@@ -1679,6 +1679,14 @@ class CandidateQualificationTests(unittest.TestCase):
         ):
             qualification.validate_alert_investigation_proof(missing, "fixture proof")
 
+        # Non-UUID ids are legitimate: detection tiers do not share one id
+        # format, and only the bound alert must be a UUID.
+        mixed = copy.deepcopy(proof)
+        mixed["observed_alerts"] = list(mixed["observed_alerts"]) + [
+            {"id": "campaign:kill-chain:7", "rule_id": "tier-2", "severity": "high"},
+        ]
+        qualification.validate_alert_investigation_proof(mixed, "fixture proof")
+
         unbound = copy.deepcopy(proof)
         unbound["observed_alerts"] = [
             {

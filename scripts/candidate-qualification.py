@@ -6084,11 +6084,11 @@ def validate_alert_investigation_proof(raw: Any, path: str) -> Dict[str, int]:
         row = object_value(entry, f"{path}.observed_alerts[{index}]")
         if set(row) != {"id", "rule_id", "severity"}:
             fail(f"{path}.observed_alerts[{index}] inventory is incomplete or unknown")
-        observed_id = string_value(
-            row.get("id"), f"{path}.observed_alerts[{index}].id"
-        )
-        if not UUID_RE.fullmatch(observed_id):
-            fail(f"{path}.observed_alerts[{index}].id is not a UUID")
+        # Only the BOUND alert is required to be a UUID (checked above). This
+        # is a census of every tier that caught the same trigger, and tiers do
+        # not share one id format -- requiring UUIDs here rejected a real
+        # multi-tier observation on the reference host.
+        string_value(row.get("id"), f"{path}.observed_alerts[{index}].id")
         string_value(row.get("rule_id"), f"{path}.observed_alerts[{index}].rule_id")
         string_value(row.get("severity"), f"{path}.observed_alerts[{index}].severity")
     if alert_id not in {
