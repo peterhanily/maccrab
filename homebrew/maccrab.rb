@@ -168,9 +168,8 @@ cask "maccrab" do
     intentionally leaves the Endpoint Security extension registered (Homebrew
     runs the same uninstall steps on every `brew upgrade`, so forcing a
     deactivate here would drop protection on routine upgrades). To fully
-    remove the extension, first click "Disable Protection" on MacCrab's
-    Overview tab, or run the bundled scripts/uninstall.sh before uninstalling.
-    Any leftover entry clears after a reboot (confirm with
+    remove the extension, click "Disable Protection" on MacCrab's
+    Overview tab before uninstalling. Any leftover entry clears after a reboot (confirm with
     `systemextensionsctl list`).
 
     Your data (alerts, baselines, settings) is preserved at
