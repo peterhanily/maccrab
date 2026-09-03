@@ -422,6 +422,51 @@ struct BatchedEventWriterJournalPipelineTests {
         #expect(snapshot.terminalStorageMutationGeneration > 0)
     }
 
+    @Test("shutdown converges when one drain pass cannot clear both buffers")
+    func shutdownConvergesAcrossPasses() async throws {
+        // v1.22.0: `drain()` legitimately returns with work still buffered --
+        // an overlay waiting on an admission that pass cannot advance, a
+        // free-space shed, a `prependForRetry`. In steady state the 250 ms
+        // timer collects those next tick, but `shutdown()` cancels the timer
+        // FIRST, so a single `flushPartial()` could strand a lane and lose its
+        // events. Here the base is still buffered when its overlay arrives, so
+        // the terminal work is not immediately eligible; one shutdown must
+        // still land both.
+        let store = JournalStoreFake()
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 10_000,
+            hardCap: 100
+        )
+        let base = event(1)
+        let basePrepared = try EventJournalAdmissionValidator.prepare(base)
+        let receipt = try #require(await writer.enqueuePrepared(basePrepared))
+
+        var terminal = base
+        terminal.enrichments["heavy.sha256"] = String(repeating: "cd", count: 32)
+        let terminalPrepared = try EventJournalAdmissionValidator.prepare(terminal)
+        #expect(await writer.enqueueTerminalRevision(
+            terminalPrepared,
+            admission: receipt
+        ) == .queued)
+
+        let queued = await writer.telemetrySnapshot()
+        #expect(queued.terminalRevisionBufferDepth == 1)
+
+        await writer.shutdown()
+
+        let snapshot = await writer.telemetrySnapshot()
+        #expect(snapshot.bufferDepth == 0, "shutdown must not strand a base")
+        #expect(
+            snapshot.terminalRevisionBufferDepth == 0,
+            "shutdown must not strand a terminal overlay"
+        )
+        #expect(snapshot.terminalRevisionInFlightDepth == 0)
+        #expect(snapshot.terminalRevisionDroppedCount == 0)
+        #expect(snapshot.terminalRevisionConservationHolds)
+        #expect(await store.exactEvent(base.id) == terminalPrepared.event)
+    }
+
     @Test("settled terminal receipt is digest-bound and storage-durable")
     func settledTerminalReceipt() async throws {
         let store = JournalStoreFake()

@@ -2957,8 +2957,18 @@ actor BatchedEventWriter {
     func flushPartial() async {
         sweepRepairPayloadLeases()
         if let task = drainTask {
+            // v1.22.0: join the in-flight drain, then FALL THROUGH and
+            // re-check rather than returning. `drain()` has legitimate early
+            // returns that leave work buffered — an overlay waiting on an
+            // admission that pass could not advance, a free-space shed, a
+            // `prependForRetry`. In steady state the 250 ms timer collects
+            // those next tick, but `shutdown()` cancels the timer FIRST, so
+            // returning here could strand a lane and lose its events on
+            // teardown. Deliberately at most ONE further drain, not a
+            // convergence loop: repeated fresh drains over work that cannot
+            // advance can block on an admission that never resolves, and a
+            // hang on teardown is worse than the rare loss this closes.
             await task.value
-            return
         }
         if hasPendingStorageWork {
             startDrain(reason: .periodicTimer)

@@ -195,6 +195,34 @@ struct DetectionPipelineOrderingTests {
         #expect(prepareCall.lowerBound < terminalSettlement.lowerBound)
         #expect(terminalSettlement.lowerBound < dispatchCall.lowerBound)
 
+        // v1.22.0 (item 3): an unmatched revision skips the synchronous
+        // barrier and goes through the writer's batched terminal buffer, so the
+        // fixed per-transaction WAL floor is paid once per batch instead of
+        // once per changed revision. The safety property is that ONLY an
+        // unmatched revision may do so -- anything that matched still settles
+        // canonically before scoring and alert commit, which is what keeps a
+        // crash between review and fanout from leaving a match durable only in
+        // alerts.db. Pin the gate, not just the call ordering: the receipt's
+        // one reader (sparse projection promotion) tests `ruleMatches`, so a
+        // gate that omitted it would silently promote against a receipt that
+        // was never settled.
+        let receiptGate = try #require(detection.range(
+            of: "let needsTerminalReceipt ="
+        ))
+        let batchedEnqueue = try #require(detection.range(
+            of: "await enqueueTerminalJournalRevision("
+        ))
+        #expect(prepareCall.lowerBound < receiptGate.lowerBound)
+        #expect(receiptGate.lowerBound < batchedEnqueue.lowerBound)
+        let gateExpression = String(
+            detection[receiptGate.lowerBound..<batchedEnqueue.lowerBound]
+        )
+        #expect(gateExpression.contains("reviewedDispatch.event.ruleMatches.isEmpty"))
+        #expect(gateExpression.contains("reviewedDispatch.primaryMatches.isEmpty"))
+        #expect(gateExpression.contains("reviewedDispatch.sequenceMatches.isEmpty"))
+        // The barrier must remain on the matched side of the branch.
+        #expect(terminalSettlement.lowerBound < batchedEnqueue.lowerBound)
+
         // Counterfactual/forecast engines remain explicit analyst tools. The
         // old source guard required their automatic one-step derivative after
         // commit, but that emitter was retired because one synthetic step
