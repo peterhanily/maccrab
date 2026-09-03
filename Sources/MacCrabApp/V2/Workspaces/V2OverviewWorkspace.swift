@@ -170,13 +170,24 @@ struct V2OverviewWorkspace: View {
                 await MainActor.run { if c != self.campaigns { self.campaigns = c } }
 
                 let k = await state.provider.kpis()
-                await MainActor.run { if k != self.kpis { self.kpis = k } }
+                // v1.22.0 (item 7): latch the token here, as soon as the three
+                // token-gated loads have resolved, instead of after the
+                // histogram. Both latches used to be written only in the final
+                // MainActor.run below, so a body cancelled mid-fan-out (which
+                // `.task(id:)` does on every refreshTick change) recorded no
+                // progress at all — and when the fan-out took longer than the
+                // 5s tick it could never latch, re-enqueueing the whole thing
+                // faster than it drained. `histogramLoaded` stays separate so
+                // an unfinished histogram is still retried on the next tick.
+                await MainActor.run {
+                    if k != self.kpis { self.kpis = k }
+                    self.lastAlertsDataToken = dataToken
+                }
 
                 let buckets = await state.provider.alertHistogram(rangeKey: rangeKey)
                 await MainActor.run {
                     if buckets != self.histogramBuckets { self.histogramBuckets = buckets }
                     self.histogramLoaded = true
-                    self.lastAlertsDataToken = dataToken
                 }
             }
 

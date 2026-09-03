@@ -34,6 +34,16 @@ struct V2CrabWidget: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
+    // v1.22.0 (item 7): `scenePhase` is the wrong signal in this app — MacCrab
+    // is LSUIElement, so it stays `.active` even with the dashboard window
+    // backgrounded, and the freeze below never fired. `controlActiveState`
+    // reports actual window activity and goes `.inactive` when the user is in
+    // another app, which is when a background dashboard must not animate.
+    @Environment(\.controlActiveState) private var controlActiveState
+    /// Animation tick rate while the window is active. 15 Hz is 8x under a
+    /// 120 Hz display and still above flicker fusion for a bob/blink. Verify
+    /// against `gui_background_cpu_percent` before treating it as settled.
+    private static let animationTickSeconds = 1.0 / 15.0
     @State private var petting = false
     @State private var feeding = false
     @State private var snapAt: Date? = nil
@@ -184,12 +194,25 @@ struct V2CrabWidget: View {
     @ViewBuilder
     private var sceneView: some View {
         // Freeze the per-frame Canvas redraw when motion is off OR the window
-        // isn't the active scene (don't burn CPU/battery animating a pet the
-        // user can't see).
-        if reduceMotion || scenePhase != .active {
+        // isn't active (don't burn CPU/battery animating a pet the user can't
+        // see).
+        //
+        // v1.22.0 (item 7): this freeze was dead. The guard tested
+        // `scenePhase != .active`, which never becomes false in an LSUIElement
+        // app, so a merely-open dashboard animated forever — a live `sample`
+        // with the window backgrounded still showed
+        // `TimelineView.UpdateFilter.updateValue()`, costing ~20-25% of a core.
+        // The draw itself is trivial (10 samples); the cost is that every tick
+        // dirties the AttributeGraph and forces a whole-tree layout pass
+        // (`LayoutEngineBox.sizeThatFits` 3399 of 4101 main-thread samples),
+        // which `V2FlowGridLayout` amplifies by re-measuring all 13 Overview
+        // widget subtrees. So CPU here is linear in tick rate: `.animation`
+        // runs at display refresh (up to 120 Hz), while 15 Hz is still well
+        // above flicker fusion for a bob/blink.
+        if reduceMotion || controlActiveState == .inactive {
             sceneCanvas(t: 0)
         } else {
-            TimelineView(.animation) { tl in
+            TimelineView(.periodic(from: .now, by: Self.animationTickSeconds)) { tl in
                 sceneCanvas(t: tl.date.timeIntervalSinceReferenceDate)
             }
         }

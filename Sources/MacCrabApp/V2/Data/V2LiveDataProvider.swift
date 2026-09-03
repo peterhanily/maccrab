@@ -593,6 +593,45 @@ public final class V2LiveDataProvider: V2DataProvider {
         }
     }
 
+    /// The two most recent heartbeat `(writtenAt, eventsProcessed)` readings.
+    /// A rate is a delta, so one sample can never produce one — that is what
+    /// `eventRateCoverageComplete == false` reports rather than showing a zero.
+    private var eventRateSamples: [(at: Date, count: Int)] = []
+    /// Recent per-minute rates, newest last, for the KPI sparkline.
+    private var eventRateHistory: [Double] = []
+    private static let eventRateHistoryCapacity = 8
+
+    /// Fold one heartbeat reading into the rate ring. Ignores a repeat of the
+    /// same heartbeat (the poll is faster than the engine's write cadence, so
+    /// most calls see an unchanged file) and re-baselines across a daemon
+    /// restart, where the cumulative counter goes backwards.
+    private func recordEventRateSample(count: Int, at when: Date) {
+        if let last = eventRateSamples.last, when <= last.at { return }
+        eventRateSamples.append((at: when, count: count))
+        if eventRateSamples.count > 2 {
+            eventRateSamples.removeFirst(eventRateSamples.count - 2)
+        }
+        guard let rate = measuredEventRate() else { return }
+        eventRateHistory.append(rate * 60)
+        if eventRateHistory.count > Self.eventRateHistoryCapacity {
+            eventRateHistory.removeFirst(
+                eventRateHistory.count - Self.eventRateHistoryCapacity
+            )
+        }
+    }
+
+    /// Events per second across the two retained samples, or nil when the rate
+    /// is not yet measurable (first sample) or the counter reset (engine
+    /// restart), so a placeholder is never rendered as an observed zero.
+    private func measuredEventRate() -> Double? {
+        guard eventRateSamples.count == 2 else { return nil }
+        let previous = eventRateSamples[0]
+        let current = eventRateSamples[1]
+        let elapsed = current.at.timeIntervalSince(previous.at)
+        guard elapsed > 0, current.count >= previous.count else { return nil }
+        return Double(current.count - previous.count) / elapsed
+    }
+
     public func kpis() async -> V2OverviewKPIs {
         let now = Date()
         let day: TimeInterval = 86_400
@@ -624,26 +663,40 @@ public final class V2LiveDataProvider: V2DataProvider {
                 }
             }
         }
-        // Events/sec from last 1m bucket count.
+        // Events/sec, derived from the engine's own heartbeat counter.
+        //
+        // v1.22.0 (item 7): pre-fix this called `eventCategoryCountSnapshot`
+        // AND `histogramSnapshot`, both of which go through
+        // `withVerifiedExactReadSnapshot` — a full re-verification of the
+        // on-disk event journal (measured on an installed host: 8,249 blocks /
+        // 26,283 events / 5,874 terminal revisions / 44.8 MB), retried up to
+        // five times per read because the engine keeps advancing the topology
+        // generation underneath it. A live `sample` caught one cooperative-pool
+        // thread pinned 5013/5013 samples inside it — ~100% of a core against a
+        // 10%-of-one-core budget — with 51% of that in the credential
+        // sanitizer's locale-aware substring scan over every replayed revision.
+        // It also held an events.db read-mark for the duration, denying the
+        // engine's WAL checkpoint the reader-free window it needs to truncate.
+        //
+        // The KPI tile needs two scalars, and the engine already publishes the
+        // underlying counter, so this is the same substitution `updateStats()`
+        // and `loadEventsIncremental()` already made — `kpis()` was the caller
+        // that was missed. No exactness is lost that the tile ever showed: a
+        // rate is a delta, and `eventRateCoverageComplete` still distinguishes
+        // "not yet measurable" from an observed zero.
         var eventsPerSec: Double = 0
         var eventRateCoverageComplete = false
         var sparkBuckets: [Double] = []
-        if let eventStore {
-            if let countSnapshot = try? await eventStore
-                .eventCategoryCountSnapshot(
-                    since: now.addingTimeInterval(-60),
-                    until: now
-                ), countSnapshot.isComplete {
-                let totalLastMin = countSnapshot.counts.values.reduce(0, +)
-                eventsPerSec = Double(totalLastMin) / 60.0
+        if let snapshot = V2HeartbeatSnapshot.readFreshest() {
+            recordEventRateSample(
+                count: snapshot.eventsProcessed,
+                at: snapshot.writtenAt
+            )
+            if let rate = measuredEventRate() {
+                eventsPerSec = rate
                 eventRateCoverageComplete = true
             }
-            // 8 × 1-minute buckets for the sparkline.
-            if let histogram = try? await eventStore.histogramSnapshot(
-                spanSeconds: 8 * 60, stepSeconds: 60, endingAt: now, category: nil
-            ), histogram.isComplete {
-                sparkBuckets = histogram.bins.map { Double($0.count) }
-            }
+            sparkBuckets = eventRateHistory
         }
         return V2OverviewKPIs(
             openAlerts24h: openAlerts,
