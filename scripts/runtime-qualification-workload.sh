@@ -4,32 +4,32 @@ set -euo pipefail
 
 RUN_ID=""
 ALERT_ONLY=0
-# Sized from the gate's own predeclared reference load, not tuned until green.
+# Sized from MEASURED loop throughput, not arithmetic.
 #
-#   * candidate-qualification.py requires a PEAK of 1,274 combined offered
-#     events/s, measured over one 30s sample interval -- the rate observed on a
-#     real reference host.  Hitting it takes 1,274 * 30 = 38,220 events inside
-#     a single interval.
-#   * Measured on this workload, one iteration offers ~42 events (exec of
-#     /usr/bin/true and /bin/mv, plus the create/write/close/rename file path).
-#   * 2,000 iterations therefore offer ~84,000 events, and the loop is not rate
-#     limited, so they land inside one interval: ~2,800 events/s peak, a little
-#     over 2x the required floor. The recorder launches this script ON the
-#     minute-five sample boundary and the loop finishes in ~9s, so the burst
-#     falls inside a single interval rather than being halved across two.
-#   * The upper bound is drainability, not capacity: every lane must report
-#     queued=0 and in_flight=0 at the fixed drain boundary 150s after the burst
-#     starts, so offering more than the engine can retire in that window fails
-#     the run no matter how much headroom the caps have.
-#   * Both merged detection-input streams cap at 100,000 (mergedPriorityStreamCap
-#     / mergedFileStreamCap).  ~84,000 events split ~53k priority / ~30k file
-#     leaves each lane under half its cap even before any drain, so nothing is
-#     structurally forced to shed.
+# Measured on this host: 500 iterations take 2.26s (221 iterations/s), and one
+# iteration offers ~7 events -- an exec of /usr/bin/true, an exec of /bin/mv,
+# and the create/write/close/rename file path. That is ~1,546 offered events/s,
+# already above the 1,274/s floor the gate requires.
 #
-# The previous 20,000 offered ~834,000 events -- 7x the required peak and 4x the
-# combined stream capacity -- so the engine had to shed several hundred thousand
-# events that the same gate then failed the candidate for shedding.
-BURST_ITERATIONS=2000
+# The floor is a rate measured over ONE 30s sample interval, so what matters is
+# how much of that interval the burst SPANS, not how fast it runs. The previous
+# 2,000 iterations finished in 9.1s and offered ~14,000 events, which the 30s
+# window averages down to ~467/s -- comfortably under the floor despite the loop
+# running above it the whole time. Confirmed against the recorder capture:
+# file+10,621 priority+3,556 = 14,177 events, a 473/s interval rate.
+#
+# 6,000 iterations run for ~27s and offer ~42,000 events, so a single interval
+# sees ~1,400/s -- about 10% above the floor, with enough margin that sampling
+# jitter cannot drop it under. The recorder launches this script on the minute-
+# five boundary, so the run lands inside one interval rather than straddling two.
+#
+# NOTE the open question this is designed to answer: the same measurement showed
+# the engine shedding 1,378 file events while sustaining ~1,546/s, because a
+# priority admission evicts queued file events when the pipeline memory budget
+# saturates. If a burst that genuinely meets the floor still sheds, the engine
+# cannot ingest the gate's own reference load without sacrificing file events,
+# and that is a product limit to fix rather than a workload to retune.
+BURST_ITERATIONS=6000
 
 usage() {
     echo "usage: $0 [--alert-only] --run-id <32-lowercase-hex>" >&2

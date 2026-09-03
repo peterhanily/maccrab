@@ -149,7 +149,7 @@ MIN_BURST_COMBINED_OFFERED_PER_SECOND = 1_274.0
 # demanding the old count and failing a correct run at
 # "fixed workload output does not reconcile with its bounded run".
 # `test_fixed_workload_iterations_match_the_script` pins the two together.
-FIXED_WORKLOAD_ITERATIONS = 2_000
+FIXED_WORKLOAD_ITERATIONS = 6_000
 MIN_TRACE_STORE_INGEST_DELTA = 1
 CONTAINMENT_FIXTURE_PRODUCTS = (
     "maccrab-tierb-corpus-probe",
