@@ -1138,8 +1138,19 @@ final class AppState: ObservableObject {
     private var pollTimer: AnyCancellable?
     /// nil until the first `updateStats()` sample primes it — see
     /// `eventsPerSecondFrom` (deep-audit fix for the first-poll rate spike).
+    /// v1.22.0 (item 7): `previousEventCount` now holds the previous heartbeat
+    /// `events_processed` cumulative value (not a live DB COUNT(*)); paired with
+    /// the heartbeat's own `writtenAt` so the rate spans the engine's real ~30s
+    /// publish interval.
     private var previousEventCount: Int? = nil
+    private var previousStatsHeartbeatWrittenAt: Date? = nil
     private var lastStatsUpdate: Date = Date()
+    /// v1.22.0 (item 7): the routine poll only opens a live events.db read
+    /// snapshot (which pins the WAL) while the Events workspace is actually on
+    /// screen. Set by the Events view's appear/disappear. Off screen, the poll
+    /// reads nothing from events.db, so the writer's checkpoint always has a
+    /// reader-free window and the WAL cannot bloat past the family cap.
+    private var eventsWorkspaceVisible: Bool = false
     private var rulesLoaded_cached = false
     /// v1.11.1 (audit perf MEDIUM): mtime gate ported from
     /// V2LiveDataProvider.rules(). Lets `loadRules()` short-circuit on
@@ -3191,9 +3202,27 @@ final class AppState: ObservableObject {
         } catch {}
     }
 
+    /// v1.22.0 (item 7): the Events view calls this on appear/disappear so the
+    /// routine 5s poll only holds a live events.db WAL read-mark while the user
+    /// is actually watching the live event stream. When it becomes visible, do
+    /// one immediate incremental load so the list is fresh without waiting a
+    /// poll cycle.
+    @MainActor
+    func setEventsWorkspaceVisible(_ visible: Bool) {
+        guard eventsWorkspaceVisible != visible else { return }
+        eventsWorkspaceVisible = visible
+        if visible {
+            Task { await loadEventsIncremental() }
+        }
+    }
+
     private func loadEventsIncremental() async {
         // Don't trample search results with newer rows the user didn't ask for.
         if eventSearchActive { return }
+        // v1.22.0 (item 7): off the Events workspace, skip the live snapshot —
+        // its WAL read-mark (with the Overview provider's) was defeating the
+        // engine's checkpoint under burst and forcing event shed.
+        guard eventsWorkspaceVisible else { return }
         do {
             let store = try eventStore()
             let snapshot = try await store.exactEventsSnapshot(
@@ -3437,28 +3466,42 @@ final class AppState: ObservableObject {
     }
 
     private func updateStats() async {
-        do {
-            let store = try eventStore()
-            let currentCount = try await store.count()
-            let now = Date()
-            let elapsed = max(1, Int(now.timeIntervalSince(lastStatsUpdate)))
-            // Deep-audit fix (2814): skip the FIRST sample. With no baseline the
-            // delta is the entire backlog, which published a spurious events/sec
-            // spike on the first poll. `eventsPerSecondFrom` returns nil until
-            // primed. Only publish when the displayed value actually changes —
-            // every @Published assignment invalidates every SwiftUI view that
-            // subscribes to AppState (OverviewDashboard, StatusBarMenu,
-            // ESHealthView read eventsPerSecond), and re-publishing the same 0
-            // every tick forced a full-dashboard redraw with no visible change.
-            if let rate = Self.eventsPerSecondFrom(previousCount: previousEventCount,
-                                                   currentCount: currentCount,
-                                                   elapsedSeconds: elapsed),
-               rate != eventsPerSecond {
-                eventsPerSecond = rate
+        // v1.22.0 (item 7): derive the events/sec rate from the engine's own
+        // published cumulative counter (heartbeat.json `events_processed`)
+        // instead of a live COUNT(*) on events.db. That live count opened a WAL
+        // read snapshot on events.db every 5s; under a sustained burst that —
+        // together with the Overview provider's reads — left the writer no
+        // reader-free window, so its PASSIVE checkpoint could never truncate the
+        // WAL, the db+WAL family blew through its size cap, and the engine shed
+        // new events (measured: ~13k dropped with the dashboard open). The
+        // heartbeat is already refreshed each poll (refreshHeartbeat, mtime-
+        // gated), so this reads no database at all, and is more accurate: the
+        // engine counts every processed event, whereas a COUNT(*) can be
+        // shrinking mid-read as a retention sweep prunes.
+        if let hb = heartbeat {
+            let current = Int(clamping: hb.eventsProcessed)
+            if let prev = previousEventCount,
+               let prevAt = previousStatsHeartbeatWrittenAt,
+               current >= prev,
+               hb.writtenAt > prevAt {
+                let elapsed = max(1, Int(hb.writtenAt.timeIntervalSince(prevAt)))
+                if let rate = Self.eventsPerSecondFrom(previousCount: prev,
+                                                       currentCount: current,
+                                                       elapsedSeconds: elapsed),
+                   rate != eventsPerSecond {
+                    eventsPerSecond = rate
+                }
             }
-            previousEventCount = currentCount
-            lastStatsUpdate = now
-        } catch {}
+            // Re-baseline on first sample and on a daemon restart (counter reset
+            // makes current < prev) rather than surfacing a garbage rate.
+            if previousEventCount == nil || current < (previousEventCount ?? 0) {
+                previousEventCount = current
+                previousStatsHeartbeatWrittenAt = hb.writtenAt
+            } else if hb.writtenAt > (previousStatsHeartbeatWrittenAt ?? .distantPast) {
+                previousEventCount = current
+                previousStatsHeartbeatWrittenAt = hb.writtenAt
+            }
+        }
 
         // Recompute security score at most every 5 minutes (scorer
         // calls system APIs). v1.11.1 (audit perf LOW): the audit

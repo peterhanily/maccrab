@@ -51,6 +51,12 @@ struct V2EventsWorkspace: View {
             )
             .id("events:\(state.pendingEventsFilter ?? "default"):\(state.pendingEventsCenterTime?.timeIntervalSince1970 ?? 0)")
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // v1.22.0 (item 7): only while the live event stream is on screen
+            // does the routine poll open a live events.db read snapshot. Off
+            // screen, that WAL-pinning read is skipped so the engine's WAL
+            // checkpoint is never starved of a reader-free window under burst.
+            .onAppear { appState.setEventsWorkspaceVisible(true) }
+            .onDisappear { appState.setEventsWorkspaceVisible(false) }
         }
     }
 
