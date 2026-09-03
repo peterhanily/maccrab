@@ -76,7 +76,7 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - **Ingest dropped events under a burst.** The pre-enrichment memory reservation
   and the journal-preparation reservation were each sized at a fixed worst case
   (24 MiB and ~36 MiB) far larger than any real event — measured maximum on an
-  installed host was 950 KiB across 351,374 events — so two concurrent
+  installed host was 950 KB across 351,374 events — so two concurrent
   reservations exceeded the pipeline's per-owner ceiling and the second ingest
   lane waited behind the first, shedding queued events under load. Both are now
   sized from the measured event size (a small fixed reservation, and the journal

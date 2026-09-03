@@ -56,11 +56,12 @@ public struct EventJournalIngressPreparation: Sendable, Equatable {
 /// v1.22.0 item6: bounded, lock-guarded telemetry for the real event-source
 /// size distribution flowing through `preflight`/`prepare` and the sanitized
 /// canonical-JSON expansion ratio. Read-only and never consulted by admission
-/// logic — its sole purpose is to give a burst-time measurement pass the
-/// P99/P99.9/max data needed to pick safe values for the constants flagged
-/// "MEASUREMENT PENDING" below (and in DeferredEnrichmentBuffer.swift), in
-/// place of guessing. O(1) per event: fixed power-of-two buckets, a running
-/// max, and a fixed-size ratio reservoir — no allocation on the hot path.
+/// logic. The v1.22.0 lease sizes (`preparationWorkspaceByteEstimate` below and
+/// DeferredEnrichmentBuffer.productionReservationRawEventByteCharge) were chosen
+/// from this data on an installed host (max source 950,068 B over 351,374
+/// events); it stays in place as ongoing drift/re-validation monitoring for
+/// those constants. O(1) per event: fixed power-of-two buckets, a running max,
+/// and a fixed-size ratio reservoir — no allocation on the hot path.
 public enum EventJournalSourceSizeTelemetry {
     /// Bucket[i] counts sourceBytes in (bounds[i-1], bounds[i]]; the final
     /// entry is an overflow catch-all for anything above the largest bound.

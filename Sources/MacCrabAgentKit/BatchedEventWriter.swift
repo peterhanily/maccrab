@@ -111,7 +111,6 @@ enum DrainTrigger: String, CaseIterable, Sendable {
     case periodicTimer
     case depthThreshold
     case memoryPressureRetry
-    case shutdown
 }
 
 actor BatchedEventWriter {
