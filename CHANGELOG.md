@@ -73,6 +73,26 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   overhead, and an early-fire watchdog (2-minute first fire, 60s cadence) reacts
   within minutes whenever writes are actually blocked, instead of waiting for
   the hourly sweep.
+- **Ingest dropped events under a burst.** The pre-enrichment memory reservation
+  and the journal-preparation reservation were each sized at a fixed worst case
+  (24 MiB and ~36 MiB) far larger than any real event — measured maximum on an
+  installed host was 950 KiB across 351,374 events — so two concurrent
+  reservations exceeded the pipeline's per-owner ceiling and the second ingest
+  lane waited behind the first, shedding queued events under load. Both are now
+  sized from the measured event size (a small fixed reservation, and the journal
+  request scaled from the event's own bytes). A 1,546 events/s burst on a
+  healthy store now sheds nothing, versus 786 dropped before.
+- **The file-capture worker reserved a slot budget it never used.** The
+  split file-activity Endpoint Security client withheld a quarter of its
+  in-flight budget for process-lineage events it does not carry, capping it at
+  three-quarters of its buffer. It now uses its full budget; the exec client,
+  which does carry lineage events, keeps the reserve.
+- **Pre-producer storage recovery could hang startup.** Two retry loops were
+  bounded only by attempt count (up to ~60s each), so a reader holding a store
+  open could stall startup for minutes. Both now also stop at a wall-clock
+  ceiling, and the alerts store skips its checkpoint when it is already under
+  its size boundary — converting a slow, unbounded hang into fast, bounded,
+  reported behavior.
 
 ### Added
 - Journal-index refresh telemetry: full-rebuild and append-refresh counters, a
