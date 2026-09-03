@@ -273,4 +273,67 @@ struct EventJournalAdmissionValidatorTests {
         )
         #expect(!replacementJSON.contains(String(repeating: "Q", count: 1_024)))
     }
+
+    @Test("source-size telemetry snapshot advances with preflight/prepare traffic")
+    func sourceSizeTelemetryAdvancesWithTraffic() throws {
+        // EventJournalSourceSizeTelemetry backs its snapshot with a single
+        // process-global, lock-guarded accumulator (see the type's doc
+        // comment), so other tests running concurrently in this suite may
+        // also be feeding it. Every assertion below is therefore either a
+        // delta/lower-bound against a "before" baseline, or an invariant
+        // that must hold of any snapshot regardless of who else contributed.
+        let before = EventJournalSourceSizeTelemetry.snapshot()
+
+        let small = richEvent(commandLine: "/usr/bin/curl -s", args: [])
+        let medium = richEvent(
+            commandLine: String(repeating: "M", count: 100_000),
+            args: []
+        )
+        let large = richEvent(
+            commandLine: String(repeating: "L", count: 3_000_000),
+            args: []
+        )
+
+        var measuredSourceBytes: [Int] = []
+
+        // Explicit preflight() + prepare(_:preflight:) — the two-phase hot
+        // path used when a caller reuses sizing across the ingress boundary.
+        for event in [small, medium, large] {
+            let preflight = try EventJournalAdmissionValidator.preflight(event)
+            measuredSourceBytes.append(preflight.sourceRetainedByteEstimate)
+            _ = try EventJournalAdmissionValidator.prepare(
+                event,
+                preflight: preflight
+            )
+        }
+
+        // Single-call prepare(_:) path, which internally runs its own
+        // preflight() and so contributes one more recordSourceBytes() sample.
+        let single = richEvent(
+            commandLine: String(repeating: "S", count: 500_000),
+            args: []
+        )
+        _ = try EventJournalAdmissionValidator.prepare(single)
+
+        let after = EventJournalSourceSizeTelemetry.snapshot()
+
+        // We issued 4 preflight() calls (one per event above); a concurrent
+        // test in this suite can only add more, never fewer.
+        let sampleDelta = after.sampleCount - before.sampleCount
+        #expect(sampleDelta >= 4)
+
+        // Every recordSourceBytes() call increments exactly one bucket and
+        // the running sample count together under the same lock, so the sum
+        // of bucket counts must equal the sample count in ANY snapshot, not
+        // just as a delta -- this holds even under concurrent contamination.
+        #expect(before.bucketCounts.reduce(0, +) == before.sampleCount)
+        #expect(after.bucketCounts.reduce(0, +) == after.sampleCount)
+        #expect(after.bucketCounts.count == before.bucketCounts.count)
+
+        // The running max can only have grown, and must be at least as large
+        // as the biggest source size we fed it.
+        #expect(after.maximumSourceBytes >= before.maximumSourceBytes)
+        let largestMeasured = try #require(measuredSourceBytes.max())
+        #expect(after.maximumSourceBytes >= largestMeasured)
+    }
 }

@@ -8,6 +8,12 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/.build/debug"
 APP_BUNDLE="$BUILD_DIR/MacCrab.app"
 
+# Same VERSION derivation as scripts/build-release.sh: honor an explicit
+# VERSION env var, else fall back to the latest git tag, else the current
+# release version.
+VERSION="${VERSION:-$(cd "$PROJECT_DIR" && git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+VERSION="${VERSION:-1.22.0}"
+
 # Clean old bundle
 rm -rf "$APP_BUNDLE"
 
@@ -84,7 +90,7 @@ if [ -n "$SPARKLE_SRC" ]; then
 fi
 
 # Create Info.plist
-cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
+cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -96,9 +102,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.maccrab.app</string>
     <key>CFBundleVersion</key>
-    <string>0.5.0</string>
+    <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.5.0</string>
+    <string>$VERSION</string>
     <key>CFBundleExecutable</key>
     <string>MacCrab</string>
     <key>CFBundleIconFile</key>

@@ -133,7 +133,7 @@ func printPluginUsage() {
       test <bundle-dir>               Run the bundle LOCALLY under the real
                                       sandbox and show its containment + outcome.
 
-    Renamed in v1.17 (aliases work through v1.18, removed v1.19):
+    Renamed in v1.17 (deprecated aliases, still supported):
       installed-list  → list --filter installed
       verify-all      → verify
       daemon-status   → status
@@ -224,7 +224,7 @@ private func pluginList(args: [String] = []) async {
 /// Emit a deprecation hint when an operator hits an old plugin
 /// subcommand name. v1.17 renames a few without breaking aliases.
 func printPluginAliasWarning(_ oldName: String, _ newName: String) {
-    let msg = "WARNING: 'maccrabctl plugin \(oldName)' is renamed 'maccrabctl plugin \(newName)' in v1.17. Aliases work through v1.18; removed in v1.19.\n"
+    let msg = "WARNING: 'maccrabctl plugin \(oldName)' is renamed 'maccrabctl plugin \(newName)' in v1.17. The old name still works but is deprecated — prefer the new name.\n"
     FileHandle.standardError.write(Data(msg.utf8))
 }
 

@@ -135,7 +135,7 @@ reference Mac using the recorded normal-plus-burst workload:
 | TraceStore | Agent Traces and the loopback receiver are enabled. `traces.db` is available, unblocked, below its writer-admission threshold and free-space floor, and not recovering at every sample. A fixed OTLP span must increase and fully drain the real TraceStore ingest ledger with zero shed. |
 | Disk writes | Engine average at most 1 MiB/s over the epoch and no 60-second interval above 4 MiB/s; no macOS disk-writes diagnostic. |
 | CPU | Engine average at most 0.50 CPU core over the epoch. Background GUI p95 at most 10% of one core. |
-| Memory | Engine RSS at most 450 MiB and growth from minute 5 to minute 15 at most 64 MiB. |
+| Memory | Engine physical footprint (phys_footprint) at most 450 MiB and growth from minute 5 to minute 15 at most 64 MiB. |
 | Disk safety | Every SQLite family stays beneath its exact DB+WAL+SHM cap and preserves the configured free-space floor. |
 | Rules | Sealed rules synchronize before readers, corpus parity holds, and ordinary launch produces no administrator-password flow. |
 | AI quality | Alert investigation is configured and healthy before t0. Every sample carries conserving schema-2 fixed-cardinality telemetry. Both the prewarm and minute-5 harmless HIGH-alert triggers must each create exactly one new row for their unique executable path; the same stable alert ID must acquire non-empty, schema-valid investigation JSON and reconcile with one or more newly started operations, `accepted == started`, zero final rejection, zero unattributed requests, and no unfinished operation. Benign concurrent investigations are allowed but cannot substitute for the causal row proof. Disabled, ambiguous, unrelated-only, or zero-operation runs fail. |
@@ -197,7 +197,7 @@ complete SQLite-family observation; it then canonically hashes and normalizes
 those observations. The verifier repeats that normalization, reconciles sample
 timestamps to epoch start plus offset, recomputes CPU/write aggregates and p95,
 and enforces every numerical limit above. Every sample carries cumulative engine
-CPU and disk-write totals, engine RSS, GUI background CPU, the complete
+CPU and disk-write totals, engine physical footprint (phys_footprint), GUI background CPU, the complete
 conservation-boundary snapshot, all five zero-loss counters, and LLM quality
 state. Aggregate PASS fields must reconcile to those raw observations.
 

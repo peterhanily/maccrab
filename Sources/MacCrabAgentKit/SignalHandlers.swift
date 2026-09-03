@@ -370,6 +370,12 @@ enum SignalHandlers {
                             let latch = snapshot?.latchedFailure ?? "none"
                             let pending = snapshot?.pageLimitPending ?? false
                             print("[SIGHUP] events.db hard admission: latch=\(latch), page_limit_pending=\(pending)")
+                            // v1.22.0: ALSO emit through os.log (see the matching
+                            // note on the rule-reload line above — print is
+                            // discarded for a sysext).
+                            logger.notice(
+                                "[SIGHUP] events.db hard admission: latch=\(latch, privacy: .public), page_limit_pending=\(pending, privacy: .public)"
+                            )
                         } catch {
                             newEventsFamilyCap = newStorage
                                 .effectiveEventsFamilyMaxSizeMB(
@@ -377,6 +383,9 @@ enum SignalHandlers {
                                         newTransition.appliedReserveMiB
                                 )
                             print("[SIGHUP] events.db hard admission reload failed closed: \(error.localizedDescription)")
+                            logger.error(
+                                "[SIGHUP] events.db hard admission reload failed closed: \(error.localizedDescription, privacy: .public)"
+                            )
                         }
                     } else if newTransition.pendingReserveFitsHardBoundary == true,
                               let pendingReserve = newTransition
@@ -398,8 +407,14 @@ enum SignalHandlers {
                             let latch = snapshot?.latchedFailure ?? "none"
                             let pending = snapshot?.pageLimitPending ?? false
                             print("[SIGHUP] alerts.db hard admission: latch=\(latch), page_limit_pending=\(pending)")
+                            logger.notice(
+                                "[SIGHUP] alerts.db hard admission: latch=\(latch, privacy: .public), page_limit_pending=\(pending, privacy: .public)"
+                            )
                         } catch {
                             print("[SIGHUP] alerts.db hard admission reload failed closed: \(error.localizedDescription)")
+                            logger.error(
+                                "[SIGHUP] alerts.db hard admission reload failed closed: \(error.localizedDescription, privacy: .public)"
+                            )
                         }
                     }
                     if evidenceBudgetChanged {
@@ -417,8 +432,14 @@ enum SignalHandlers {
                             let latch = snapshot?.latchedFailure ?? "none"
                             let pending = snapshot?.pageLimitPending ?? false
                             print("[SIGHUP] campaigns.db hard admission: latch=\(latch), page_limit_pending=\(pending)")
+                            logger.notice(
+                                "[SIGHUP] campaigns.db hard admission: latch=\(latch, privacy: .public), page_limit_pending=\(pending, privacy: .public)"
+                            )
                         } catch {
                             print("[SIGHUP] campaigns.db hard admission reload failed closed: \(error.localizedDescription)")
+                            logger.error(
+                                "[SIGHUP] campaigns.db hard admission reload failed closed: \(error.localizedDescription, privacy: .public)"
+                            )
                         }
                     }
                     if let causalStore = state.causalStore {
@@ -438,8 +459,14 @@ enum SignalHandlers {
                                     orphanCutoff: Date().addingTimeInterval(-3_600)
                                 )
                                 print("[SIGHUP] TraceGraph bounded recovery: traces=\(result.tracesDeleted), trace_children=\(result.traceChildRowsDeleted), edges=\(result.edgesDeleted), entities=\(result.entitiesDeleted), reclaimed_pages=\(result.vacuumPagesReclaimed), footprint=\(result.footprintBeforeBytes ?? -1)->\(result.footprintBytes ?? -1), pinned=\(result.pinnedReader)")
+                                logger.notice(
+                                    "[SIGHUP] TraceGraph bounded recovery: traces=\(result.tracesDeleted, privacy: .public), trace_children=\(result.traceChildRowsDeleted, privacy: .public), edges=\(result.edgesDeleted, privacy: .public), entities=\(result.entitiesDeleted, privacy: .public), reclaimed_pages=\(result.vacuumPagesReclaimed, privacy: .public), footprint=\(result.footprintBeforeBytes ?? -1, privacy: .public)->\(result.footprintBytes ?? -1, privacy: .public), pinned=\(result.pinnedReader, privacy: .public)"
+                                )
                             } catch {
                                 print("[SIGHUP] TraceGraph bounded recovery failed: \(error.localizedDescription)")
+                                logger.error(
+                                    "[SIGHUP] TraceGraph bounded recovery failed: \(error.localizedDescription, privacy: .public)"
+                                )
                             }
                         }
                     }

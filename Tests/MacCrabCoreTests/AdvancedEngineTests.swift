@@ -610,7 +610,7 @@ struct CrossProcessCorrelatorTests {
         // Wide correlation window so nothing is purged for being stale; the
         // only thing that should bound the list is the per-key cap.
         let correlator = CrossProcessCorrelator(correlationWindow: 100_000, minChainLength: 2)
-        let hotPath = "/Users/phanily/Documents/shared-data.bin"
+        let hotPath = "/Users/testuser/Documents/shared-data.bin"
         // Near-now timestamps so nothing is stale-purged; only the per-key
         // cap should bound the list.
         let base = Date().addingTimeInterval(-30)
@@ -642,7 +642,7 @@ struct CrossProcessCorrelatorTests {
     func googleUpdaterLogDoesNotChain() async {
         let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
         let now = Date()
-        let logPath = "/Users/phanily/Library/Application Support/Google/GoogleUpdater/updater.log"
+        let logPath = "/Users/testuser/Library/Application Support/Google/GoogleUpdater/updater.log"
 
         // Thirteen worker processes hammer the same log file — exactly the
         // field scenario that produced the 140-event chain alert.

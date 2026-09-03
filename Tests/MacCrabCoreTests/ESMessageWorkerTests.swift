@@ -186,4 +186,78 @@ struct ESMessageWorkerTests {
         #expect(rec.totalFrees() == 2)
         #expect(rec.maxFreeCount() == 1)
     }
+
+    @Test("reservesLineageSlots:false lets non-critical traffic use the full budget")
+    func lineageReserveDisabledUsesFullBudget() {
+        let rec = HandleRecorder()
+        // Gate `process` so accepted items STAY in-flight until released, exactly
+        // like `boundEnforced` above — keeps the cap check deterministic.
+        let gate = DispatchSemaphore(value: 0)
+        let bound = 100
+        let worker = ESMessageWorker(
+            maxInFlight: bound,
+            reservesLineageSlots: false,
+            process: { h in rec.recordProcess(h); gate.wait() },
+            free: { rec.recordFree($0) }
+        )
+
+        // With no reserve withheld, all 100 non-critical (e.g. FILE-client WRITE)
+        // submissions fit in the full budget — none of the old 25% set-aside.
+        let accepted = handles(1...bound)
+        for h in accepted { worker.submit(h, lineageCritical: false) }
+        #expect(worker.inFlightCount() == bound)
+        #expect(worker.backpressureDropped() == 0)
+
+        // The 101st is genuinely over the (undiminished) cap and is dropped.
+        let overflowHandle = handles((bound + 1)...(bound + 1))[0]
+        let overflowAccepted = worker.submit(overflowHandle, lineageCritical: false)
+        #expect(overflowAccepted == false)
+        #expect(worker.backpressureDropped() == 1)
+        #expect(rec.freeCount(overflowHandle) == 1)
+
+        for _ in 0..<bound { gate.signal() }
+        worker.shutdownAndDrain()
+        #expect(rec.totalFrees() == bound + 1)
+        #expect(rec.maxFreeCount() == 1)
+    }
+
+    @Test("reservesLineageSlots:true (default) withholds a quarter of the budget from non-critical traffic")
+    func lineageReserveDefaultWithholdsQuarter() {
+        let rec = HandleRecorder()
+        let gate = DispatchSemaphore(value: 0)
+        let bound = 100
+        // reservesLineageSlots omitted — pins the unchanged default (exec/unified
+        // client) behavior as a regression guard against this fix accidentally
+        // widening that admission too.
+        let worker = ESMessageWorker(
+            maxInFlight: bound,
+            process: { h in rec.recordProcess(h); gate.wait() },
+            free: { rec.recordFree($0) }
+        )
+
+        // lineageReserve = max(1, min(99, 25)) == 25, so non-critical admission
+        // caps at 100 - 25 = 75.
+        let attempted = handles(1...bound)
+        var acceptedCount = 0
+        for h in attempted {
+            if worker.submit(h, lineageCritical: false) { acceptedCount += 1 }
+        }
+        #expect(acceptedCount == 75)
+        #expect(worker.inFlightCount() == 75)
+        #expect(worker.backpressureDropped() == 25)
+        for h in attempted[75...] { #expect(rec.freeCount(h) == 1) }   // dropped ⇒ freed inline
+
+        // A lineage-critical handle is still accepted even though non-critical
+        // admission is already exhausted at inFlight == 75 — the withheld quarter
+        // is reserved for exactly this case.
+        let criticalHandle = handles((bound + 1)...(bound + 1))[0]
+        let criticalAccepted = worker.submit(criticalHandle, lineageCritical: true)
+        #expect(criticalAccepted == true)
+        #expect(worker.inFlightCount() == 76)
+
+        for _ in 0..<76 { gate.signal() }
+        worker.shutdownAndDrain()
+        #expect(rec.totalFrees() == bound + 1)   // 75 accepted + 25 dropped + 1 critical
+        #expect(rec.maxFreeCount() == 1)
+    }
 }

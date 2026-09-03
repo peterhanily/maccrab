@@ -46,6 +46,25 @@ public struct EventPipelineLiveMemorySnapshot: Sendable, Equatable {
     }
 }
 
+/// Read-only, per-owner slice of the same counters ``EventPipelineLiveMemorySnapshot``
+/// already tracks in aggregate. v1.22.0 item6: exposes the burst-time telemetry
+/// needed to pick safe lease-size constants (see the MEASUREMENT PENDING markers
+/// in EventJournalAdmissionValidator.swift and DeferredEnrichmentBuffer.swift).
+/// Never consulted by acquisition/admission logic — instrumentation only.
+public struct EventPipelineOwnerMemoryStats: Sendable, Equatable {
+    /// Async callers of this owner that legitimately queued for FIFO backpressure.
+    public let waitsTotal: UInt64
+    /// High watermark of this owner's concurrent waiter count.
+    public let waiterHighWatermark: Int
+    /// Synchronous callers of this owner that could not wait and were rejected.
+    public let nonblockingRejectionsTotal: UInt64
+    /// This owner's requests refused because the shared bounded waiter storage
+    /// was already full.
+    public let waiterLimitSaturationsTotal: UInt64
+    /// This owner's requests that could never fit under the configured envelope.
+    public let oversizedRequestsTotal: UInt64
+}
+
 /// Reference-counted credit under ``EventPipelineLiveMemoryBudget``.
 /// ARC copies share one reservation. Deinit is synchronous because receipts,
 /// detached workers, and SQLite callbacks can release on any executor.
@@ -163,6 +182,17 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
     private var waiterLimitSaturationsTotal: UInt64 = 0
     private var oversizedRequestsTotal: UInt64 = 0
     private var cancelledWaiterTotal: UInt64 = 0
+    // v1.22.0 item6: per-owner mirrors of the aggregate counters above,
+    // updated at the same call sites under the same lock. Read-only
+    // telemetry only — never consulted by acquisition/admission logic.
+    private var waitsTotalByOwner: [EventPipelineMemoryOwner: UInt64] = [:]
+    private var waiterHighWatermarkByOwner: [EventPipelineMemoryOwner: Int] = [:]
+    private var nonblockingRejectionsTotalByOwner:
+        [EventPipelineMemoryOwner: UInt64] = [:]
+    private var waiterLimitSaturationsTotalByOwner:
+        [EventPipelineMemoryOwner: UInt64] = [:]
+    private var oversizedRequestsTotalByOwner:
+        [EventPipelineMemoryOwner: UInt64] = [:]
     /// Deterministic cancellation-race seam; internal so production callers
     /// cannot make waiter delivery execute application work.
     private var waiterAssignedHookForTesting: (@Sendable () -> Void)?
@@ -205,6 +235,7 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
         guard bytes > 0,
               bytes <= maximumIndividualRequestBytes(for: owner) else {
             increment(&oversizedRequestsTotal)
+            increment(&oversizedRequestsTotalByOwner, owner: owner)
             lock.unlock()
             return nil
         }
@@ -229,6 +260,7 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
               canAcquireAheadOfWaitersLocked(owner: owner)
                 || isDrainSideOwner(owner) else {
             increment(&nonblockingRejectionsTotal)
+            increment(&nonblockingRejectionsTotalByOwner, owner: owner)
             lock.unlock()
             return nil
         }
@@ -303,6 +335,31 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
         return value
     }
 
+    /// Read-only per-owner counters mirroring ``snapshot()``'s aggregate
+    /// totals. v1.22.0 item6: lets a heartbeat publish, per owner, waits,
+    /// waiter high watermark, non-blocking rejections, waiter-limit
+    /// saturations, and oversized-request counts without changing any
+    /// acquisition/admission behavior.
+    public func perOwnerSnapshot()
+        -> [EventPipelineMemoryOwner: EventPipelineOwnerMemoryStats] {
+        lock.lock()
+        var result: [EventPipelineMemoryOwner: EventPipelineOwnerMemoryStats] = [:]
+        for owner in EventPipelineMemoryOwner.allCases {
+            result[owner] = EventPipelineOwnerMemoryStats(
+                waitsTotal: waitsTotalByOwner[owner, default: 0],
+                waiterHighWatermark: waiterHighWatermarkByOwner[owner, default: 0],
+                nonblockingRejectionsTotal:
+                    nonblockingRejectionsTotalByOwner[owner, default: 0],
+                waiterLimitSaturationsTotal:
+                    waiterLimitSaturationsTotalByOwner[owner, default: 0],
+                oversizedRequestsTotal:
+                    oversizedRequestsTotalByOwner[owner, default: 0]
+            )
+        }
+        lock.unlock()
+        return result
+    }
+
     func setWaiterAssignedHookForTesting(
         _ hook: (@Sendable () -> Void)?
     ) {
@@ -337,6 +394,7 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
             for: reservation.owner
         ) else {
             increment(&oversizedRequestsTotal)
+            increment(&oversizedRequestsTotalByOwner, owner: reservation.owner)
             lock.unlock()
             return false
         }
@@ -349,6 +407,7 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
                 && canAcquireLocked(bytes: delta, owner: reservation.owner)
         ) else {
             increment(&nonblockingRejectionsTotal)
+            increment(&nonblockingRejectionsTotalByOwner, owner: reservation.owner)
             lock.unlock()
             return false
         }
@@ -389,6 +448,7 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
                (reservation.bytes > maximumIndividualRequestBytes(for: owner)
                     || currentBytes > maximumAggregateBytes(for: owner)) {
                 increment(&nonblockingRejectionsTotal)
+                increment(&nonblockingRejectionsTotalByOwner, owner: owner)
                 lock.unlock()
                 return false
             }
@@ -458,6 +518,7 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
         if bytes > maximumIndividualRequestBytes(for: owner)
             || (relabels && currentBytes > maximumAggregateBytes(for: owner)) {
             increment(&nonblockingRejectionsTotal)
+            increment(&nonblockingRejectionsTotalByOwner, owner: owner)
             lock.unlock()
             return nil
         }
@@ -506,6 +567,7 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
         if bytes <= 0
             || bytes > maximumIndividualRequestBytes(for: owner) {
             increment(&oversizedRequestsTotal)
+            increment(&oversizedRequestsTotalByOwner, owner: owner)
             returnsNil = true
         } else if taskIsCancelled {
             increment(&cancelledWaiterTotal)
@@ -515,6 +577,7 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
             immediate = createReservationLocked(bytes: bytes, owner: owner)
         } else if waiters.count >= maximumWaiters {
             increment(&waiterLimitSaturationsTotal)
+            increment(&waiterLimitSaturationsTotalByOwner, owner: owner)
             returnsNil = true
         } else {
             waiters.append(Waiter(
@@ -524,7 +587,16 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
                 continuation: continuation
             ))
             increment(&waitsTotal)
+            increment(&waitsTotalByOwner, owner: owner)
             waiterHighWatermark = max(waiterHighWatermark, waiters.count)
+            // Bounded by maximumWaiters (64 in production); cheap under lock.
+            let ownerWaiterCount = waiters.reduce(0) {
+                $0 + ($1.owner == owner ? 1 : 0)
+            }
+            waiterHighWatermarkByOwner[owner] = max(
+                waiterHighWatermarkByOwner[owner, default: 0],
+                ownerWaiterCount
+            )
         }
         lock.unlock()
         if returnsNil {
@@ -714,5 +786,16 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
 
     private func increment(_ value: inout UInt64) {
         if value < UInt64.max { value += 1 }
+    }
+
+    /// Per-owner counterpart of ``increment(_:)`` for the v1.22.0 item6
+    /// telemetry dictionaries. Always called under `lock`, alongside the
+    /// matching aggregate `increment`.
+    private func increment(
+        _ dict: inout [EventPipelineMemoryOwner: UInt64],
+        owner: EventPipelineMemoryOwner
+    ) {
+        let current = dict[owner, default: 0]
+        if current < UInt64.max { dict[owner] = current + 1 }
     }
 }

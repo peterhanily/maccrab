@@ -1377,12 +1377,14 @@ public final class ESCollector: @unchecked Sendable {
         traceContinuation: AsyncStream<TraceBindingSignal>.Continuation,
         deliveryTelemetry: EventCollectorBufferTelemetry,
         logger: Logger,
-        maxInFlight: Int
+        maxInFlight: Int,
+        reservesLineageSlots: Bool = true
     ) -> ESClientContext {
         let tracker = ESSeqTracker()
         let worker = ESMessageWorker(
             maxInFlight: maxInFlight,
             label: "com.maccrab.es.message-worker.\(label)",
+            reservesLineageSlots: reservesLineageSlots,
             process: { handle in
                 // Peek at the boxed context WITHOUT consuming the retain (the
                 // `free` closure consumes it exactly once). Never frees here.
@@ -1408,7 +1410,7 @@ public final class ESCollector: @unchecked Sendable {
     }
 
     /// Wrap `makeClientContext` with this collector's captured continuations.
-    private func makeContext(label: String, types: [es_event_type_t], canary: ESCanaryRegistry?) -> ESClientContext {
+    private func makeContext(label: String, types: [es_event_type_t], canary: ESCanaryRegistry?, reservesLineageSlots: Bool = true) -> ESClientContext {
         Self.makeClientContext(
             label: label,
             types: types,
@@ -1417,7 +1419,8 @@ public final class ESCollector: @unchecked Sendable {
             traceContinuation: traceBindingContinuation!,
             deliveryTelemetry: deliveryTelemetry,
             logger: logger,
-            maxInFlight: workerMaxInFlight
+            maxInFlight: workerMaxInFlight,
+            reservesLineageSlots: reservesLineageSlots
         )
     }
 
@@ -1549,8 +1552,8 @@ public final class ESCollector: @unchecked Sendable {
 
         // The exec/process context carries the D3 canary — its EXEC events feed
         // the recognizer. The file context never sees EXEC, so it gets no canary.
-        let fileCtx = makeContext(label: "file", types: fileTypes, canary: nil)
-        let execCtx = makeContext(label: "exec", types: execTypes, canary: canaryRegistry)
+        let fileCtx = makeContext(label: "file", types: fileTypes, canary: nil, reservesLineageSlots: false)
+        let execCtx = makeContext(label: "exec", types: execTypes, canary: canaryRegistry, reservesLineageSlots: true)
 
         // FIRST client (file).
         let firstResult = openClient(for: fileCtx)
@@ -1581,7 +1584,7 @@ public final class ESCollector: @unchecked Sendable {
         let allTypes = Self.fullSubscription(subscribeFileOpen: subscribeFileOpen,
                                              subscribeIntrospection: subscribeIntrospection,
                                              subscribeMemoryProtection: subscribeMemoryProtection)
-        let unifiedCtx = makeContext(label: "unified", types: allTypes, canary: canaryRegistry)
+        let unifiedCtx = makeContext(label: "unified", types: allTypes, canary: canaryRegistry, reservesLineageSlots: true)
         let unifiedResult = openClient(for: unifiedCtx)
         guard unifiedResult == ES_NEW_CLIENT_RESULT_SUCCESS else {
             teardownContext(unifiedCtx)
@@ -2993,10 +2996,18 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// - Parameters:
     ///   - maxInFlight: in-flight cap (clamped to ≥1).
     ///   - label: dispatch-queue label.
+    ///   - reservesLineageSlots: whether a quarter of the budget is held back
+    ///     for lineage-critical types (see `lineageReserve`). Only meaningful
+    ///     for a client that can carry BOTH lineage-critical and non-critical
+    ///     traffic on the same queue; a client whose subscribed types never
+    ///     include EXEC/FORK/EXIT (e.g. the FILE client) has nothing to protect
+    ///     and should pass `false` so the reserve isn't dead capacity. Defaults
+    ///     to `true` so every existing caller keeps today's behavior.
     ///   - process: run the message pipeline; MUST NOT free the handle.
     ///   - free: release the handle; the worker calls it exactly once per handle.
     public init(maxInFlight: Int,
                 label: String = "com.maccrab.es.message-worker",
+                reservesLineageSlots: Bool = true,
                 process: @escaping (Handle) -> Void,
                 free: @escaping (Handle) -> Void) {
         let cap = Swift.max(1, maxInFlight)
@@ -3004,8 +3015,13 @@ public final class ESMessageWorker: @unchecked Sendable {
         // A quarter of the budget is held for lineage-critical types (see
         // `lineageReserve`). Floored at 1 so even a tiny test cap reserves a slot,
         // and capped below `maxInFlight` so non-critical traffic is never refused
-        // outright — it just loses the race for the last slots.
-        self.lineageReserve = Swift.max(1, Swift.min(cap - 1, cap / 4))
+        // outright — it just loses the race for the last slots. Skipped entirely
+        // when the client never carries lineage-critical traffic in the first
+        // place (`reservesLineageSlots: false`), so that client's full budget is
+        // usable instead of sitting reserved for a type it never sees.
+        self.lineageReserve = reservesLineageSlots
+            ? Swift.max(1, Swift.min(cap - 1, cap / 4))
+            : 0
         self.queue = DispatchQueue(label: label, qos: .userInitiated)
         self.process = process
         self.free = free

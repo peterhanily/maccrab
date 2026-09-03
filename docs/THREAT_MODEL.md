@@ -41,7 +41,7 @@ residual risk remains.
   trees, AMOS/Atomic Stealer wallet paths, XCSSET clipboard injection,
   etc.). This count describes the full corpus. Since v1.21.4 the daemon
   defaults to the stable rule profile — only rules marked `status: stable`
-  (~87 single-event rules) ship **enabled** by default; the majority are
+  (109 single-event rules) ship **enabled** by default; the majority are
   disabled unless the operator opts into a broader profile. See
   [`COVERAGE.md`](COVERAGE.md).
 - Sequence rules correlate multi-step kill chains within bounded

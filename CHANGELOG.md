@@ -3,7 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.22.0] — 2026-09-01
+## [1.22.0] — 2026-09-03
 
 ### Fixed
 - **Engine crash on the heavy-enrichment timeout path.** A budget split that
@@ -62,6 +62,17 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   `llm.configured=false` with Ollama running and a valid config on disk.
 - **SIGHUP rule-reload confirmations were invisible on release builds.** Same
   cause: the only signal that a reload took effect went to discarded stdout.
+- **Alert-evidence writes could pause even though each storage budget looked
+  satisfied.** The combined alerts+evidence family cap is the sum of both
+  component caps, but the footprint that gates writes also carries shared
+  SQLite indexes, WAL and freelist pages that belong to neither component. Both
+  components could therefore sit at their own caps, both enforcers correctly do
+  nothing, and only the family pass — scheduled hourly with a one-hour first
+  fire — could clear it, leaving evidence capture stopped for up to an hour.
+  Recovery now trims each component's target to leave room for the shared
+  overhead, and an early-fire watchdog (2-minute first fire, 60s cadence) reacts
+  within minutes whenever writes are actually blocked, instead of waiting for
+  the hourly sweep.
 
 ### Added
 - Journal-index refresh telemetry: full-rebuild and append-refresh counters, a

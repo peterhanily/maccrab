@@ -157,7 +157,7 @@
 "settings.macosNotifications" = "macOS Notifications";
 "settings.showNotifications" = "Show notifications for detection alerts";
 "settings.minimumSeverity" = "Minimum severity:";
-"settings.severityHelp" = "Only alerts at or above this severity will trigger a macOS notification.";
+"settings.severityHelp" = "Only alerts at or above this severity will trigger a macOS notification. Daemon picks up changes on next restart or SIGHUP.";
 "settings.informational" = "Informational";
 "settings.low" = "Low";
 "settings.medium" = "Medium";
@@ -428,7 +428,7 @@
 "wizard.filtersHint" = "Filters exclude known-good activity (NOT conditions). Optional.";
 "wizard.quickAdd" = "Quick add:";
 "wizard.falsepositiveHint" = "Describe known legitimate scenarios that might trigger this rule:";
-"wizard.savedTitle" = "Rule saved!";
+"wizard.savedTitle" = "Rule installed";
 "wizard.yamlLabel" = "Generated YAML:";
 "wizard.nextSteps" = "Next: run make compile-rules && make restart to load the new rule.";
 
@@ -609,7 +609,7 @@
 "ruleWizard.stepOptions" = "Options";
 "ruleWizard.stepPreview" = "Preview & Save";
 "settings.aiBackend" = "AI Backend";
-"settings.alerts.help" = "Detections fired by MacCrab. Survives any event-firehose prune.";
+"settings.alerts.help" = "Detections plus bounded alert-owned event context. The gauge uses the combined alerts.db family cap.";
 "settings.alerts.label" = "Alert history";
 "settings.appearance" = "Appearance";
 "settings.brewInstalled.hint" = "Installed via Homebrew. Background auto-update is off; upgrade with `brew upgrade --cask maccrab`. Manual checks above still work.";
@@ -618,7 +618,7 @@
 "settings.catalogReopen" = "Reopen the Catalog tab after changing this setting.";
 "settings.checkForUpdates" = "Check for Updates";
 "settings.displayLanguage" = "Display language";
-"settings.events.help" = "Recent raw activity for live rules. Floor 15 min — anything shorter risks dropping events mid-sequence.";
+"settings.events.help" = "Recent raw activity for live rules. This legacy envelope reserves the alert-evidence budget; the effective events.db cap is shown below. Floor 15 min.";
 "settings.events.label" = "Event firehose";
 "settings.flushBody" = "Run the events.db size-cap sweep + VACUUM right now. Useful when the file has grown well past the configured cap (recovery from the v1.8.x size-cap regression).";
 "settings.flushButton" = "Reduce events.db now";
@@ -774,13 +774,13 @@
 "agentTraces.statusRunning" = "Running on %lld";
 "eventDetail.openAlerts" = "Open the Alerts workspace for full detail and actions.";
 "settings.agentControl" = "Agent Control (MCP)";
-"settings.agentControlHelp" = "Let a Claude/Codex agent on this Mac customise MacCrab through the MCP server. Every tier is off by default and each change is audit-logged. Turn on only what you need.";
+"settings.agentControlHelp" = "Root-owned MCP mutation grants currently active in the detection engine. This dashboard can revoke a tier, but granting one requires administrator authorization in Terminal. Every applied change is audit-logged.";
 "settings.agentTier.authoring" = "Author rules";
 "settings.agentTier.authoringDesc" = "Create and delete detection rules (validated by the compiler).";
 "settings.agentTier.config" = "Tune detection";
 "settings.agentTier.configDesc" = "Built-in rule settings, reload rules, refresh intel, safe daemon tunables.";
 "settings.agentTier.response" = "Change defense-affecting config";
-"settings.agentTier.responseDesc" = "Toggle ES introspection / file-open subscriptions and ultrasonic. Disabling these reduces detection — grant with care.";
+"settings.agentTier.responseDesc" = "Allows ES introspection, file-open subscriptions, and ultrasonic controls to be changed. Revoking this tier removes that agent authority.";
 "settings.flushCurrentSize" = "Current size: %@";
 "settings.flushDelta" = "Last sweep: %@ → %@";
 "settings.flushLastRun" = "Last run %@";

@@ -1466,6 +1466,43 @@ class CandidateQualificationTests(unittest.TestCase):
                 require_drained=True,
             )
 
+    def test_cumulative_alert_insert_errors_fail_readiness(self) -> None:
+        """v1.22.0: alert_insert_errors_total mirrors capture_failures_total."""
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        observation["heartbeat"]["alert_insert_errors_total"] = 4
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "cumulative alert insert errors=4",
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture alerts", phase="fixture alerts",
+                require_drained=True,
+            )
+
+    def test_zero_alert_insert_errors_passes_readiness(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        observation["heartbeat"]["alert_insert_errors_total"] = 0
+        self.rebind_observation_heartbeat(observation)
+        qualification.validate_runtime_readiness(
+            observation, "fixture alerts", phase="fixture alerts",
+            require_drained=True,
+        )
+
+    def test_missing_alert_insert_errors_key_is_treated_as_zero(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        self.assertNotIn("alert_insert_errors_total", observation["heartbeat"])
+        self.assertEqual(
+            qualification.alert_storage_admission_sample(
+                observation["heartbeat"]
+            )["insert_errors_total"],
+            0,
+        )
+        qualification.validate_runtime_readiness(
+            observation, "fixture alerts", phase="fixture alerts",
+            require_drained=True,
+        )
+
     def test_sticky_event_budget_and_sqlite_cap_fail_readiness(self) -> None:
         report = copy.deepcopy(self.runtime)
         observation = report["recorder_observations"][0]
@@ -3033,6 +3070,92 @@ class CandidateQualificationTests(unittest.TestCase):
             qualification.sample_from_recorder_observation(
                 observation, "fixture incomplete journal recovery"
             )
+
+    def test_event_journal_index_sample_absent_is_not_sampled(self) -> None:
+        """v1.22.0: absence is 'not sampled', never a passing zero."""
+        result = qualification.event_journal_index_sample({})
+        self.assertEqual(
+            result,
+            {
+                "present": False,
+                "full_rebuilds_total": None,
+                "append_refreshes_total": None,
+            },
+        )
+
+    def test_event_journal_index_sample_non_dict_is_not_present(self) -> None:
+        result = qualification.event_journal_index_sample(
+            {"event_journal_index": "not-a-mapping"}
+        )
+        self.assertFalse(result["present"])
+
+    def test_event_journal_index_sample_normalizes_present_counters(self) -> None:
+        result = qualification.event_journal_index_sample(
+            {
+                "event_journal_index": {
+                    "full_rebuilds_total": 3,
+                    "append_refreshes_total": 7,
+                }
+            }
+        )
+        self.assertEqual(
+            result,
+            {
+                "present": True,
+                "full_rebuilds_total": 3,
+                "append_refreshes_total": 7,
+            },
+        )
+
+    def test_event_journal_index_full_rebuild_recurrence_fails_when_appends_climb(
+        self,
+    ) -> None:
+        """v1.22.0 recurrence gate: the dashboard-starves-expiry signature."""
+        report = copy.deepcopy(self.runtime)
+        observations = report["recorder_observations"]
+        last_index = len(observations) - 1
+        for index, observation in enumerate(observations):
+            observation["heartbeat"]["event_journal_index"] = {
+                "full_rebuilds_total": 5 if index == last_index else 0,
+                "append_refreshes_total": 10 if index == last_index else 0,
+            }
+            self.rederive_sample(report, index)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "dashboard-starves-expiry recurrence signature",
+        ):
+            self.validate_runtime(report)
+
+    def test_event_journal_index_recurrence_passes_when_only_appends_climb(
+        self,
+    ) -> None:
+        report = copy.deepcopy(self.runtime)
+        observations = report["recorder_observations"]
+        for index, observation in enumerate(observations):
+            observation["heartbeat"]["event_journal_index"] = {
+                "full_rebuilds_total": 1,
+                "append_refreshes_total": index,
+            }
+            self.rederive_sample(report, index)
+        self.validate_runtime(report)
+
+    def test_event_journal_index_recurrence_gate_skips_when_not_sampled_everywhere(
+        self,
+    ) -> None:
+        report = copy.deepcopy(self.runtime)
+        last_index = len(report["recorder_observations"]) - 1
+        observation = report["recorder_observations"][last_index]
+        # Only the last observation carries event_journal_index; every other
+        # observation still lacks it entirely, so `present` is False on at
+        # least one sample. Even though these counters look exactly like the
+        # fatal signature above, the gate must skip (NOTE) rather than pass
+        # or fail on a partial view of the recurrence.
+        observation["heartbeat"]["event_journal_index"] = {
+            "full_rebuilds_total": 99,
+            "append_refreshes_total": 99,
+        }
+        self.rederive_sample(report, last_index)
+        self.validate_runtime(report)
 
     def test_unavailable_trace_store_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)

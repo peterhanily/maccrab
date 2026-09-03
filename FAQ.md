@@ -16,7 +16,7 @@ this now — if it's showing, click *Open Settings* and grant access.
 Other possibilities: the System Extension isn't activated (check *Overview
 → Protection active*), no rules are compiled (run `maccrabctl status`: it
 prints `Rules: <active> active / <loaded> loaded standard`, which on a stock
-install reads 87 active of 438 compiled under the default **stable** profile.
+install reads 109 active of 438 compiled under the default **stable** profile.
 Do *not* use `rules list | wc -l` — that enumerates every compiled rule
 regardless of profile, plus four header lines), or
 you're inside the 60-second startup warm-up window that suppresses
@@ -222,9 +222,10 @@ Splunk HEC, Elastic Bulk, Datadog Logs, and S3/SFTP can be configured via
 
 ### How do I completely uninstall MacCrab?
 
-**Homebrew:** `brew uninstall --cask maccrab`. The cask's `uninstall` block
-deactivates the System Extension and cleans up the app bundle, binaries,
-LaunchDaemons (if any), and provisioning profiles.
+**Homebrew:** `brew uninstall --cask maccrab` removes the app bundle and
+binaries, but intentionally leaves the Endpoint Security System Extension
+registered. For full removal, either click **Disable Protection** in the
+app before uninstalling, or run `brew uninstall --zap --cask maccrab`.
 
 **Manual data wipe (if desired):**
 
@@ -243,8 +244,9 @@ manually if you want a clean slate.
 ### What is the MacCrab MCP server and how do I use it?
 
 MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/)
-server (`maccrab-mcp`) that exposes ~90 built-in security tools (plus
-`forensics_*` plugin tools) to AI coding tools like Claude Code. Once wired up, your AI sessions can query alerts, hunt
+server (`maccrab-mcp`) that exposes 69 built-in security tools (including the
+always-present `forensics_*` meta-tools), plus per-plugin tools, to AI coding
+tools like Claude Code. Once wired up, your AI sessions can query alerts, hunt
 threats, and scan untrusted input — without leaving the editor.
 
 **Setup:** copy `.mcp.json` from the repo root into your project, update the
@@ -290,7 +292,7 @@ process trees.
 Alerts fire on:
 
 - **Credential fence** (CRITICAL): any child process opens a file matching one
-  of 29 sensitive path patterns — SSH keys, `.env` files, AWS credentials,
+  of 27 sensitive path patterns — SSH keys, `.env` files, AWS credentials,
   keychains, browser credential stores, kubeconfig, `.npmrc`, `.pypirc`, etc.
 - **Project boundary** (HIGH): a child process writes a file outside the
   directory the AI tool was launched in.

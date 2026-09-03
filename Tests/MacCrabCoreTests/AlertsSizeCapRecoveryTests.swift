@@ -124,6 +124,42 @@ struct AlertsSizeCapRecoveryTests {
         }
     }
 
+    /// Scripts the exact order the persistent-pin fixture cannot: a slow but
+    /// SUCCESSFUL first maintenance pass (a stand-in for a multi-second VACUUM)
+    /// that alone exceeds the wall-clock budget, THEN a single transient reader
+    /// pin, THEN convergence. Used to prove the pin grace is scoped to the pin,
+    /// not to the whole recovery call.
+    private actor SlowSuccessThenPinFixture {
+        private(set) var passes = 0
+        private var footprint: Int64 = 300
+        private let slowFirstPassNanoseconds: UInt64
+
+        init(slowFirstPassNanoseconds: UInt64) {
+            self.slowFirstPassNanoseconds = slowFirstPassNanoseconds
+        }
+
+        func measure() -> Int64 { footprint }
+
+        func maintain() async -> PreIngestionStorageMaintenanceResult {
+            passes += 1
+            if passes == 1 {
+                // Slow, successful, but not yet at target: makes real physical
+                // progress (so the loop continues) while burning more than the
+                // whole wall-clock budget.
+                try? await Task.sleep(nanoseconds: slowFirstPassNanoseconds)
+                footprint -= 10
+                return .ran
+            }
+            if passes == 2 { return .transientlyPinned }
+            footprint = 0
+            return .ran
+        }
+
+        func reprobe() throws {
+            if footprint > 0 { throw ProbeFixtureError.blocked }
+        }
+    }
+
     @Test("cap minus reserve is the exact alert write boundary")
     func exactBoundaryArithmetic() {
         let mib = SQLitePersistentStorePolicy.bytesPerMiB
@@ -402,6 +438,97 @@ struct AlertsSizeCapRecoveryTests {
         #expect(permanentAttempts == 1)
     }
 
+    @Test("startup retry loop stops at the wall-clock budget, not the attempt limit")
+    func retryTransientEventStoreStartupOperationRespectsWallClockBudget() async throws {
+        // preIngestionStorageRetryWallClockBudgetSeconds is a fixed production
+        // constant (5s), not a parameter, so this exercises real elapsed time
+        // rather than a fake clock: the operation always throws the retryable
+        // .busy error, and the retry delay (5.2s) is deliberately larger than
+        // the wall-clock budget so a single real sleep is enough to cross it --
+        // this keeps the real wait to ~5.2s instead of stacking many small
+        // sleeps to reach the same 5s boundary.
+        var attempts = 0
+        let start = Date()
+        do {
+            let _: Int = try await retryTransientEventStoreStartupOperation(
+                maximumAttempts: 1000,
+                retryDelayNanoseconds: 5_200_000_000,
+                operation: {
+                    attempts += 1
+                    throw EventStoreError.busy("fixture always pinned")
+                }
+            )
+            Issue.record("persistently busy startup operation unexpectedly succeeded")
+        } catch let error as EventStoreError {
+            guard case .busy = error else {
+                Issue.record("wrong error: \(error)")
+                return
+            }
+        }
+        let elapsed = Date().timeIntervalSince(start)
+        // Stopped almost immediately after crossing the 5s budget -- nowhere
+        // near the 1000-attempt / 5,200s ceiling that attempt-count alone would
+        // have allowed.
+        #expect(attempts < 5)
+        #expect(elapsed < 10)
+    }
+
+    @Test("bounded pre-ingestion recovery stops at the wall-clock budget under a persistent pin")
+    func boundedRecoveryRespectsWallClockBudgetUnderPersistentPin() async {
+        // Mirrors the retry-loop test above but through the shared
+        // runBoundedPreIngestionStorageRecovery helper, which both
+        // recoverEventStoreBeforeProducers and recoverAlertStoreBeforeProducers
+        // call -- one test covers both call sites. maximumPinnedRetries is set
+        // far above what the wall-clock budget will ever allow, so if the fix
+        // regressed to attempt-count-only bounding this test would time out /
+        // run for far longer than the assertion allows instead of passing.
+        let pinned = RecoveryLoopFixture(
+            footprint: 300,
+            decrementBytes: 50,
+            maintenanceResult: .transientlyPinned
+        )
+        let start = Date()
+        let result = await runBoundedPreIngestionStorageRecovery(
+            component: "persistent-pin",
+            maximumPasses: 1000,
+            maximumPinnedRetries: 1000,
+            pinnedRetryDelayNanoseconds: 5_200_000_000,
+            measureFootprint: { await pinned.measure() },
+            maintenance: { await pinned.maintain() },
+            reprobeOrdinaryAdmission: { try await pinned.reprobe() }
+        )
+        let elapsed = Date().timeIntervalSince(start)
+
+        #expect(!result.writableBeforeProducers)
+        #expect(result.reason.contains("wall-clock budget"))
+        #expect(result.passes < 5)
+        #expect(elapsed < 10)
+    }
+
+    @Test("a slow successful pass does not erode a later transient pin's grace")
+    func priorMaintenanceTimeDoesNotErodePinBudget() async {
+        // Regression for the item-2 wall-clock ceiling: a legitimately slow but
+        // successful earlier maintenance pass (here 5.6s, past the 5s budget)
+        // must NOT starve a genuinely transient pin observed on a later pass.
+        // With the budget scoped to the whole call this boot would fail closed;
+        // scoped to the first observed pin, it recovers.
+        let fixture = SlowSuccessThenPinFixture(
+            slowFirstPassNanoseconds: 5_600_000_000
+        )
+        let result = await runBoundedPreIngestionStorageRecovery(
+            component: "slow-then-pin",
+            maximumPasses: 1000,
+            maximumPinnedRetries: 1000,
+            pinnedRetryDelayNanoseconds: 10_000_000,
+            measureFootprint: { await fixture.measure() },
+            maintenance: { await fixture.maintain() },
+            reprobeOrdinaryAdmission: { try await fixture.reprobe() }
+        )
+        #expect(result.writableBeforeProducers,
+                "a transient pin after a slow successful pass must still get its full grace")
+        #expect(await fixture.passes == 3)
+    }
+
     @Test("startup reclaims the writable target-to-hard interval")
     func startupForcesRecoveryTargetHeadroom() async throws {
         let directory = try tempDirectory()
@@ -463,6 +590,57 @@ struct AlertsSizeCapRecoveryTests {
         #expect(try #require(result.lastFootprintBytes)
             <= boundary.recoveryTargetBytes)
         #expect(try await store.count() < rowsBefore)
+    }
+
+    @Test("under-cap alert family reaches writable-before-producers in a single pass")
+    func recoverAlertStoreBeforeProducersConvergesInOnePassWhenAlreadyUnderCap() async throws {
+        let directory = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
+        let reserve = 8 * mib
+        let databasePath = directory.appendingPathComponent("alerts.db").path
+        let policy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: 64 * mib,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: reserve,
+            storageVolumePath: directory.path
+        )
+        let store = try AlertStore(
+            directory: directory.path,
+            storagePolicy: policy
+        )
+        for index in 0..<20 {
+            try await store.insert(alert: makeAlert(index))
+        }
+
+        let footprint = try measureDatabaseFootprintBytes(dbPath: databasePath)
+        let boundary = AlertsSizeCapBoundary(
+            nominalCapBytes: 64 * mib,
+            transactionReserveBytes: reserve
+        )
+        // This is the common well-sized-host case the v1.22.0 fast path in
+        // recoverAlertStoreBeforeProducers's maintenance closure exists to skip:
+        // both gates are false, so the closure should not need to reach for
+        // walCheckpointTruncate() at all. walCheckpointTruncate is a method on
+        // the real AlertStore actor with no injectable seam, so a call-count spy
+        // isn't reachable without a production-code change this file may not
+        // make; this asserts the behavioral contract instead -- an
+        // already-converged family still reaches writable-before-producers in
+        // exactly one pass, and separately proves (via the same boundary the
+        // production closure consults) that both gates are false for this
+        // footprint, i.e. the gate the production code added would in fact skip.
+        #expect(!boundary.requiresMaintenance(footprintBytes: footprint))
+        #expect(!boundary.requiresStartupConvergence(footprintBytes: footprint))
+
+        let result = await recoverAlertStoreBeforeProducers(
+            alertStore: store,
+            dbPath: databasePath,
+            alertCapBytes: 64 * mib,
+            evidenceCapBytes: 64 * mib,
+            boundary: boundary
+        )
+        #expect(result.writableBeforeProducers)
+        #expect(result.passes == 1)
     }
 
     @Test("family in cap-reserve dead zone is reclaimed and no-write reprobe recovers")

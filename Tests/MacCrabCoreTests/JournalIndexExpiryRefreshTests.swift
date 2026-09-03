@@ -101,6 +101,51 @@ struct JournalIndexExpiryRefreshTests {
         )
     }
 
+    @Test("count() also survives expiry without a full rebuild")
+    func countSurvivesExpiryWithoutFullRebuild() async throws {
+        let (writer, dir) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Same shape as expiryDoesNotForceAFullRebuild, but through count() --
+        // the path the dashboard's updateStats() polls every 5s. count() drives
+        // ensureJournalIndex()/compactJournalIndex via withVerifiedExactReadSnapshot
+        // just like exactEventsSnapshot, and must take the same cheap append path.
+        let now = Date()
+        for i in 0..<400 {
+            try await writer.insert(event: event(i, at: now.addingTimeInterval(-3600 - Double(i))))
+        }
+        _ = await writer.walCheckpoint()
+
+        let reader = try EventStore(directory: dir.path, forceReadOnly: true)
+        _ = try await reader.count()
+        let base = await reader.journalIndexRefreshDiagnostics()
+        #expect(base.fullRebuilds >= 1, "the reader's first read must build its index")
+
+        // Expire a prefix AND append a tail -- the exact combination the old gate
+        // refused, and the one a live engine produces continuously.
+        let expired = try await writer.expireJournalBlocks(
+            retainedThrough: now.addingTimeInterval(30 * 24 * 3600),
+            maximumBlocks: 4
+        )
+        #expect(expired > 0, "fixture must actually expire blocks")
+        for i in 400..<460 {
+            try await writer.insert(event: event(i, at: now.addingTimeInterval(Double(i))))
+        }
+        _ = await writer.walCheckpoint()
+
+        _ = try await reader.count()
+        let after = await reader.journalIndexRefreshDiagnostics()
+
+        #expect(
+            after.appendRefreshes > base.appendRefreshes,
+            "count() with an expiry alongside appends must take the append path, not rebuild the world"
+        )
+        #expect(
+            after.fullRebuilds == base.fullRebuilds,
+            "no full rebuild should have been needed for count() (rebuilds went \(base.fullRebuilds) -> \(after.fullRebuilds))"
+        )
+    }
+
     @Test("the surviving corpus is still exactly readable after eviction")
     func survivingCorpusStaysReadable() async throws {
         let (writer, dir) = try makeStore()

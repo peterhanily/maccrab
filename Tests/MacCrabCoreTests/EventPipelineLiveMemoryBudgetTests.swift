@@ -399,6 +399,58 @@ struct EventPipelineLiveMemoryBudgetTests {
         await waitUntil { budget.snapshot().currentBytes == 0 }
         #expect(budget.snapshot().leasesConserved)
     }
+
+    @Test("perOwnerSnapshot starts at zero for every owner and attributes counters to only the driving owner")
+    func perOwnerSnapshotAttribution() async throws {
+        let budget = EventPipelineLiveMemoryBudget(
+            maximumBytes: 96,
+            forwardProgressReserveBytes: 36
+        )
+        let fresh = budget.perOwnerSnapshot()
+        #expect(Set(fresh.keys) == Set(EventPipelineMemoryOwner.allCases))
+        for owner in EventPipelineMemoryOwner.allCases {
+            let stats = try #require(fresh[owner])
+            #expect(stats.waitsTotal == 0)
+            #expect(stats.waiterHighWatermark == 0)
+            #expect(stats.nonblockingRejectionsTotal == 0)
+            #expect(stats.waiterLimitSaturationsTotal == 0)
+            #expect(stats.oversizedRequestsTotal == 0)
+        }
+
+        // Same driver as impossibleNoncriticalRequestIsOversized: a noncritical
+        // request above the owner's individual ceiling. Drive it against
+        // .heavyResult only.
+        #expect(budget.tryAcquire(bytes: 61, owner: .heavyResult) == nil)
+
+        let afterOversized = budget.perOwnerSnapshot()
+        let heavyStats = try #require(afterOversized[.heavyResult])
+        #expect(heavyStats.oversizedRequestsTotal == 1)
+        for owner in EventPipelineMemoryOwner.allCases where owner != .heavyResult {
+            let stats = try #require(afterOversized[owner])
+            #expect(stats.oversizedRequestsTotal == 0)
+        }
+
+        // Now saturate .eventSource's noncritical ceiling and drive a
+        // nonblocking rejection (not oversized: within the individual limit,
+        // just no aggregate headroom left) against .eventSource only.
+        var source: EventPipelineMemoryLease? = try #require(
+            budget.tryAcquire(bytes: 60, owner: .eventSource)
+        )
+        #expect(budget.tryAcquire(bytes: 1, owner: .eventSource) == nil)
+
+        let afterRejection = budget.perOwnerSnapshot()
+        let sourceStats = try #require(afterRejection[.eventSource])
+        #expect(sourceStats.nonblockingRejectionsTotal == 1)
+        // The earlier oversized attribution to .heavyResult must be untouched.
+        #expect(afterRejection[.heavyResult]?.oversizedRequestsTotal == 1)
+        for owner in EventPipelineMemoryOwner.allCases where owner != .eventSource {
+            let stats = try #require(afterRejection[owner])
+            #expect(stats.nonblockingRejectionsTotal == 0)
+        }
+
+        source = nil
+        #expect(budget.snapshot().leasesConserved)
+    }
 }
 
 // MARK: - rc.33 regression: drain-side priority inversion

@@ -174,6 +174,16 @@ actor DeferredEnrichmentBuffer {
     /// Claiming the validator's complete accepted source envelope before
     /// enrichment guarantees a later accepted source can transfer without an
     /// unaccounted suspended Event.
+    // v1.22.0 MEASUREMENT PENDING (item6): this stays the flat 24 MiB
+    // `maximumAcceptedSourceRetainedBytes` for every reservation today. Fix
+    // design step 2 (v1.22.0 ingest-headroom brief) wants a smaller constant
+    // sized from the real P99/P99.9/max pre-enrichment sourceBytes seen in
+    // production traffic (see EventJournalSourceSizeTelemetry.snapshot() in
+    // EventJournalAdmissionValidator.swift) — chosen with a wide safety
+    // margin over that tail, since `resizeReservation()` below rejects any
+    // final size above this charge. Do not lower this without that
+    // measurement: too small silently turns legitimate large (but
+    // non-overflow) events into a new drop path.
     static let productionReservationRawEventByteCharge =
         EventJournalAdmissionValidator.maximumAcceptedSourceRetainedBytes
 

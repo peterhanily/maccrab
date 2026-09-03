@@ -102,6 +102,18 @@ struct JournalBaseEnqueueOutcome: Sendable {
     let poisoned: Bool
 }
 
+/// v1.22.0 diagnostic tag identifying why a `drain()` task was started.
+/// Read-only instrumentation for `diagnosticDrainSnapshot()` — attributing
+/// drain counts and trigger-time buffer depth by mechanism is Phase 0 of
+/// isolating which trigger dominates journal write-rate/packing behavior
+/// under sustained load; it does not itself change drain behavior.
+enum DrainTrigger: String, CaseIterable, Sendable {
+    case periodicTimer
+    case depthThreshold
+    case memoryPressureRetry
+    case shutdown
+}
+
 actor BatchedEventWriter {
     private struct BufferedEvent: Sendable {
         let generation: UInt64
@@ -387,6 +399,11 @@ actor BatchedEventWriter {
     /// Shutdown must not infer completion from `draining`: the actor can be
     /// suspended inside SQLite while that flag is true.
     private var drainTask: Task<Void, Never>?
+    /// v1.22.0 Phase 0 diagnostic: per-trigger `startDrain()` call counts and
+    /// summed buffer depth at trigger time, read via `diagnosticDrainSnapshot()`.
+    /// Read-only instrumentation, not a behavior signal.
+    private var drainTriggerCounts: [DrainTrigger: Int] = [:]
+    private var drainTriggerBufferDepthSum: [DrainTrigger: Int] = [:]
     private var flushLoop: Task<Void, Never>?
     /// Storage-write drops since start (writer-queue overflow). A `LockedCounter`
     /// (Sendable, lock-guarded) so `droppedCount` can be read `nonisolated` from
@@ -1191,7 +1208,7 @@ actor BatchedEventWriter {
             // The shared J lease already owns the prepared value, so waiting
             // cannot increase RSS. Force a below-threshold drain and yield the
             // actor until local count/byte ownership becomes available.
-            if !draining, hasPendingStorageWork { startDrain() }
+            if !draining, hasPendingStorageWork { startDrain(reason: .memoryPressureRetry) }
             try? await Task.sleep(for: .milliseconds(10))
         }
         offeredByLane[lane.rawValue] += 1
@@ -1230,7 +1247,7 @@ actor BatchedEventWriter {
         )
         bufferedBytesByLane[lane.rawValue] += handle.retainedByteCharge
         if bufferDepth + terminalRevisionDepth >= flushThreshold && !draining {
-            startDrain()
+            startDrain(reason: .depthThreshold)
         }
         return EventJournalAdmission(
             eventID: event.id,
@@ -1350,7 +1367,7 @@ actor BatchedEventWriter {
         terminalRevisionBufferedBytesByLane[lane.rawValue]
             += handle.retainedByteCharge
         if bufferDepth + terminalRevisionDepth >= flushThreshold && !draining {
-            startDrain()
+            startDrain(reason: .depthThreshold)
         }
         return .queued
     }
@@ -1488,7 +1505,7 @@ actor BatchedEventWriter {
             )
             return proof(prepared: prepared, status: status)
         case .queued:
-            if !draining { startDrain() }
+            if !draining { startDrain(reason: .depthThreshold) }
         }
 
         let clock = ContinuousClock()
@@ -1501,7 +1518,7 @@ actor BatchedEventWriter {
                 )
                 return proof(prepared: prepared, status: .timedOut)
             }
-            if !draining { startDrain() }
+            if !draining { startDrain(reason: .depthThreshold) }
             try? await Task.sleep(for: .milliseconds(10))
         }
         let resolution = terminalSettlementResolutions.removeValue(
@@ -1840,7 +1857,7 @@ actor BatchedEventWriter {
                 workspaceLease: workspaceLease
             )
             if adopted == nil {
-                if !draining, hasPendingStorageWork { startDrain() }
+                if !draining, hasPendingStorageWork { startDrain(reason: .memoryPressureRetry) }
                 try? await Task.sleep(for: .milliseconds(10))
             }
         }
@@ -1866,7 +1883,7 @@ actor BatchedEventWriter {
         terminalRevisionBufferedBytesByLane[lane.rawValue]
             += handle.retainedByteCharge
         if bufferDepth + terminalRevisionDepth >= flushThreshold && !draining {
-            startDrain()
+            startDrain(reason: .depthThreshold)
         }
         return .queued
     }
@@ -2822,13 +2839,13 @@ actor BatchedEventWriter {
 
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
-        if !draining, bufferDepth > 0 { startDrain() }
+        if !draining, bufferDepth > 0 { startDrain(reason: .depthThreshold) }
         while admissionResolutions[receipt.generation] == nil {
             guard !Task.isCancelled, clock.now < deadline else {
                 return .timedOut
             }
             try? await Task.sleep(for: .milliseconds(10))
-            if !draining, bufferDepth > 0 { startDrain() }
+            if !draining, bufferDepth > 0 { startDrain(reason: .depthThreshold) }
         }
         guard let resolution = admissionResolutions[receipt.generation] else {
             return .unavailable
@@ -2923,7 +2940,7 @@ actor BatchedEventWriter {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         if !draining, bufferDepth > 0 {
-            startDrain()
+            startDrain(reason: .depthThreshold)
         }
         while terminalGeneration < target {
             guard !Task.isCancelled, clock.now < deadline else {
@@ -2931,7 +2948,7 @@ actor BatchedEventWriter {
             }
             try? await Task.sleep(for: .milliseconds(10))
             if !draining, bufferDepth > 0 {
-                startDrain()
+                startDrain(reason: .depthThreshold)
             }
         }
         return true
@@ -2945,7 +2962,7 @@ actor BatchedEventWriter {
             return
         }
         if hasPendingStorageWork {
-            startDrain()
+            startDrain(reason: .periodicTimer)
             if let task = drainTask {
                 await task.value
             }
@@ -2969,13 +2986,31 @@ actor BatchedEventWriter {
         await flushPartial()
     }
 
-    private func startDrain() {
+    private func startDrain(reason: DrainTrigger) {
         guard !draining, drainTask == nil, hasPendingStorageWork else {
             return
         }
+        drainTriggerCounts[reason, default: 0] += 1
+        drainTriggerBufferDepthSum[reason, default: 0] += bufferDepth
         draining = true
         drainTask = Task { [weak self] in
             await self?.drain()
         }
+    }
+
+    /// v1.22.0 Phase 0 diagnostic: per-`DrainTrigger` call count and average
+    /// buffer depth at trigger time, keyed by `DrainTrigger.rawValue`. Every
+    /// case is present (zero-valued if never triggered) so a load-test
+    /// comparison doesn't have to special-case a missing key. Read-only —
+    /// does not affect drain behavior.
+    func diagnosticDrainSnapshot() -> [String: (count: Int, avgDepth: Double)] {
+        var snapshot: [String: (count: Int, avgDepth: Double)] = [:]
+        for reason in DrainTrigger.allCases {
+            let count = drainTriggerCounts[reason, default: 0]
+            let depthSum = drainTriggerBufferDepthSum[reason, default: 0]
+            let avgDepth = count > 0 ? Double(depthSum) / Double(count) : 0
+            snapshot[reason.rawValue] = (count: count, avgDepth: avgDepth)
+        }
+        return snapshot
     }
 }

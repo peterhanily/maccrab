@@ -211,6 +211,15 @@ actor StorageErrorTracker {
         return (rollingSum(eventErrorPerHourWindow, now: now), rate, lastKind)
     }
 
+    /// Tier 3 surface — alert-side twin of `eventInsertErrorSnapshot()`.
+    /// Read by `DaemonTimers` when assembling the rich heartbeat payload.
+    /// Total-count-only: the alert path has a much lower steady-state
+    /// volume than events (see the comment on `lastAlertErrorLog` above),
+    /// so it doesn't carry the event-side per-minute rate window.
+    public func alertInsertErrorSnapshot(now: Date = Date()) -> Int {
+        rollingSum(alertErrorPerHourWindow, now: now)
+    }
+
     /// Test-only: reset all internal state. Production never calls this
     /// because the tracker is a singleton owned for the daemon's lifetime.
     internal func resetForTesting() {

@@ -356,6 +356,16 @@ let preIngestionStorageRecoveryMaximumPasses = 120
 let preIngestionStoragePinnedRetryPasses = 120
 let preIngestionStoragePinnedRetryDelayNanoseconds: UInt64 = 500_000_000
 
+/// v1.22.0 (item 2, boot <3s): a hard wall-clock ceiling across each of the two
+/// pre-producer storage-retry loops. Attempt counts alone let a persistently
+/// WAL-pinned boot (e.g. a stuck dashboard read that never releases its read
+/// snapshot) hang for up to ~60s per loop before the outer abort fires. That
+/// converts a slow success into a fast, loud failure so boot cannot silently
+/// blow the readiness budget; a genuinely transient pin still clears well inside
+/// it. This bounds the WORST case — it does not itself make a contended boot
+/// reach readiness in <3s (that remains a fail-fast, not a fail-slow).
+let preIngestionStorageRetryWallClockBudgetSeconds: TimeInterval = 5
+
 /// Retry only EventStore's typed lock-contention signal during the
 /// pre-producer transaction. The operation must be crash-resumable or
 /// read/checkpoint-only; permanent storage/corruption errors escape
@@ -369,6 +379,10 @@ func retryTransientEventStoreStartupOperation<T>(
     operation: () async throws -> T
 ) async throws -> T {
     let attemptLimit = max(1, maximumAttempts)
+    // v1.22.0 (item 2): also bound the loop by wall-clock time, not just by
+    // attempt count, so a persistently pinned reader fails boot fast instead of
+    // burning the full attempt budget of 500ms sleeps.
+    let retryStart = Date()
     for attempt in 1...attemptLimit {
         do {
             return try await operation()
@@ -381,7 +395,9 @@ func retryTransientEventStoreStartupOperation<T>(
             case .busy, .memoryLeaseUnavailable: retryable = true
             default: retryable = false
             }
-            guard retryable, attempt < attemptLimit else {
+            guard retryable, attempt < attemptLimit,
+                  Date().timeIntervalSince(retryStart)
+                    < preIngestionStorageRetryWallClockBudgetSeconds else {
                 throw error
             }
             onRetry(attempt)
@@ -492,6 +508,14 @@ func runBoundedPreIngestionStorageRecovery(
     var lastFootprint: Int64?
     var lastProbeError: String?
     var pinnedRetries = 0
+    // v1.22.0 (item 2): wall-clock ceiling on the pin-WAIT grace. Initialized
+    // lazily at the FIRST observed reader pin — not at function entry — so that
+    // time spent on legitimate, successful maintenance in earlier passes (a WAL
+    // checkpoint fsync, retention prune, or a multi-second VACUUM inside
+    // enforce*SizeCap) is never deducted from the grace a genuinely transient
+    // pin is meant to get. A reader that never releases its pin still fails boot
+    // fast instead of exhausting the full pinnedRetryLimit of 500ms sleeps.
+    var pinnedRetryStart: Date?
 
     for pass in 1...passLimit {
         let before: Int64
@@ -563,16 +587,23 @@ func runBoundedPreIngestionStorageRecovery(
             }
         case .transientlyPinned, .ranThenTransientlyPinned:
             pinnedRetries += 1
-            guard pinnedRetries < pinnedRetryLimit else {
+            let pinStart = pinnedRetryStart ?? Date()
+            pinnedRetryStart = pinStart
+            let withinWallClock = Date().timeIntervalSince(pinStart)
+                < preIngestionStorageRetryWallClockBudgetSeconds
+            guard pinnedRetries < pinnedRetryLimit, withinWallClock else {
                 let phase = maintenanceResult == .transientlyPinned
                     ? "pre-maintenance" : "post-maintenance"
+                let bound = withinWallClock
+                    ? "after \(pinnedRetries) bounded retries"
+                    : "within the \(Int(preIngestionStorageRetryWallClockBudgetSeconds))s wall-clock budget"
                 return PreIngestionStorageRecoveryResult(
                     component: component,
                     writableBeforeProducers: false,
                     passes: pass,
                     lastFootprintBytes: after,
                     lastProbeError: lastProbeError,
-                    reason: "reader-pinned \(phase) checkpoint did not clear after \(pinnedRetries) bounded retries (before=\(before), after=\(after)); ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
+                    reason: "reader-pinned \(phase) checkpoint did not clear \(bound) (before=\(before), after=\(after)); ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
                 )
             }
             onTransientPinRetry(pinnedRetries)
@@ -3159,6 +3190,11 @@ enum DaemonTimers {
             // through the StorageErrorTracker actor — strictly off the
             // hot insert path (30 s cadence).
             let insertErrorSnapshot = await StorageErrorTracker.shared.eventInsertErrorSnapshot()
+            // v1.22.0 (item 1): alert-side twin. 34f1ef1/4c8d563 fixed the
+            // alerts-family write pause; this surfaces any residual alert-insert
+            // failure instead of leaving it silent. Total-count-only.
+            let alertInsertErrorSnapshot = await StorageErrorTracker.shared
+                .alertInsertErrorSnapshot()
 
             // v1.12.6 Wave 9K: previously-orphaned operator counters
             // wired into the rich heartbeat:
@@ -3791,6 +3827,26 @@ enum DaemonTimers {
                 .snapshot()
             let eventPipelineLiveMemory = EventPipelineLiveMemoryBudget
                 .processShared.snapshot()
+            // v1.22.0 (item 6, measurement): per-owner budget pressure so a
+            // qualification burst can show whether .eventSource / .journalPrepared
+            // are the owners that saturate the shared 96 MiB envelope. Read-only.
+            let eventPipelineOwnerStats = EventPipelineLiveMemoryBudget
+                .processShared.perOwnerSnapshot()
+            // v1.22.0 (item 6, measurement): real pre/post-enrichment source-size
+            // distribution + sanitized-JSON expansion ratio, so the lease-sizing
+            // constants are chosen from measured tails, not guessed.
+            let eventSourceSizeTelemetry = EventJournalSourceSizeTelemetry
+                .snapshot()
+            // v1.22.0 (item 7): journal-index refresh accounting so a recurrence
+            // of the dashboard-starves-expiry defect (full rebuilds climbing while
+            // append refreshes also climb) is visible and gated in qualification.
+            let journalIndexDiagnostics = await state.eventStore
+                .journalIndexRefreshDiagnostics()
+            // v1.22.0 (item 3, Phase 0): per-trigger drain attribution, to measure
+            // whether memory-pressure retries drive the small-block write bursts
+            // before choosing the sustained-write-rate fix.
+            let drainDiagnostics = await state.eventWriter
+                .diagnosticDrainSnapshot()
 
             func workLifecycleDictionary(
                 _ plane: DaemonTimerLifecycleSnapshot
@@ -4076,6 +4132,60 @@ enum DaemonTimers {
                 "conserved": journalRecoveryConserved,
             ]
 
+            // v1.22.0 (item 7): journal-index refresh counters for the
+            // recurrence gate. full_rebuilds_total should stay flat while
+            // append_refreshes_total climbs under healthy operation.
+            let eventJournalIndexDict: [String: Any] = [
+                "refreshes_total":
+                    Int64(clamping: journalIndexDiagnostics.refreshes),
+                "slow_refreshes_total":
+                    Int64(clamping: journalIndexDiagnostics.slowRefreshes),
+                "last_refresh_ms":
+                    Int64(journalIndexDiagnostics.lastNanoseconds / 1_000_000),
+                "full_rebuilds_total":
+                    Int64(clamping: journalIndexDiagnostics.fullRebuilds),
+                "append_refreshes_total":
+                    Int64(clamping: journalIndexDiagnostics.appendRefreshes),
+            ]
+
+            // v1.22.0 (item 6, measurement): per-owner live-memory pressure.
+            var eventPipelineLiveMemoryByOwnerDict: [String: Any] = [:]
+            for (owner, stats) in eventPipelineOwnerStats {
+                eventPipelineLiveMemoryByOwnerDict[owner.rawValue] = [
+                    "waits_total": Int64(clamping: stats.waitsTotal),
+                    "waiter_high_watermark": stats.waiterHighWatermark,
+                    "nonblocking_rejections_total":
+                        Int64(clamping: stats.nonblockingRejectionsTotal),
+                    "waiter_limit_saturations_total":
+                        Int64(clamping: stats.waiterLimitSaturationsTotal),
+                    "oversized_requests_total":
+                        Int64(clamping: stats.oversizedRequestsTotal),
+                ] as [String: Any]
+            }
+
+            // v1.22.0 (item 6, measurement): event-source size distribution.
+            let eventJournalSourceSizeDict: [String: Any] = [
+                "sample_count":
+                    Int64(clamping: eventSourceSizeTelemetry.sampleCount),
+                "bucket_upper_bounds":
+                    eventSourceSizeTelemetry.bucketUpperBounds,
+                "bucket_counts": eventSourceSizeTelemetry.bucketCounts
+                    .map { Int64(clamping: $0) },
+                "maximum_source_bytes":
+                    eventSourceSizeTelemetry.maximumSourceBytes,
+                "sampled_expansion_ratios":
+                    eventSourceSizeTelemetry.sampledExpansionRatios,
+            ]
+
+            // v1.22.0 (item 3, Phase 0): drain-trigger attribution.
+            var drainTriggersDict: [String: Any] = [:]
+            for (reason, stat) in drainDiagnostics {
+                drainTriggersDict[reason] = [
+                    "count": stat.count,
+                    "avg_depth": stat.avgDepth,
+                ] as [String: Any]
+            }
+
             var payload: [String: Any] = [
                 "written_at_unix": nowUnix,
                 "engine_pid": engineIdentity.pid,
@@ -4111,6 +4221,11 @@ enum DaemonTimers {
                 "event_search_projection": eventSearchProjection,
                 "rule_sync": ruleSync,
                 "event_journal_recovery": eventJournalRecovery,
+                "event_journal_index": eventJournalIndexDict,
+                "event_pipeline_live_memory_by_owner":
+                    eventPipelineLiveMemoryByOwnerDict,
+                "event_journal_source_size": eventJournalSourceSizeDict,
+                "drain_triggers": drainTriggersDict,
                 // v1.21.6 (PERF-04): the DELIVERED retention window per category,
                 // which is not the configured one. The companion list is the
                 // categories under the 15-minute raw-event forensic/correlation
@@ -4218,6 +4333,7 @@ enum DaemonTimers {
                 "event_insert_errors_total": insertErrorSnapshot.total,
                 "event_insert_error_rate_per_min": insertErrorSnapshot.ratePerMin,
                 "last_event_insert_error_kind": insertErrorSnapshot.lastKind ?? "",
+                "alert_insert_errors_total": alertInsertErrorSnapshot,
                 "eslogger_dropped_total": esloggerDroppedTotal,
                 // v1.21.4 (F3): effective vs on-disk single-event rule coverage.
                 "rules_loaded": rulesLoaded,
@@ -7302,12 +7418,26 @@ func recoverAlertStoreBeforeProducers(
             try measureDatabaseFootprintBytes(dbPath: dbPath)
         },
         maintenance: {
+            // v1.22.0 (item 2, boot <3s): mirror recoverEventStoreBeforeProducers,
+            // which gates its WAL checkpoint behind requiresStartupConvergence. An
+            // already-converged alerts family needs neither the WAL TRUNCATE (a
+            // real fsync) nor a family prune, so skip the checkpoint when the
+            // family sits under the maintenance/convergence boundary — this was
+            // unconditional on every boot before. Per-alert evidence enforcement
+            // inside enforceAlertsSizeCap stays unconditional (a single alert can
+            // exceed the per-alert row cap while the family is under its cap).
+            //
             // A GUI/read-only transaction can pin the WAL. Prove drainability
             // before the enforcer is allowed to prune any parent rows; a
             // failed preflight gets a short bounded no-delete grace in the
             // outer loop instead of repeating destructive maintenance.
-            guard await alertStore.walCheckpointTruncate() else {
-                return .transientlyPinned
+            let footprint = (try? measureDatabaseFootprintBytes(dbPath: dbPath))
+                ?? boundary.nominalCapBytes
+            if boundary.requiresMaintenance(footprintBytes: footprint)
+                || boundary.requiresStartupConvergence(footprintBytes: footprint) {
+                guard await alertStore.walCheckpointTruncate() else {
+                    return .transientlyPinned
+                }
             }
             let ran = await enforceAlertsSizeCap(
                 alertStore: alertStore,

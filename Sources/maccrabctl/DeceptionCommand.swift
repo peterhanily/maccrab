@@ -152,8 +152,9 @@ extension MacCrabCtl {
                       missing / tampered
             remove    Delete every MacCrab-deployed canary
 
-        After `deploy`, set MACCRAB_DECEPTION=1 in the daemon environment so the
-        event enricher tags file-event reads of canary paths for detection.
+        After `deploy`, add "deception_enabled": true to daemon_config.json (or
+        export MACCRAB_DECEPTION=1 for a dev `swift run maccrabd` session) and
+        restart the daemon so file event enrichment picks up the canaries.
 
         Honeyfiles deploy into the user's home directory:
             ~/.aws/credentials.bak, ~/.ssh/id_rsa.old, ~/.kube/config.backup,

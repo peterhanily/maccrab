@@ -195,7 +195,8 @@ let package = Package(
         .target(
             name: "MacCrabPluginKit",
             dependencies: ["CTierBBroker"],
-            path: "Sources/MacCrabPluginKit"
+            path: "Sources/MacCrabPluginKit",
+            exclude: ["CHANGELOG.md"]
         ),
         .target(
             name: "MacCrabForensics",

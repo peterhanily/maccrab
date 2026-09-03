@@ -53,6 +53,104 @@ public struct EventJournalIngressPreparation: Sendable, Equatable {
     }
 }
 
+/// v1.22.0 item6: bounded, lock-guarded telemetry for the real event-source
+/// size distribution flowing through `preflight`/`prepare` and the sanitized
+/// canonical-JSON expansion ratio. Read-only and never consulted by admission
+/// logic — its sole purpose is to give a burst-time measurement pass the
+/// P99/P99.9/max data needed to pick safe values for the constants flagged
+/// "MEASUREMENT PENDING" below (and in DeferredEnrichmentBuffer.swift), in
+/// place of guessing. O(1) per event: fixed power-of-two buckets, a running
+/// max, and a fixed-size ratio reservoir — no allocation on the hot path.
+public enum EventJournalSourceSizeTelemetry {
+    /// Bucket[i] counts sourceBytes in (bounds[i-1], bounds[i]]; the final
+    /// entry is an overflow catch-all for anything above the largest bound.
+    static let bucketUpperBounds: [Int] = {
+        var bounds: [Int] = []
+        var value = 1_024 // 1 KiB
+        let ceiling = 32 * 1_024 * 1_024 // 32 MiB
+        while value <= ceiling {
+            bounds.append(value)
+            value <<= 1
+        }
+        return bounds
+    }()
+
+    private static let ratioSampleCapacity = 256
+
+    public struct Snapshot: Sendable, Equatable {
+        public let sampleCount: UInt64
+        public let bucketUpperBounds: [Int]
+        /// `bucketCounts.count == bucketUpperBounds.count + 1`; the trailing
+        /// entry is the overflow bucket above the largest listed bound.
+        public let bucketCounts: [UInt64]
+        public let maximumSourceBytes: Int
+        /// A bounded, most-recent sample of canonicalJSON.count / sourceBytes
+        /// from the non-overflow `prepare()` path.
+        public let sampledExpansionRatios: [Double]
+    }
+
+    // Guarded by `lock` — preflight()/prepare() run concurrently across the
+    // priority and file lanes, matching the PowerGate/NoiseFilter pattern of
+    // a lock-guarded `nonisolated(unsafe)` static cache elsewhere in this
+    // module.
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var sampleCount: UInt64 = 0
+    nonisolated(unsafe) private static var bucketCounts =
+        Array(repeating: UInt64(0), count: bucketUpperBounds.count + 1)
+    nonisolated(unsafe) private static var maximumSourceBytes = 0
+    nonisolated(unsafe) private static var sampledExpansionRatios: [Double] = []
+    nonisolated(unsafe) private static var ratioSampleCursor = 0
+
+    static func recordSourceBytes(_ bytes: Int) {
+        guard bytes >= 0 else { return }
+        lock.lock()
+        if sampleCount < UInt64.max { sampleCount += 1 }
+        // `ExplicitEventSizer.retainedBytes` returns Int.max on arithmetic
+        // overflow (not merely "large"); excluding that sentinel from the max
+        // stat keeps one pathological event from permanently pinning it.
+        if bytes < Int.max {
+            maximumSourceBytes = max(maximumSourceBytes, bytes)
+        }
+        var index = bucketUpperBounds.count
+        for (candidate, bound) in bucketUpperBounds.enumerated()
+        where bytes <= bound {
+            index = candidate
+            break
+        }
+        bucketCounts[index] += 1
+        lock.unlock()
+    }
+
+    static func recordExpansionRatio(
+        canonicalJSONBytes: Int,
+        sourceBytes: Int
+    ) {
+        guard sourceBytes > 0 else { return }
+        let ratio = Double(canonicalJSONBytes) / Double(sourceBytes)
+        lock.lock()
+        if sampledExpansionRatios.count < ratioSampleCapacity {
+            sampledExpansionRatios.append(ratio)
+        } else {
+            sampledExpansionRatios[ratioSampleCursor] = ratio
+            ratioSampleCursor = (ratioSampleCursor + 1) % ratioSampleCapacity
+        }
+        lock.unlock()
+    }
+
+    public static func snapshot() -> Snapshot {
+        lock.lock()
+        let value = Snapshot(
+            sampleCount: sampleCount,
+            bucketUpperBounds: bucketUpperBounds,
+            bucketCounts: bucketCounts,
+            maximumSourceBytes: maximumSourceBytes,
+            sampledExpansionRatios: sampledExpansionRatios
+        )
+        lock.unlock()
+        return value
+    }
+}
+
 public enum EventJournalAdmissionValidatorError: Error, LocalizedError,
     Sendable, Equatable {
     case invalidTimestamp
@@ -116,9 +214,18 @@ public enum EventJournalAdmissionValidator {
         let overflowed = sizer.limitExceeded
             || sourceBytes > maximumAcceptedSourceRetainedBytes
         let sourceIdentity = sourceIdentityDigest(input)
+        EventJournalSourceSizeTelemetry.recordSourceBytes(sourceBytes)
         return EventJournalIngressPreflight(
             eventID: input.id,
             sourceRetainedByteEstimate: sourceBytes,
+            // v1.22.0 MEASUREMENT PENDING (item6): this stays the flat
+            // maximumPreparationWorkspaceBytes constant for every non-overflow
+            // event today. Fix design step 1 (v1.22.0 ingest-headroom brief)
+            // wants this scaled from `sourceBytes` instead — see
+            // EventJournalSourceSizeTelemetry.snapshot() for the P99/P99.9/max
+            // source-size and canonicalJSON-expansion-ratio data needed to
+            // pick a safe `preparationExpansionMarginBytes` before making that
+            // change. Do not guess the margin.
             preparationWorkspaceByteEstimate: maximumPreparationWorkspaceBytes,
             structurallyOverflowed: overflowed,
             sourceIdentitySHA256: sourceIdentity,
@@ -177,6 +284,10 @@ public enum EventJournalAdmissionValidator {
         )
         let sanitized = try EventPrivacySanitizer.sanitize(source)
         if sanitized.canonicalJSON.count <= maximumCanonicalRecordBytes {
+            EventJournalSourceSizeTelemetry.recordExpansionRatio(
+                canonicalJSONBytes: sanitized.canonicalJSON.count,
+                sourceBytes: preflight.sourceRetainedByteEstimate
+            )
             return EventJournalIngressPreparation(
                 event: sanitized.event,
                 canonicalJSON: sanitized.canonicalJSON,

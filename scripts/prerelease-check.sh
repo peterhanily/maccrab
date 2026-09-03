@@ -184,24 +184,25 @@ fi
 
 section "Stats sync"
 
-# The rules badge encodes all three classes: `rules-<single>%20%2B%20<seq>%20seq
-# %20%2B%20<graph>%20graph-<colour>`. Verify each against the canonical counts
-# (coverage_matrix.py is the single source of truth — same one check-counts uses).
+# The rules badge shows the combined total: `rules-<total>%20(stable%20tier...)`.
+# Verify it against the canonical total (coverage_matrix.py is the single
+# source of truth — same one check-counts uses).
 CANON=$(python3 scripts/coverage_matrix.py --counts Rules 2>/dev/null)
+C_TOTAL=$(echo "$CANON" | sed -E 's/.*total=([0-9]+).*/\1/')
+# The badge check below only needs the total, but the release.json breakdown
+# check further down still asserts each class, so derive all three here.
 C_SINGLE=$(echo "$CANON" | sed -E 's/.*single=([0-9]+).*/\1/')
 C_SEQ=$(echo "$CANON" | sed -E 's/.*sequence=([0-9]+).*/\1/')
 C_GRAPH=$(echo "$CANON" | sed -E 's/.*graph=([0-9]+).*/\1/')
-BADGE=$(grep -oE 'badge/rules-[0-9]+%20%2B%20[0-9]+%20seq%20%2B%20[0-9]+%20graph' README.md | head -1)
+BADGE=$(grep -oE 'badge/rules-[0-9]+' README.md | head -1)
 if [[ -z "$BADGE" ]]; then
     warn "README.md: couldn't parse rules badge"
 else
-    B_SINGLE=$(echo "$BADGE" | sed -E 's#badge/rules-([0-9]+)%20.*#\1#')
-    B_SEQ=$(echo "$BADGE" | sed -E 's#.*%2B%20([0-9]+)%20seq.*#\1#')
-    B_GRAPH=$(echo "$BADGE" | sed -E 's#.*%2B%20([0-9]+)%20graph#\1#')
-    if [[ "$B_SINGLE" == "$C_SINGLE" && "$B_SEQ" == "$C_SEQ" && "$B_GRAPH" == "$C_GRAPH" ]]; then
-        ok "README.md rules badge → $B_SINGLE + $B_SEQ seq + $B_GRAPH graph"
+    B_TOTAL=$(echo "$BADGE" | sed -E 's#badge/rules-([0-9]+)#\1#')
+    if [[ "$B_TOTAL" == "$C_TOTAL" ]]; then
+        ok "README.md rules badge → $B_TOTAL total"
     else
-        warn "README.md rules badge = ${B_SINGLE}+${B_SEQ}+${B_GRAPH}, canonical = ${C_SINGLE}+${C_SEQ}+${C_GRAPH}"
+        warn "README.md rules badge = ${B_TOTAL}, canonical total = ${C_TOTAL}"
     fi
 fi
 

@@ -109,7 +109,7 @@ scan_for() {   # scan_for <extended-regex> <label>
     if [ "$MODE" = "diff" ]; then
         grep -E "^\+\+\+ |$1" "$SUBJECT" | collect "$2" || true
     else
-        grep -E "$1" "$SUBJECT" | collect "$2" || true
+        grep -E -- "$1" "$SUBJECT" | collect "$2" || true
     fi
 }
 

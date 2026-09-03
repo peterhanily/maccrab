@@ -83,6 +83,20 @@ func printScanUsage() {
         [--scheduled]                   Only proceed if scheduled-trusted.
       export <scan-id>                  Export evidence bundle.
         [--output <path>.maccrabevidence]
+      findings <scan-id> [--limit N]    Show posture analyzer findings with
+                                        severity, explanation, and evidence.
+      explain <scan-id>                 Aggregate summary: artifact counts by
+                                        type, posture findings by severity,
+                                        top TCC risks.
+      timeline <scan-id> [--limit N]    Chronological artifact list
+                                        (privacy-ceiled; default 200).
+      artifacts <scan-id> [--type <ct>] [--limit N]
+                                        List committed artifacts for a scan
+                                        (tcc.grant rows show risk + reasons).
+      allow-ai --content <scan-id>      Grant AI agents access to non-metadata
+                                        artifacts in this scan (default off).
+      mark-trusted-scheduled <scan-id>  Opt this scan into auto-proceeding
+                                        scheduled runs (toast still emits).
       delete <scan-id> [--shred]        Remove a scan.
 
     Equivalent legacy command: maccrabctl case ...

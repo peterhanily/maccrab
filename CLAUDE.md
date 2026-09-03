@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (4403 tests in 683 suites)
+swift test                     # Unit tests (4415 tests in 684 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -62,18 +62,18 @@ Sources/MacCrabCore/
   Utilities/      LockedCounter, PowerGate (battery/thermal gating), shared primitives
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            438 single-event Sigma-compatible YAML rules (19 tactic directories)
+Rules/            438 single-event Sigma-compatible YAML rules (17 tactic directories)
   sequences/      41 multi-step sequence rules
   graph/          7 multi-entity TraceGraph rules (v1.12.0, +lethal-trifecta v1.21.4)
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (4403 tests in 683 suites)
+Tests/            Swift Testing unit tests (4415 tests in 684 suites)
 ```
 
 ## Detection Stack (5 tiers)
 
-1. **Rules** -- 438 single-event Sigma-compatible YAML rules compiled to JSON predicates, plus 41 sequence rules across 19 tactic dirs, plus 7 graph rules (Rules/graph/*.json) evaluated against materialized TraceGraph traces. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
+1. **Rules** -- 438 single-event Sigma-compatible YAML rules compiled to JSON predicates, plus 41 sequence rules across 17 tactic dirs, plus 7 graph rules (Rules/graph/*.json) evaluated against materialized TraceGraph traces. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
 2. **Anomaly** -- Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights).
 3. **Sequences** -- 41 temporal multi-step rules with process lineage correlation, 10K partial match cap.
 4. **Campaigns** -- Kill chain, alert storm, AI compromise, coordinated attack, lateral movement detection. Incremental tactic/user indexes for O(1) lookups.
@@ -104,7 +104,7 @@ Known passthrough fields (resolved via RuleEngine enrichments): `SignerType`, `P
 |---------|---------|--------------|
 | ESCollector | Endpoint Security framework events | Real-time |
 | UnifiedLogCollector | System log (18 subsystems incl. Bluetooth, Wi-Fi, AirDrop) | Real-time |
-| NetworkCollector | TCP/UDP connections | 5s |
+| NetworkCollector | TCP/UDP connections | 10s |
 | DNSCollector | DNS queries (BPF) | Real-time |
 | TCCMonitor | Privacy permission changes | Real-time |
 | FSEventsCollector | File system events (non-root fallback) | Real-time |
@@ -251,7 +251,7 @@ Key UX features:
 - Dark mode support (system-aware)
 - "What To Do" actionable guidance on alerts and campaigns
 - Campaign dismiss/restore workflow
-- 14 language localizations, but thinner than the tables suggest: en.lproj defines 699 keys, while 557 of the 1005 keys the UI actually references have no table row at all and fall through to the call-site `defaultValue:` in every locale. Real coverage of visible strings is ~43%, not the 94-98% per-locale figure prerelease-check.sh reports (that percentage is computed over the 699-row table, 251 rows of which are dead). Gated by `LocalizationCoverageTests.missingEnKeyBudget`; see TRANSLATION.md
+- 14 language localizations, but thinner than the tables suggest: en.lproj defines 799 keys, while 552 of the 1096 keys the UI actually references have no table row at all and fall through to the call-site `defaultValue:` in every locale. Real coverage of visible strings is ~50%, not the 94-98% per-locale figure prerelease-check.sh reports. Gated by `LocalizationCoverageTests.missingEnKeyBudget`; see TRANSLATION.md
 - WCAG AA contrast compliance (documented in code)
 
 ## Daemon Configuration

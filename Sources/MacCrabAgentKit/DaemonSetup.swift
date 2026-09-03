@@ -361,6 +361,14 @@ enum DaemonSetup {
         }
     }
 
+    /// Boot's own backpressure budget for the pre-producer journal expiry
+    /// pass, distinct from `DaemonTimers.journalExpiryConsecutiveBackpressureBudgetSeconds`
+    /// (30s). That value is tuned for a steady-state sweep with a five-minute
+    /// documented overhang; boot is targeting single-digit-second readiness,
+    /// so it gets its own, much tighter budget rather than reusing the
+    /// runtime one verbatim.
+    private static let bootJournalExpiryBackpressureBudgetSeconds: TimeInterval = 2
+
     static func initialize() async throws -> DaemonState {
         let startupBegin = DispatchTime.now()
         let startedAt = Date()
@@ -818,26 +826,56 @@ enum DaemonSetup {
             )
         }
         logger.notice("EventStore journal migration and integrity proved before generic cap recovery: source=\(journalRecovery.sourceEvents), migrated=\(journalRecovery.migratedEvents), expired=\(journalRecovery.rolledExpiredEvents), corrupt_preserved=\(journalRecovery.corruptPreservedEvents)")
+        Self.logBootStep(label: "after_journal_migration", startedAt: startedAt)
         do {
             var expired = 0
             var batches = 0
+            // Consecutive resets whenever a quantum makes progress; cumulative
+            // never does. Both are bounded by the boot-specific budget above
+            // rather than the runtime timer's 30s/120s values, which are
+            // tuned for a steady-state sweep's five-minute overhang, not a
+            // single-digit-second boot. Mirrors the steady-state handling in
+            // DaemonTimers.swift's event-journal-expiry timer.
+            var consecutiveWaitSeconds: TimeInterval = 0
+            var cumulativeWaitSeconds: TimeInterval = 0
             while true {
-                let batch = try await
-                    retryTransientEventStoreStartupOperation(
-                        onRetry: { _ in
-                            Self.writeBootPhase(
-                                supportDir: supportDir,
-                                phase: "starting",
-                                startedAt: startedAt
-                            )
-                        },
-                        operation: {
-                            try await eventStore.expireJournalBlocks(
-                                retainedThrough: Date(),
-                                maximumBlocks: 1_024
-                            )
-                        }
-                )
+                let batch: Int
+                do {
+                    batch = try await eventStore.expireJournalBlocks(
+                        retainedThrough: Date(),
+                        maximumBlocks: 1_024
+                    )
+                } catch let error as EventStoreError {
+                    guard JournalExpiryBackpressurePolicy.decide(
+                        error: error,
+                        consecutiveWaitSeconds: consecutiveWaitSeconds,
+                        cumulativeWaitSeconds: cumulativeWaitSeconds,
+                        maximumConsecutiveWaitSeconds:
+                            Self.bootJournalExpiryBackpressureBudgetSeconds,
+                        maximumCumulativeWaitSeconds:
+                            Self.bootJournalExpiryBackpressureBudgetSeconds
+                    ) == .conserveAndRetry else {
+                        throw error
+                    }
+                    logger.notice("Boot journal expiry: bounded record ownership is committed; conserving this pass for prompt retry.")
+                    Self.writeBootPhase(
+                        supportDir: supportDir,
+                        phase: "starting",
+                        startedAt: startedAt
+                    )
+                    try await Task.sleep(
+                        for: .milliseconds(
+                            DaemonTimers.journalExpiryBackpressureRetryMilliseconds
+                        )
+                    )
+                    let waited = Double(
+                        DaemonTimers.journalExpiryBackpressureRetryMilliseconds
+                    ) / 1000.0
+                    consecutiveWaitSeconds += waited
+                    cumulativeWaitSeconds += waited
+                    continue
+                }
+                consecutiveWaitSeconds = 0
                 expired += batch
                 if batch == 0 { break }
                 batches += 1
@@ -861,6 +899,7 @@ enum DaemonSetup {
                 reason: "event journal expiry/rollup failed before producers: \(error.localizedDescription)"
             )
         }
+        Self.logBootStep(label: "after_journal_expiry", startedAt: startedAt)
         let eventStartupRecovery = await recoverEventStoreBeforeProducers(
             eventStore: eventStore,
             dbPath: supportDir + "/events.db",
@@ -896,6 +935,7 @@ enum DaemonSetup {
             boundary: eventStartupBoundary
         )
         logger.notice("EventStore ordinary priority+file admission proved before collector construction after \(eventStartupRecovery.passes) bounded pass(es); footprint=\(eventStartupRecovery.lastFootprintBytes ?? -1), file_boundary=\(eventStartupBoundary.fileLaneAdmissionBoundaryBytes), target=\(eventStartupBoundary.targetBytes)")
+        Self.logBootStep(label: "after_eventstore_recovery", startedAt: startedAt)
 
         let alertStartupBoundary = AlertsSizeCapBoundary(
             nominalCapBytes: alertStoragePolicy.maxFootprintBytes,
@@ -926,6 +966,7 @@ enum DaemonSetup {
             )
         }
         logger.notice("AlertStore ordinary admission proved before collector construction after \(alertStartupRecovery.passes) bounded pass(es); footprint=\(alertStartupRecovery.lastFootprintBytes ?? -1), boundary=\(alertStartupBoundary.hardAdmissionBoundaryBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")
+        Self.logBootStep(label: "after_alertstore_recovery", startedAt: startedAt)
 
         Self.writeBootPhase(supportDir: supportDir, phase: "stores_ready", startedAt: startedAt)
         Self.logBootStep(label: "stores_ready", startedAt: startedAt)

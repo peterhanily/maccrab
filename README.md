@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-4403%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-4415%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
 [![Version](https://img.shields.io/badge/version-1.22.0-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
@@ -279,7 +279,8 @@ into your project; it points at the local `.build/debug/maccrab-mcp`.
 | `get_intent_posterior` | (v1.12) Bayesian posterior over attacker goals for a process tree — reads the daemon-recorded `maccrab.intent.bayesian-posterior` alerts from the last 30 days, matching the tree key (`<root executable>@<pid>`) by substring |
 | `list_response_actions` | List configured per-rule response actions and their current settings |
 | `set_response_action` | Adjust a rule's response action (audit-logged; requires the matching capability tier) |
-| `forensics_*` | Plugin tools registered dynamically from installed forensic plugins — e.g. `forensics_run_collector`, `forensics_run_analyzer`, `forensics_search_artifacts`, `forensics_timeline`, `forensics_explain_case` (underscore-named since v1.19.1; legacy `forensics.*` dotted names still accepted as aliases) |
+| `forensics_*` | Built-in case/plugin meta-tools, always present — e.g. `forensics_run_collector`, `forensics_run_analyzer`, `forensics_enrich`, `forensics_search_artifacts`, `forensics_timeline`, `forensics_explain_case` (underscore-named since v1.19.1; legacy `forensics.*` dotted names still accepted as aliases) |
+| `launchd_*` / `tcc_*` / `safari_*` / `mail_*` / `imessage_*` / `*_analyze_path` | Per-plugin tools registered dynamically from installed forensic plugins — the actual variable-count family; present only when the corresponding plugin is installed |
 
 **Slash commands** (`.claude/commands/`): `/security-check`, `/threat-hunt <query>`, `/alerts`.
 
@@ -293,7 +294,7 @@ into your project; it points at the local `.build/debug/maccrab-mcp`.
 brew uninstall --cask maccrab
 ```
 
-The cask's uninstall block deactivates the System Extension via `systemextensionsctl` and removes MacCrab.app, the CLI binaries, and any pre-1.3 LaunchDaemon artefacts.
+The cask's uninstall block removes MacCrab.app, the CLI binaries, and any pre-1.3 LaunchDaemon artefacts, but it does not deactivate the System Extension — it stays registered. Before uninstalling, open MacCrab.app and click "Disable Protection" to fully deactivate it; otherwise deactivate it manually afterward with `systemextensionsctl`.
 
 ### Manual / source build
 
@@ -644,10 +645,14 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-The current release is **v1.21.5**. See [CHANGELOG.md](CHANGELOG.md) for the full
+The current release is **v1.22.0**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.22.0** — fixed a crash on the enrichment-timeout path; event storage now
+  reclaims already-freed space and expired events are reliably reclaimed;
+  the notification channel now starts without a window open; network-blocking
+  reports whether it is actually enforcing; honest collector-health reporting.
 - **v1.21.5** — sequence and graph rules now honor the rule profile (six must-fire
   kill-chain sequences promoted to the stable tier); a verified first-run setup
   checklist with a workspace-density picker; Package Freshness and the intent MCP

@@ -1,10 +1,10 @@
 # Contributing False-Positive Data to MacCrab
 
-MacCrab relies on real-world false-positive baselines to be credible as a security tool. Today, we publish rule coverage (486 rules — ~87 enabled by default under the stable profile, the rest experimental), but FP rates remain unmeasured at scale — only a reference-machine number exists. This document explains why that matters, what data we collect, how to participate, and how results are published.
+MacCrab relies on real-world false-positive baselines to be credible as a security tool. Today, we publish rule coverage (486 rules — 109 enabled by default under the stable profile, the rest experimental), but FP rates remain unmeasured at scale — only a reference-machine number exists. This document explains why that matters, what data we collect, how to participate, and how results are published.
 
 ## 1. Why We Need FP Data
 
-A detection rule is only useful if its false-positive rate is known and acceptable. A rule that fires thousands of times per day on clean machines is noise, regardless of its true-positive accuracy. MacCrab's detection library includes **486 rules** (~87 enabled by default under the stable profile, the rest experimental), but production FP rates are blank:
+A detection rule is only useful if its false-positive rate is known and acceptable. A rule that fires thousands of times per day on clean machines is noise, regardless of its true-positive accuracy. MacCrab's detection library includes **486 rules** (109 enabled by default under the stable profile, the rest experimental), but production FP rates are blank:
 
 - **Reference machine FP rate:** We measure this in CI on a clean macOS VM using `scripts/false-positive-test.sh`, validating against a curated list of 100+ Apple system processes. This gives us a *lower bound* under artificial conditions.
 - **Real-world FP rate:** Unknown. A developer machine with build tools (esbuild, node, Chrome, Xcode) produces different alert volumes than a non-developer endpoint. A machine running AI tools produces different patterns still. We need data from diverse real machines to publish per-rule FP baselines.

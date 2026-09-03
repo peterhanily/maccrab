@@ -151,6 +151,14 @@ MIN_BURST_COMBINED_OFFERED_PER_SECOND = 1_274.0
 # `test_fixed_workload_iterations_match_the_script` pins the two together.
 FIXED_WORKLOAD_ITERATIONS = 6_000
 MIN_TRACE_STORE_INGEST_DELTA = 1
+# v1.22.0: the dashboard-starves-expiry recurrence signature is a journal
+# index that keeps paying for a full rebuild instead of an append-only
+# refresh while the journal is simultaneously expiring and appending. A
+# handful of legitimate full rebuilds remain (cold start, index overflow,
+# "everything previously indexed expired" -- see EventStore.swift's
+# compactJournalIndex/rebuildJournalIndex fallback paths), so the allowance
+# is small, not zero.
+EVENT_JOURNAL_INDEX_FULL_REBUILD_ALLOWANCE = 2
 CONTAINMENT_FIXTURE_PRODUCTS = (
     "maccrab-tierb-corpus-probe",
     "maccrab-tierb-corpus-probe-swift",
@@ -1638,6 +1646,8 @@ def validate_runtime_report(
     sample_gui_values: List[float] = []
     sample_sequence_evictions: List[int] = []
     sample_journal_shed: List[int] = []
+    sample_journal_index_full_rebuilds: List[int | None] = []
+    sample_journal_index_append_refreshes: List[int | None] = []
     rss_by_offset: Dict[int, int] = {}
     for index, raw_sample in enumerate(samples):
         path = f"runtime.samples[{index}]"
@@ -1747,6 +1757,25 @@ def validate_runtime_report(
             ).get("explicitly_shed"),
             f"{path}.conservation.sequence-journal.explicitly_shed",
         ))
+        sample_journal_index = object_value(
+            sample.get("event_journal_index"), f"{path}.event_journal_index"
+        )
+        if sample_journal_index.get("present"):
+            sample_journal_index_full_rebuilds.append(
+                int_value(
+                    sample_journal_index.get("full_rebuilds_total"),
+                    f"{path}.event_journal_index.full_rebuilds_total",
+                )
+            )
+            sample_journal_index_append_refreshes.append(
+                int_value(
+                    sample_journal_index.get("append_refreshes_total"),
+                    f"{path}.event_journal_index.append_refreshes_total",
+                )
+            )
+        else:
+            sample_journal_index_full_rebuilds.append(None)
+            sample_journal_index_append_refreshes.append(None)
         sample_losses = object_value(sample.get("losses"), f"{path}.losses")
         for loss_name in (
             "priority_lane_loss",
@@ -1901,6 +1930,38 @@ def validate_runtime_report(
         correlation.get("sequence_state_continuity_maintained_all_samples"),
         "runtime.measurements.correlation_continuity.sequence_state_continuity_maintained_all_samples",
     )
+    # v1.22.0: recurrence gate for the dashboard-starves-expiry bug. A healthy
+    # journal index keeps paying append-only refreshes as the journal expires
+    # and appends; it does NOT keep paying full rebuilds. `present` is False
+    # on any candidate whose heartbeat predates this wiring -- that is "not
+    # sampled", not a pass, so it is surfaced with a NOTE rather than silently
+    # skipped.
+    if all(value is not None for value in sample_journal_index_full_rebuilds):
+        journal_index_rebuild_delta = (
+            sample_journal_index_full_rebuilds[-1]
+            - sample_journal_index_full_rebuilds[0]
+        )
+        journal_index_append_delta = (
+            sample_journal_index_append_refreshes[-1]
+            - sample_journal_index_append_refreshes[0]
+        )
+        if journal_index_rebuild_delta < 0 or journal_index_append_delta < 0:
+            fail("event journal index refresh/rebuild counters moved backwards")
+        if journal_index_rebuild_delta > EVENT_JOURNAL_INDEX_FULL_REBUILD_ALLOWANCE \
+                and journal_index_append_delta > 0:
+            fail(
+                "event journal index full_rebuilds_total increased by "
+                f"{journal_index_rebuild_delta} while append_refreshes_total "
+                f"also increased by {journal_index_append_delta} -- this is "
+                "the dashboard-starves-expiry recurrence signature (v1.22.0)"
+            )
+    else:
+        print(
+            "NOTE: heartbeat.event_journal_index is not present on every "
+            "runtime sample; skipping the full-rebuild-vs-append-refresh "
+            "recurrence gate (instrumentation not yet wired on this "
+            "candidate). This is a skip, not a pass."
+        )
     probe_evidence = object_value(
         report.get("recorder_probe_evidence"), "runtime.recorder_probe_evidence"
     )
@@ -3029,6 +3090,36 @@ def event_journal_recovery_sample(
     return result
 
 
+def event_journal_index_sample(
+    heartbeat: Mapping[str, Any], path: str = "heartbeat"
+) -> Dict[str, Any]:
+    """Normalize the journal-index refresh/rebuild counters (v1.22.0).
+
+    Unlike every other heartbeat section in this file, absence here is not a
+    schema violation: `event_journal_index` is new wiring that may not yet be
+    present on a candidate's heartbeat. Callers must treat `present: False`
+    as "not sampled" and skip with a NOTE -- never as a passing zero, which
+    would silently hide the dashboard-starves-expiry recurrence gate.
+    """
+    index = heartbeat.get("event_journal_index")
+    if not isinstance(index, dict):
+        return {
+            "present": False,
+            "full_rebuilds_total": None,
+            "append_refreshes_total": None,
+        }
+    index_path = f"{path}.event_journal_index"
+    return {
+        "present": True,
+        "full_rebuilds_total": heartbeat_counter(
+            index, "full_rebuilds_total", index_path
+        ),
+        "append_refreshes_total": heartbeat_counter(
+            index, "append_refreshes_total", index_path
+        ),
+    }
+
+
 def recorder_boundary(
     *, offered: int, completed: int, queued: int, in_flight: int,
     explicitly_shed: int, path: str,
@@ -3290,6 +3381,15 @@ def alert_storage_admission_sample(
         ),
         "capture_shed_total": heartbeat_counter(
             budget, "capture_shed_total", f"{path}.alert_evidence_budget"
+        ),
+        # v1.22.0: alert_insert_errors_total is a top-level heartbeat key
+        # (sibling of event_insert_errors_total), not nested under
+        # alert_evidence_budget -- absent on any heartbeat that predates the
+        # DaemonTimers wiring, which is treated as zero rather than failed.
+        "insert_errors_total": (
+            heartbeat_counter(heartbeat, "alert_insert_errors_total", path)
+            if "alert_insert_errors_total" in heartbeat
+            else 0
         ),
         "capture_pending": heartbeat_counter(
             budget, "capture_pending", f"{path}.alert_evidence_budget"
@@ -3766,6 +3866,7 @@ def normalized_runtime_sample(
     event_search_projection = event_search_projection_sample(heartbeat)
     rule_sync = rule_sync_sample(heartbeat)
     event_journal_recovery = event_journal_recovery_sample(heartbeat)
+    event_journal_index = event_journal_index_sample(heartbeat)
 
     upstream_loss = sum(
         heartbeat_counter_map(
@@ -3807,6 +3908,7 @@ def normalized_runtime_sample(
         "event_search_projection": event_search_projection,
         "rule_sync": rule_sync,
         "event_journal_recovery": event_journal_recovery,
+        "event_journal_index": event_journal_index,
         "losses": {
             "priority_lane_loss": boundaries["priority-ingress"]["explicitly_shed"],
             "kernel_loss": heartbeat_counter(heartbeat, "es_kernel_dropped_total", "heartbeat"),
@@ -4164,6 +4266,12 @@ def runtime_readiness_failures(
         value = int_value(alerts.get(key), f"{path}.alert_storage_admission.{key}")
         if value:
             fatal.append(f"cumulative alert evidence {key}={value}")
+    alert_insert_errors = int_value(
+        alerts.get("insert_errors_total"),
+        f"{path}.alert_storage_admission.insert_errors_total",
+    )
+    if alert_insert_errors:
+        fatal.append(f"cumulative alert insert errors={alert_insert_errors}")
     for key in ("capture_pending", "capture_in_flight"):
         value = int_value(alerts.get(key), f"{path}.alert_storage_admission.{key}")
         if value:

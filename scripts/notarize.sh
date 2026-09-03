@@ -129,6 +129,7 @@ NOTARIZE_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-}"
 NOTARIZE_AUTH=()
 NOTARIZE_AUTH_OK=0
 NOTARIZE_DISPLAY=""
+NOTARIZED="No"
 if [ -n "$NOTARIZE_KEYCHAIN_PROFILE" ]; then
     NOTARIZE_AUTH=(--keychain-profile "$NOTARIZE_KEYCHAIN_PROFILE")
     NOTARIZE_AUTH_OK=1
@@ -179,6 +180,7 @@ if [ "$NOTARIZE_AUTH_OK" = "1" ]; then
                 /bin/chmod 0600 "$NOTARY_ID_TMP"
                 /bin/mv -f "$NOTARY_ID_TMP" "$NOTARY_ID_PATH"
                 ok "Notarization identity recorded: $NOTARY_ID_PATH"
+                NOTARIZED="Yes"
             else
                 fail "Stapling failed — exact-candidate qualification requires an offline-verifiable ticket"
             fi
@@ -251,9 +253,5 @@ if [ -n "$DEVELOPER_ID" ]; then
 else
     echo "  Signing:      Ad-hoc (local development only)"
 fi
-if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$NOTARIZE_PASSWORD" ] && [ -n "$DEVELOPER_ID" ]; then
-    echo "  Notarized:    Yes"
-else
-    echo "  Notarized:    No"
-fi
+echo "  Notarized:    $NOTARIZED"
 echo ""

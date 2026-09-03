@@ -20,12 +20,14 @@
 import Foundation
 
 private struct AnsiColor {
-    static let red = "\u{1B}[31m"
-    static let green = "\u{1B}[32m"
-    static let yellow = "\u{1B}[33m"
-    static let cyan = "\u{1B}[36m"
-    static let bold = "\u{1B}[1m"
-    static let reset = "\u{1B}[0m"
+    // Gated on the same `isTerminal` (isatty) check the rest of the CLI uses
+    // (Helpers.swift), so `repair` output is plain when piped/redirected.
+    static var red: String { isTerminal ? "\u{1B}[31m" : "" }
+    static var green: String { isTerminal ? "\u{1B}[32m" : "" }
+    static var yellow: String { isTerminal ? "\u{1B}[33m" : "" }
+    static var cyan: String { isTerminal ? "\u{1B}[36m" : "" }
+    static var bold: String { isTerminal ? "\u{1B}[1m" : "" }
+    static var reset: String { isTerminal ? "\u{1B}[0m" : "" }
 }
 
 private func sectionHeader(_ title: String) {

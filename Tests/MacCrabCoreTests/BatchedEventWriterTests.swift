@@ -1182,7 +1182,7 @@ struct BatchedEventWriterTests {
         ]
         #expect(losslessSource.contains("while !Task.isCancelled"))
         #expect(losslessSource.contains("ownershipBudget.adopt("))
-        #expect(losslessSource.contains("hasPendingStorageWork { startDrain() }"))
+        #expect(losslessSource.contains("hasPendingStorageWork { startDrain(reason: .memoryPressureRetry) }"))
         #expect(!losslessSource.contains(
             "evictNewestQueuedFileForPriorityAdmission()"
         ))
@@ -1805,6 +1805,84 @@ struct BatchedEventWriterTests {
         #expect(writer.persistedCount == 0)
         #expect(writer.retriedCount == 0)
         #expect(writer.droppedCount == events.count)
+    }
+
+    @Test("diagnosticDrainSnapshot attributes each drain to its correct DrainTrigger")
+    func diagnosticDrainSnapshotAttributesTriggersCorrectly() async throws {
+        // Phase 1: depthThreshold -- a tiny flushThreshold forces
+        // admitPreparedHandle to start a drain purely from crossing the
+        // buffer-depth threshold.
+        do {
+            let (store, dir) = try tempStore()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let writer = BatchedEventWriter(
+                store: store,
+                flushThreshold: 2,
+                hardCap: 100,
+                liveMemoryBudget: isolatedMemoryBudget()
+            )
+            for i in 0..<6 { await writer.enqueue(makeEvent(i)) }
+            let n = try await waitForCount(store, target: 6)
+            #expect(n == 6)
+            await writer.shutdown()
+
+            let snapshot = await writer.diagnosticDrainSnapshot()
+            #expect((snapshot["depthThreshold"]?.count ?? 0) > 0,
+                    "crossing flushThreshold must attribute its drain to depthThreshold")
+            #expect((snapshot["memoryPressureRetry"]?.count ?? 0) == 0,
+                    "hardCap headroom was never constrained in this phase")
+        }
+
+        // Phase 2: memoryPressureRetry -- an unreachable flushThreshold
+        // isolates the hardCap-constrained ownership retry loop as the only
+        // possible drain source.
+        do {
+            let (store, dir) = try tempStore()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let writer = BatchedEventWriter(
+                store: store,
+                flushThreshold: 100_000,
+                hardCap: 5,
+                liveMemoryBudget: isolatedMemoryBudget()
+            )
+            for i in 0..<20 {
+                #expect(await writer.enqueue(makeEvent(i)) != nil)
+            }
+            await writer.shutdown()
+            #expect(try await store.count() == 20)
+
+            let snapshot = await writer.diagnosticDrainSnapshot()
+            #expect((snapshot["memoryPressureRetry"]?.count ?? 0) > 0,
+                    "ownership constrained by hardCap must attribute its drain to memoryPressureRetry")
+            #expect((snapshot["depthThreshold"]?.count ?? 0) == 0,
+                    "flushThreshold was set unreachably high; no depthThreshold drain should fire")
+        }
+
+        // Phase 3: periodicTimer -- an unreachable flushThreshold and no
+        // hardCap pressure leaves the timer as the only thing that can
+        // start a drain.
+        do {
+            let (store, dir) = try tempStore()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let writer = BatchedEventWriter(
+                store: store,
+                flushThreshold: 100_000,
+                hardCap: 100_000,
+                liveMemoryBudget: isolatedMemoryBudget()
+            )
+            await writer.startFlushLoop(intervalMs: 30)
+            for i in 0..<3 { await writer.enqueue(makeEvent(i)) }
+            let n = try await waitForCount(store, target: 3)
+            #expect(n == 3,
+                    "the periodic timer alone must flush the below-threshold buffer")
+
+            let snapshot = await writer.diagnosticDrainSnapshot()
+            #expect((snapshot["periodicTimer"]?.count ?? 0) > 0,
+                    "the periodic timer alone must attribute its drain to periodicTimer")
+            #expect((snapshot["depthThreshold"]?.count ?? 0) == 0)
+            #expect((snapshot["memoryPressureRetry"]?.count ?? 0) == 0)
+            await writer.shutdown()
+        }
     }
 }
 

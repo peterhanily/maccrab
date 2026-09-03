@@ -142,5 +142,7 @@ replaces itself via `OSSystemExtensionRequest(.replace)` — no user
 approval required for a same-team-ID upgrade. Your data, config, and
 suppressions carry forward untouched.
 
-If Sparkle auto-update ships in v1.4 (planned), even the `brew upgrade`
-step goes away for DMG-installed users.
+DMG-installed users get the same result without Homebrew: *Check for
+Updates…* in the status-bar menu (Sparkle) fetches the signed appcast,
+downloads and installs the update, and MacCrab.app relaunches into the
+new version — no manual `brew upgrade` step needed.

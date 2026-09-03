@@ -1,4 +1,4 @@
-.PHONY: build test test-corpus compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign pkg dmg breakdown check-counts benchmark-fp
+.PHONY: build test test-corpus compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign dmg breakdown check-counts benchmark-fp
 
 PREFIX ?= /usr/local
 SUPPORT_DIR = /Library/Application\ Support/MacCrab
@@ -189,9 +189,8 @@ install: release
 uninstall:
 	sudo ./scripts/uninstall.sh
 
-# Create .pkg installer (double-click install for end users)
-pkg: release
-	./scripts/build-pkg.sh
+# NOTE: the 'pkg' target was removed — scripts/build-pkg.sh no longer
+# exists. Use 'make dmg' for a release artifact.
 
 # Create .dmg release (for GitHub releases)
 dmg: release
