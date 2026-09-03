@@ -215,18 +215,22 @@ public enum EventJournalAdmissionValidator {
             || sourceBytes > maximumAcceptedSourceRetainedBytes
         let sourceIdentity = sourceIdentityDigest(input)
         EventJournalSourceSizeTelemetry.recordSourceBytes(sourceBytes)
+        // v1.22.0 (item 6): right-size the `.journalPrepared` acquisition from
+        // the real measured source size instead of always requesting the
+        // pessimistic `maximumPreparationWorkspaceBytes` (~36 MiB). Installed-host
+        // measurement over 351,374 events found max sourceBytes 950,068 and a
+        // sanitized-JSON expansion ratio of ~0.20–0.28 (the JSON is SMALLER than
+        // the source), so `2 × sourceBytes + 64 KiB` is always ≥ the real adopt()
+        // charge (retainedByteEstimate + canonicalJSON + 4096), keeping the later
+        // `resize()` a shrink — never a grow that could exceed the budget. The
+        // overflow path keeps the full pessimistic reserve.
+        let preparationWorkspaceEstimate = overflowed
+            ? maximumPreparationWorkspaceBytes
+            : min(maximumPreparationWorkspaceBytes, sourceBytes * 2 + 65_536)
         return EventJournalIngressPreflight(
             eventID: input.id,
             sourceRetainedByteEstimate: sourceBytes,
-            // v1.22.0 MEASUREMENT PENDING (item6): this stays the flat
-            // maximumPreparationWorkspaceBytes constant for every non-overflow
-            // event today. Fix design step 1 (v1.22.0 ingest-headroom brief)
-            // wants this scaled from `sourceBytes` instead — see
-            // EventJournalSourceSizeTelemetry.snapshot() for the P99/P99.9/max
-            // source-size and canonicalJSON-expansion-ratio data needed to
-            // pick a safe `preparationExpansionMarginBytes` before making that
-            // change. Do not guess the margin.
-            preparationWorkspaceByteEstimate: maximumPreparationWorkspaceBytes,
+            preparationWorkspaceByteEstimate: preparationWorkspaceEstimate,
             structurallyOverflowed: overflowed,
             sourceIdentitySHA256: sourceIdentity,
             structuralSourceSHA256: overflowed

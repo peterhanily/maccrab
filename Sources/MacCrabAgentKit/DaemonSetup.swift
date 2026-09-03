@@ -369,6 +369,18 @@ enum DaemonSetup {
     /// runtime one verbatim.
     private static let bootJournalExpiryBackpressureBudgetSeconds: TimeInterval = 2
 
+    /// v1.22.0 (item 2, boot <3s): a wall-clock ceiling on the PRODUCTIVE
+    /// pre-producer journal-expiry drain. Installed-host BOOT_TIMING found this
+    /// pass draining a downtime-inflated backlog for 93s — the single dominant
+    /// boot cost. Expiry of aged-past-retention blocks is housekeeping the
+    /// runtime 30s sweep already performs continuously after producers start; it
+    /// is not a pre-producer durability requirement (unlike the journal
+    /// migration above it, which stays synchronous). So boot drains oldest-first
+    /// only until this budget, then hands the remainder to the runtime sweep,
+    /// keeping steady-state readiness fast regardless of backlog. The migration
+    /// is a separate one-time upgrade cost this ceiling does not bound.
+    private static let bootJournalExpiryWorkBudgetSeconds: TimeInterval = 2.5
+
     static func initialize() async throws -> DaemonState {
         let startupBegin = DispatchTime.now()
         let startedAt = Date()
@@ -838,6 +850,8 @@ enum DaemonSetup {
             // DaemonTimers.swift's event-journal-expiry timer.
             var consecutiveWaitSeconds: TimeInterval = 0
             var cumulativeWaitSeconds: TimeInterval = 0
+            let expiryStart = Date()
+            var deferredBacklog = false
             while true {
                 let batch: Int
                 do {
@@ -886,10 +900,23 @@ enum DaemonSetup {
                         startedAt: startedAt
                     )
                 }
+                // v1.22.0 (item 2): cap the PRODUCTIVE drain by wall-clock and
+                // hand any remaining aged backlog to the runtime 30s expiry
+                // sweep, so a downtime-inflated backlog cannot hold readiness
+                // for a minute-plus. Oldest-first ordering means the most-aged
+                // (most prune-eligible) blocks are drained first within budget.
+                if Date().timeIntervalSince(expiryStart)
+                    >= Self.bootJournalExpiryWorkBudgetSeconds {
+                    deferredBacklog = true
+                    break
+                }
                 await Task.yield()
             }
             if expired > 0 {
                 logger.notice("EventStore expired and aggregate-rolled \(expired) authenticated journal events before generic cap recovery")
+            }
+            if deferredBacklog {
+                logger.notice("EventStore deferred remaining aged journal backlog to the runtime expiry sweep after the \(Int(Self.bootJournalExpiryWorkBudgetSeconds))s boot budget; producers start now and the sweep drains the rest.")
             }
         } catch {
             try DaemonBootstrap.failPreIngestionStorage(

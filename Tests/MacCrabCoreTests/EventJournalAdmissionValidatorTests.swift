@@ -336,4 +336,35 @@ struct EventJournalAdmissionValidatorTests {
         let largestMeasured = try #require(measuredSourceBytes.max())
         #expect(after.maximumSourceBytes >= largestMeasured)
     }
+
+    @Test("item 6: a non-overflow event's prepared-workspace request is right-sized from its source bytes, not the flat pessimistic reserve")
+    func preparationWorkspaceIsRightSizedForNonOverflow() throws {
+        let preflight = try EventJournalAdmissionValidator.preflight(richEvent())
+        #expect(!preflight.structurallyOverflowed)
+        let source = preflight.sourceRetainedByteEstimate
+        // Right-sized: exactly the 2× source + 64 KiB margin, and dramatically
+        // smaller than the old flat ~36 MiB reserve — this is what lets many
+        // real (KB-scale) admissions coexist under the 84 MiB .journalPrepared
+        // ceiling instead of ~3 phantom 36 MiB ones.
+        #expect(preflight.preparationWorkspaceByteEstimate == source * 2 + 65_536)
+        #expect(preflight.preparationWorkspaceByteEstimate
+            < EventJournalAdmissionValidator.maximumPreparationWorkspaceBytes)
+        // Never under-charges the source itself, so the later adopt() resize is
+        // always a shrink (the request >= retainedByteEstimate + canonicalJSON +
+        // 4096 whenever the sanitized JSON is not larger than the source).
+        #expect(preflight.preparationWorkspaceByteEstimate >= source)
+    }
+
+    @Test("item 6: a structurally overflowed event keeps the full pessimistic prepared-workspace reserve")
+    func preparationWorkspaceKeepsFullReserveForOverflow() throws {
+        // A payload past the 24 MiB accepted-source envelope forces the
+        // overflow path, which must NOT be right-sized down.
+        let huge = String(repeating: "A", count: 25 * 1_024 * 1_024)
+        let preflight = try EventJournalAdmissionValidator.preflight(
+            richEvent(enrichments: ["payload": huge])
+        )
+        #expect(preflight.structurallyOverflowed)
+        #expect(preflight.preparationWorkspaceByteEstimate
+            == EventJournalAdmissionValidator.maximumPreparationWorkspaceBytes)
+    }
 }

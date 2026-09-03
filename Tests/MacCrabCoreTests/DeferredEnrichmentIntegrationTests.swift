@@ -781,4 +781,25 @@ struct DeferredEnrichmentIntegrationTests {
         #expect(lifecycle.contains("DeferredEnrichmentDispatcher.shutdown("))
         #expect(lifecycle.contains("heavyEnrichmentPlane: heavyEnrichment.clean"))
     }
+
+    @Test("item 6: the per-event .eventSource charge lets both EventLoop lanes reserve concurrently without serializing, and can never oversize")
+    func reservationChargeFitsBothLanesUnderTheSourceCeiling() {
+        let charge = DeferredEnrichmentBuffer.productionReservationRawEventByteCharge
+        let sourceCeiling = EventPipelineLiveMemoryBudget.productionMaximumBytes
+            - EventPipelineLiveMemoryBudget.productionForwardProgressReserveBytes
+        // The regression this guards: at the old 24 MiB charge, two concurrent
+        // reservations (48 MiB) exceeded the .eventSource class ceiling, so the
+        // second lane FIFO-waited behind the first — the measured 4,973 waits
+        // and 786 storage-write sheds. Both lanes must fit with headroom.
+        #expect(2 * charge <= sourceCeiling,
+                "two lanes' reservations must coexist under the .eventSource ceiling")
+        // Safety (the ingest-headroom brief's CRITICAL note): a single charge at
+        // or above the individual-request ceiling would make EVERY acquisition an
+        // oversized request, and reserveEventSlot()==nil permanently breaks a
+        // lane's consumer loop — far worse than one dropped event.
+        #expect(charge < sourceCeiling)
+        // Covers the installed-host observed maximum source size (~928 KiB) with
+        // wide margin, so real non-overflow events never trip resizeReservation.
+        #expect(charge >= 1_024 * 1_024)
+    }
 }

@@ -171,21 +171,23 @@ actor DeferredEnrichmentBuffer {
     static let productionCapacity = 512
     static let productionRawEventByteCapacity = EventPipelineLiveMemoryBudget
         .productionMaximumBytes
-    /// Claiming the validator's complete accepted source envelope before
-    /// enrichment guarantees a later accepted source can transfer without an
-    /// unaccounted suspended Event.
-    // v1.22.0 MEASUREMENT PENDING (item6): this stays the flat 24 MiB
-    // `maximumAcceptedSourceRetainedBytes` for every reservation today. Fix
-    // design step 2 (v1.22.0 ingest-headroom brief) wants a smaller constant
-    // sized from the real P99/P99.9/max pre-enrichment sourceBytes seen in
-    // production traffic (see EventJournalSourceSizeTelemetry.snapshot() in
-    // EventJournalAdmissionValidator.swift) — chosen with a wide safety
-    // margin over that tail, since `resizeReservation()` below rejects any
-    // final size above this charge. Do not lower this without that
-    // measurement: too small silently turns legitimate large (but
-    // non-overflow) events into a new drop path.
-    static let productionReservationRawEventByteCharge =
-        EventJournalAdmissionValidator.maximumAcceptedSourceRetainedBytes
+    /// Pre-enrichment memory reserved per in-flight event so a later accepted
+    /// source can transfer without an unaccounted suspended Event.
+    ///
+    /// v1.22.0 (item 6): right-sized from installed-host measurement. Over
+    /// 351,374 events the maximum post-enrichment sourceBytes was 950,068 (~928
+    /// KiB) with nothing above 1 MiB, while the old flat 24 MiB charge made two
+    /// concurrent `.eventSource` reservations (48 MiB) exceed the 43.125 MiB
+    /// class ceiling — so the second EventLoop lane always FIFO-waited behind the
+    /// first (measured: 4,973 `.eventSource` waits and 786 storage-write sheds in
+    /// one burst, with the 96 MiB envelope pinned at its high-watermark). 4 MiB
+    /// covers the observed max with ~4× margin, keeps both lanes plus the
+    /// `.deferredPatch`/`.heavyResult` owners well under the ceiling (2 × 4 = 8
+    /// MiB), and frees ~40 MiB of the global envelope those owners were starved
+    /// of. `resizeReservation()` rejects any FINAL size above this charge; a
+    /// non-overflow event between 4 and 24 MiB (never observed) would drop a
+    /// single event — a bounded per-event rejection, not a lane break.
+    static let productionReservationRawEventByteCharge = 4 * 1_024 * 1_024
 
     private struct Retained {
         var event: Event
