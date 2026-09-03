@@ -7027,6 +7027,31 @@ func fullVacuumHeadroom(
 /// result means the exact family and both ownership budgets already needed no
 /// work (or the authoritative family could not be measured safely).
 @discardableResult
+/// Shared alerts-family overhead that belongs to NEITHER component budget:
+/// SQLite indexes, the WAL, and freelist pages.
+///
+/// The family cap is exactly `alertsMaxSizeMB + evidenceMaxSizeMB`, so with
+/// both components at their own caps the family necessarily exceeds the
+/// boundary that gates writes, both component enforcers correctly do nothing,
+/// and only the family pass can clear it. Measured on the reference host at the
+/// moment alert-evidence writes paused: `alert_evidence` 99.9 MB (at its cap),
+/// `alerts` 78.3 MB (under its cap), indexes ~4.6 MB and WAL ~4.3 MB on top,
+/// family 1,592 bytes past the admission boundary.
+///
+/// Trim each component by a share of this instead of enlarging the family, so
+/// the operator still gets exactly the total they configured and the two
+/// components can coexist inside it. Proportional with a ceiling so a small
+/// configured cap is not trimmed to nothing.
+func alertsFamilyComponentTrimBytes(componentCapBytes: Int64) -> Int64 {
+    // 12 MiB, not 8. At the shipped 100 MiB component caps an 8 MiB trim leaves
+    // 2 x 92 + 9 = 193 MiB against a 192 MiB admission boundary -- still over,
+    // by a megabyte, and that is before freelist pages are counted at all.
+    // 12 MiB gives 2 x 88 = 176 MiB, so the measured ~9 MiB of indexes and WAL
+    // fit with room for the freelist to breathe.
+    let ceiling = 12 * SQLitePersistentStorePolicy.bytesPerMiB
+    return max(0, min(ceiling, componentCapBytes / 8))
+}
+
 func enforceAlertsSizeCap(
     alertStore: AlertStore,
     dbPath: String,
@@ -7038,13 +7063,28 @@ func enforceAlertsSizeCap(
     var changed = false
     var maintenanceRan = false
 
+    // Leave room for the shared family overhead so both components can sit at
+    // their targets without pushing the family past the write boundary.
+    let evidenceTargetBytes = max(
+        SQLitePersistentStorePolicy.bytesPerMiB,
+        evidenceCapBytes - alertsFamilyComponentTrimBytes(
+            componentCapBytes: evidenceCapBytes
+        )
+    )
+    let alertTargetBytes = max(
+        SQLitePersistentStorePolicy.bytesPerMiB,
+        alertCapBytes - alertsFamilyComponentTrimBytes(
+            componentCapBytes: alertCapBytes
+        )
+    )
+
     do {
         let pruned = try await alertStore.enforceAlertEvidenceBudget(
-            maxBytes: evidenceCapBytes
+            maxBytes: evidenceTargetBytes
         )
         if pruned.perAlert > 0 || pruned.bySize > 0 {
             changed = true
-            logger.warning("Alert evidence cap: pruned \(pruned.perAlert) over per-alert row ceiling and \(pruned.bySize) over the \(evidenceCapBytes)-byte evidence ownership budget")
+            logger.warning("Alert evidence cap: pruned \(pruned.perAlert) over per-alert row ceiling and \(pruned.bySize) over the \(evidenceTargetBytes)-byte evidence target (cap \(evidenceCapBytes) less shared family overhead)")
         }
     } catch {
         logger.error("Alert evidence cap enforcement failed: \(error.localizedDescription, privacy: .public)")
@@ -7053,9 +7093,9 @@ func enforceAlertsSizeCap(
     // Enforce the alert-row ownership budget using DBSTAT pages belonging only
     // to alerts + its indexes (not evidence).
     if let alertOwned = try? await alertStore.alertsAllocatedBytes(),
-       alertOwned > alertCapBytes {
+       alertOwned > alertTargetBytes {
         let total = (try? await alertStore.count()) ?? 0
-        let overFraction = Double(alertOwned - alertCapBytes)
+        let overFraction = Double(alertOwned - alertTargetBytes)
             / Double(max(1, alertOwned))
         let dropTarget = max(
             1,
@@ -7065,7 +7105,7 @@ func enforceAlertsSizeCap(
             count: dropTarget
         )) ?? 0
         changed = changed || dropped > 0
-        logger.warning("Alert-row cap: pruned \(dropped) oldest alerts (owned=\(alertOwned) bytes > \(alertCapBytes), target=\(dropTarget)); evidence cascaded with each parent")
+        logger.warning("Alert-row cap: pruned \(dropped) oldest alerts (owned=\(alertOwned) bytes > target \(alertTargetBytes), cap \(alertCapBytes); rows=\(dropTarget)); evidence cascaded with each parent")
     }
 
     var beforeFamily: Int64

@@ -577,3 +577,42 @@ struct AlertsFamilyHeadroomTests {
         #expect(!boundary.requiresMaintenance(footprintBytes: 194_641_920))
     }
 }
+
+@Suite("Alerts family component trim")
+struct AlertsFamilyComponentTrimTests {
+    private let mib: Int64 = 1_048_576
+
+    @Test("Both components at target fit inside the family write boundary")
+    func componentsAtTargetFitTheFamily() {
+        // The defect: caps of 100 + 100 exactly equal the 200 MiB family cap,
+        // so both components at their caps put the family past the boundary
+        // that gates writes, while each component enforcer correctly no-ops.
+        let componentCap = 100 * mib
+        let trim = alertsFamilyComponentTrimBytes(componentCapBytes: componentCap)
+        let target = componentCap - trim
+        let boundary = AlertsSizeCapBoundary(
+            nominalCapBytes: 200 * mib,
+            transactionReserveBytes: 8 * mib
+        )
+        // Two components at target, plus the measured shared overhead that
+        // belongs to neither (indexes ~4.6 MB + WAL ~4.3 MB on the reference
+        // host), must land under the admission boundary.
+        let sharedOverhead: Int64 = 9 * mib
+        #expect(target * 2 + sharedOverhead <= boundary.hardAdmissionBoundaryBytes)
+        // And with real margin, not by a hair: the freelist is not in the 9 MiB.
+        #expect(
+            boundary.hardAdmissionBoundaryBytes - (target * 2 + sharedOverhead)
+                >= 4 * mib
+        )
+        #expect(!boundary.requiresMaintenance(footprintBytes: target * 2 + sharedOverhead))
+    }
+
+    @Test("A small configured cap is not trimmed to nothing")
+    func smallCapsKeepMostOfTheirBudget() {
+        // Proportional with a ceiling, so an 8 MiB cap loses 1 MiB, not 8.
+        #expect(alertsFamilyComponentTrimBytes(componentCapBytes: 8 * mib) == mib)
+        #expect(alertsFamilyComponentTrimBytes(componentCapBytes: 0) == 0)
+        // ...and a large cap is bounded by the ceiling rather than scaling away.
+        #expect(alertsFamilyComponentTrimBytes(componentCapBytes: 1024 * mib) == 12 * mib)
+    }
+}
