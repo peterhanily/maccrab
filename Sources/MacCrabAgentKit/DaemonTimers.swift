@@ -4419,6 +4419,12 @@ enum DaemonTimers {
                 "event_terminal_revision_durable_by_lane": eventWriterTelemetry.terminalRevisionDurableByLane,
                 "event_terminal_revision_dropped_total": eventWriterTelemetry.terminalRevisionDroppedCount,
                 "event_terminal_revision_dropped_by_lane": eventWriterTelemetry.terminalRevisionDroppedByLane,
+                // v1.22.0: WHY, not just how many. `evidence_poisoned` folds a
+                // shed and a genuine integrity failure into one boolean named
+                // "poisoned"; this says which status actually fired, so a
+                // residual drop is diagnosable from one heartbeat read.
+                "event_terminal_revision_dropped_reason":
+                    eventWriterTelemetry.terminalRevisionDroppedReasonCounts,
                 "event_terminal_revision_poisoned_total": eventWriterTelemetry.terminalRevisionPoisonedCount,
                 "event_terminal_revision_poisoned_by_lane": eventWriterTelemetry.terminalRevisionPoisonedByLane,
                 "event_terminal_revision_retried_total": eventWriterTelemetry.terminalRevisionRetriedCount,

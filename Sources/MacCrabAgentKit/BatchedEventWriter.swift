@@ -206,6 +206,7 @@ actor BatchedEventWriter {
         let terminalRevisionDurableByLane: [String: Int]
         let terminalRevisionDroppedCount: Int
         let terminalRevisionDroppedByLane: [String: Int]
+        let terminalRevisionDroppedReasonCounts: [String: UInt64]
         /// Subset of dropped terminal work that durably wrote a content-bound
         /// poison ledger row instead of an exact terminal revision.
         let terminalRevisionPoisonedCount: Int
@@ -451,6 +452,9 @@ actor BatchedEventWriter {
     private var terminalRevisionDurableByLane = [Int](
         repeating: 0, count: EventPipelineLane.allCases.count
     )
+    /// Status-keyed shed reasons, so a drop is diagnosable from one heartbeat
+    /// read instead of by elimination across a dozen counters.
+    private var terminalRevisionDroppedReasonCounts: [String: UInt64] = [:]
     private var terminalRevisionDroppedByLane = [Int](
         repeating: 0, count: EventPipelineLane.allCases.count
     )
@@ -513,6 +517,8 @@ actor BatchedEventWriter {
             terminalRevisionDroppedCount: terminalRevisionDrops.get(),
             terminalRevisionDroppedByLane:
                 laneDictionary(terminalRevisionDroppedByLane),
+            terminalRevisionDroppedReasonCounts:
+                terminalRevisionDroppedReasonCounts,
             terminalRevisionPoisonedCount: terminalRevisionPoisoned.get(),
             terminalRevisionPoisonedByLane:
                 laneDictionary(terminalRevisionPoisonedByLane),
@@ -670,11 +676,23 @@ actor BatchedEventWriter {
 
     private func recordTerminalDrop(
         _ count: Int = 1,
-        lane: EventPipelineLane
+        lane: EventPipelineLane,
+        reason: EventJournalContextStatus? = nil
     ) {
         guard count > 0 else { return }
         terminalRevisionDrops.add(count)
         terminalRevisionDroppedByLane[lane.rawValue] += count
+        // v1.22.0: WHY a terminal revision was shed, not just that one was.
+        // `terminalRevisionEvidencePoisoned` folds `.dropped` and `.poisoned`
+        // into a single boolean named "poisoned", so a shed and a genuine
+        // integrity failure are indistinguishable from the heartbeat — which
+        // cost a full investigation to tell apart by elimination. A
+        // status-keyed counter answers it in one read.
+        if let reason {
+            terminalRevisionDroppedReasonCounts[
+                String(describing: reason), default: 0
+            ] += UInt64(count)
+        }
     }
 
     private func resolveTerminalSettlement(
@@ -1425,7 +1443,7 @@ actor BatchedEventWriter {
         _ event: Event,
         lane explicitLane: EventPipelineLane? = nil,
         admission: EventJournalAdmission?,
-        timeout: Duration = .seconds(5)
+        timeout: Duration = BatchedEventWriter.terminalSettlementDeadline
     ) async -> EventJournalTerminalAdmission {
         let lane = explicitLane ?? EventPipelineLane.finalLane(for: event)
         func proof(
@@ -1544,7 +1562,7 @@ actor BatchedEventWriter {
         terminal: Event,
         lane explicitLane: EventPipelineLane? = nil,
         admission: EventJournalAdmission?,
-        timeout: Duration = .seconds(5)
+        timeout: Duration = BatchedEventWriter.terminalSettlementDeadline
     ) async -> EventJournalTerminalAdmission {
         let lane = explicitLane ?? EventPipelineLane.finalLane(for: terminal)
         return await settleTerminalDelta(
@@ -1569,7 +1587,7 @@ actor BatchedEventWriter {
         _ delta: EventTerminalDelta,
         lane: EventPipelineLane,
         admission: EventJournalAdmission?,
-        timeout: Duration = .seconds(5)
+        timeout: Duration = BatchedEventWriter.terminalSettlementDeadline
     ) async -> EventJournalTerminalAdmission {
         await settleTerminalDelta(
             eventID: delta.eventID,
@@ -1621,14 +1639,40 @@ actor BatchedEventWriter {
             recordTerminalDrop(lane: lane)
             return proof(status: .mismatchedReceipt)
         }
+        // v1.22.0: ONE clock for the whole settlement, armed here rather than
+        // at the growth loop. The base wait used to sit outside the shared
+        // instant the growth/storage loops use, on an unoverridden
+        // `timeout: Duration = .seconds(5)` default that EventLoop never set —
+        // so the documented per-event ceiling was really 5s (base) + 30s
+        // (growth/storage) = 35s, and a base commit slower than 5s dropped the
+        // terminal revision. Sharing the clock upward LOWERS the true
+        // worst-case lane block to 30s while giving the base wait the whole
+        // remaining budget instead of 5s. `timeout` keeps its meaning as the
+        // base-wait bound (three tests pass .seconds(1) deliberately); it is
+        // now additionally clamped by the settlement deadline so it can never
+        // extend the per-event ceiling.
+        let settlementClock = ContinuousClock()
+        let settlementDeadline = settlementClock.now
+            .advanced(by: Self.terminalSettlementDeadline)
         let baseStatus = await awaitCurrentJournalAdmission(
             admission,
-            timeout: timeout,
+            timeout: min(timeout, settlementDeadline - settlementClock.now),
             securityRelevant: true
         )
         guard baseStatus.isVerified || baseStatus == .prefixIncomplete else {
             recordTerminalOffered(lane: lane)
-            recordTerminalDrop(lane: lane)
+            recordTerminalDrop(lane: lane, reason: baseStatus)
+            // rc.32 set the bar for this file: "a shed that only moves a
+            // private counter is invisible in `event_insert_errors_total`".
+            // This branch violated it — the drop was silent in every
+            // operator-facing counter, which is why it read as a deliberate
+            // tradeoff for a whole investigation. Report it.
+            await StorageErrorTracker.shared.recordEventError(
+                EventStoreError.encodingFailed(
+                    "terminal settlement abandoned: base admission "
+                    + "\(baseStatus)"
+                )
+            )
             return proof(status: baseStatus)
         }
         guard let workspaceLease = await liveMemoryBudget.acquire(
@@ -1688,9 +1732,12 @@ actor BatchedEventWriter {
         // reclaim its release-valve workspace.
         recordTerminalOffered(lane: lane)
         await terminalDeltaStorageLeaseGrowthHookForTesting?()
-        let growthClock = ContinuousClock()
-        let growthDeadline = growthClock.now
-            .advanced(by: Self.terminalSettlementDeadline)
+        // v1.22.0: share the settlement clock armed at function entry. Arming
+        // a fresh one here would restore the per-LOOP ceiling this file's own
+        // comment below warns against, and would put the base wait back
+        // outside the budget it is supposed to be inside.
+        let growthClock = settlementClock
+        let growthDeadline = settlementDeadline
         while !Task.isCancelled,
               !workspaceLease.resize(
                 to: EventPipelineLiveMemoryBudget

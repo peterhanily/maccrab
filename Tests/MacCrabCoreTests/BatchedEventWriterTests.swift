@@ -1944,4 +1944,77 @@ struct BoundedCreditPressureRegressionTests {
         #expect(BatchedEventWriter.terminalSettlementDeadline >= .seconds(10))
         #expect(BatchedEventWriter.terminalSettlementDeadline <= .seconds(120))
     }
+
+    @Test("terminal settlement budgets the base wait, not a hidden 5 seconds")
+    func terminalSettlementSharesOneDeadline() throws {
+        // v1.22.0. The base admission wait used to run on an unoverridden
+        // `timeout: Duration = .seconds(5)` default that EventLoop never set,
+        // OUTSIDE the instant the growth/storage loops share. Two consequences,
+        // both wrong: the documented per-event ceiling was really 5s + 30s, and
+        // a base commit slower than 5s silently shed the terminal revision —
+        // which is exactly what fired on an installed host (1 drop in 19,946,
+        // load-correlated, priority lane).
+        //
+        // Source-pinned rather than timing-pinned on purpose: reproducing it
+        // behaviourally needs a base commit stalled past a wall-clock deadline,
+        // which is precisely the CPU-starvation flake the comment above warns
+        // against manufacturing.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabAgentKit/BatchedEventWriter.swift"
+        ))
+
+        // No terminal settlement entry point may carry a bare short default.
+        // Scan DECLARATIONS, not prose — the comment explaining this fix quotes
+        // the old default verbatim, and a naive `contains` matches itself.
+        let declaresShortDefault = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.hasPrefix("//") }
+            .contains { $0.hasPrefix("timeout: Duration = .seconds(5)") }
+        #expect(!declaresShortDefault)
+
+        // The base wait is clamped by the settlement deadline, so `timeout`
+        // can bound it but can never extend the per-event ceiling.
+        #expect(source.contains(
+            "timeout: min(timeout, settlementDeadline - settlementClock.now)"
+        ))
+
+        // The growth loop shares that instant instead of arming a fresh one.
+        #expect(source.contains("let growthClock = settlementClock"))
+        #expect(source.contains("let growthDeadline = settlementDeadline"))
+        let freshGrowthClock = "let growthClock = ContinuousClock()"
+        #expect(!source.contains(freshGrowthClock))
+    }
+
+    @Test("an abandoned base admission is reported, not shed silently")
+    func abandonedBaseAdmissionIsReported() throws {
+        // rc.32 set this bar for this file: "a shed that only moves a private
+        // counter is invisible in event_insert_errors_total". The baseStatus
+        // guard violated it — on the installed host the drop showed
+        // dropped_total=1 with event_insert_errors_total=0 and
+        // last_event_insert_error_kind="", so it was indistinguishable from a
+        // deliberate reported tradeoff without a forensic pass over the code.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabAgentKit/BatchedEventWriter.swift"
+        ))
+        let guardSite = try #require(source.range(
+            of: "recordTerminalDrop(lane: lane, reason: baseStatus)"
+        ))
+        let tail = String(source[guardSite.upperBound...].prefix(600))
+        #expect(tail.contains("StorageErrorTracker.shared.recordEventError"))
+        #expect(tail.contains("terminal settlement abandoned"))
+
+        // And the reason reaches the heartbeat, so a residual drop is
+        // diagnosable in one read rather than by elimination.
+        let timers = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabAgentKit/DaemonTimers.swift"
+        ))
+        #expect(timers.contains("event_terminal_revision_dropped_reason"))
+    }
 }
