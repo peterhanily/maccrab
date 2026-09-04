@@ -2617,59 +2617,39 @@ enum EventLoop {
             enrichedEvent = reviewedDispatch.event
 
             if !hasPendingHeavyEnrichment {
-                // v1.22.0 (item 3): only a revision whose receipt someone
-                // actually reads needs the synchronous barrier.
-                // `settleTerminalJournalRevision` blocks this consumer until the
-                // writer commits, and `awaitCurrentJournalAdmission` kicks a
-                // drain on entry and again every 10 ms, so each changed revision
-                // forced its own transaction: measured 55,926 forced drains at
-                // avg depth 2.93 against the 250 ms timer's 7,908 at 44.92 --
-                // 1.12 forced drains per changed revision, and the fixed ~43 KB
-                // per-transaction WAL floor was being paid for ~3 events instead
-                // of ~45.
-                //
-                // The only reader of the terminal receipt is the sparse
-                // projection promotion in `dispatchReviewedMatches`, gated on
-                // `!event.ruleMatches.isEmpty`. When nothing was matched there
-                // is no alert to join and no promotion to authorise, so the
-                // revision can go through the batched buffer the writer already
-                // drains (`prepareAndEnqueueTerminalRevision` ->
-                // `detachTerminalRevisionWork` -> `appendTerminalRevisions`).
-                // Gate on all three emptiness conditions, not just the reviewed
-                // matches: `ruleMatches` is what the promotion actually tests.
-                // Anything that matched keeps the barrier, unchanged.
-                let needsTerminalReceipt =
-                    !reviewedDispatch.event.ruleMatches.isEmpty
-                    || !reviewedDispatch.primaryMatches.isEmpty
-                    || !reviewedDispatch.sequenceMatches.isEmpty
-                if needsTerminalReceipt {
-                    let terminalAdmission = await settleTerminalJournalRevision(
-                        enrichedEvent,
-                        lane: lane,
-                        admission: journalAdmission,
-                        unchangedFrom: journalBaseEvent,
-                        state: state
-                    )
-                    enrichedEvent = await EventJournalAdmissionContext
-                        .$terminalRevision.withValue(terminalAdmission) {
-                            await dispatchReviewedMatches(
-                                state: state,
-                                reviewed: reviewedDispatch
-                            )
-                        }
-                } else {
-                    await enqueueTerminalJournalRevision(
-                        enrichedEvent,
-                        lane: lane,
-                        admission: journalAdmission,
-                        unchangedFrom: journalBaseEvent,
-                        state: state
-                    )
-                    enrichedEvent = await dispatchReviewedMatches(
-                        state: state,
-                        reviewed: reviewedDispatch
-                    )
-                }
+                // NOTE (v1.22.0, measured): routing revisions with no reviewed
+                // matches to the writer's batched terminal buffer was tried
+                // here and REVERTED — it is inert. On an installed host under
+                // the qualification burst, 9,677 of 9,981 changed revisions
+                // (97%) still took this barrier, because an
+                // enrichment-changed event is overwhelmingly also rule-matched;
+                // only ~3% were divertible, and bytes/event did not move.
+                // Widening the gate to the reviewed matches alone does NOT
+                // work either: `promoteProjection` requires
+                // `terminalRevision?.status == .verified`, so the batched path
+                // (which leaves that receipt nil) would silently drop sparse
+                // projection promotion for rule-matched events — the exact
+                // thing DeferredEnrichmentIntegrationTests pins with "failed
+                // canonical terminal work must not promote sparse projection".
+                // The write amplification this was chasing is structural: it
+                // needs base+terminal in ONE transaction, which means deferring
+                // the base until after detection, and base-before-detection IS
+                // the evidence-durability guarantee. Not a stability-release
+                // change.
+                let terminalAdmission = await settleTerminalJournalRevision(
+                    enrichedEvent,
+                    lane: lane,
+                    admission: journalAdmission,
+                    unchangedFrom: journalBaseEvent,
+                    state: state
+                )
+                enrichedEvent = await EventJournalAdmissionContext
+                    .$terminalRevision.withValue(terminalAdmission) {
+                        await dispatchReviewedMatches(
+                            state: state,
+                            reviewed: reviewedDispatch
+                        )
+                    }
             }
 
             // Replay cannot overtake the initial evaluation. Publish the final
