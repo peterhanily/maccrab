@@ -18,18 +18,33 @@ ALERT_ONLY=0
 # running above it the whole time. Confirmed against the recorder capture:
 # file+10,621 priority+3,556 = 14,177 events, a 473/s interval rate.
 #
-# 6,000 iterations run for ~27s and offer ~42,000 events, so a single interval
-# sees ~1,400/s -- about 10% above the floor, with enough margin that sampling
-# jitter cannot drop it under. The recorder launches this script on the minute-
-# five boundary, so the run lands inside one interval rather than straddling two.
+# The ~7 events/iteration above was wrong, and 6,000 iterations did NOT offer
+# ~42,000 events. Measured on an installed host (build 1.22.0.1788459825) by
+# reading offered_by_lane across the burst:
+#   N=6000 -> ~98,290 offered   N=3600 -> 58,998   N=2700 -> 44,931
+# That is a steady 16.4 events/iteration, not 7 -- so 6,000 offered 2.3x its
+# intended load and took ~690s to drain.
 #
-# NOTE the open question this is designed to answer: the same measurement showed
-# the engine shedding 1,378 file events while sustaining ~1,546/s, because a
-# priority admission evicts queued file events when the pipeline memory budget
-# saturates. If a burst that genuinely meets the floor still sheds, the engine
-# cannot ingest the gate's own reference load without sacrificing file events,
-# and that is a product limit to fix rather than a workload to retune.
-BURST_ITERATIONS=6000
+# THE UPPER BOUND IS DRAINABILITY, NOT CAPACITY. (This paragraph was deleted
+# when the count went 2,000 -> 6,000; that deletion is what let the two
+# constants drift apart.) Every lane must be drained at the fixed boundary
+# BURST_DRAIN_OFFSET_SECONDS after the burst starts, so offering more than the
+# engine can retire in that window fails the run no matter how much headroom
+# the stream caps have. Measured post-burst retirement is ~196 ev/s (the tail is
+# priority-bound; the ~400 ev/s seen mid-burst is the fast file lane and does
+# not govern time-to-empty).
+#
+# 3,000 iterations offer ~49,200 events. Against the floor: the burst runs ~22s
+# and the recorder launches it on the minute-five sample boundary, so one
+# interval sees ~1,640 ev/s -- 29% above the 1,274/s floor, enough that sampling
+# jitter cannot drop it under. (N=2,700 was measured at 1,119 ev/s, UNDER the
+# floor, because that burst straddled two intervals -- the margin matters.)
+# Against drainability: ~49,200 at ~196 ev/s is ~251s of drain after a ~22s
+# burst, ~273s total, inside the 660s checkpoint with ~30% headroom.
+#
+# These two bounds are one budget. If either the floor or the engine's write
+# path changes, re-measure BOTH this and BURST_DRAIN_OFFSET_SECONDS together.
+BURST_ITERATIONS=3000
 
 usage() {
     echo "usage: $0 [--alert-only] --run-id <32-lowercase-hex>" >&2

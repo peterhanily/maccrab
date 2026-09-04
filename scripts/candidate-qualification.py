@@ -147,7 +147,29 @@ MAX_TRACE_RECOVERY_MUTATION_WAIT_NANOSECONDS = 5_000_000_000
 TRACE_RECOVERY_MUTATION_WAITER_LIMIT = 1_024
 BURST_START_OFFSET_SECONDS = 300
 BURST_END_OFFSET_SECONDS = 390
-BURST_DRAIN_OFFSET_SECONDS = 450
+# v1.22.0: derived from measured retirement, not chosen.
+#
+# The old 450 gave 150s from burst start to drain, and in combination with
+# MIN_BURST_COMBINED_OFFERED_PER_SECOND it was unsatisfiable. That floor demands
+# 1,274 ev/s across one 30s interval = 38,220 events, while the engine's
+# POST-BURST retirement measures ~200 ev/s on the reference host, so only
+# ~30,000 events can be retired inside 150s. 38,220 > 30,000: no BURST_ITERATIONS
+# value satisfies both. Measured directly (build 1.22.0.1788459825):
+#   N=3600 -> 58,998 offered (16.4/iteration), peak interval 1,966 ev/s,
+#             backlog 52,671 -> 17,318 over 180s = 196 ev/s net
+#   N=2700 -> 44,931 offered, peak interval 1,119 ev/s (UNDER the floor -- the
+#             burst straddled two sample intervals), backlog 15,662 at +150s
+#   N=6000 -> ~98,290 offered, ~690s to fully drain
+# The earlier 400 ev/s figure was mid-burst DEQUEUE, when the fast file lane
+# still dominates; the tail is priority-bound at roughly half that, and it is
+# the tail that governs time-to-empty.
+#
+# Sized as burst_start + burst_duration + backlog/retirement + margin: ~49,200
+# events at ~196 ev/s is ~251s of drain after a ~25s burst, i.e. ~576s, rounded
+# to 660 for ~30% headroom while still leaving 240s of epoch tail. Re-measure
+# this together with BURST_ITERATIONS if either the floor or the write path
+# changes -- they are one budget, not two independent constants.
+BURST_DRAIN_OFFSET_SECONDS = 660
 WORKLOAD_DEADLINE_SECONDS = (
     BURST_END_OFFSET_SECONDS - BURST_START_OFFSET_SECONDS
 )
@@ -178,7 +200,11 @@ MIN_BURST_COMBINED_OFFERED_PER_SECOND = 1_274.0
 # demanding the old count and failing a correct run at
 # "fixed workload output does not reconcile with its bounded run".
 # `test_fixed_workload_iterations_match_the_script` pins the two together.
-FIXED_WORKLOAD_ITERATIONS = 6_000
+# v1.22.0: 6,000 -> 3,000. Measured yield is 16.4 offered events per iteration
+# (not the ~7 the 6,000 was sized on), so 6,000 offered ~98,290 events -- 2.3x
+# its intended load, and ~690s to drain. See the drainability budget at
+# BURST_DRAIN_OFFSET_SECONDS; the two are one budget, not two constants.
+FIXED_WORKLOAD_ITERATIONS = 3_000
 MIN_TRACE_STORE_INGEST_DELTA = 1
 # v1.22.0: the dashboard-starves-expiry recurrence signature is a journal
 # index that keeps paying for a full rebuild instead of an append-only

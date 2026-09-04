@@ -2804,7 +2804,8 @@ class CandidateQualificationTests(unittest.TestCase):
     def test_priority_persistence_backlog_cannot_masquerade_as_delivery(self) -> None:
         report = copy.deepcopy(self.runtime)
         for index, observation in enumerate(report["recorder_observations"]):
-            if 330 <= observation["offset_seconds"] <= 450:
+            if 330 <= observation["offset_seconds"] <= \
+                    qualification.BURST_DRAIN_OFFSET_SECONDS:
                 heartbeat = observation["heartbeat"]
                 heartbeat["events_storage_write_offered_by_lane"]["priority"] = 40_300
                 heartbeat["events_storage_write_persisted_by_lane"]["priority"] = 301
@@ -2841,7 +2842,12 @@ class CandidateQualificationTests(unittest.TestCase):
                     self.runtime["recorder_observations"]
                 )
                 for observation in observations:
-                    if observation["offset_seconds"] < 480:
+                    # Inject AFTER the drain boundary, so the cumulative
+                    # shed/poison check is what rejects this and not the
+                    # stricter burst-window conservation check that spans
+                    # burst start -> drain end.
+                    if observation["offset_seconds"] <= \
+                            qualification.BURST_DRAIN_OFFSET_SECONDS:
                         continue
                     heartbeat = observation["heartbeat"]
                     heartbeat["event_terminal_revision_offered_total"] += 1
@@ -3171,7 +3177,8 @@ class CandidateQualificationTests(unittest.TestCase):
     def test_zero_trace_store_workload_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)
         for index, observation in enumerate(report["recorder_observations"]):
-            if 330 <= observation["offset_seconds"] <= 450:
+            if 330 <= observation["offset_seconds"] <= \
+                    qualification.BURST_DRAIN_OFFSET_SECONDS:
                 ledger = observation["heartbeat"]["traces_storage_admission"][
                     "ingest_conservation"
                 ]
@@ -3256,7 +3263,14 @@ class CandidateQualificationTests(unittest.TestCase):
         observations = copy.deepcopy(self.runtime["recorder_observations"])
         observations[1]["captured_at"] = iso(35)
         observations[2]["captured_at"] = iso(55)
-        scheduled_passing_bytes = 7 * qualification.MIB * 15
+        # Derived from the cap, not a literal: the captured interval here is
+        # 20s against a 30s scheduled one, so any byte count strictly between
+        # 20x and 30x the cap passes on the scheduled rate while failing on the
+        # captured rate -- which is the jitter this test exists to catch. 25x
+        # sits in the middle of that band at whatever the cap currently is.
+        scheduled_passing_bytes = int(
+            qualification.MAX_WINDOW_WRITE_BYTES_PER_SECOND * 25
+        )
         first_total = observations[1]["process"][
             "engine_disk_write_bytes_total"
         ]
