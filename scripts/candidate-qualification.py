@@ -164,12 +164,23 @@ BURST_END_OFFSET_SECONDS = 390
 # still dominates; the tail is priority-bound at roughly half that, and it is
 # the tail that governs time-to-empty.
 #
-# Sized as burst_start + burst_duration + backlog/retirement + margin: ~49,200
-# events at ~196 ev/s is ~251s of drain after a ~25s burst, i.e. ~576s, rounded
-# to 660 for ~30% headroom while still leaving 240s of epoch tail. Re-measure
-# this together with BURST_ITERATIONS if either the floor or the write path
-# changes -- they are one budget, not two independent constants.
-BURST_DRAIN_OFFSET_SECONDS = 660
+# Sized as burst_start + backlog/tail-retirement + margin, from a FULL recorder
+# epoch on the notarized candidate (build 1.22.0.1116) rather than a standalone
+# burst on an otherwise idle host:
+#   combined offered in the burst interval  47,429  -> 1,581 ev/s peak (floor 1,274)
+#   priority backlog peak                   26,135  at offset 330
+#   priority backlog at offset 630           7,053
+#   => tail retirement (26,135 - 7,053)/300s = 63.6 ev/s; the remaining 7,053
+#      clears at ~741s, and the <=512 flow tolerance is reached at ~730s.
+# The 196 ev/s this was previously sized on was measured with nothing else
+# running. Under the recorder's real load -- its own probes, the causal alert
+# investigation, the live rule reload -- the priority TAIL runs about a third of
+# that, and the tail is precisely what this boundary tests. 780 leaves ~50s over
+# the measured 730s while keeping 120s of epoch tail before MIN_EPOCH_SECONDS,
+# which is itself a strict drain boundary.
+# Re-measure this together with BURST_ITERATIONS if either the floor or the
+# write path changes -- they are one budget, not two independent constants.
+BURST_DRAIN_OFFSET_SECONDS = 780
 WORKLOAD_DEADLINE_SECONDS = (
     BURST_END_OFFSET_SECONDS - BURST_START_OFFSET_SECONDS
 )
