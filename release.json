@@ -1,6 +1,6 @@
 {
   "version": "1.22.0",
-  "release_date": "2026-09-03T18:32:57Z",
+  "release_date": "2026-09-04T06:11:36Z",
   "toolchain": "Xcode 26.4.1 Build version 17E202",
   "source_commit": "unbound",
   "source_tree": "unbound",
@@ -15,8 +15,8 @@
   "dmg": {
     "filename": "MacCrab-v1.22.0.dmg",
     "url": "https://github.com/peterhanily/maccrab/releases/download/v1.22.0/MacCrab-v1.22.0.dmg",
-    "sha256": "0c67e8b2cfc3ad0c7b529121663b1594b6a2ce1d6bdddd06412678e90086a1e0",
-    "size_bytes": 77329809
+    "sha256": "d72e3386dfab465015ed8244ca3df3efd07cf6b4f75a69161222784755dec690",
+    "size_bytes": 77315950
   },
   "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.22.0",
   "appcast_url": "https://maccrab.com/appcast.xml",
