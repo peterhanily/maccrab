@@ -5593,20 +5593,11 @@ public actor EventStore {
                 }
                 do {
                     let stageStarted = DispatchTime.now().uptimeNanoseconds
-                    defer { recordJournalIndexStage("poison_integrity", started: stageStarted) }
-                    try validatePoisonIntegrity(
-                        blockID: blockID,
-                        baseEvents: decodedBlock.events
-                    )
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    journalIntegrityFailures += 1
-                    throw error
-                }
-                do {
-                    let stageStarted = DispatchTime.now().uptimeNanoseconds
-                    defer { recordJournalIndexStage("overlays_and_projection", started: stageStarted) }
+                    // The exact loader validates poison against this same
+                    // authenticated base before applying any overlays. Count
+                    // that work here once, together with exact/projection
+                    // validation, instead of repeating the poison-ledger pass.
+                    defer { recordJournalIndexStage("poison_overlays_and_projection", started: stageStarted) }
                     let exact = try loadExactJournalBlock(
                         blockID: blockID,
                         authenticatedBase: decodedBlock

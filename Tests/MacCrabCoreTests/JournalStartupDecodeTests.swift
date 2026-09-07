@@ -103,6 +103,7 @@ struct JournalStartupDecodeTests {
         let stages = await reader.journalIndexRefreshDiagnostics()
         #expect(stages.stagesComplete)
         #expect(stages.stagesNanoseconds["base_authentication", default: 0] > 0)
+        #expect(stages.stagesNanoseconds["poison_overlays_and_projection", default: 0] > 0)
         #expect(stages.stagesNanoseconds["global_projection_and_fts", default: 0] > 0)
         #expect(stages.stagesNanoseconds.values.reduce(UInt64(0), +) <= stages.lastNanoseconds)
 

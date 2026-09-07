@@ -894,6 +894,10 @@ enum DaemonSetup {
         do {
             var expired = 0
             var batches = 0
+            // Keep one retention boundary for the complete boot sweep, as the
+            // runtime expiry timer does. Advancing it per batch resets the
+            // store's summary cursor and rescans already-visited prefixes.
+            let retainedThrough = Date()
             // Consecutive resets whenever a quantum makes progress; cumulative
             // never does. Both are bounded by the boot-specific budget above
             // rather than the runtime timer's 30s/120s values, which are
@@ -906,7 +910,7 @@ enum DaemonSetup {
                 let batch: Int
                 do {
                     batch = try await eventStore.expireJournalBlocks(
-                        retainedThrough: Date(),
+                        retainedThrough: retainedThrough,
                         maximumBlocks: 1_024
                     )
                 } catch let error as EventStoreError {
