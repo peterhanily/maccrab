@@ -75,13 +75,13 @@ struct V2ForensicsSettingsSheet: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Forensics settings").font(.headline)
-                Text("Manage installed scanners + trusted publishers.")
+                Text(String(localized: "ui.V2ForensicsSettingsSheet.forensics.settings", defaultValue: "Forensics settings")).font(.headline)
+                Text(String(localized: "ui.V2ForensicsSettingsSheet.manage.installed.scanners.trusted.publishers", defaultValue: "Manage installed scanners + trusted publishers."))
                     .scaledSystem(11)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Done") { isPresented = false }
+            Button(String(localized: "overview.sheetDone", defaultValue: "Done")) { isPresented = false }
                 .keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
@@ -98,7 +98,7 @@ struct V2ForensicsSettingsSheet: View {
             sectionHeader(String(localized: "forensicsSettings.installedScanners", defaultValue: "Installed scanners"), "")
             HStack(spacing: 6) {
                 Image(systemName: "puzzlepiece.extension").foregroundStyle(.secondary).scaledSystem(12)
-                Text("Manage installed scanners — provenance, live re-verify, and uninstall — in the Run a scan tab.")
+                Text(String(localized: "ui.V2ForensicsSettingsSheet.manage.installed.scanners.provenance.live.re.verify", defaultValue: "Manage installed scanners — provenance, live re-verify, and uninstall — in the Run a scan tab."))
                     .scaledSystem(11).foregroundStyle(.secondary)
             }
         }
@@ -175,7 +175,7 @@ struct V2ForensicsSettingsSheet: View {
                 Button(role: .destructive) {
                     Task { await cleanupResidue() }
                 } label: {
-                    Label("Remove all dev / test scanners", systemImage: "trash")
+                    Label(String(localized: "ui.V2ForensicsSettingsSheet.remove.all.dev.test.scanners", defaultValue: "Remove all dev / test scanners"), systemImage: "trash")
                 }
                 .padding(.top, 4)
             }
@@ -192,7 +192,7 @@ struct V2ForensicsSettingsSheet: View {
                 .scaledSystem(11, design: .monospaced)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-            Button("Open in Finder") {
+            Button(String(localized: "ui.V2ForensicsSettingsSheet.open.in.finder", defaultValue: "Open in Finder")) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: installer.pluginsRootPath))
             }
             .controlSize(.small)

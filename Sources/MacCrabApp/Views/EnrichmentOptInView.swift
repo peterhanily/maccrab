@@ -23,13 +23,15 @@ struct EnrichmentOptInView: View {
     private var anySelected: Bool { threatIntel || vulnScan || packageFreshness || certTransparency }
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 0) {
+            ScrollView {
+            VStack(spacing: 16) {
             Text("🦀").scaledSystem(44).accessibilityHidden(true)
 
             Text(String(localized: "enrich.title", defaultValue: "Optional network enrichment"))
                 .font(.title2).fontWeight(.bold)
 
-            Text(String(localized: "enrich.intro", defaultValue: "MacCrab runs fully on-device by default — nothing about your Mac leaves it. Detection (rules, sequences, campaigns, bundled threat-intel) works offline. These four optional lookups each reach a public service to add extra context. They stay off until you turn them on, and you can change this anytime in Settings."))
+            Text(String(localized: "enrich.intro", defaultValue: "Detection runs on your Mac and works offline. These optional lookups contact public services only when enabled. Each service receives your IP address and the request data described below. Other features, including update checks, can use the network. You can change these choices in Settings."))
                 .font(.callout).foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -38,11 +40,11 @@ struct EnrichmentOptInView: View {
             VStack(alignment: .leading, spacing: 10) {
                 EnrichToggleRow(icon: "shield.lefthalf.filled",
                     title: String(localized: "enrich.threatIntel", defaultValue: "Threat-intel feeds (abuse.ch)"),
-                    detail: String(localized: "enrich.threatIntelDetail", defaultValue: "Download IOC lists every 4h. Download-only — nothing about your Mac is uploaded."),
+                    detail: String(localized: "enrich.threatIntelDetail", defaultValue: "Download IOC lists every 4 hours. URLhaus and MalwareBazaar require an abuse.ch Auth-Key in Settings. Requests include your IP address and normal request metadata, but no observed events or software inventory."),
                     isOn: $threatIntel)
                 EnrichToggleRow(icon: "ladybug",
                     title: String(localized: "enrich.vulnScan", defaultValue: "Vulnerability scan (osv.dev)"),
-                    detail: String(localized: "enrich.vulnScanDetail", defaultValue: "Look up CVEs for installed software. Sends your software inventory (anonymous)."),
+                    detail: String(localized: "enrich.vulnScanDetail", defaultValue: "Look up known vulnerabilities for installed software. Sends package names and versions to osv.dev; the service also receives your IP address."),
                     isOn: $vulnScan)
                 EnrichToggleRow(icon: "shippingbox",
                     title: String(localized: "enrich.packageFreshness", defaultValue: "Package freshness (npm / PyPI / …)"),
@@ -58,6 +60,10 @@ struct EnrichmentOptInView: View {
             .cornerRadius(12)
             .padding(.horizontal, 20)
 
+            }
+            .padding(.vertical, 16)
+            }
+            Divider()
             HStack {
                 Button(String(localized: "enrich.keepOff", defaultValue: "Keep everything off")) {
                     // Writes nothing — the daemon defaults are already off.
@@ -83,7 +89,7 @@ struct EnrichmentOptInView: View {
             }
             .padding(20)
         }
-        .frame(width: 520, height: 560)
+        .frame(minWidth: 500, idealWidth: 560, maxWidth: 700, minHeight: 400, idealHeight: 600, maxHeight: 800)
         // Any dismiss path (buttons OR Esc / window close) marks the one-time
         // prompt as seen so it never re-appears — without enabling anything.
         .onDisappear { hasSeenEnrichmentPrompt = true }

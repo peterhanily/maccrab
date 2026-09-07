@@ -87,9 +87,9 @@ struct DeceptionIntegrationTests {
         let deployed = try await mgr.deploy()
         let canaryPath = try #require(deployed.first).path
 
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
 
         let enricher = EventEnricher(honeyfileManager: mgr)
         let event = fileEvent(path: canaryPath)
@@ -109,9 +109,9 @@ struct DeceptionIntegrationTests {
         let deployed = try await mgr.deploy()
         let canaryPath = try #require(deployed.first).path
 
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
 
         let enricher = EventEnricher(honeyfileManager: mgr)
         let event = fileEvent(

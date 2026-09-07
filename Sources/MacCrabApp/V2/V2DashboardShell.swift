@@ -6,7 +6,8 @@ import SwiftUI
 
 struct V2DashboardShell: View {
 
-    @StateObject private var state = V2DashboardState()
+    @StateObject private var state: V2DashboardState
+    @State private var noticesExpanded = false
     @ObservedObject var appState: AppState
     @ObservedObject var sysextManager: SystemExtensionManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -24,6 +25,7 @@ struct V2DashboardShell: View {
     @AppStorage("v2.colorScheme") private var colorSchemeRaw: String = "system"
 
     init(appState: AppState, sysextManager: SystemExtensionManager) {
+        _state = StateObject(wrappedValue: V2DashboardState(engineSource: appState.engineSource))
         self.appState = appState
         self.sysextManager = sysextManager
     }
@@ -88,8 +90,8 @@ struct V2DashboardShell: View {
                     .transition(V2Motion.fade)
             }
 
-            if let toast = state.toast {
-                toastLayer(toast)
+            if state.toast != nil || !state.noticeHistory.isEmpty {
+                toastLayer
                     .transition(V2Motion.toastTransition(reduceMotion: reduceMotion))
             }
         }
@@ -116,6 +118,9 @@ struct V2DashboardShell: View {
         // dashboard on mock or a degraded live provider (a store's DB absent
         // at probe time) until a manual restart. Edge-gated in the state, so
         // a steady stream of "ready" heartbeats triggers nothing.
+        .onChange(of: appState.heartbeat?.engineIdentity) { identity in
+            Task { await state.onEngineIdentity(identity) }
+        }
         .onChange(of: appState.heartbeat?.bootPhase) { newPhase in
             Task { await state.onSysextBootPhase(newPhase) }
         }
@@ -182,14 +187,34 @@ struct V2DashboardShell: View {
         .zIndex(10)
     }
 
-    private func toastLayer(_ toast: V2Toast) -> some View {
+    private var toastLayer: some View {
         VStack {
             Spacer()
             HStack {
                 Spacer()
-                V2ToastView(toast: toast, onDismiss: { state.dismissToast() })
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .padding(20)
+                VStack(alignment: .trailing, spacing: 8) {
+                    if !state.noticeHistory.isEmpty {
+                        Button(String(localized: "notices.earlier", defaultValue: "Earlier notices (\(state.noticeHistory.count))")) {
+                            noticesExpanded.toggle()
+                        }
+                        .buttonStyle(.bordered)
+                        .popover(isPresented: $noticesExpanded, arrowEdge: .top) {
+                            ScrollView {
+                                VStack(spacing: 10) {
+                                    ForEach(state.noticeHistory.reversed()) { notice in
+                                        V2ToastView(toast: notice, onDismiss: { state.dismissToast(id: notice.id) })
+                                    }
+                                }.padding(12)
+                            }
+                            .frame(width: 390, height: 420)
+                        }
+                    }
+                    if let toast = state.toast {
+                        V2ToastView(toast: toast, onDismiss: { state.dismissToast(id: toast.id) })
+                            .transition(V2Motion.toastTransition(reduceMotion: reduceMotion))
+                    }
+                }
+                .padding(20)
             }
         }
         .zIndex(20)

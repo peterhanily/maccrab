@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>findings.findingCount</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>%1$lld risultati</string>
+			<key>one</key>
+			<string>%1$lld risultato</string>
+			<key>other</key>
+			<string>%1$lld risultati</string>
+		</dict>
+	</dict>
+	<key>findings.skippedNote</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>Impossibile leggere %1$lld scansioni, che sono state saltate. Aprile dalla scheda Scansioni per conoscere il motivo.</string>
+			<key>one</key>
+			<string>Impossibile leggere %1$lld scansione, che è stata saltata. Aprila dalla scheda Scansioni per conoscere il motivo.</string>
+			<key>other</key>
+			<string>Impossibile leggere %1$lld scansioni, che sono state saltate. Aprile dalla scheda Scansioni per conoscere il motivo.</string>
+		</dict>
+	</dict>
+	<key>kit.footerSummary</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>%1$lld scanner · v%2$@ · %3$@</string>
+			<key>one</key>
+			<string>%1$lld scanner · v%2$@ · %3$@</string>
+			<key>other</key>
+			<string>%1$lld scanner · v%2$@ · %3$@</string>
+		</dict>
+	</dict>
+	<key>overview.crab.quipCritical</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>MacCrab è in allarme! %1$lld campagne critiche attive.</string>
+			<key>one</key>
+			<string>MacCrab è in allarme! %1$lld campagna critica attiva.</string>
+			<key>other</key>
+			<string>MacCrab è in allarme! %1$lld campagne critiche attive.</string>
+		</dict>
+	</dict>
+	<key>pastScans.bulkDeleteConfirm</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>Elimina %1$lld scansioni</string>
+			<key>one</key>
+			<string>Elimina %1$lld scansione</string>
+			<key>other</key>
+			<string>Elimina %1$lld scansioni</string>
+		</dict>
+	</dict>
+	<key>pastScans.bulkDeleteTitle</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>Eliminare definitivamente %1$lld scansioni?</string>
+			<key>one</key>
+			<string>Eliminare definitivamente %1$lld scansione?</string>
+			<key>other</key>
+			<string>Eliminare definitivamente %1$lld scansioni?</string>
+		</dict>
+	</dict>
+	<key>pastScans.bulkDeletedToast</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>Eliminate %1$lld scansioni · liberati %2$@.</string>
+			<key>one</key>
+			<string>Eliminata %1$lld scansione · liberati %2$@.</string>
+			<key>other</key>
+			<string>Eliminate %1$lld scansioni · liberati %2$@.</string>
+		</dict>
+	</dict>
+	<key>scans.rowsCollected</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>· %1$lld righe raccolte finora</string>
+			<key>one</key>
+			<string>· %1$lld riga raccolta finora</string>
+			<key>other</key>
+			<string>· %1$lld righe raccolte finora</string>
+		</dict>
+	</dict>
+	<key>scans.scannersDidntRun</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>%1$lld scanner non sono stati eseguiti:</string>
+			<key>one</key>
+			<string>%1$lld scanner non è stato eseguito:</string>
+			<key>other</key>
+			<string>%1$lld scanner non sono stati eseguiti:</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

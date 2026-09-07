@@ -91,9 +91,9 @@ struct BTMDetectionTests {
     // MARK: - 2. Rule fire + FP guard (through the real RuleEngine)
 
     private func loadRules() async throws -> RuleEngine {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         return engine
     }
 

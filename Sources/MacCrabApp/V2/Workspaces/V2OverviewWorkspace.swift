@@ -220,34 +220,24 @@ struct V2OverviewWorkspace: View {
         }
     }
 
-    /// Three-state banner driven by ENGINE-HEALTH signals only: active (live +
-    /// heartbeat fresh + engine not degraded), degraded (stale heartbeat / no
-    /// rules loaded / storage errors / rule tamper), or inactive (no daemon).
-    ///
-    /// The banner deliberately does NOT factor the security SCORE: a low posture
-    /// score (e.g. the macOS firewall is off) is an environmental finding, not an
-    /// engine impairment, and is already surfaced by the Security Grade tile +
-    /// its factors. Treating score<75 as "Protection degraded" cried wolf about
-    /// the engine when the engine was perfectly healthy.
-    private enum ProtectionState { case active, degraded, inactive }
-
-    private var protectionState: ProtectionState {
-        // Not live (offline/no-daemon in release, or mock in DEBUG) ⇒ inactive.
-        if state.provider.mode != .live { return .inactive }
-        let heartbeatFresh: Bool = {
-            guard let hb = appState.heartbeat else { return false }
-            return !hb.isStale
-        }()
-        if !heartbeatFresh { return .degraded }
-        if appState.isProtectionDegraded { return .degraded }
-        return .active
+    /// Engine readiness and sensor coverage are independent of the posture score.
+    private var protectionState: V2ProtectionStatus {
+        V2ProtectionStatus.resolve(
+            providerLive: state.provider.mode == .live,
+            heartbeatPresent: appState.heartbeat != nil,
+            heartbeatStale: appState.heartbeat?.isStale ?? true,
+            readiness: appState.heartbeat?.readiness ?? .unavailable,
+            degraded: appState.isProtectionDegraded
+        )
     }
 
     private var protectionBanner: some View {
         let s = protectionState
         let title: String = {
             switch s {
-            case .active:   return String(localized: "overview.bannerTitleActive", defaultValue: "Protected — system is secure")
+            case .active:   return String(localized: "overview.bannerTitleActive", defaultValue: "Protected — monitoring active")
+            case .starting: return String(localized: "overview.bannerTitleStarting", defaultValue: "Protection starting — preparing the engine")
+            case .unavailable: return String(localized: "overview.bannerTitleUnavailable", defaultValue: "Protection unavailable — engine not ready")
             case .degraded: return String(localized: "overview.bannerTitleDegraded", defaultValue: "Protection degraded — review System Health")
             case .inactive: return String(localized: "overview.bannerTitleInactive", defaultValue: "Protection inactive — daemon not detected")
             }
@@ -255,12 +245,17 @@ struct V2OverviewWorkspace: View {
         let body: String = {
             switch s {
             case .active:
-                let collectors = appState.heartbeat?.collectorHealth?.count ?? 0
+                let collectors = appState.heartbeat?.collectorHealth?
+                    .filter { $0.resolvedState == .healthy }.count ?? 0
                 return collectors == 0
                     ? String(localized: "overview.bannerBodyActiveNoCount", defaultValue: "Live data flowing · collectors active")
                     : String(localized: "overview.bannerBodyActive", defaultValue: "Live data flowing · \(collectors) collectors active")
+            case .starting:
+                return String(localized: "overview.bannerBodyStarting", defaultValue: "Protection is not ready yet. The engine is preparing storage, rules, and sensors.")
+            case .unavailable:
+                return String(localized: "overview.bannerBodyUnavailable", defaultValue: "The engine has not confirmed readiness. Open System health for startup and storage details.")
             case .degraded:
-                return String(localized: "overview.bannerBodyDegraded", defaultValue: "Live data is stale or score is low — open System health for details")
+                return String(localized: "overview.bannerBodyDegraded", defaultValue: "The engine or an enabled sensor needs attention. Open System health for details.")
             case .inactive:
                 // v1.21.5: end-user copy — the old string told release
                 // users to `swift run maccrabd`. Clicking the banner
@@ -272,14 +267,15 @@ struct V2OverviewWorkspace: View {
         let color: Color = {
             switch s {
             case .active:   return V2Theme.healthy
-            case .degraded: return V2Theme.warning
+            case .starting, .unavailable, .degraded: return V2Theme.warning
             case .inactive: return V2Theme.high
             }
         }()
         let icon: String = {
             switch s {
             case .active:   return "checkmark.shield.fill"
-            case .degraded: return "exclamationmark.shield.fill"
+            case .starting: return "hourglass"
+            case .unavailable, .degraded: return "exclamationmark.shield.fill"
             case .inactive: return "xmark.shield.fill"
             }
         }()
@@ -898,8 +894,10 @@ struct V2OverviewWorkspace: View {
         // as a green "all healthy" shield — the daemon-down "looks safe" class.
         // Gate the green state on freshness; stale ⇒ last-known, not current.
         let stale = appState.heartbeat?.isStale ?? true
-        let healthy = collectors.filter { $0.healthy }.count
-        let allHealthy = !stale && !collectors.isEmpty && healthy == collectors.count
+        let summary = V2CollectorSummary(states: collectors.map(\.resolvedState))
+        let healthy = summary.healthyCount
+        let allHealthy = !stale && appState.heartbeat?.isReady == true
+            && summary.allEnabledHealthy
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(String(localized: "overview.coverageTitle", defaultValue: "Protection coverage"))
@@ -916,21 +914,26 @@ struct V2OverviewWorkspace: View {
             } else {
                 HStack(spacing: 6) {
                     Image(systemName: allHealthy ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                        .foregroundStyle(allHealthy ? Color.green : V2Theme.high)
+                        .foregroundStyle(allHealthy ? V2Theme.healthy : V2Theme.high)
                     Text(stale
-                         ? String(localized: "overview.coverageStale", defaultValue: "Daemon not reporting — last-known \(healthy) of \(collectors.count) sensors")
-                         : String(localized: "overview.coverageSummary", defaultValue: "\(healthy) of \(collectors.count) sensors healthy"))
+                         ? String(localized: "overview.coverageStale", defaultValue: "Daemon not reporting — last-known \(healthy) of \(summary.enabledCount) enabled sensors")
+                         : String(localized: "overview.coverageSummary", defaultValue: "\(healthy) of \(summary.enabledCount) enabled sensors healthy"))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
                 }
-                let sortedCollectors = collectors.sorted { ($0.healthy ? 1 : 0) < ($1.healthy ? 1 : 0) }
+                let sortedCollectors = collectors.sorted {
+                    if $0.resolvedState.sortOrder == $1.resolvedState.sortOrder { return $0.name < $1.name }
+                    return $0.resolvedState.sortOrder < $1.resolvedState.sortOrder
+                }
                 FlowLayout(spacing: 6) {
                     ForEach(sortedCollectors, id: \.self) { c in
                         HStack(spacing: 4) {
-                            Circle().fill(c.healthy ? Color.green : V2Theme.high).frame(width: 6, height: 6)
-                            Text(c.name).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                            Circle().fill(c.resolvedState.chipKind.color).frame(width: 6, height: 6)
+                                .accessibilityHidden(true)
+                            Text("\(c.name): \(c.resolvedState.label)").font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                         }
                         .padding(.horizontal, 7).padding(.vertical, 3)
                         .background(V2Theme.panelBackground).clipShape(Capsule())
+                        .help(c.lastError ?? c.reason ?? c.resolvedState.label)
                     }
                 }
             }
@@ -1029,7 +1032,9 @@ struct V2OverviewWorkspace: View {
     /// All sensors reporting healthy (drives Crabby's coverage shield).
     private var crabProtectionHealthy: Bool {
         let cols = appState.heartbeat?.collectorHealth ?? []
-        return appState.isConnected && !cols.isEmpty && cols.allSatisfy { $0.healthy } && !appState.isProtectionDegraded
+        return appState.isConnected
+            && V2CollectorSummary(states: cols.map(\.resolvedState)).allEnabledHealthy
+            && !appState.isProtectionDegraded
     }
 
     private var crabCard: some View {
@@ -1595,7 +1600,7 @@ fileprivate struct V2AlertHistogram: View {
                     .scaledSystem(10, weight: .medium)
                     .foregroundStyle(V2Theme.mutedText)
                 Spacer()
-                Text("\(bucket.total) \(bucket.total == 1 ? String(localized: "overview.popoverAlertSingular", defaultValue: "alert") : String(localized: "overview.popoverAlertPlural", defaultValue: "alerts"))")
+                Text(String(localized: "ui.final.overviewAlertCount", defaultValue: "Alerts: \(bucket.total)"))
                     .scaledSystem(11, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)
                     .monospacedDigit()

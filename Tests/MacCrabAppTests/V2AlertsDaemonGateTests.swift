@@ -15,29 +15,37 @@ import Testing
 @Suite("V2 alerts daemon-liveness gate (B6)")
 struct V2AlertsDaemonGateTests {
 
+    @Test("a starting or impaired engine cannot yield an all-clear empty state")
+    func startingDoesNotReport() {
+        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .live, heartbeatStale: false, heartbeatReady: false))
+        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .live, heartbeatStale: false, heartbeatReady: nil))
+        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .live, heartbeatStale: false,
+                                                    heartbeatReady: true, protectionDegraded: true))
+    }
+
     @Test("live provider with a fresh heartbeat is the only reporting state")
     func liveFreshReports() {
-        #expect(V2AlertsWorkspace.isDaemonReporting(mode: .live, heartbeatStale: false))
+        #expect(V2AlertsWorkspace.isDaemonReporting(mode: .live, heartbeatStale: false, heartbeatReady: true))
     }
 
     @Test("live provider with a stale heartbeat is NOT reporting")
     func liveStaleDoesNotReport() {
-        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .live, heartbeatStale: true))
+        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .live, heartbeatStale: true, heartbeatReady: true))
     }
 
     @Test("live provider with a missing heartbeat is NOT reporting")
     func liveMissingHeartbeatDoesNotReport() {
-        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .live, heartbeatStale: nil))
+        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .live, heartbeatStale: nil, heartbeatReady: nil))
     }
 
     @Test("offline provider never reports even with a fresh heartbeat")
     func offlineNeverReports() {
-        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .offline, heartbeatStale: false))
-        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .offline, heartbeatStale: nil))
+        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .offline, heartbeatStale: false, heartbeatReady: true))
+        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .offline, heartbeatStale: nil, heartbeatReady: nil))
     }
 
     @Test("mock provider never reports (sample data is knowingly synthetic)")
     func mockNeverReports() {
-        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .mock, heartbeatStale: false))
+        #expect(!V2AlertsWorkspace.isDaemonReporting(mode: .mock, heartbeatStale: false, heartbeatReady: true))
     }
 }

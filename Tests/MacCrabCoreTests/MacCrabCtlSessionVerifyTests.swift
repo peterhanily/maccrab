@@ -23,6 +23,11 @@ struct MacCrabCtlSessionVerifyTests {
     /// Locate the built maccrabctl binary, building it once if absent
     /// (mirrors MCPProtocolHarnessTests.binaryURL()).
     static func binaryURL() -> URL? {
+        if let directory = ProcessInfo.processInfo.environment["MACCRAB_BIN_DIR"],
+           !directory.isEmpty {
+            let binary = URL(fileURLWithPath: directory).appendingPathComponent("maccrabctl")
+            return FileManager.default.isExecutableFile(atPath: binary.path) ? binary : nil
+        }
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // MacCrabCoreTests
             .deletingLastPathComponent()   // Tests

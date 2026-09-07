@@ -147,47 +147,44 @@ extension MacCrabCtl {
         }
     }
 
+    /// Legacy command spelling with version-aware removal. Only the matching
+    /// rule scopes change; TTL, reasons and unrelated v2 entries survive.
     static func unsuppressRule(ruleId: String, processPath: String?) async {
-        let configDir = maccrabDataDir()
-        let suppressFile = (configDir as NSString).appendingPathComponent("suppressions.json")
-
-        var suppressions: [String: [String]] = [:]
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)) {
-            do {
-                suppressions = try JSONDecoder().decode([String: [String]].self, from: data)
-            } catch {
-                print("ERROR: \(suppressFile) exists but could not be parsed: \(error)")
-                print("       Refusing to unsuppress — fix or delete the file first.")
-                return
-            }
-        }
-
-        guard suppressions[ruleId] != nil else {
-            print("No suppressions found for rule '\(ruleId)'.")
-            return
-        }
-
-        if let path = processPath {
-            guard let idx = suppressions[ruleId]?.firstIndex(of: path) else {
-                print("Process '\(path)' is not suppressed for rule '\(ruleId)'.")
-                return
-            }
-            suppressions[ruleId]?.remove(at: idx)
-            if suppressions[ruleId]?.isEmpty == true { suppressions.removeValue(forKey: ruleId) }
-            print("✔ Removed suppression of '\(path)' for rule '\(ruleId)'")
-        } else {
-            let count = suppressions[ruleId]?.count ?? 0
-            suppressions.removeValue(forKey: ruleId)
-            print("✔ Removed all \(count) suppression(s) for rule '\(ruleId)'")
-        }
-
         do {
-            let data = try JSONEncoder().encode(suppressions)
-            try data.write(to: URL(fileURLWithPath: suppressFile))
-            print("  Restart daemon (SIGHUP) to apply.")
-        } catch {
-            print("Error saving suppressions: \(error)")
+            let removed = try await removeRuleSuppressions(directory: maccrabDataDir(), ruleId: ruleId, processPath: processPath)
+            print("Saved removal of \(removed) suppression(s). Runtime reload may still be pending.")
+        } catch { cliFailure("unsuppress: \(error.localizedDescription)") }
+    }
+
+    static func removeRuleSuppressions(directory: String, ruleId: String, processPath: String?) async throws -> Int {
+        let path = directory + "/suppressions.json"
+        guard let data = try RuntimeConfigurationFiles.readControlData(at: path, maximumBytes: 4 * 1024 * 1024) else {
+            throw RuntimeConfigContractError("No suppression store is available")
         }
+        if let document = try? SuppressionFile.decode(data: data) {
+            let matching = document.entries.filter { entry in
+                switch entry.scope {
+                case .rule(let rule): return rule == ruleId && processPath == nil
+                case .ruleHash(let rule, _): return rule == ruleId && processPath == nil
+                case .rulePath(let rule, let savedPath):
+                    return rule == ruleId && (processPath == nil || processPath == savedPath)
+                case .path, .host: return false
+                }
+            }
+            guard !matching.isEmpty else { throw RuntimeConfigContractError("No matching rule suppression is present") }
+            let manager = SuppressionManager(dataDir: directory, publishReadableSnapshot: true)
+            await manager.load()
+            return try await manager.removePersisted(ids: Set(matching.map(\.id))).count
+        }
+        var legacy = try JSONDecoder().decode([String: [String]].self, from: data)
+        guard let paths = legacy[ruleId] else { throw RuntimeConfigContractError("No suppression is present for this rule") }
+        let retained = processPath.map { requested in paths.filter { $0 != requested } } ?? []
+        let removed = paths.count - retained.count
+        guard removed > 0 else { throw RuntimeConfigContractError("No matching rule suppression is present") }
+        if retained.isEmpty { legacy.removeValue(forKey: ruleId) }
+        else { legacy[ruleId] = retained }
+        try SecureFileIO.atomicReplace(at: path, data: JSONEncoder().encode(legacy), mode: 0o600)
+        return removed
     }
 
     static func listSuppressions() {

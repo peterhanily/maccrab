@@ -32,6 +32,9 @@ enum SignalHandlers {
                     print("[SIGHUP] Ignoring reload: \(reason)")
                     return
                 }
+                let reloadRequestIDs = await state.runtimeConfigurationReporter.takeReloadRequests()
+                var reloadSucceeded = false
+                var reloadFailureReason = "Rule reload did not complete"
 
                 do {
                     try Task.checkCancellation()
@@ -177,10 +180,18 @@ enum SignalHandlers {
                             selectors: esSelectors.values,
                             unanalyzable: esSelectors.hasUnanalyzableSelector)
                         let introspectionOn = freshConfig.subscribeIntrospectionEvents && esDemand.introspection
-                        esCollector.applyOptionalSubscriptions(
+                        let subscriptionsApplied = esCollector.applyOptionalSubscriptions(
                             introspection: introspectionOn,
                             memoryProtection: esDemand.memoryProtection)
-                        print("[SIGHUP] ES demand-gated families: introspection=\(introspectionOn), memory_protection=\(esDemand.memoryProtection)")
+                        if subscriptionsApplied {
+                            if var entry = freshConfig.effectiveRuntimeEntries()["subscribe_introspection_events"] {
+                                entry.adjustment = "Effective subscription policy; enabled-rule demand governs actual capture"
+                                try await state.runtimeConfigurationReporter.apply(["subscribe_introspection_events": entry])
+                            }
+                            print("[SIGHUP] ES demand-gated families: introspection=\(introspectionOn), memory_protection=\(esDemand.memoryProtection)")
+                        } else {
+                            throw RuntimeConfigContractError("Rules were reloaded but the native subscription update was not fully applied")
+                        }
                     }
                     await state.suppressionManager.load()
                     let stats = await state.suppressionManager.stats()
@@ -484,6 +495,9 @@ enum SignalHandlers {
                         await state.threatIntel.setNetworkRefresh(freshConfig.threatIntelEnabled)
                         print("[SIGHUP] Threat-intel network refresh \(freshConfig.threatIntelEnabled ? "ENABLED" : "disabled (egress stopped)")")
                     }
+                    let refreshedRuntimeEntries = freshConfig.effectiveRuntimeEntries()
+                        .filter { RuntimeConfigurationContract.byKey[$0.key]?.disableOnly == true }
+                    try await state.runtimeConfigurationReporter.apply(refreshedRuntimeEntries)
 
                     let anyChange = old.eventsHotTierMinutes  != newStorage.eventsHotTierMinutes
                                  || old.eventsMaxSizeMB       != newStorage.eventsMaxSizeMB
@@ -571,10 +585,24 @@ enum SignalHandlers {
                         await state.threatIntel.refreshNow()
                         print("[SIGHUP] Threat intel refresh complete")
                     }
+                    reloadSucceeded = true
                 } catch {
+                    reloadFailureReason = String(error.localizedDescription.prefix(300))
                     print("[SIGHUP] ERROR: \(error)")
                 }
+                do {
+                    try await state.runtimeConfigurationReporter.finishReload(
+                        reloadRequestIDs, succeeded: reloadSucceeded,
+                        reason: reloadSucceeded ? "Rule reload completed" : "Reload incomplete; some components may have changed: " + reloadFailureReason
+                    )
+                } catch {
+                    logger.error("Rule reload completion status could not be persisted: \(error.localizedDescription)")
+                }
                 await state.daemonLifecycle.endRuleReload()
+                if await state.runtimeConfigurationReporter.hasQueuedReloads(),
+                   !(await state.daemonLifecycle.isShuttingDown()) {
+                    kill(getpid(), SIGHUP)
+                }
             }
             if !accepted {
                 print("[SIGHUP] Reload not admitted: another reload is active, runtime work capacity is unavailable, or shutdown has begun")

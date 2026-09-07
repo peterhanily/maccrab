@@ -38,7 +38,7 @@ struct ArtifactTranscriptView: View {
             VStack(spacing: 8) {
                 // The older end is truncated, so the note belongs at the top.
                 if artifacts.count > 300 {
-                    Text("Showing the most recent 300 of \(artifacts.count). Older messages above are truncated. Newest at the bottom.")
+                    Text(String(localized: "ui.ArtifactTranscriptView.showing.the.most.recent.300.of.older", defaultValue: "Showing the most recent 300 of \(artifacts.count). Older messages above are truncated. Newest at the bottom."))
                         .scaledSystem(10)
                         .foregroundStyle(.tertiary)
                         .padding(.bottom, 4)

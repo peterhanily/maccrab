@@ -4,6 +4,8 @@
 
 import Testing
 import Foundation
+import Darwin
+import Security
 @testable import MacCrabCore
 
 // MARK: - Rootkit Detector Tests
@@ -108,24 +110,59 @@ struct PowerAnomalyDetectorTests {
 @Suite("CDHash Extractor")
 struct CDHashExtractorTests {
 
-    @Test("Extracts CDHash for launchd (PID 1)")
-    func extractLaunchdCDHash() async {
+    @Test("Running self CDHash equals Security.framework's CodeDirectory identity")
+    func selfCDHashMatchesSecurityFramework() async throws {
+        let expected = try selfCodeDirectoryHash()
         let extractor = CDHashExtractor()
-        let hash = await extractor.extractCDHash(pid: 1)
-        #expect(hash != nil, "launchd (PID 1) should always have a CDHash")
-        if let hash = hash {
-            #expect(hash.count == 40, "CDHash should be 40 hex characters (20 bytes), got \(hash.count)")
-            // Verify it's valid hex
-            let validHex = hash.allSatisfy { "0123456789abcdef".contains($0) }
-            #expect(validHex, "CDHash should be lowercase hex")
+        let result = await extractor.extractCDHash(pid: getpid())
+        let hash = try #require(result)
+        #expect(hash == expected)
+        #expect(hash.count == 40)
+        #expect(hash.allSatisfy { "0123456789abcdef".contains($0) })
+    }
+
+    @Test("Returns nil for nonpositive process IDs")
+    func returnsNilForInvalidPID() async {
+        let extractor = CDHashExtractor()
+        let invalidPIDs: [Int32] = [-1, 0]
+        for pid in invalidPIDs {
+            let hash = await extractor.extractCDHash(pid: pid)
+            #expect(hash == nil)
         }
     }
 
-    @Test("Returns nil for invalid PID")
-    func returnsNilForInvalidPID() async {
+    @Test("Batch extraction and compatibility invalidation preserve self identity")
+    func batchAndInvalidation() async throws {
+        let expected = try selfCodeDirectoryHash()
         let extractor = CDHashExtractor()
-        let hash = await extractor.extractCDHash(pid: 99999)
-        #expect(hash == nil, "PID 99999 should not have a CDHash")
+        let pid = getpid()
+        let batch = await extractor.extractBatch(pids: [pid, -1, 0])
+        #expect(batch == [pid: expected])
+        await extractor.invalidate(pid: pid)
+        let result = await extractor.extractCDHash(pid: pid)
+        let hash = try #require(result)
+        #expect(hash == expected)
+    }
+
+    /// Independent oracle for this test process; no other live process is queried.
+    private func selfCodeDirectoryHash() throws -> String {
+        var code: SecCode?
+        let selfStatus = SecCodeCopySelf(SecCSFlags(), &code)
+        try #require(selfStatus == errSecSuccess)
+        let runningCode = try #require(code)
+        var staticCode: SecStaticCode?
+        let staticStatus = SecCodeCopyStaticCode(runningCode, SecCSFlags(), &staticCode)
+        try #require(staticStatus == errSecSuccess)
+        let signatureCode = try #require(staticCode)
+        var information: CFDictionary?
+        let informationStatus = SecCodeCopySigningInformation(
+            signatureCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information
+        )
+        try #require(informationStatus == errSecSuccess)
+        let dictionary = try #require(information as? [String: Any])
+        let codeHash = try #require(dictionary[kSecCodeInfoUnique as String] as? Data)
+        try #require(codeHash.count == 20)
+        return codeHash.map { String(format: "%02x", $0) }.joined()
     }
 }
 

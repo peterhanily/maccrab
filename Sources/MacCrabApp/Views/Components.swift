@@ -149,7 +149,7 @@ struct AlertMenuItem: View {
                     .font(.caption)
                     .foregroundColor(alert.severityColor)
                     .frame(width: 12, height: 12)
-                    .accessibilityLabel(Text("\(alert.severity.rawValue) severity"))
+                    .accessibilityLabel(Text(String(localized: "ui.final.severity", defaultValue: "Severity: \(alert.severity.rawValue)")))
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(alert.ruleTitle)
@@ -201,7 +201,7 @@ struct SignerBadge: View {
             .background(color.opacity(0.15))
             .foregroundColor(color)
             .clipShape(Capsule())
-            .accessibilityLabel("Signed by \(signerType)")
+            .accessibilityLabel(String(localized: "ui.Components.signed.by", defaultValue: "Signed by \(signerType)"))
     }
 }
 
@@ -233,7 +233,7 @@ struct RuleRow: View {
                         .clipShape(Capsule())
                 }
                 if let stats, stats.meanExecNs > 50_000_000 {
-                    Text("SLOW")
+                    Text(String(localized: "ui.Components.slow", defaultValue: "SLOW"))
                         .font(.caption2.weight(.bold))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
@@ -280,7 +280,7 @@ struct RuleRow: View {
                     if let last = stats.lastFiredAt {
                         Label(last.formatted(.relative(presentation: .named)), systemImage: "clock")
                     } else {
-                        Text("never fired")
+                        Text(String(localized: "ui.Components.never.fired", defaultValue: "never fired"))
                             .foregroundStyle(.tertiary)
                     }
                     Label(String(format: "μ %.2f ms", stats.meanExecNs / 1_000_000),

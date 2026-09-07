@@ -33,7 +33,12 @@ struct TierBRegistryTests {
         let fm = FileManager.default
         var candidates: [String] = []
         if let d = ProcessInfo.processInfo.environment["MACCRAB_BIN_DIR"], !d.isEmpty {
-            candidates.append(d + "/maccrab-tierb-example")
+            let binary = d + "/maccrab-tierb-example"
+            guard fm.isExecutableFile(atPath: binary) else {
+                Issue.record("Selected test build is missing maccrab-tierb-example")
+                return nil
+            }
+            return binary
         }
         candidates += [
             root.appendingPathComponent(".build/debug/maccrab-tierb-example").path,

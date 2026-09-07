@@ -149,8 +149,9 @@ public enum SchemaMigrationError: Error, LocalizedError {
 /// try SchemaMigrator.run(on: handle, migrations: Self.migrations)
 /// ```
 ///
-/// The migrator reads `PRAGMA user_version`, then applies each migration with
-/// `version > current`, in ascending order, each wrapped in `BEGIN/COMMIT`.
+/// The migrator reads `PRAGMA user_version`, then reapplies the caller's
+/// idempotent migrations in ascending order, each wrapped in `BEGIN/COMMIT`.
+/// Only a forward version step advances the shared database counter.
 /// On any statement failure the transaction is rolled back and the error is
 /// propagated; `user_version` is only bumped after all statements for a step
 /// succeed.
@@ -158,29 +159,16 @@ public enum SchemaMigrator {
 
     /// Apply any pending migrations to the given SQLite handle.
     ///
-    /// ## Schema-downgrade policy (C-05) — DELIBERATE, PERMANENT: additive + warn
+    /// A newer database counter produces a warning here, not a compatibility
+    /// verdict. Several stores historically shared that counter, so callers
+    /// reapply their own idempotent statements without lowering it.
     ///
-    /// When the on-disk `user_version` is NEWER than this binary's latest known
-    /// migration (an older MacCrab opened against a DB a newer build wrote — a
-    /// Sparkle/MDM rollback or a mixed-version fleet), we do NOT fail-closed. We
-    /// proceed additively and log the skew LOUDLY. This is a considered policy,
-    /// not an oversight:
-    ///
-    ///   1. Every migration in this codebase is strictly additive — `ADD COLUMN`
-    ///      and `CREATE … IF NOT EXISTS`. An older binary only ever reads/writes
-    ///      the columns it knows; columns a newer build added sit unused. There
-    ///      is no read-wrong-data or corruption risk from a newer additive schema.
-    ///   2. Hard-refusing would be *actively dangerous* here. A throw from `run()`
-    ///      propagates out of `EventStore.init`, which `DaemonSetup.recoverEventStore`
-    ///      treats as corruption — it would quarantine the (perfectly good) DB and
-    ///      start a fresh empty one, DESTROYING the operator's event/evidence
-    ///      history on a benign version rollback. Staying open + warning preserves
-    ///      the data and keeps the security daemon detecting.
-    ///
-    /// `SchemaMigrationError.unknownVersion` exists for a caller that explicitly
-    /// wants fail-closed semantics; the primary stores intentionally do NOT use
-    /// it. If a future migration ever becomes non-additive (a `DROP`/rewrite),
-    /// this policy must be revisited — that's the one case additive-safety breaks.
+    /// Callers must enforce semantic compatibility before invoking this helper.
+    /// EventStore v8 has a non-additive journal transition and its own exact
+    /// schema/write guards. An older binary is not a supported rollback target
+    /// merely because this helper tolerates its database counter. Historical
+    /// binaries can quarantine a v8 store and start empty after another open
+    /// operation fails; this helper cannot make those binaries safe.
     ///
     /// - Parameters:
     ///   - db: Open SQLite handle (must be writable).
@@ -221,24 +209,13 @@ public enum SchemaMigrator {
         //   on the next boot.
         //
         // Cost: a handful of cheap fail-fast SQLite calls per store init.
-        // Non-idempotent ops (DROP, INSERT, UPDATE in a migration body) would
-        // need per-store version tracking — none of our migrations use them.
+        // Non-idempotent work needs caller-specific transition state and
+        // admission. EventStore handles its journal transition separately.
         let sorted = migrations.sorted(by: { $0.version < $1.version })
         if current > latest {
-            // v1.19.1 (audit): the DB was written by a NEWER binary than this one
-            // — a Sparkle/MDM downgrade or a rolled-back update onto an existing
-            // evidence store. Our migrations are additive (ADD COLUMN /
-            // CREATE … IF NOT EXISTS), so re-applying them is safe and the old
-            // binary's column-explicit reads/writes still work; but this build may
-            // not understand columns/semantics a newer one added, so surface the
-            // version skew LOUDLY rather than treating it as routine.
-            //
-            // C-05: proceeding additively (not throwing) is the DELIBERATE,
-            // PERMANENT policy — see the "Schema-downgrade policy" block on
-            // run(). Throwing here would trip DaemonSetup.recoverEventStore into
-            // quarantining a good DB and losing the operator's history on a
-            // benign downgrade. A caller that truly wants fail-closed can check
-            // `current > latest` and throw SchemaMigrationError.unknownVersion.
+            // Surface version skew even when no logger callback was supplied.
+            // Store-specific compatibility checks remain the caller's job;
+            // a tolerated counter alone does not prove safe reads or writes.
             let msg = "DB user_version=\(current) EXCEEDS this binary's latest known v\(latest) — running an OLDER MacCrab against a newer-schema database (downgrade/rollback / mixed-version fleet?). Proceeding additively; upgrade to the build that wrote this DB if you see schema errors."
             // Log via BOTH the optional callback AND os.Logger.warning — the
             // primary stores pass no callback, so the os.Logger is what actually
@@ -273,12 +250,11 @@ public enum SchemaMigrator {
         // billed as "sub-second on a 500 MB DB" (v1.10 audit hardening),
         // but field measurement on a 962 MB events.db with FTS5 puts it
         // at 1–2 s of synchronous PRAGMA work — significant chunk of
-        // daemon cold-start time. v1.12.0: callers that care about
-        // boot latency pass `skipQuickCheck: true` and re-invoke
-        // `SchemaMigrator.quickCheck(on:)` from a deferred Task once
-        // the store is up. Corruption surfaces immediately on real
-        // queries via SQLITE_CORRUPT, so deferring the up-front check
-        // is a perf trade with no correctness loss.
+        // daemon cold-start time. EventStore skips this full SQLite pass;
+        // it does not schedule a deferred task. Its startup journal/schema
+        // validation has a different scope. Operators can explicitly request
+        // the bounded read-only `maccrabctl storage check` diagnostic. A
+        // successful ordinary query is not a full-store integrity verdict.
         if !skipQuickCheck {
             try quickCheck(db: db, logger: logger)
         }
@@ -307,11 +283,20 @@ public enum SchemaMigrator {
         defer { sqlite3_finalize(stmt) }
 
         var issues: [String] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        var rows = 0
+        var result = sqlite3_step(stmt)
+        while result == SQLITE_ROW {
+            rows += 1
             if let cstr = sqlite3_column_text(stmt, 0) {
                 let row = String(cString: cstr)
                 if row != "ok" { issues.append(row) }
+            } else {
+                issues.append("quick_check returned a null result")
             }
+            result = sqlite3_step(stmt)
+        }
+        guard result == SQLITE_DONE, rows > 0 else {
+            throw SchemaMigrationError.quickCheckFailed("check did not complete (SQLite rc=\(result))")
         }
         if !issues.isEmpty {
             let summary = issues.prefix(5).joined(separator: "; ")

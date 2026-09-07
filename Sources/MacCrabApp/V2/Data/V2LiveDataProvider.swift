@@ -5,9 +5,8 @@
 // degrades independently: if the alerts.db isn't there, alerts()
 // returns empty + records the error, while events() can still work.
 //
-// The store-init pattern matches AppState.swift's path-probe: pick
-// the directory whose .db is most recently modified, so we don't
-// pin to a stale system-dir copy from a prior sysext install.
+// Stores and telemetry use the same app-session engine source. A newer
+// heartbeat or database belonging to another engine never changes this source.
 
 import Foundation
 import Darwin
@@ -18,6 +17,7 @@ public final class V2LiveDataProvider: V2DataProvider {
 
     public let mode: V2DataSourceMode = .live
     public private(set) var lastErrorDescription: String? = nil
+    public private(set) var suppressionReadError: String? = nil
     /// Surface-specific read-failure slot for the alerts store — see the
     /// protocol doc. Set on a throwing read, CLEARED on the next successful
     /// one, so a one-off SQLITE_BUSY mid-VACUUM can't permanently withhold the
@@ -26,6 +26,9 @@ public final class V2LiveDataProvider: V2DataProvider {
     public private(set) var alertsReadError: String? = nil
     public let dataDir: String?
     public private(set) var browserInventoryCoverage: V2BrowserInventoryCoverage?
+    public private(set) var ruleTelemetryContext: RuleTelemetryContext?
+    private var rulesCacheContextKey: String?
+    private var rulesCacheBuiltinMtime: Date?
 
     private let alertStore: AlertStore?
     private let eventStore: EventStore?
@@ -59,18 +62,9 @@ public final class V2LiveDataProvider: V2DataProvider {
     private var compositeLabelsCache: [String: String] = [:]
     private var compositeLabelsCacheMtime: Date? = nil
 
-    /// Returns nil if no candidate directory exists at all (fresh dev
-    /// machine where the daemon has never run). Caller should fall
-    /// back to V2MockDataProvider.
-    public init?() async {
-        // Pick a single canonical data directory rather than a mix
-        // of system + user-home per-file: if a user previously ran
-        // `swift run maccrabd` (writes to user-home) then later
-        // installed the sysext (writes to system), the dev leftovers
-        // outranked the production data on per-file mtime. Now we
-        // prefer the system dir whenever it has *any* canonical file,
-        // and fall back to user-home only when system is empty.
-        let dir = V2LiveDataProvider.pickDataDirectory()
+    /// Reopen stores only in this session's selected engine directory.
+    public init?(source: V2EngineSource = .session) async {
+        let dir: String? = source.directory
         let alertsDir   = dir.flatMap { Self.fileExists(at: $0 + "/alerts.db")     ? $0 : nil }
         let eventsDir   = dir.flatMap { Self.fileExists(at: $0 + "/events.db")     ? $0 : nil }
         let campaignDir = dir.flatMap { Self.fileExists(at: $0 + "/campaigns.db")  ? $0 : nil }
@@ -91,8 +85,9 @@ public final class V2LiveDataProvider: V2DataProvider {
             return DatabaseEncryption(enabled: true)
         }()
 
-        guard alertsDir != nil || eventsDir != nil
-                || campaignDir != nil || traceDir != nil else {
+        guard V2EngineSource.canonicalFiles.contains(where: {
+            FileManager.default.fileExists(atPath: source.directory + "/" + $0)
+        }) else {
             return nil
         }
 
@@ -157,7 +152,8 @@ public final class V2LiveDataProvider: V2DataProvider {
         // when any store is nil despite its dir existing. The previous
         // per-store error string was rarely consumed by the dashboard
         // (just logged) — the simpler signal is enough.
-        let allOpened = (alertsDir == nil   || self.alertStore != nil)
+        let allOpened = self.alertStore != nil && self.eventStore != nil
+                     && (alertsDir == nil   || self.alertStore != nil)
                      && (eventsDir == nil   || self.eventStore != nil)
                      && (campaignDir == nil || self.campaignStore != nil)
                      && (traceDir == nil    || self.causalStore != nil)
@@ -294,6 +290,11 @@ public final class V2LiveDataProvider: V2DataProvider {
         guard let dir = dataDir else { return [] }
         let rulesPath = dir + "/compiled_rules"
         let telemetryPath = dir + "/rule_telemetry.json"
+        let context = await Task.detached(priority: .userInitiated) {
+            RuleTelemetryContext.load(directory: dir)
+        }.value
+        ruleTelemetryContext = context
+        let contextKey = "\(context.freshness.rawValue):\(context.engineIdentity?.pid ?? 0):\(context.engineIdentity?.startedAtUnix ?? 0):\(context.ruleProfile ?? "unknown")"
         let fm = FileManager.default
 
         // mtime gate — return the cache unchanged if neither the
@@ -306,7 +307,10 @@ public final class V2LiveDataProvider: V2DataProvider {
         let dirMtime  = (try? fm.attributesOfItem(atPath: rulesPath))?[.modificationDate] as? Date
         let teleMtime = (try? fm.attributesOfItem(atPath: telemetryPath))?[.modificationDate] as? Date
         let userMtime = (try? fm.attributesOfItem(atPath: userRulesPath))?[.modificationDate] as? Date
+        let builtinMtime = (try? fm.attributesOfItem(atPath: dir + "/" + BuiltinRuleSettings.fileName))?[.modificationDate] as? Date
         if !rulesCache.isEmpty,
+           contextKey == rulesCacheContextKey,
+           builtinMtime == rulesCacheBuiltinMtime,
            dirMtime == rulesCacheDirMtime,
            teleMtime == rulesCacheTelemetryMtime,
            userMtime == rulesCacheUserRulesMtime {
@@ -343,18 +347,12 @@ public final class V2LiveDataProvider: V2DataProvider {
         let rules = await engine.listRules()
 
         let mapped = await Task.detached(priority: .userInitiated) {
-            var telemetry: [String: RuleEngine.RuleStats] = [:]
-            var autoDisabled: Set<String> = []
-            if let snapshot = RuleEngine.readTelemetrySnapshot(at: telemetryPath) {
-                for s in snapshot.stats { telemetry[s.ruleId] = s }
-                // Runtime auto-disabled rules (pathological/ReDoS guard) — the
-                // on-disk CompiledRule still reads enabled, so without this the
-                // dashboard would show a silenced detection as active.
-                autoDisabled = Set(snapshot.autoDisabledRuleIds)
-            }
-            return rules.map { rule in
-                V2LiveDataProvider.toV2Rule(rule, stats: telemetry[rule.id],
-                                            autoDisabled: autoDisabled.contains(rule.id))
+            rules.map { rule in
+                V2LiveDataProvider.toV2Rule(rule, stats: context.statsByID[rule.id],
+                    autoDisabled: context.autoDisabledRuleIDs.contains(rule.id),
+                    coverage: V2RuleCoverage(rawValue: context.coverage(ruleID: rule.id,
+                        status: rule.status ?? "", enabled: rule.enabled).rawValue) ?? .unknown,
+                    writtenAt: context.snapshotWrittenAt)
             }
         }.value
 
@@ -394,6 +392,8 @@ public final class V2LiveDataProvider: V2DataProvider {
         let merged = mapped + composite + builtins
         rulesCache = merged
         rulesCacheDirMtime = dirMtime
+        rulesCacheContextKey = contextKey
+        rulesCacheBuiltinMtime = builtinMtime
         rulesCacheTelemetryMtime = teleMtime
         rulesCacheUserRulesMtime = userMtime
         return merged
@@ -462,10 +462,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         // WRONG for any operator who set rule_profile: all — the dashboard would
         // hide the rules the engine is actually running. heartbeat_rich.json is
         // 0644 and carries the daemon's own effective profile.
-        let heartbeat = configDir + "/heartbeat_rich.json"
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: heartbeat)),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let profile = json["rule_profile"] as? String, !profile.isEmpty {
+        if let profile = RuleTelemetryContext.load(directory: configDir).ruleProfile {
             return profile
         }
         let path = configDir + "/daemon_config.json"
@@ -544,8 +541,9 @@ public final class V2LiveDataProvider: V2DataProvider {
         // `Data(contentsOf:)` + `JSONSerialization.jsonObject` calls.
         // ~3-15 ms per call on cold cache. Detach so a System / Overview
         // refresh tick doesn't block main.
-        await Task.detached(priority: .userInitiated) {
-            V2HeartbeatSnapshot.readFreshest()
+        guard let directory = dataDir else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            V2HeartbeatSnapshot.read(directory: directory)
         }.value
     }
 
@@ -687,7 +685,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         var eventsPerSec: Double = 0
         var eventRateCoverageComplete = false
         var sparkBuckets: [Double] = []
-        if let snapshot = V2HeartbeatSnapshot.readFreshest() {
+        if let snapshot = await heartbeat() {
             recordEventRateSample(
                 count: snapshot.eventsProcessed,
                 at: snapshot.writtenAt
@@ -815,18 +813,7 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// (`swift run maccrabd` dev workflow) is tried last. Duplicates
     /// are de-duplicated so the same dir isn't probed twice.
     nonisolated public static func candidateThreatIntelCacheDirs(preferring preferred: String? = nil) -> [String] {
-        var dirs: [String] = []
-        if let preferred {
-            dirs.append(preferred + "/threat_intel")
-        }
-        let systemDir = "/Library/Application Support/MacCrab/threat_intel"
-        let userDir = (FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("MacCrab/threat_intel").path)
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab/threat_intel"
-        if !dirs.contains(systemDir) { dirs.append(systemDir) }
-        if !dirs.contains(userDir) { dirs.append(userDir) }
-        return dirs
+        [(preferred ?? V2EngineSource.session.directory) + "/threat_intel"]
     }
 
     nonisolated private static func feedKindHint(name: String) -> String {
@@ -955,7 +942,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         // Each collector entry: name, eventCount, healthy, lastTickUnix.
         // Map to V2MockCollector — throughput is best-effort
         // (eventCount / uptime), errors not yet tracked in heartbeat.
-        guard let snap = V2HeartbeatSnapshot.readFreshest() else { return [] }
+        guard let snap = await heartbeat() else { return [] }
         let uptimeSeconds = max(snap.uptimeSeconds, 1)
         return snap.collectors.map { c -> V2MockCollector in
             V2MockCollector(
@@ -1389,6 +1376,11 @@ public final class V2LiveDataProvider: V2DataProvider {
 
     // MARK: - Mutations
 
+    public func confirmMutation(_ request: V2MutationRequest) async -> V2MutationConfirmation {
+        await V2MutationConfirmationReader.confirm(request, alertStore: alertStore,
+                                                  campaignStore: campaignStore, dataDir: dataDir)
+    }
+
     public func suppressAlert(id: String) async -> Bool {
         guard let alertStore else {
             lastErrorDescription = "no alert store"
@@ -1435,9 +1427,8 @@ public final class V2LiveDataProvider: V2DataProvider {
         } catch {
             if isReadOnlyError(error), queueInboxMutation(prefix: "delete-alert", id: id) {
                 lastErrorDescription = nil
-                // Return true to flip UI optimistically — the daemon
-                // applies the delete within ~5 s. The row will simply
-                // be gone on the next alerts() refresh.
+                // Acknowledge submission only. The UI keeps the saved row
+                // visible until a successful point read confirms its removal.
                 return true
             }
             lastErrorDescription = describeMutationError(error)
@@ -1594,8 +1585,8 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// Drop a JSON mutation request into <dataDir>/inbox/ for the
     /// root daemon to pick up. Files are named `<prefix>-<id>.json` so
     /// re-clicking a suppress button coalesces into one file (idempotent).
-    /// The daemon polls every 5 s; UI flips optimistically and the
-    /// next 5 s refresh tick observes the actual flipped row.
+    /// The daemon polls every 5 s. Request status is separate from stored row
+    /// state; a later point read confirms whether the change actually landed.
     ///
     /// Pre-v1.10.1, mutations against a root-owned alerts.db just
     /// failed with SQLITE_READONLY and the user was told to "use
@@ -1698,58 +1689,29 @@ public final class V2LiveDataProvider: V2DataProvider {
         }
     }
 
-    /// Read live suppression entries from `<dataDir>/suppressions.json`.
-    /// SuppressionManager writes this on every change; we just decode
-    /// off-main so a refresh tick doesn't block the UI on disk read +
-    /// JSONDecoder.
+    /// Read the daemon's public snapshot; the privileged master stays private.
     public func suppressions() async -> [V2SuppressionEntry] {
         guard let dir = dataDir else { return [] }
-        let path = dir + "/suppressions.json"
-        return await Task.detached(priority: .userInitiated) {
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return [] }
-            struct OnDisk: Codable {
-                let entries: [Entry]?
-                struct Entry: Codable {
-                    let id: String?
-                    let ruleId: String
-                    let scope: String?
-                    let addedBy: String?
-                    let createdAt: Date?
-                    let expiresAt: Date?
+        do {
+            let entries = try await Task.detached(priority: .userInitiated) {
+                guard let document = try SuppressionFile.read(at: URL(fileURLWithPath: dir + "/suppressions_snapshot.json")) else {
+                    throw CocoaError(.fileReadNoSuchFile)
                 }
-            }
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            guard let parsed = try? decoder.decode(OnDisk.self, from: data) else { return [] }
-            return (parsed.entries ?? []).map {
-                V2SuppressionEntry(
-                    id: $0.id ?? UUID().uuidString,
-                    ruleId: $0.ruleId,
-                    scope: $0.scope ?? "any",
-                    addedBy: $0.addedBy ?? "—",
-                    createdAt: $0.createdAt ?? Date.distantPast,
-                    expiresAt: $0.expiresAt
-                )
-            }
-        }.value
+                return document.entries.filter { !$0.isExpired() }.map(V2SuppressionEntry.init)
+            }.value
+            suppressionReadError = nil
+            return entries
+        } catch {
+            suppressionReadError = String(localized: "alerts.suppressionsUnavailable", defaultValue: "Saved suppression state is unavailable. Refresh after the engine is ready; an empty list does not confirm that no suppressions exist.")
+            return []
+        }
     }
 
-    public func liftSuppression(ruleId: String, scope: String) async -> Bool {
-        var args = ["unsuppress", ruleId]
-        if !scope.isEmpty, scope != "any" {
-            args.append(scope)
-        }
-        // Detach the subprocess spawn off-main; same rationale as
-        // refreshThreatIntel above.
-        let argsCopy = args
-        let result = await Task.detached(priority: .userInitiated) {
-            V2LiveDataProvider.runMaccrabctl(arguments: argsCopy)
-        }.value
-        if result.exitCode != 0 {
-            lastErrorDescription = "lift suppression: \(result.stderr.split(separator: "\n").first.map(String.init) ?? "exit \(result.exitCode)")"
-            return false
-        }
-        return true
+    public func liftSuppression(id: String) async -> Bool {
+        guard UUID(uuidString: id) != nil else { return false }
+        let queued = queueInboxMutation(prefix: "remove-suppression", id: id)
+        if queued { lastErrorDescription = nil }
+        return queued
     }
 
     /// Resolve a trace's member entities. Walks the causal graph
@@ -1876,22 +1838,6 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// always wins when it has any of the canonical files; the user-
     /// home directory is only considered when the system dir is empty
     /// (dev workflow with `swift run maccrabd` and no sysext).
-    private static func pickDataDirectory() -> String? {
-        let systemDir = "/Library/Application Support/MacCrab"
-        let userDir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("MacCrab").path
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let canonical = ["/alerts.db", "/events.db", "/campaigns.db", "/tracegraph.db"]
-        if canonical.contains(where: { fileExists(at: systemDir + $0) }) {
-            return systemDir
-        }
-        if canonical.contains(where: { fileExists(at: userDir + $0) }) {
-            return userDir
-        }
-        return nil
-    }
-
     private static func fileExists(at path: String) -> Bool {
         FileManager.default.fileExists(atPath: path)
     }
@@ -2021,7 +1967,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         )
     }
 
-    nonisolated private static func toV2Rule(_ r: CompiledRule, stats: RuleEngine.RuleStats? = nil, autoDisabled: Bool = false) -> V2MockRule {
+    nonisolated private static func toV2Rule(_ r: CompiledRule, stats: RuleEngine.RuleStats? = nil, autoDisabled: Bool = false, coverage: V2RuleCoverage = .unknown, writtenAt: Date? = nil) -> V2MockRule {
         // MITRE-shaped tags look like "attack.t1059" / "attack.execution".
         let mitre = r.tags
             .filter { $0.hasPrefix("attack.t") }
@@ -2043,7 +1989,8 @@ public final class V2LiveDataProvider: V2DataProvider {
             firesLastWeek: Int(stats?.fireCount ?? 0),
             isCustom: isCustom,
             description: r.description,
-            status: r.status
+            status: r.status,
+            telemetryCoverage: coverage, telemetryWrittenAt: writtenAt
         )
     }
 

@@ -4,10 +4,11 @@
 
 import Foundation
 import MacCrabForensics
+import MacCrabCore
 
 private func resolveRulesBase(_ explicit: String?) -> String {
     explicit
-        ?? ProcessInfo.processInfo.environment["MACCRAB_RULES_BASE_URL"]
+        ?? Foundation.ProcessInfo.processInfo.environment["MACCRAB_RULES_BASE_URL"]
         ?? "https://rave.maccrab.com/rules/"
 }
 
@@ -16,18 +17,25 @@ func dispatchRules(args: [String]) async {
     let rest = Array(args.dropFirst())
     do {
         switch sub {
+        case "reload":
+            guard rest.isEmpty || rest == ["--json"] else {
+                throw RuntimeConfigContractError("Usage: maccrabctl rules reload [--json]")
+            }
+            let id = try RuntimeConfigurationFiles.submit(operation: "reload-rules", payload: [:], directory: maccrabDataDir())
+            if rest.contains("--json") {
+                try printCLIJSONObject(["schema_version": 1, "state": "pending", "operation": "reload-rules", "request_id": id.uuidString])
+            } else {
+                print("Submitted reload request \(id.uuidString). Check: maccrabctl config status \(id.uuidString)")
+            }
         case "update":                 try await rulesUpdate(args: rest)
         case "check-updates", "check": try await rulesCheckUpdates(args: rest)
         case "status":                 try await rulesStatus()
         case "help", "-h", "--help":   printRulesUsage()
         default:
-            print("Unknown rules subcommand: \(sub)")
-            printRulesUsage()
-            exit(1)
+            cliFailure("Unknown rules subcommand: \(sub)")
         }
     } catch {
-        print("Error: \(error)")
-        exit(1)
+        cliFailure("rules \(sub): \(error.localizedDescription)")
     }
 }
 
@@ -45,8 +53,9 @@ func printRulesUsage() {
                                        rules manifest into compiled_rules/pushed.
       check-updates [--json]           Report whether a newer rules corpus exists.
       status                           Show the installed pushed-rules state.
-      list                             List the rules currently loaded by the engine.
-      count                            Count the rules currently loaded by the engine.
+      reload [--json]                   Submit a reload request and return its status ID.
+      list [--json]                     List the compiled corpus with current coverage provenance.
+      count [--json]                    Count the readable compiled single-event corpus.
 
     The dormant parser retains Ed25519 verification, anti-rollback, version-floor,
     byte/count limits, and atomic staging defenses for a future approved channel.
@@ -61,7 +70,7 @@ private func rulesUpdate(args: [String]) async throws {
     }
     let fetcher: RuleChannelFetcher
     do { fetcher = try RuleChannelFetcher(rulesBase: resolveRulesBase(base)) }
-    catch { print("rules update: \(error)"); exit(2) }
+    catch { cliFailure("rules update: \(error)", code: 2) }
 
     let pushedDir = URL(fileURLWithPath: maccrabDataDir())
         .appendingPathComponent("compiled_rules").appendingPathComponent("pushed")
@@ -74,15 +83,11 @@ private func rulesUpdate(args: [String]) async throws {
             print("✓ Rules serial \(serial) is already installed; no files or trust state changed.")
         }
     } catch let e as RuleChannelError {
-        print("rules update refused: \(e)")
-        exit(2)
+        cliFailure("rules update refused: \(e)", code: 2)
     } catch {
         // The most common non-trust failure: the engine's compiled_rules dir is
         // root-owned (release System Extension), so a non-root CLI can't write it.
-        print("rules update failed: \(error)")
-        print("  (If this is a permissions error, the engine's compiled_rules dir is root-owned;")
-        print("   run with sudo, or push the verified rules via the privileged daemon path.)")
-        exit(2)
+        cliFailure("rules update failed: \(error.localizedDescription)", code: 2)
     }
 }
 
@@ -96,7 +101,7 @@ private func rulesCheckUpdates(args: [String]) async throws {
     let fetcher = try RuleChannelFetcher(rulesBase: resolveRulesBase(base))
     let s: RuleChannelFetcher.UpdateStatus
     do { s = try await fetcher.check() }
-    catch { print("rules check-updates: could not fetch or verify the rules manifest: \(error)"); exit(2) }
+    catch { cliFailure("rules check-updates: \(error.localizedDescription)", code: 2) }
 
     if json {
         let payload: [String: Any] = [
@@ -123,8 +128,8 @@ private func rulesStatus() async throws {
     let serial = store.load().rulesManifestSerial
     let pushedDir = URL(fileURLWithPath: maccrabDataDir())
         .appendingPathComponent("compiled_rules").appendingPathComponent("pushed")
-    let installed = (try? FileManager.default.contentsOfDirectory(atPath: pushedDir.path))?
-        .filter { $0.hasSuffix(".json") }.count ?? 0
+    let installed = FileManager.default.fileExists(atPath: pushedDir.path)
+        ? try FileManager.default.contentsOfDirectory(atPath: pushedDir.path).filter { $0.hasSuffix(".json") }.count : 0
     print("Pushed rules:")
     print("  Accepted manifest serial: \(serial.map(String.init) ?? "none")")
     print("  Preserved on-disk rules:   \(installed) (at \(pushedDir.path))")

@@ -2,7 +2,7 @@
 // MacCrabCore
 //
 // Combines FileHasher (SHA-256 of the executable on disk) with
-// CDHashExtractor (SHA-1 CDHash via proc_pidinfo) to produce the
+// CDHashExtractor (the running image's CodeDirectory hash via csops) to produce the
 // full hash fingerprint for a running process.
 
 import Foundation
@@ -15,6 +15,7 @@ import os.log
 /// YARA-like matching, MISP IoC feeds). CDHash identifies the code signature
 /// (useful for Apple's notarization + signing authority records). Both are
 /// typically wanted in enrichment.
+/// The 20-byte CDHash can be SHA-1 or a truncated SHA-256 CodeDirectory hash.
 public actor ProcessHasher {
 
     /// Combined hash fingerprint for a process.
@@ -56,6 +57,8 @@ public actor ProcessHasher {
     /// Runs the two hashes concurrently. Either can return `nil`:
     /// - SHA-256 nil → file missing, over size cap, on a network mount, or I/O error.
     /// - CDHash nil → process not running, not code-signed, or csops unavailable.
+    /// These are independent observations of the supplied path and the current
+    /// PID; they do not establish an atomic process identity across an exec.
     public func hash(pid: Int32, executablePath: String) async -> ProcessHash {
         async let sha256 = fileHasher.hash(path: executablePath)
         async let cdhash = cdHashExtractor.extractCDHash(pid: pid)

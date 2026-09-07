@@ -192,9 +192,9 @@ struct EndToEndFPRateSLOTests {
         let corpus = try JSONDecoder().decode([FPCorpusEvent].self, from: Data(contentsOf: url))
         #expect(corpus.count >= 10, "FP corpus should be seeded (got \(corpus.count))")
 
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
 
         let (sink, store, dir) = try makeRealSink()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -241,9 +241,9 @@ struct EndToEndFPRateSLOTests {
 
     @Test("an untrusted suppressible:false CRITICAL still emits through the real path")
     func untrustedCriticalStillEmits() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         let (sink, store, dir) = try makeRealSink()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -265,9 +265,9 @@ struct EndToEndFPRateSLOTests {
 
     @Test("a curl|bash LOLBin on an Apple shell still emits (Gate-7 execution carve-out)")
     func curlBashLolbinStillEmits() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         let (sink, store, dir) = try makeRealSink()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -291,9 +291,9 @@ struct EndToEndFPRateSLOTests {
 
     @Test("credential theft by a NOTARIZED Developer-ID binary still emits (Gate-8 carve-out)")
     func notarizedCredentialTheftStillEmits() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         let (sink, store, dir) = try makeRealSink()
         defer { try? FileManager.default.removeItem(at: dir) }
 

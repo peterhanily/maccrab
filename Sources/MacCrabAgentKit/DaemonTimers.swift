@@ -1308,7 +1308,7 @@ enum DaemonTimers {
     /// list, preventing a newly added request shape from silently bypassing the
     /// hardened reader.
     static let knownInboxRequestPrefixes = [
-        "suppress-alert-", "unsuppress-alert-", "delete-alert-",
+        "suppress-alert-", "unsuppress-alert-", "delete-alert-", "remove-suppression-",
         "suppress-campaign-", "refresh-intel-", "reload-rules-",
         "llm-config-", "flush-request-", "record-clipboard-",
         "builtin-rule-setting-", "set-daemon-config-", "install-rule-",
@@ -2707,6 +2707,7 @@ enum DaemonTimers {
                     "written_at_unix": nowUnix,
                     "engine_pid": engineIdentity.pid,
                     "engine_started_at_unix": engineIdentity.startedAtUnix,
+                    "engine_uptime_seconds": engineIdentity.uptimeSeconds,
                     "engine_version": engineIdentity.version,
                     "engine_build": engineIdentity.build,
                     "uptime_seconds": uptime,
@@ -3177,6 +3178,8 @@ enum DaemonTimers {
                     "healthy": s.healthy,
                     // v1.21.6-rc.45: a boolean cannot say "never started".
                     "reason": s.reason,
+                    "state": s.state.rawValue,
+                    "enabled": s.enabled,
                 ]
                 if let lt = s.lastTick { d["last_tick_unix"] = lt.timeIntervalSince1970 }
                 if let le = s.lastError { d["last_error"] = le }
@@ -4146,6 +4149,8 @@ enum DaemonTimers {
                     Int64(clamping: journalIndexDiagnostics.fullRebuilds),
                 "append_refreshes_total":
                     Int64(clamping: journalIndexDiagnostics.appendRefreshes),
+                "last_stages_ns": journalIndexDiagnostics.stagesNanoseconds,
+                "last_stages_complete": journalIndexDiagnostics.stagesComplete,
             ]
 
             // v1.22.0 (item 6, measurement): per-owner live-memory pressure.
@@ -4190,6 +4195,7 @@ enum DaemonTimers {
                 "written_at_unix": nowUnix,
                 "engine_pid": engineIdentity.pid,
                 "engine_started_at_unix": engineIdentity.startedAtUnix,
+                "engine_uptime_seconds": engineIdentity.uptimeSeconds,
                 "engine_version": engineIdentity.version,
                 "engine_build": engineIdentity.build,
                 "llm": llmHealthDict,
@@ -4222,6 +4228,7 @@ enum DaemonTimers {
                 "rule_sync": ruleSync,
                 "event_journal_recovery": eventJournalRecovery,
                 "event_journal_index": eventJournalIndexDict,
+                "dns_capture": state.dnsCollector.captureDiagnostics.dictionary,
                 "event_pipeline_live_memory_by_owner":
                     eventPipelineLiveMemoryByOwnerDict,
                 "event_journal_source_size": eventJournalSourceSizeDict,
@@ -4638,7 +4645,7 @@ enum DaemonTimers {
 
             let ruleTelemetryPath = state.supportDir + "/rule_telemetry.json"
             async let ruleWrite: Void = state.ruleEngine
-                .writeTelemetrySnapshot(to: ruleTelemetryPath)
+                .writeTelemetrySnapshot(to: ruleTelemetryPath, engineIdentity: engineIdentity.telemetryIdentity)
 
             let tccSnapshotPath = state.supportDir + "/tcc_snapshot.json"
             async let tccWrite: Void = state.tccMonitor
@@ -4724,12 +4731,20 @@ enum DaemonTimers {
                     maxEntries: maxInboxDrainPerTick
                 )
                 let files = scan.requestNames
+                // A previous SIGHUP may have been refused while runtime work
+                // capacity was full. Retry accepted requests on the existing
+                // poll tick, even after their inbox files have been consumed.
+                if await state.runtimeConfigurationReporter.hasQueuedReloads(),
+                   !(await state.daemonLifecycle.isShuttingDown()) {
+                    kill(getpid(), SIGHUP)
+                }
                 guard !files.isEmpty else { return }
 
                 // Partition by request type so we drain in a defined order
                 // (mutations first, flush last — flush can take seconds).
                 let suppressAlertReqs = files.filter { $0.hasPrefix("suppress-alert-") && $0.hasSuffix(".json") }
                 let unsuppressAlertReqs = files.filter { $0.hasPrefix("unsuppress-alert-") && $0.hasSuffix(".json") }
+                let removeSuppressionReqs = files.filter { $0.hasPrefix("remove-suppression-") && $0.hasSuffix(".json") }
                 let deleteAlertReqs = files.filter { $0.hasPrefix("delete-alert-") && $0.hasSuffix(".json") }
                 let suppressCampaignReqs = files.filter { $0.hasPrefix("suppress-campaign-") && $0.hasSuffix(".json") }
                 let refreshIntelReqs = files.filter { $0.hasPrefix("refresh-intel-") && $0.hasSuffix(".json") }
@@ -4769,6 +4784,7 @@ enum DaemonTimers {
 
                 await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
                 await handleUnsuppressAlertRequests(unsuppressAlertReqs, inboxDir: inboxDir, state: state)
+                await handleRemoveSuppressionRequests(removeSuppressionReqs, inboxDir: inboxDir, state: state)
                 await handleDeleteAlertRequests(deleteAlertReqs, inboxDir: inboxDir, state: state)
                 await handleSuppressCampaignRequests(suppressCampaignReqs, inboxDir: inboxDir, state: state)
                 await handleRefreshIntelRequests(refreshIntelReqs, inboxDir: inboxDir, state: state)
@@ -5238,179 +5254,105 @@ enum DaemonTimers {
         }
     }
 
-    // v1.18 agent control-plane: whitelisted daemon_config keys settable from
-    // the MCP skill. Re-stated here (NOT trusting the MCP) so the daemon is the
-    // authority. Safe tunables vs defense-affecting kill-switches — the MCP
-    // gates the latter behind the higher 'response' tier; the daemon enforces
-    // type + membership regardless.
-    private static let agentSettableConfigKeys: [String: String] = [
-        "behavior_alert_threshold": "double", "behavior_critical_threshold": "double",
-        "statistical_z_threshold": "double", "statistical_min_samples": "int",
-        "usb_poll_interval": "double", "clipboard_poll_interval": "double",
-        "browser_extension_poll_interval": "double", "rootkit_poll_interval": "double",
-        "event_tap_poll_interval": "double", "system_policy_poll_interval": "double",
-        "prompt_injection_confidence": "int", "intent_posterior_threshold": "double",
-        "subscribe_file_open_events": "bool", "subscribe_introspection_events": "bool",
-        "ultrasonic_enabled": "bool",
-        // v1.21.6 (audit DOC-11): the four network-enrichment switches, accepted
-        // ONLY as `false` — see agentDisableOnlyConfigKeys below.
-        "threat_intel_enabled": "bool", "vuln_scan_enabled": "bool",
-        "package_freshness_enabled": "bool", "cert_transparency_enabled": "bool",
-    ]
-
-    /// Keys this plane accepts in the privacy-increasing direction only.
-    ///
-    /// The inbox authorizes on file-owner uid alone, so anything running as the
-    /// console user can drive every verb here. Setting a network-enrichment
-    /// switch to `false` only ever REDUCES egress — harmless for an attacker to
-    /// call, and the thing PRIVACY.md needs a non-root user to be able to do.
-    /// Setting one to `true` would ENABLE egress (cert-transparency publishes
-    /// every domain the host resolves; osv.dev publishes the installed software
-    /// inventory), which is a capability that must not be reachable from a
-    /// uid-only plane. A `true` is refused and audited, not silently dropped.
-    private static let agentDisableOnlyConfigKeys: Set<String> = [
-        "threat_intel_enabled", "vuln_scan_enabled",
-        "package_freshness_enabled", "cert_transparency_enabled",
-    ]
-
-    /// v1.19.1 (audit): detection-preserving safe ranges for agent-settable
-    /// NUMERIC config. Without clamping, an agent (or any console user via the
-    /// inbox) could set a threshold to a value that effectively DISABLES a tier
-    /// — the live audit caught `statistical_z_threshold` pushed to 99 (anomaly
-    /// tier off) with only an audit line, no alert. Requested values outside the
-    /// range are CLAMPED to the nearest bound AND raise a self-protection alert.
-    private static let agentConfigSafeRange: [String: (min: Double, max: Double)] = [
-        "behavior_alert_threshold":        (1, 50),
-        "behavior_critical_threshold":     (1, 100),
-        "statistical_z_threshold":         (1.0, 6.0),
-        "statistical_min_samples":         (10, 1000),
-        "prompt_injection_confidence":     (1, 95),
-        "intent_posterior_threshold":      (0.5, 0.99),
-        "usb_poll_interval":               (1, 300),
-        "clipboard_poll_interval":         (1, 60),
-        "browser_extension_poll_interval": (5, 600),
-        "rootkit_poll_interval":           (10, 600),
-        "event_tap_poll_interval":         (1, 300),
-        "system_policy_poll_interval":     (10, 1800),
-    ]
-
+    // The shared catalog is revalidated here; client validation is never authority.
     private static func handleSetDaemonConfigRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
-        guard !names.isEmpty else { return }
-        let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
+            let requestID = RuntimeConfigurationFiles.requestID(filename: name, operation: "set-daemon-config") ?? UUID()
+            let identity = DaemonProcessIdentity.current.telemetryIdentity
             let uid = requestOwnerUID(at: path)
+            var receipt = RuntimeRequestReceipt(
+                requestID: requestID, operation: "set-daemon-config", state: .rejected,
+                engineIdentity: identity, reason: "Request could not be validated"
+            )
             guard isAuthorizedInboxRequest(uid: uid) else {
+                receipt.reason = "Request owner is not authorized"
+                try? await state.runtimeConfigurationReporter.record(receipt)
                 auditLogInbox(state: state, prefix: "set-daemon-config", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let key = json["key"] as? String,
-                  let kind = agentSettableConfigKeys[key] else {
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let key = object["key"] as? String,
+                  let definition = RuntimeConfigurationContract.byKey[key],
+                  let raw = object["value"] else {
+                receipt.reason = "Request key or value is unavailable"
+                try? await state.runtimeConfigurationReporter.record(receipt)
                 auditLogInbox(state: state, prefix: "set-daemon-config", id: "-", uid: uid, result: "rejected_key")
                 continue
             }
-            // Coerce + validate the value to the declared kind; reject mismatches.
-            var value: Any
-            switch kind {
-            case "bool":
-                guard let b = json["value"] as? Bool else {
-                    auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid, result: "rejected_type")
-                    continue
-                }
-                value = b
-            case "int":
-                guard let i = json["value"] as? Int else {
-                    auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid, result: "rejected_type")
-                    continue
-                }
-                value = i
-            default:
-                if let d = json["value"] as? Double { value = d }
-                else if let i = json["value"] as? Int { value = Double(i) }
-                else {
-                    auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid, result: "rejected_type")
-                    continue
-                }
-            }
-            // Disable-only keys: a `true` here would turn outbound network
-            // enrichment ON from a plane that authorizes on uid alone. Refuse and
-            // audit it — the operator path is the dashboard or the root config.
-            if agentDisableOnlyConfigKeys.contains(key), (value as? Bool) == true {
-                auditLogInbox(state: state, prefix: "set-daemon-config",
-                              id: sanitizeAuditField(key), uid: uid,
-                              result: "rejected_enable_egress")
-                await emitSelfProtectionAlert(
-                    state: state, action: "Network egress enable refused",
-                    detail: "An inbox request tried to set '\(key)' to true, which would enable outbound network calls. The privileged inbox authorizes on uid alone, so it accepts these switches in the disable direction only; the request was refused.")
-                continue
-            }
-            // v1.19.1 (audit): clamp numeric thresholds to a detection-preserving
-            // range so an agent / console user can't disable a tier (e.g. the
-            // live-caught statistical_z_threshold=99). A clamp means the request
-            // tried to weaken detection past the safe bound — make it LOUD.
-            if let range = agentConfigSafeRange[key] {
-                let requested = (value as? Double) ?? Double(value as? Int ?? 0)
-                let clamped = Swift.min(Swift.max(requested, range.min), range.max)
-                if clamped != requested {
-                    value = (kind == "int") ? (Int(clamped.rounded()) as Any) : (clamped as Any)
-                    auditLogInbox(state: state, prefix: "set-daemon-config",
-                                  id: sanitizeAuditField(key), uid: uid,
-                                  result: "clamped \(requested)->\(clamped)")
-                    await emitSelfProtectionAlert(
-                        state: state, action: "Detection threshold clamped",
-                        detail: "Config '\(key)' was requested as \(requested), outside the detection-preserving range [\(range.min), \(range.max)] — clamped to \(clamped). A value past this bound weakens or disables a detection tier.")
-                }
-            }
-            // Merge into daemon_config.json (root-owned). Effect on next config
-            // reload / restart — these keys are read at startup.
-            let cfgPath = state.supportDir + "/daemon_config.json"
-            var cfg: [String: Any] = (try? Data(contentsOf: URL(fileURLWithPath: cfgPath)))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
-            cfg[key] = value
+            var persisted = false
             do {
-                let out = try JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys])
-                let tmp = cfgPath + ".tmp"
-                try out.write(to: URL(fileURLWithPath: tmp))
-                _ = try? fm.removeItem(atPath: cfgPath)
-                try fm.moveItem(atPath: tmp, toPath: cfgPath)
-                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cfgPath)
-                auditLogInbox(state: state, prefix: "set-daemon-config",
-                              id: sanitizeAuditField(key), uid: uid, result: "set=\(value)")
-                // Self-protection: disabling an ES event subscription blinds a
-                // class of kernel telemetry — rare-legitimate, high-impact.
-                if (key == "subscribe_file_open_events" || key == "subscribe_introspection_events"),
-                   (value as? Bool) == false {
-                    await emitSelfProtectionAlert(
-                        state: state, action: "Endpoint Security subscription disabled",
-                        detail: "ES event subscription '\(key)' was set to false (disables a class of kernel telemetry on the next daemon restart)")
+                let requested = try definition.typed(raw)
+                let value = try definition.normalized(requested)
+                receipt = RuntimeRequestReceipt(
+                    requestID: requestID, operation: "set-daemon-config", state: .accepted,
+                    engineIdentity: identity, key: key, requestedValue: requested, acceptedValue: value,
+                    reason: "Validated; awaiting persistence and \(definition.application.rawValue) application"
+                )
+                // Persist acknowledgement before changing the configuration. A
+                // receipt-storage failure refuses the mutation rather than
+                // reporting an unrecorded change as applied.
+                try await state.runtimeConfigurationReporter.record(receipt)
+                if requested != value {
+                    auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid,
+                                  result: "clamped \(requested)->\(value)")
+                    await emitSelfProtectionAlert(state: state, action: "Detection threshold clamped",
+                        detail: "Config '\(key)' was requested as \(requested), outside its documented runtime range; clamped to \(value).")
                 }
-                // Apply the egress switches LIVE rather than on the next reload.
-                // Every other key here is a threshold whose next read is soon
-                // enough, but these are the ones a user reaches for when they
-                // want the network calls to stop NOW — deferring that to a
-                // restart would make `config set … false` look like it worked
-                // while enrichment kept talking. Mirrors the SIGHUP path.
-                if agentDisableOnlyConfigKeys.contains(key), (value as? Bool) == false {
+                let configPath = state.supportDir + "/daemon_config.json"
+                // Only absence means defaults. Never replace unreadable or
+                // invalid configuration with an empty object and lose its keys.
+                var config = try RuntimeConfigurationFiles.readConfigured(at: configPath) ?? [:]
+                config[key] = value.foundationValue
+                config.removeValue(forKey: definition.property)
+                let output = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
+                try SecureFileIO.atomicReplace(at: configPath, data: output, mode: 0o600)
+                persisted = true
+                receipt.updatedAt = Date()
+                receipt.reason = "Persisted; awaiting \(definition.application.rawValue) application"
+                try await state.runtimeConfigurationReporter.record(receipt, supersedingPendingForKey: true)
+                auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid,
+                              result: "accepted request=\(requestID.uuidString) value=\(value)")
+                if (key == "subscribe_file_open_events" || key == "subscribe_introspection_events"), value == .boolean(false) {
+                    await emitSelfProtectionAlert(state: state, action: "Endpoint Security subscription disabled",
+                        detail: "ES policy '\(key)' was saved as false; application requires \(definition.application.rawValue).")
+                }
+                if definition.disableOnly, value == .boolean(false) {
                     switch key {
-                    case "vuln_scan_enabled":         state.vulnScanEnabled = false
+                    case "vuln_scan_enabled": state.vulnScanEnabled = false
                     case "package_freshness_enabled": state.packageFreshnessEnabled = false
                     case "cert_transparency_enabled": state.certTransparencyEnabled = false
                     case "threat_intel_enabled":
-                        // The feed runs its own network loop; flipping the flag
-                        // alone would not stop it.
                         state.threatIntelEnabled = false
                         await state.threatIntel.setNetworkRefresh(false)
                     default: break
                     }
-                    print("[inbox] \(key)=false applied live (egress stopped)")
+                    try await state.runtimeConfigurationReporter.apply([
+                        key: .init(value: value, configuredValue: value, source: "inbox")
+                    ])
+                } else {
+                    // A request for the already applied value can complete
+                    // immediately; other startup-only values remain accepted.
+                    try await state.runtimeConfigurationReporter.apply([:])
                 }
             } catch {
-                print("[inbox] set-daemon-config \(key) write failed: \(error)")
+                receipt.state = persisted ? .accepted : .rejected
+                receipt.updatedAt = Date()
+                receipt.reason = persisted
+                    ? "Configuration was persisted; application confirmation is unavailable: " + String(error.localizedDescription.prefix(200))
+                    : String(error.localizedDescription.prefix(300))
+                try? await state.runtimeConfigurationReporter.record(receipt)
+                auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid,
+                              result: "\(persisted ? "accepted_unconfirmed" : "rejected") request=\(requestID.uuidString)")
+                logger.error("Configuration request could not complete: \(error.localizedDescription)")
+                if definition.disableOnly, (try? definition.typed(raw)) == .boolean(true) {
+                    await emitSelfProtectionAlert(state: state, action: "Network egress enable refused",
+                        detail: "An inbox request tried to enable '\(key)'; this request plane accepts only disabling network enrichment.")
+                }
             }
         }
     }
@@ -5662,6 +5604,55 @@ enum DaemonTimers {
             } catch {
                 print("[inbox] suppress-alert id=\(id) uid=\(uid) failed: \(error)")
                 auditLogInbox(state: state, prefix: "suppress-alert", id: id, uid: uid, result: "failed:\(error)")
+            }
+        }
+    }
+
+    /// This verb only revokes an existing exact-ID allowlist entry. It cannot
+    /// grant suppression, broaden a scope, or rewrite unrelated entry metadata.
+    private static func handleRemoveSuppressionRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { removeInboxEntry(at: path) }
+            let uid = requestOwnerUID(at: path)
+            let requestID = RuntimeConfigurationFiles.requestID(filename: name, operation: "remove-suppression") ?? UUID()
+            var receipt = RuntimeRequestReceipt(requestID: requestID, operation: "remove-suppression",
+                state: .rejected, engineIdentity: DaemonProcessIdentity.current.telemetryIdentity,
+                reason: "Request could not be validated")
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                receipt.reason = "Request owner is not authorized"
+                try? await state.runtimeConfigurationReporter.record(receipt)
+                auditLogInbox(state: state, prefix: "remove-suppression", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let id = readIdRequest(at: path), UUID(uuidString: id) != nil else {
+                receipt.reason = "An exact suppression UUID is required"
+                try? await state.runtimeConfigurationReporter.record(receipt)
+                continue
+            }
+            var persisted = false
+            do {
+                receipt.state = .accepted
+                receipt.reason = "Validated; awaiting saved allowlist removal"
+                try await state.runtimeConfigurationReporter.record(receipt)
+                let removed = try await state.suppressionManager.removePersisted(ids: [id])
+                guard !removed.isEmpty else { throw RuntimeConfigContractError("Suppression ID is no longer present; review current saved state") }
+                persisted = true
+                receipt.state = .applied
+                receipt.reason = "Suppression removal persisted and the running allowlist updated"
+                receipt.updatedAt = Date()
+                try await state.runtimeConfigurationReporter.record(receipt)
+                auditLogInbox(state: state, prefix: "remove-suppression", id: id, uid: uid, result: "applied")
+            } catch {
+                receipt.state = persisted ? .accepted : .rejected
+                receipt.reason = persisted ? "Removal persisted; receipt confirmation is unavailable" : String(error.localizedDescription.prefix(300))
+                receipt.updatedAt = Date()
+                try? await state.runtimeConfigurationReporter.record(receipt)
+                auditLogInbox(state: state, prefix: "remove-suppression", id: id, uid: uid,
+                              result: persisted ? "applied_receipt_unavailable" : "failed")
+                logger.error("Suppression removal status: \(error.localizedDescription)")
             }
         }
     }
@@ -6099,7 +6090,25 @@ enum DaemonTimers {
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 print("[inbox] reload-rules \(name) REJECTED uid=\(uid) (not console-user or root)")
+                let receipt = RuntimeRequestReceipt(
+                    requestID: RuntimeConfigurationFiles.requestID(filename: name, operation: "reload-rules") ?? UUID(),
+                    operation: "reload-rules", state: .rejected,
+                    engineIdentity: DaemonProcessIdentity.current.telemetryIdentity,
+                    reason: "Request owner is not authorized"
+                )
+                try? await state.runtimeConfigurationReporter.record(receipt)
                 auditLogInbox(state: state, prefix: "reload-rules", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            do {
+                try await state.runtimeConfigurationReporter.record(.init(
+                    requestID: RuntimeConfigurationFiles.requestID(filename: name, operation: "reload-rules") ?? UUID(),
+                    operation: "reload-rules", state: .accepted,
+                    engineIdentity: DaemonProcessIdentity.current.telemetryIdentity,
+                    reason: "Queued for the rule reload handler; completion is not yet confirmed"
+                ))
+            } catch {
+                logger.error("Rule reload request status could not be persisted; request was not applied: \(error.localizedDescription)")
                 continue
             }
             anyAuthorized = true

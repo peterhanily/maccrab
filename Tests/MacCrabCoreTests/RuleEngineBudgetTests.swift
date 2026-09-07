@@ -34,10 +34,10 @@ struct RuleEngineBudgetTests {
 
     @Test("a rule that repeatedly blows the eval budget is auto-disabled and stops firing")
     func autoDisableStopsFiring() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         // Tiny budget: every eval is "over budget"; disable after 3 of them.
         let engine = RuleEngine(slowRuleThresholdNs: 1, autoDisableMaxBreaches: 3)
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         let before = await engine.ruleCount
         let nvram = "d1a2b3c4-0342-4000-a000-000000000342"
 
@@ -56,10 +56,10 @@ struct RuleEngineBudgetTests {
 
     @Test("rules under budget are never auto-disabled")
     func underBudgetSurvives() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         // Default 50ms budget — normal evals are microseconds, never over budget.
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         for _ in 0..<5 { _ = await engine.evaluate(nvramEvent()) }
         #expect(await engine.autoDisabledRules.isEmpty, "fast rules must never be auto-disabled")
         #expect(await engine.evaluate(nvramEvent()).contains { $0.ruleId == "d1a2b3c4-0342-4000-a000-000000000342" })

@@ -1929,7 +1929,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// reported as stale (`true`), never as fresh — the framework must never
     /// present an unknown as a live/green engine.
     public func isStale(now: Double, maxAge: Double) -> Bool {
-        guard let age = ageSeconds(now: now) else { return true }
-        return age > maxAge
+        guard let age = ageSeconds(now: now), age.isFinite, maxAge.isFinite, maxAge >= 0 else { return true }
+        return age < 0 || age > maxAge
     }
 }

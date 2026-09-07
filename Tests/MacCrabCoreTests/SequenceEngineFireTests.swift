@@ -364,8 +364,8 @@ struct SequenceEngineFireTests {
         // of 41 sequence rules shipped dead before v1.18. Asserting
         // loaded == compiled-file-count converts that silent drop into a test
         // failure.
-        ensureRulesCompiled()
-        let seqDir = URL(fileURLWithPath: "/tmp/maccrab_v3/sequences")
+        try ensureRulesCompiled()
+        let seqDir = compiledRulesDirectory.appendingPathComponent("sequences")
         guard FileManager.default.fileExists(atPath: seqDir.path) else {
             Issue.record("compiled sequence dir missing — ensureRulesCompiled() did not produce it")
             return

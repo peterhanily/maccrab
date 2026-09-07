@@ -152,8 +152,8 @@ struct CorrDetectionAuditFixTests {
 
     @Test("#276: a clean reload re-enables a runtime-auto-disabled rule (self-heal)")
     func reloadSelfHealsAutoDisabled() async throws {
-        ensureRulesCompiled()
-        let dir = URL(fileURLWithPath: "/tmp/maccrab_v3")
+        try ensureRulesCompiled()
+        let dir = compiledRulesDirectory
         // Tiny budget: every eval is over budget; disable after 3 in a row.
         let engine = RuleEngine(slowRuleThresholdNs: 1, autoDisableMaxBreaches: 3)
         _ = try await engine.loadRules(from: dir)
@@ -171,8 +171,8 @@ struct CorrDetectionAuditFixTests {
 
     @Test("#276: an operator-disabled rule STILL survives reload (auto vs operator distinction)")
     func operatorDisableSurvivesReload() async throws {
-        ensureRulesCompiled()
-        let dir = URL(fileURLWithPath: "/tmp/maccrab_v3")
+        try ensureRulesCompiled()
+        let dir = compiledRulesDirectory
         let engine = RuleEngine()  // default budget — nothing auto-disables
         _ = try await engine.loadRules(from: dir)
 
@@ -184,9 +184,9 @@ struct CorrDetectionAuditFixTests {
 
     @Test("#276: an explicit re-enable clears the guard and lets the rule fire again")
     func explicitReenableClearsGuard() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine(slowRuleThresholdNs: 1, autoDisableMaxBreaches: 3)
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
 
         for _ in 0..<4 { _ = await engine.evaluate(nvramEvent()) }
         #expect(await engine.autoDisabledRules.contains(nvramRuleId))

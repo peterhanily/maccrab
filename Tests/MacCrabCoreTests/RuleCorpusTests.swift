@@ -84,7 +84,7 @@ struct RuleCorpusTests {
 
     @Test("every corpus fixture: a positive fires its rule, a negative does not")
     func corpus() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("fixtures/rule_corpus.json")
@@ -92,7 +92,7 @@ struct RuleCorpusTests {
         #expect(fixtures.count >= 6, "corpus should be seeded (got \(fixtures.count))")
 
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
 
         for f in fixtures {
             // Builder supports process_creation fixtures and (when `file` is

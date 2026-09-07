@@ -1218,6 +1218,9 @@ public actor EventStore {
     private var journalIntegrityFailures = 0
     private var verifiedJournalSummaries: [VerifiedJournalSummary] = []
     private var journalExactQueryBlockDecodes: UInt64 = 0
+    /// Completed base authentications, including startup verification. Kept
+    /// internal so ordinary cold-read tests can pin redundant decode work.
+    private(set) var journalBaseBlockDecodesForTesting: UInt64 = 0
     private var projectionOwnedUpperBoundBytes: Int64?
     private var projectionBlocksSincePhysicalMeasure = 0
     private var projectionDBStatProbeCount: UInt64 = 0
@@ -2576,6 +2579,16 @@ public actor EventStore {
                 journalTransitionReady = try transitionBoundaryIsDrained()
             }
             func installRollbackBarrier() throws -> Bool {
+                guard try transitionCanStartNextStatement() else { return false }
+                try Self.exec(handle, "BEGIN IMMEDIATE TRANSACTION")
+                // Every inventory and sizing query below observes the same
+                // serialized schema that will be changed. Any early error
+                // releases the lock without leaving a partial barrier.
+                defer {
+                    if sqlite3_get_autocommit(handle) == 0 {
+                        try? Self.exec(handle, "ROLLBACK")
+                    }
+                }
                 if let legacyAlerts = try Self.schemaObject(
                     on: handle,
                     named: "alerts"
@@ -2613,6 +2626,7 @@ public actor EventStore {
                         on: handle,
                         requireAllGuards: false
                     )
+                    try Self.exec(handle, "COMMIT")
                     return true
                 }
                 var sizeStatement: OpaquePointer?
@@ -2663,28 +2677,14 @@ public actor EventStore {
                         maximumTreePathPageTouches:
                             8 + missingGuards.count
                     )
-                let reserve = admission?.transactionReserveBytes
-                    ?? SQLitePersistentStorePolicy.eventTransactionReserveBytes
-                guard estimate <= reserve,
-                      try transitionCanStartNextStatement() else {
-                    return false
-                }
-                if var current = admission {
-                    try current.admitMaintenanceWrite(
-                        estimatedTransactionBytes: estimate
-                    )
-                    admission = current
-                }
-                try Self.exec(handle, "BEGIN IMMEDIATE TRANSACTION")
                 do {
-                    // The earlier probe happened before SQLite waited for the
-                    // cross-process writer lock. Re-measure the complete
-                    // rollback-barrier transaction under that lock before its
-                    // first schema mutation.
+                    // A large legacy index needs a schema budget, not the
+                    // small fixed reserve used for ordinary event writes.
+                    // Keep the entire drop/view/guards transaction bounded by
+                    // fresh family and free-space measurements under this lock.
                     if var current = admission {
-                        try current.admitSerializedWrite(
+                        try current.admitSerializedSchemaWrite(
                             estimatedTransactionBytes: estimate,
-                            maintenance: true,
                             on: handle
                         )
                         admission = current
@@ -3032,8 +3032,9 @@ public actor EventStore {
         // BUSY/LOCKED/PERM/READONLY/IOERR without parsing a message. Swallowing
         // one here would let daemon recovery make the wrong evidence decision.
         if writerInitializationAllowed {
-            // v1.12.0: skip the per-init quick_check — it's a 1–2 s PRAGMA
-            // on a large events.db. A deferred task runs it after startup.
+            // Full SQLite quick_check is an explicit maintenance operation.
+            // Startup validates journal evidence and schema separately; no
+            // deferred quick_check task is scheduled by the daemon.
             try SchemaMigrator.run(
                 on: handle,
                 migrations: Self.schemaMigrations,
@@ -3522,14 +3523,11 @@ public actor EventStore {
         self.insertFilter = filter
     }
 
-    /// Run SQLite `PRAGMA quick_check` on the open handle, deferred
-    /// off the daemon boot path. EventStore.init now constructs with
-    /// `skipQuickCheck: true` — call this from a background Task once
-    /// boot completes. Logs structural-corruption findings; does not
-    /// throw, since the daemon has no recovery path from corruption
-    /// at this layer anyway (real corruption surfaces as SQLITE_CORRUPT
-    /// on actual queries and the daemon's existing error handlers take
-    /// over from there).
+    /// Run an explicitly requested SQLite `PRAGMA quick_check` on this handle.
+    /// This diagnostic is not scheduled automatically: it occupies the store
+    /// actor while running. Startup performs the journal/schema validation
+    /// required before producers start. Findings here are logged; callers
+    /// needing a throwing diagnostic can use SchemaMigrator.quickCheck.
     public func runQuickCheck() {
         guard let db = self.db else { return }
         do {
@@ -3539,7 +3537,7 @@ public actor EventStore {
             }
         } catch {
             Logger(subsystem: "com.maccrab.storage", category: "event-store")
-                .warning("Deferred quick_check failed: \(error.localizedDescription, privacy: .public)")
+                .warning("Requested quick_check failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -5043,19 +5041,30 @@ public actor EventStore {
     private var journalIndexAppendRefreshesTotal: UInt64 = 0
     private var journalIndexLastRefreshNanoseconds: UInt64 = 0
     private var journalIndexLastSlowLogUptimeNanoseconds: UInt64 = 0
+    private var journalIndexStageNanoseconds: [String: UInt64] = [:]
+    private var journalIndexStagesComplete = false
 
     /// Refresh cost, for the heartbeat and for tests.
     public func journalIndexRefreshDiagnostics() -> (
         refreshes: UInt64, slowRefreshes: UInt64, lastNanoseconds: UInt64,
-        fullRebuilds: UInt64, appendRefreshes: UInt64
+        fullRebuilds: UInt64, appendRefreshes: UInt64,
+        stagesNanoseconds: [String: UInt64], stagesComplete: Bool
     ) {
         (
             journalIndexRefreshesTotal,
             journalIndexSlowRefreshesTotal,
             journalIndexLastRefreshNanoseconds,
             journalIndexFullRebuildsTotal,
-            journalIndexAppendRefreshesTotal
+            journalIndexAppendRefreshesTotal,
+            journalIndexStageNanoseconds,
+            journalIndexStagesComplete
         )
+    }
+
+    private func recordJournalIndexStage(_ stage: String, started: UInt64) {
+        let elapsed = DispatchTime.now().uptimeNanoseconds &- started
+        let sum = journalIndexStageNanoseconds[stage, default: 0].addingReportingOverflow(elapsed)
+        journalIndexStageNanoseconds[stage] = sum.overflow ? .max : sum.partialValue
     }
 
     private func ensureJournalIndex() throws {
@@ -5274,6 +5283,8 @@ public actor EventStore {
             journalIndexFullRebuildsTotal &+= 1
         }
         let maximumIndexEvents = Self.journalInMemoryLocationLimit
+        journalIndexStageNanoseconds = [:]
+        journalIndexStagesComplete = false
         if !appendOnlyRefresh {
             let countStatement = try prepare(
                 "SELECT COALESCE(SUM(event_count), 0) FROM event_journal_blocks"
@@ -5320,6 +5331,8 @@ public actor EventStore {
             var batch: [ScannedJournalRow] = []
             batch.reserveCapacity(Self.journalScanBatchBlocks)
             do {
+                let stageStarted = DispatchTime.now().uptimeNanoseconds
+                defer { recordJournalIndexStage("metadata_scan", started: stageStarted) }
                 let statement = try prepare(
                     """
                     SELECT block_id, min_timestamp, max_timestamp, retained_until,
@@ -5544,6 +5557,8 @@ public actor EventStore {
                 let blockID = row.blockID
                 let decodedBlock: OwnedJournalBlock
                 do {
+                    let stageStarted = DispatchTime.now().uptimeNanoseconds
+                    defer { recordJournalIndexStage("base_authentication", started: stageStarted) }
                     decodedBlock = try loadJournalBlock(blockID: blockID)
                 } catch {
                     journalIntegrityFailures += 1
@@ -5559,6 +5574,8 @@ public actor EventStore {
                     )
                 }
                 do {
+                    let stageStarted = DispatchTime.now().uptimeNanoseconds
+                    defer { recordJournalIndexStage("poison_integrity", started: stageStarted) }
                     try validatePoisonIntegrity(
                         blockID: blockID,
                         baseEvents: decodedBlock.events
@@ -5568,7 +5585,12 @@ public actor EventStore {
                     throw error
                 }
                 do {
-                    let exact = try loadExactJournalBlock(blockID: blockID)
+                    let stageStarted = DispatchTime.now().uptimeNanoseconds
+                    defer { recordJournalIndexStage("overlays_and_projection", started: stageStarted) }
+                    let exact = try loadExactJournalBlock(
+                        blockID: blockID,
+                        authenticatedBase: decodedBlock
+                    )
                     try validateProjectionIntegrity(
                         blockID: blockID,
                         admissionBucket: row.admissionBucket,
@@ -5590,6 +5612,7 @@ public actor EventStore {
                         metadata: row.storedSummary
                     )
                 )
+                let populationStarted = DispatchTime.now().uptimeNanoseconds
                 try row.roster.withUnsafeBytes { bytes in
                     for ordinal in 0..<row.count {
                         let id = try Self.uuid(
@@ -5623,6 +5646,7 @@ public actor EventStore {
                         }
                     }
                 }
+                recordJournalIndexStage("packed_index_population", started: populationStarted)
             }
             if batch.count < Self.journalScanBatchBlocks { break scanLoop }
         }
@@ -5634,6 +5658,8 @@ public actor EventStore {
             )
         }
         if !appendOnlyRefresh {
+            let stageStarted = DispatchTime.now().uptimeNanoseconds
+            defer { recordJournalIndexStage("packed_index_sort", started: stageStarted) }
             journalBaseLocations.sort { $0.precedes($1) }
         }
         if !appendOnlyRefresh, journalBaseLocations.count > 1 {
@@ -5649,12 +5675,16 @@ public actor EventStore {
         }
         if !appendOnlyRefresh {
             do {
+                let stageStarted = DispatchTime.now().uptimeNanoseconds
+                defer { recordJournalIndexStage("global_terminal_integrity", started: stageStarted) }
                 try validateTerminalRevisionIntegrity()
             } catch {
                 journalIntegrityFailures += 1
                 throw error
             }
             do {
+                let stageStarted = DispatchTime.now().uptimeNanoseconds
+                defer { recordJournalIndexStage("global_projection_and_fts", started: stageStarted) }
                 try validateGlobalProjectionCoverage()
             } catch {
                 journalIntegrityFailures += 1
@@ -5666,6 +5696,7 @@ public actor EventStore {
         journalIndexedBlockCount = blockCount
         journalIndexedMinimumBlockID = minimumBlockID
         journalIndexedMaximumBlockID = maximumBlockID
+        journalIndexStagesComplete = true
     }
 
     private func indexedJournalLocation(
@@ -6022,6 +6053,7 @@ public actor EventStore {
                 }
             }
         }
+        journalBaseBlockDecodesForTesting &+= 1
         return block
     }
 
@@ -7134,6 +7166,21 @@ public actor EventStore {
         blockID: Int64
     ) throws -> ExactJournalBlock {
         let baseBlock = try loadJournalBlock(blockID: blockID)
+        return try loadExactJournalBlock(
+            blockID: blockID,
+            authenticatedBase: baseBlock
+        )
+    }
+
+    /// Reuse a base authenticated for this block in the same synchronous actor
+    /// turn. Startup already retains these owned records for summary checking;
+    /// decoding them again would repeat I/O and charge a second Event graph.
+    /// All overlay and poison validation still runs, and the returned exact
+    /// block retains the original base leases alongside its overlay leases.
+    private func loadExactJournalBlock(
+        blockID: Int64,
+        authenticatedBase baseBlock: OwnedJournalBlock
+    ) throws -> ExactJournalBlock {
         var events = baseBlock.events
         let baseEvents = events
         var ownershipLeasesByOrdinal = baseBlock.records.map {

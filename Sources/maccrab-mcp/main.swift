@@ -915,11 +915,13 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "get_daemon_config",
-        "description": "Read-only. Report the effective daemon_config.json values (all keys, or one if 'key' is given), like `maccrabctl config get`. The companion to set_daemon_config.",
+        "description": "Read-only JSON schema 1. Read configured values/defaults, effective runtime tunables with effective:true, or a durable config/reload outcome with request_id. Configured values are not an applied-state claim.",
         "inputSchema": [
             "type": "object",
             "properties": [
                 "key": ["type": "string", "description": "A single config key to read (optional; omit for all)."] as [String: Any],
+                "effective": ["type": "boolean", "description": "Read applied runtime tunables, source, generation and current-epoch status."],
+                "request_id": ["type": "string", "description": "Read a durable config or reload request outcome by UUID."],
             ] as [String: Any],
         ] as [String: Any],
     ],
@@ -942,7 +944,7 @@ let tools: [[String: Any]] = [
     // ReadParityTools.swift. All read-only, so none is capability-gated.
     [
         "name": "list_rules",
-        "description": "List the compiled Sigma detection corpus (id, title, level, tags), annotated with whether each rule is actually LOADED under the active rule_profile and whether it has ever been evaluated or matched. Most rules ship as 'experimental' and are NOT loaded under the default profile, so a rule appearing here does not mean it is running — the state field says which. Read-only. Complements list_builtin_rules (the separate maccrab.* built-in set).",
+        "description": "Read-only JSON schema 1 compiled single-event inventory with engine identity, telemetry age and coverage: unknown, disabled, unobserved, quiet or matched. Current coverage requires a fresh same-epoch snapshot. Complements the separate list_builtin_rules catalog.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -950,6 +952,7 @@ let tools: [[String: Any]] = [
                 "tactic": ["type": "string", "description": "substring match against the rule's tags, e.g. 'credential_access' or 'attack.t1555'"],
                 "search": ["type": "string", "description": "substring match against title or rule id"],
                 "limit": ["type": "integer", "description": "max rules to return (1-500, default 100)"],
+                "offset": ["type": "integer", "description": "Zero-based offset into the filtered rule inventory; next_offset is returned."],
             ],
         ] as [String: Any],
     ],
@@ -1032,10 +1035,12 @@ let tools: [[String: Any]] = [
         "inputSchema": [
             "type": "object",
             "properties": [
-                "key": ["type": "string", "description": "an allowed daemon_config key (call with an invalid key to see the allow-list)"],
+                "key": ["type": "string", "enum": RuntimeConfigurationContract.definitions
+                    .filter { $0.application != .unsupported }.map(\.key),
+                    "description": "A supported runtime-tunable key; config schema documents its type and bounds."],
                 "value": [
                     "description": "number, integer, or boolean matching the key's type (server coerces + validates per key)",
-                    "oneOf": [["type": "number"], ["type": "integer"], ["type": "boolean"]],
+                    "oneOf": [["type": "number"], ["type": "boolean"]],
                 ] as [String: Any],
             ],
             "required": ["key", "value"],
@@ -1102,9 +1107,9 @@ actor SuppressBudget {
 }
 let suppressBudget = SuppressBudget()
 
-// v1.18: resolve the trace store path ONCE (writer-aware) instead of per
-// handler, so the chosen dir can't flip between calls.
-let traceGraphPath = resolveTraceGraphPath()
+// Every evidence store in this session belongs to the once-selected engine.
+// A missing selected graph is unavailable; another engine is not a fallback.
+let traceGraphPath = dataDir + "/tracegraph.db"
 
 func handleToolCall(name: String, args: [String: Any]) async -> Any {
     // Dynamic manifest tools cannot live in the exhaustive static authority
@@ -1329,6 +1334,9 @@ func runMaccrabctl(_ args: [String]) -> (status: Int32, stdout: String, stderr: 
     let p = Process()
     p.executableURL = URL(fileURLWithPath: bin)
     p.arguments = args
+    var environment = Foundation.ProcessInfo.processInfo.environment
+    environment["MACCRAB_DATA_DIR"] = dataDir
+    p.environment = environment
     let outPipe = Pipe(); let errPipe = Pipe()
     p.standardOutput = outPipe
     p.standardError = errPipe
@@ -1472,8 +1480,12 @@ func handleForensicsPinPlugin(_ args: [String: Any]) -> Any {
 }
 
 func handleGetDaemonConfig(_ args: [String: Any]) -> Any {
-    var argv = ["config", "get"]
-    if let key = args["key"] as? String, !key.isEmpty { argv.append(key) }
+    var argv = ["config", (args["effective"] as? Bool == true) ? "effective" : "get"]
+    if let requestID = args["request_id"] as? String {
+        guard UUID(uuidString: requestID) != nil else { return toolError("request_id must be a UUID") }
+        argv = ["config", "status", requestID]
+    } else if let key = args["key"] as? String, !key.isEmpty { argv.append(key) }
+    argv.append("--json")
     guard let r = runMaccrabctl(argv) else {
         return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
     }
@@ -2760,135 +2772,7 @@ func resolveDaemonLiveness(dataDir: String, now: Date = Date()) -> DaemonLivenes
 }
 
 func handleGetStatus() async -> Any {
-    let fm = FileManager.default
-    let dbPath = dataDir + "/events.db"
-    let dbExists = fm.fileExists(atPath: dbPath)
-    let liveness = resolveDaemonLiveness(dataDir: dataDir)
-
-    var lines: [String] = ["MacCrab Status"]
-    lines.append("═══════════════════════════════════")
-    switch liveness {
-    case .running: lines.append("Daemon: Running")
-    case .offline: lines.append("Daemon: Offline")
-    case .unknown: lines.append("Daemon: Unknown (no recent heartbeat; database has an active WAL)")
-    }
-    lines.append("Database: \(dbExists ? dbPath : "Not found")")
-
-    if dbExists {
-        let size = (try? fm.attributesOfItem(atPath: dbPath))?[.size] as? UInt64 ?? 0
-        lines.append("DB Size: \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))")
-    }
-
-    do {
-        let eventStore = try openMCPEventStoreForReading(directory: dataDir)
-        let alertStore = try openMCPAlertStoreForReading(directory: dataDir)
-        let eventCount = try await eventStore.count()
-        let alertCount = try await alertStore.count()
-        lines.append("Total Events: \(eventCount)")
-        lines.append("Total Alerts: \(alertCount)")
-    } catch {
-        lines.append(
-            "Evidence counts: unavailable — "
-                + error.localizedDescription
-        )
-    }
-
-    // Count compiled single-event rules (exclude manifest.json — it is
-    // build-time metadata, not a rule; counting it reported 439 vs the true
-    // 438 the engine loads).
-    let rulesDir = dataDir + "/compiled_rules"
-    let ruleCount = (try? fm.contentsOfDirectory(atPath: rulesDir))?
-        .filter { $0.hasSuffix(".json") && $0 != "manifest.json" }.count ?? 0
-
-    // Report EFFECTIVE coverage, not the on-disk file count. Under the default
-    // `stable` profile these diverge sharply (~438 compiled / ~87 enabled), and
-    // this is the tool every agent posture check starts with — reporting the file
-    // count alone overstated active detection roughly 5x. The heartbeat is the
-    // daemon's own account and is world-readable; fall back to the file count
-    // only when it is missing or stale.
-    let hb = (try? Data(contentsOf: URL(fileURLWithPath: dataDir + "/heartbeat_rich.json")))
-        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-    let typedHeartbeat = HeartbeatSnapshot.readFreshest(supportDirs: [dataDir])
-    if let hb, let active = hb["rules_active"] as? Int, let loaded = hb["rules_loaded"] as? Int {
-        let profile = (hb["rule_profile"] as? String) ?? "stable"
-        lines.append("Rules: \(active) enabled / \(loaded) compiled (rule_profile: \(profile))")
-        if active < loaded {
-            lines.append("  \(loaded - active) rules are compiled but NOT evaluated under this profile.")
-        }
-    } else {
-        lines.append("Rules Compiled: \(ruleCount)  (enabled count unavailable — daemon heartbeat not readable)")
-    }
-
-    if let heartbeat = hb,
-       let storage = heartbeat["traces_storage_admission"] as? [String: Any] {
-        let blocked = storage["blocked"] as? Bool ?? false
-        let enabled = storage["enabled"] as? Bool ?? false
-        let storeAvailable = storage["store_available"] as? Bool
-        let startupBlocked = storage["startup_blocked"] as? Bool ?? false
-        let reason = (storage["reason"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            ?? "reason not reported"
-
-        if reason == "receiver_disabled" && !blocked {
-            lines.append("Agent Trace DB: Receiver disabled")
-        } else if blocked || (enabled && storeAvailable == false) {
-            let phase = startupBlocked ? "paused at startup" : "persistence paused"
-            lines.append("Agent Trace DB: \(phase) (\(reason))")
-            lines.append("  Unauthenticated/self-reported OTLP spans are not being recorded; kernel detection continues.")
-        } else {
-            lines.append("Agent Trace DB: Active (unauthenticated/self-reported OTLP)")
-        }
-    }
-
-    if let storage = typedHeartbeat?.traceGraphStorageAdmission {
-        lines.append(contentsOf: traceGraphPersistenceStatusLines(storage))
-    }
-
-    if let llm = typedHeartbeat?.llm {
-        lines.append(contentsOf: llmRuntimeOperatorStatusLines(llm))
-    }
-
-    if let budget = typedHeartbeat?.alertEvidenceBudget {
-        lines.append(contentsOf: alertEvidenceBudgetStatusLines(budget))
-    }
-
-    if let typedHeartbeat {
-        lines.append(contentsOf: workLifecycleOperatorStatusLines(typedHeartbeat))
-        if let otlp = typedHeartbeat.otlpReceiverLifecycle {
-            lines.append(contentsOf: otlpReceiverLifecycleOperatorStatusLines(otlp))
-        }
-    }
-
-    // Multi-event detection continuity must be visible to the same agent that
-    // asks whether MacCrab is healthy. A live daemon and current checkpoint do
-    // not compensate for runtime partial/pending eviction or weight drift.
-    if let heartbeat = hb,
-       let checkpoint = heartbeat["sequence_checkpoint"] as? [String: Any] {
-        let runtimeMaintained = heartbeat["sequence_state_continuity_maintained"] as? Bool
-        let rpoMaintained = checkpoint["crash_rpo_bound_currently_maintained"] as? Bool
-        let carrierValid = checkpoint["durable_carrier_valid"] as? Bool
-        let restoreStatus = checkpoint["restore_status"] as? String ?? "unknown"
-        if runtimeMaintained == false {
-            let reason = heartbeat["sequence_state_continuity_detail"] as? String
-                ?? "runtime state loss or accounting drift"
-            lines.append("Sequence State: Runtime continuity degraded (\(reason))")
-            lines.append("  Some in-flight multi-event detections were lost or cannot be accounted for exactly.")
-        } else if carrierValid == false || rpoMaintained == false || restoreStatus == "rejected" {
-            lines.append("Sequence State: Restart continuity degraded")
-            lines.append("  Detection continues, but in-flight multi-event state is not currently restart-safe.")
-        } else if rpoMaintained == true {
-            lines.append("Sequence State: Restart-safe")
-            if let invalidations = checkpoint["carrier_invalidations_total"] as? NSNumber,
-               invalidations.uint64Value > 0 {
-                let reason = checkpoint["last_carrier_invalidation_reason"] as? String
-                    ?? "reason unavailable"
-                lines.append("  Recovered carrier invalidations: \(invalidations.uint64Value) (last: \(reason)).")
-            }
-        } else {
-            lines.append("Sequence State: Status unavailable")
-        }
-    }
-
-    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+    await mcpRuntimeStatus(directory: dataDir)
 }
 
 func handleHunt(_ args: [String: Any]) async -> Any {
@@ -3210,7 +3094,6 @@ func handleScanText(_ args: [String: Any]) async -> Any {
 /// Reader for `traces.db`. Before v1.21.6 NO MCP tool could see a span — the
 /// store had exactly one consumer in the whole product, the dashboard tab.
 func handleGetAgentSpans(_ args: [String: Any]) async -> Any {
-    let dataDir = resolveDataDir()
     let path = dataDir + "/traces.db"
     guard FileManager.default.fileExists(atPath: path) else {
         return toolError("No agent-trace store at \(path). Agent Traces is opt-in — see docs/AGENT_TRACES.md.")
@@ -3268,34 +3151,6 @@ func handleGetAgentSpans(_ args: [String: Any]) async -> Any {
 }
 
 // MARK: - v1.10 TraceGraph handlers
-
-/// Probe likely paths for the tracegraph.db. Same logic as
-/// `resolveDataDir()` for events/alerts but checks both system and
-/// user app-support locations.
-private func resolveTraceGraphPath() -> String {
-    let userDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-        .first?.appendingPathComponent("MacCrab").path
-        ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-    let systemDir = "/Library/Application Support/MacCrab"
-    // v1.18: deterministic, writer-aware resolution. A `-wal` sidecar means
-    // the daemon is actively writing that store; prefer it (system/root dir
-    // first, then user/dev dir) instead of racing on newest mtime, which
-    // could flip the chosen store between calls. Newest-mtime is only the
-    // fallback when no live writer is detectable.
-    let fm = FileManager.default
-    for dir in [systemDir, userDir] where fm.fileExists(atPath: dir + "/tracegraph.db-wal") {
-        return dir + "/tracegraph.db"
-    }
-    let candidates = [dataDir, userDir, systemDir]
-    let chosen = candidates
-        .map { dir -> (String, Date) in
-            let mtime = (try? fm
-                .attributesOfItem(atPath: dir + "/tracegraph.db"))?[.modificationDate] as? Date
-            return (dir, mtime ?? .distantPast)
-        }
-        .max { $0.1 < $1.1 }?.0 ?? dataDir
-    return chosen + "/tracegraph.db"
-}
 
 func handleGetTraces(_ args: [String: Any]) async -> Any {
     let limit = min(max(args["limit"] as? Int ?? 25, 1), 200)
@@ -4234,7 +4089,7 @@ func handleForensicsPostureFindings(_ args: [String: Any]) async -> Any {
 
 /// Tiny JSON stringifier. Matches the existing handlers' habit of
 /// returning a JSON-encoded string as the tool result's text body.
-private func jsonStringify(_ obj: Any) -> String {
+func jsonStringify(_ obj: Any) -> String {
     guard let data = try? JSONSerialization.data(
         withJSONObject: obj,
         options: [.prettyPrinted, .sortedKeys]

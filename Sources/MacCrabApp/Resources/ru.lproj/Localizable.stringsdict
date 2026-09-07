@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>findings.findingCount</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>few</key>
+			<string>%1$lld результата</string>
+			<key>many</key>
+			<string>%1$lld результатов</string>
+			<key>one</key>
+			<string>%1$lld результат</string>
+			<key>other</key>
+			<string>%1$lld результата</string>
+		</dict>
+	</dict>
+	<key>findings.skippedNote</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>few</key>
+			<string>Не удалось прочитать сканирования: %1$lld. Они пропущены. Откройте их на вкладке «Сканирования», чтобы узнать причину.</string>
+			<key>many</key>
+			<string>Не удалось прочитать сканирования: %1$lld. Они пропущены. Откройте их на вкладке «Сканирования», чтобы узнать причину.</string>
+			<key>one</key>
+			<string>Не удалось прочитать сканирование: %1$lld. Оно пропущено. Откройте его на вкладке «Сканирования», чтобы узнать причину.</string>
+			<key>other</key>
+			<string>Не удалось прочитать сканирования: %1$lld. Они пропущены. Откройте их на вкладке «Сканирования», чтобы узнать причину.</string>
+		</dict>
+	</dict>
+	<key>kit.footerSummary</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>few</key>
+			<string>%1$lld сканера · v%2$@ · %3$@</string>
+			<key>many</key>
+			<string>%1$lld сканеров · v%2$@ · %3$@</string>
+			<key>one</key>
+			<string>%1$lld сканер · v%2$@ · %3$@</string>
+			<key>other</key>
+			<string>%1$lld сканера · v%2$@ · %3$@</string>
+		</dict>
+	</dict>
+	<key>overview.crab.quipCritical</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>few</key>
+			<string>MacCrab встревожен! %1$lld активные критические кампании.</string>
+			<key>many</key>
+			<string>MacCrab встревожен! %1$lld активных критических кампаний.</string>
+			<key>one</key>
+			<string>MacCrab встревожен! %1$lld активная критическая кампания.</string>
+			<key>other</key>
+			<string>MacCrab встревожен! %1$lld активной критической кампании.</string>
+		</dict>
+	</dict>
+	<key>pastScans.bulkDeleteConfirm</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>few</key>
+			<string>Удалить %1$lld сканирования</string>
+			<key>many</key>
+			<string>Удалить %1$lld сканирований</string>
+			<key>one</key>
+			<string>Удалить %1$lld сканирование</string>
+			<key>other</key>
+			<string>Удалить %1$lld сканирования</string>
+		</dict>
+	</dict>
+	<key>pastScans.bulkDeleteTitle</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>few</key>
+			<string>Удалить %1$lld сканирования навсегда?</string>
+			<key>many</key>
+			<string>Удалить %1$lld сканирований навсегда?</string>
+			<key>one</key>
+			<string>Удалить %1$lld сканирование навсегда?</string>
+			<key>other</key>
+			<string>Удалить %1$lld сканирования навсегда?</string>
+		</dict>
+	</dict>
+	<key>pastScans.bulkDeletedToast</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>few</key>
+			<string>Удалено %1$lld сканирования · освобождено %2$@.</string>
+			<key>many</key>
+			<string>Удалено %1$lld сканирований · освобождено %2$@.</string>
+			<key>one</key>
+			<string>Удалено %1$lld сканирование · освобождено %2$@.</string>
+			<key>other</key>
+			<string>Удалено %1$lld сканирования · освобождено %2$@.</string>
+		</dict>
+	</dict>
+	<key>scans.rowsCollected</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>few</key>
+			<string>· собрано строк: %1$lld</string>
+			<key>many</key>
+			<string>· собрано строк: %1$lld</string>
+			<key>one</key>
+			<string>· собрано строк: %1$lld</string>
+			<key>other</key>
+			<string>· собрано строк: %1$lld</string>
+		</dict>
+	</dict>
+	<key>scans.scannersDidntRun</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>few</key>
+			<string>Не запущены %1$lld сканера:</string>
+			<key>many</key>
+			<string>Не запущены %1$lld сканеров:</string>
+			<key>one</key>
+			<string>Не запущен %1$lld сканер:</string>
+			<key>other</key>
+			<string>Не запущены %1$lld сканера:</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

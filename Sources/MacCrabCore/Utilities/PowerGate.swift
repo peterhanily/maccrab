@@ -53,16 +53,18 @@ public enum PowerGate {
     /// (unplugged, LPM off, nominal thermals) the whole gate returned exactly
     /// 1.0×, i.e. it was inert precisely where it was supposed to earn its keep.
     ///
-    /// The reading is memoised for `powerSourceCacheSeconds`: an
+    /// The reading is memoised for `powerSourceCacheDuration`: an
     /// `IOPSCopyPowerSourcesInfo` snapshot walks the IOKit registry, and the
     /// short-interval collectors (Clipboard 2 s, USB 10 s, Network 5 s) would
     /// otherwise pay for it on every tick — a perf fix must not become a perf
     /// cost. A desktop with no battery reports AC and costs one lookup per
     /// cache window.
     public static var isOnBatteryPower: Bool {
-        let now = Date().timeIntervalSinceReferenceDate
+        // Cache age must not follow wall-clock corrections. ContinuousClock
+        // also advances across sleep, so a resumed laptop re-reads its supply.
+        let now = ContinuousClock.now
         cacheLock.lock()
-        if let cached = cachedOnBattery, now - cachedAt < powerSourceCacheSeconds {
+        if let cached = cachedOnBattery, now - cachedAt < powerSourceCacheDuration {
             cacheLock.unlock()
             return cached
         }
@@ -85,13 +87,13 @@ public enum PowerGate {
     }
 
     /// How long an `isOnBatteryPower` reading is reused before re-querying IOKit.
-    private static let powerSourceCacheSeconds: TimeInterval = 15
+    private static let powerSourceCacheDuration: Duration = .seconds(15)
 
     /// Cache backing `isOnBatteryPower`. Guarded by `cacheLock` — PowerGate is
     /// read from every collector's own task, so this is genuinely concurrent.
     private static let cacheLock = NSLock()
     nonisolated(unsafe) private static var cachedOnBattery: Bool?
-    nonisolated(unsafe) private static var cachedAt: TimeInterval = 0
+    nonisolated(unsafe) private static var cachedAt: ContinuousClock.Instant = .now
 
     /// The multiplier collectors actually apply: the worse of the pressure
     /// signal and the battery term (battery → 1.5×, matching the "fair thermal"

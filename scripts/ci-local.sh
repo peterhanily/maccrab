@@ -28,6 +28,8 @@ AWK_BIN=/usr/bin/awk
 RELEASE_CRITICAL_EXECUTORS=(
     .githooks/pre-push
     scripts/ci-local.sh
+    scripts/run-ci-phase.py
+    scripts/check-swift-toolchain.py
     scripts/release.sh
     scripts/build-release.sh
     scripts/prepare-dmg-payload.sh
@@ -274,6 +276,15 @@ verify_release_source_snapshot() {
 }
 
 verify_release_source_snapshot
+
+# The bundled Testing module follows this compiler. Verify its complete build
+# identity before cleanup, dependency resolution, or any build/test phase.
+CI_TOOLCHAIN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-ci-toolchain.XXXXXX")
+echo "Toolchain qualification evidence: $CI_TOOLCHAIN_DIR"
+/usr/bin/python3 -I "$SCRIPT_DIR/run-ci-phase.py" \
+    --label "Swift toolchain identity" --timeout-seconds 30 \
+    --log "$CI_TOOLCHAIN_DIR/toolchain.log" --result "$CI_TOOLCHAIN_DIR/toolchain.json" \
+    -- /usr/bin/python3 -I "$SCRIPT_DIR/check-swift-toolchain.py"
 
 if [ "$CLEAN_TREE" = "1" ]; then
     PRESERVED_RELEASE_DIR=""
@@ -612,7 +623,14 @@ if [ "$CLEAN_TREE" = "1" ]; then
 
     echo "Clean run: removing .build and re-resolving dependencies…"
     rm -rf .build
-    swift package resolve
+    # Resolution can stall on a transport as readily as compilation. Keep its
+    # evidence outside the build tree that this clean run just removed.
+    CI_RESOLVE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-ci-resolve.XXXXXX")
+    echo "Dependency-resolution evidence: $CI_RESOLVE_DIR"
+    /usr/bin/python3 -I "$SCRIPT_DIR/run-ci-phase.py" \
+        --label "Resolve dependencies" --timeout-seconds 600 \
+        --log "$CI_RESOLVE_DIR/resolve.log" --result "$CI_RESOLVE_DIR/resolve.json" \
+        -- swift package resolve
 fi
 
 # Never redirect CI output or compiler artifacts through fixed shared `/tmp`
@@ -620,11 +638,8 @@ fi
 # user can pre-create a predictable symlink/tree and turn an otherwise harmless
 # check into an arbitrary-file clobber or stale-rules false green. `mktemp`
 # creates private, per-run leaves below the invoking user's normal temp root.
-CI_LOCAL_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/maccrab-ci-output.XXXXXX")
-# Per-run directory for the complete output of any gate that fails. Kept outside
-# .build so a --clean wipe cannot destroy the evidence for the failure that
-# stopped the release.
-CI_FAILURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-ci-failures.XXXXXX")
+CI_EVIDENCE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-ci-evidence.XXXXXX")
+CI_LOCAL_OUTPUT=""
 CI_COMPILED_RULES=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-ci-rules.XXXXXX")
 
 RED='\033[0;31m'
@@ -636,31 +651,37 @@ NC='\033[0m'
 PASS=0
 FAIL=0
 START=$(date +%s)
+CI_PHASE_NUMBER=0
 
 check() {
     local name="$1"
     shift
+    CI_PHASE_NUMBER=$((CI_PHASE_NUMBER + 1))
+    local slug phase_script phase_status
+    slug=$(printf '%s' "$name" | LC_ALL=C tr -cs 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z')
+    slug=${slug#-}
+    slug=${slug%-}
+    local prefix="$CI_EVIDENCE_DIR/$CI_PHASE_NUMBER-${slug:-gate}"
+    CI_LOCAL_OUTPUT="$prefix.log"
+    # The badge assertion is an in-process shell function. Materialize its
+    # trusted definition in this private directory so it gets the same process
+    # group deadline as executable phases, without evaluating argument text.
+    if declare -F "$1" >/dev/null; then
+        phase_script="$prefix.sh"
+        declare -f "$1" > "$phase_script"
+        printf '\n"$@"\n' >> "$phase_script"
+        set -- /bin/bash "$phase_script" "$@"
+    fi
     printf "  %-40s " "$name"
-    if "$@" > "$CI_LOCAL_OUTPUT" 2>&1; then
+    if /usr/bin/python3 -I "$SCRIPT_DIR/run-ci-phase.py" \
+        --label "$name" --timeout-seconds 1800 \
+        --log "$CI_LOCAL_OUTPUT" --result "$prefix.json" -- "$@"; then
         echo -e "${GREEN}PASS${NC}"
         PASS=$((PASS + 1))
     else
+        phase_status=$?
         echo -e "${RED}FAIL${NC}"
-        # Preserve the WHOLE failing gate, not just its tail. $CI_LOCAL_OUTPUT is
-        # one reused buffer, so the next check() overwrote the evidence: an rc.8
-        # release build failed here on a single test out of 4,116, and by the
-        # time anyone looked, the only surviving record was five lines of
-        # unrelated passing output from the end of the run. A gate that can fail
-        # a release must leave something diagnosable behind — especially for a
-        # flake, which by definition will not reproduce on demand.
-        local slug
-        slug=$(printf '%s' "$name" | LC_ALL=C tr -cs 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z')
-        slug=${slug#-}
-        slug=${slug%-}
-        local preserved="$CI_FAILURE_DIR/${slug:-gate}.log"
-        if cp "$CI_LOCAL_OUTPUT" "$preserved" 2>/dev/null; then
-            echo "    full output: $preserved"
-        fi
+        echo "    full output: $CI_LOCAL_OUTPUT"
         # Swift Testing prints one ✘ line per failing test; surface those
         # directly rather than whatever happened to run last.
         local failures
@@ -671,11 +692,16 @@ check() {
             tail -5 "$CI_LOCAL_OUTPUT" | sed 's/^/    /'
         fi
         FAIL=$((FAIL + 1))
+        if [ "$phase_status" -ge 128 ]; then
+            echo "CI interrupted; phase evidence retained at $CI_EVIDENCE_DIR" >&2
+            exit "$phase_status"
+        fi
     fi
 }
 
 echo ""
 echo -e "${BOLD}MacCrab Local CI${NC}"
+echo "Phase logs and JSON results: $CI_EVIDENCE_DIR"
 echo "════════════════════════════════════════"
 echo ""
 
@@ -716,6 +742,10 @@ assert_readme_tests_badge() {
     echo "README tests badge agrees with the $observed tests just executed"
 }
 check "README tests badge matches suite" assert_readme_tests_badge "$OBSERVED_TEST_COUNT"
+check "CI phase deadline and evidence tests" /usr/bin/python3 -I scripts/test-ci-phase.py
+check "Toolchain identity fixtures" /usr/bin/python3 -I scripts/test-swift-toolchain.py
+check "Localization catalog contracts" /usr/bin/python3 -I scripts/check-localizations.py
+check "Localization checker tests" /usr/bin/python3 -I scripts/test-localizations.py
 
 echo ""
 echo -e "${BOLD}Rules${NC}"
@@ -767,7 +797,7 @@ if [ "$CLEAN_TREE" = "1" ]; then
     /bin/rm -rf "$PROJECT_DIR/Tools/AssessmentHarness/.build"
 fi
 check "Harness builds" swift build --package-path Tools/AssessmentHarness
-check "Harness tests" swift test --package-path Tools/AssessmentHarness
+check "Harness tests" swift test --no-parallel --package-path Tools/AssessmentHarness
 check "Harness stays out of the shipped build" ./Tools/AssessmentHarness/scripts/check-harness-isolation.sh
 
 echo ""
@@ -775,7 +805,7 @@ echo -e "${BOLD}Code Quality${NC}"
 check "No force unwraps in Sources" bash -c '! grep -rn "\.first!" Sources/ --include="*.swift" | grep -v ".build/" | grep -v "// OK:"'
 check "No TODO/FIXME in Sources" bash -c 'count=$(grep -rn "TODO\|FIXME" Sources/ --include="*.swift" | grep -v ".build/" | wc -l); [ "$count" -lt 10 ]'
 
-rm -f "$CI_LOCAL_OUTPUT"
+# Keep successful transcripts too: a release verdict must show what ran.
 rm -rf "$CI_COMPILED_RULES"
 
 # Restore the release bytes before declaring the gate green, then prove the

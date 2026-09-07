@@ -217,7 +217,7 @@ public struct V2IntelligenceWorkspace: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(V2Theme.brand)
                 .scaledSystem(12, weight: .semibold)
-            Text("Searching IOC matches for")
+            Text(String(localized: "ui.V2IntelligenceWorkspace.searching.ioc.matches.for", defaultValue: "Searching IOC matches for"))
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)
             // WCAG 1.4.3: `brand` as body text is 3.90:1 light / 3.65:1 on a
@@ -232,7 +232,7 @@ public struct V2IntelligenceWorkspace: View {
                 HStack(spacing: 4) {
                     Image(systemName: "xmark")
                         .scaledSystem(9, weight: .semibold)
-                    Text("Clear search")
+                    Text(String(localized: "ax.clearSearch", defaultValue: "Clear search"))
                         .font(V2Theme.meta())
                 }
                 .foregroundStyle(V2Theme.mutedText)
@@ -243,7 +243,7 @@ public struct V2IntelligenceWorkspace: View {
                 .clipShape(RoundedRectangle(cornerRadius: 4))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Clear IOC search")
+            .accessibilityLabel(String(localized: "ui.V2IntelligenceWorkspace.clear.ioc.search", defaultValue: "Clear IOC search"))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -284,7 +284,7 @@ public struct V2IntelligenceWorkspace: View {
                 Text(anyEnrichmentOn ? "Network enrichment" : "Enrichment is off — MacCrab is running on-device only")
                     .font(V2Theme.sectionTitle())
                     .foregroundStyle(V2Theme.primaryText)
-                Text("These optional lookups each reach a public service. Off by default — nothing about your Mac leaves it until you turn one on. Local detection (rules, sequences, campaigns, bundled IOCs) is unaffected.")
+                Text(String(localized: "settings.netEnrichHelp", defaultValue: "Local detection works offline. These optional lookups contact public services only when enabled. Each service receives your IP address and the request data described below. Other features, including update checks, can use the network."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                 VStack(alignment: .leading, spacing: 4) {
@@ -335,33 +335,33 @@ public struct V2IntelligenceWorkspace: View {
                     .scaledSystem(14)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Add custom feeds & IOCs")
+                    Text(String(localized: "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs", defaultValue: "Add custom feeds & IOCs"))
                         .font(V2Theme.sectionTitle())
                         .foregroundStyle(V2Theme.primaryText)
-                    Text("MacCrab's built-in feeds are abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, \(feedFetchPhrase). To add operator-supplied indicators, drop a text file (one IOC per line) into the threat_intel directory:")
+                    Text(String(localized: "ui.V2IntelligenceWorkspace.maccrab.s.built.in.feeds.are.abuse", defaultValue: "MacCrab can fetch abuse.ch feeds (URLhaus, MalwareBazaar, Feodo Tracker) when enabled: \(feedFetchPhrase). URLhaus and MalwareBazaar require an abuse.ch Auth-Key. To add your own indicators, place a text file (one IOC per line) in the threat_intel directory:"))
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("• `custom.hashes.txt` — SHA-256 hashes")
+                        Text(LocalizedStringKey(String(localized: "ui.finalPrefix.V2IntelligenceWorkspace.custom.hashes.txt.sha.256.hashes", defaultValue: "• `custom.hashes.txt` — SHA-256 hashes")))
                             .font(V2Theme.mono())
                             .foregroundStyle(V2Theme.primaryText)
-                        Text("• `custom.ips.txt` — IPv4/IPv6 addresses")
+                        Text(LocalizedStringKey(String(localized: "ui.finalPrefix.V2IntelligenceWorkspace.custom.ips.txt.ipv4.ipv6.addresses", defaultValue: "• `custom.ips.txt` — IPv4/IPv6 addresses")))
                             .font(V2Theme.mono())
                             .foregroundStyle(V2Theme.primaryText)
-                        Text("• `custom.domains.txt` — fully-qualified domain names")
+                        Text(LocalizedStringKey(String(localized: "ui.finalPrefix.V2IntelligenceWorkspace.custom.domains.txt.fully.qualified.domain.names", defaultValue: "• `custom.domains.txt` — fully-qualified domain names")))
                             .font(V2Theme.mono())
                             .foregroundStyle(V2Theme.primaryText)
                     }
                     HStack(spacing: 8) {
-                        V2ActionButton("Import IOCs from file…", icon: "square.and.arrow.down", style: .primary,
+                        V2ActionButton(String(localized: "ui.V2IntelligenceWorkspace.import.iocs.from.file", defaultValue: "Import IOCs from file…"), icon: "square.and.arrow.down", style: .primary,
                                        tooltip: "Pick a text file (one IOC per line) and copy it into the threat_intel directory under the right category") {
                             importIOCFile()
                         }
-                        V2ActionButton("Reveal folder", icon: "folder", style: .secondary,
+                        V2ActionButton(String(localized: "ui.V2IntelligenceWorkspace.reveal.folder", defaultValue: "Reveal folder"), icon: "folder", style: .secondary,
                                        tooltip: "Open the threat_intel directory in Finder for manual edits") {
                             revealThreatIntelDirectory()
                         }
-                        V2ActionButton("Refresh after edit", icon: "arrow.clockwise", style: .ghost,
+                        V2ActionButton(String(localized: "ui.V2IntelligenceWorkspace.refresh.after.edit", defaultValue: "Refresh after edit"), icon: "arrow.clockwise", style: .ghost,
                                        tooltip: "Signal the daemon (SIGHUP) to re-read drop files") {
                             Task {
                                 let ok = await state.provider.refreshThreatIntel()
@@ -390,10 +390,10 @@ public struct V2IntelligenceWorkspace: View {
                     .scaledSystem(14)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Managed feeds")
+                    Text(String(localized: "ui.V2IntelligenceWorkspace.managed.feeds", defaultValue: "Managed feeds"))
                         .font(V2Theme.sectionTitle())
                         .foregroundStyle(V2Theme.primaryText)
-                    Text("Built-in: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, \(feedFetchPhrase). See the table below for status. To bring in commercial feeds, drop their IOCs into the threat_intel folder above.")
+                    Text(String(localized: "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo", defaultValue: "Built-in sources: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — \(feedFetchPhrase). URLhaus and MalwareBazaar require an abuse.ch Auth-Key. See provider status below. Add external indicators through the threat_intel folder above."))
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -416,13 +416,13 @@ public struct V2IntelligenceWorkspace: View {
                     .scaledSystem(14)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("LLM provider API keys")
+                    Text(String(localized: "ui.V2IntelligenceWorkspace.llm.provider.api.keys", defaultValue: "LLM provider API keys"))
                         .font(V2Theme.sectionTitle())
                         .foregroundStyle(V2Theme.primaryText)
-                    Text("MacCrab's threat-intel feeds don't take an API key — abuse.ch is fully keyless. The only place keys go is the AI Backend (Anthropic, OpenAI, Mistral, Gemini, or remote Ollama). Keys are stored in the macOS Keychain.")
+                    Text(String(localized: "ui.V2IntelligenceWorkspace.maccrab.s.threat.intel.feeds.don.t", defaultValue: "URLhaus and MalwareBazaar use an abuse.ch Auth-Key. Configure it under Settings → Network enrichment. AI provider credentials are configured separately under AI Backend. Credentials entered in Settings are stored in the macOS Keychain."))
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
-                    V2ActionButton("Open AI Backend settings", icon: "gearshape", style: .secondary) {
+                    V2ActionButton(String(localized: "ui.V2IntelligenceWorkspace.open.ai.backend.settings", defaultValue: "Open AI Backend settings"), icon: "gearshape", style: .secondary) {
                         // v1.21.4 (audit): target the AI Backend tab directly
                         // (the tab-selection infra shipped in 4943d55) instead
                         // of opening whatever tab was last shown.
@@ -653,15 +653,15 @@ public struct V2IntelligenceWorkspace: View {
     private var feedsTable: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Threat intel feeds").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Text(String(localized: "ui.V2IntelligenceWorkspace.threat.intel.feeds", defaultValue: "Threat intel feeds")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
                 if !feeds.isEmpty {
-                    V2ActionButton("Export…", icon: "square.and.arrow.up", style: .ghost,
+                    V2ActionButton(String(localized: "ui.V2IntelligenceWorkspace.export", defaultValue: "Export…"), icon: "square.and.arrow.up", style: .ghost,
                                    tooltip: "Save the feed table as a CSV file") {
                         exportFeedsCSV(feeds)
                     }
                 }
-                V2ActionButton("Refresh now", icon: "arrow.clockwise", style: .secondary,
+                V2ActionButton(String(localized: "ui.V2IntelligenceWorkspace.refresh.now", defaultValue: "Refresh now"), icon: "arrow.clockwise", style: .secondary,
                                tooltip: "Queue a refresh for the engine to fetch URLhaus / MalwareBazaar / Feodo") {
                     Task {
                         let ok = await state.provider.refreshThreatIntel()
@@ -758,14 +758,14 @@ public struct V2IntelligenceWorkspace: View {
         let searching = (state.pendingIntelQuery?.isEmpty == false)
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("IOC matches").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Text(String(localized: "ui.V2IntelligenceWorkspace.ioc.matches", defaultValue: "IOC matches")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
                 Text(rows.isEmpty
                      ? (searching ? "no matches for search" : "none in window")
                      : (searching ? "\(rows.count) matching" : "\(rows.count) in last 7d"))
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 if !rows.isEmpty {
-                    V2ActionButton("Export…", icon: "square.and.arrow.up", style: .ghost,
+                    V2ActionButton(String(localized: "ui.V2IntelligenceWorkspace.export", defaultValue: "Export…"), icon: "square.and.arrow.up", style: .ghost,
                                    tooltip: "Save the IOC matches below as a CSV file") {
                         exportMatchesCSV(rows)
                     }
@@ -911,7 +911,7 @@ public struct V2IntelligenceWorkspace: View {
     private var packageScanRow: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Package freshness")
+                Text(String(localized: "ui.V2IntelligenceWorkspace.package.freshness", defaultValue: "Package freshness"))
                     .font(V2Theme.sectionTitle())
                     .foregroundStyle(V2Theme.primaryText)
                 Text(scanStatusLine)
@@ -1240,7 +1240,7 @@ public struct V2IntelligenceWorkspace: View {
                         .textSelection(.enabled)
                         .lineLimit(2)
                     Spacer()
-                    V2ActionButton("Copy", icon: "doc.on.doc", style: .ghost) {
+                    V2ActionButton(String(localized: "ui.V2AlertsWorkspace.copy", defaultValue: "Copy"), icon: "doc.on.doc", style: .ghost) {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(cmd, forType: .string)
                         state.showToast(V2Toast(kind: .success, title: "Command copied", detail: nil))
@@ -1351,7 +1351,7 @@ public struct V2IntelligenceWorkspace: View {
                     // markdown-style `**bold**` instead — SwiftUI Text
                     // initialized from LocalizedStringKey renders
                     // `**…**` as bold natively.
-                    Text("Two surfaces: **Detected security tools** (other macOS security software MacCrab observed on this machine — Objective-See suite, Little Snitch, commercial EDR, etc.) and **Configured output sinks** (alert destinations you wired into `daemon_config.json` / `notifications.json` — Splunk, Slack, S3, etc.). Status reflects 'configured' / 'running' / 'installed'.")
+                    Text(LocalizedStringKey(String(localized: "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos", defaultValue: "Two surfaces: **Detected security tools** (other macOS security software MacCrab observed on this machine — Objective-See suite, Little Snitch, commercial EDR, etc.) and **Configured output sinks** (alert destinations you wired into `daemon_config.json` / `notifications.json` — Splunk, Slack, S3, etc.). Status reflects 'configured' / 'running' / 'installed'.")))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(16)
@@ -1361,7 +1361,7 @@ public struct V2IntelligenceWorkspace: View {
                 if integrations.isEmpty {
                     HStack(spacing: 8) {
                         Image(systemName: "powerplug").foregroundStyle(V2Theme.mutedText)
-                        Text("Nothing to surface yet. MacCrab hasn't detected any third-party security tools on this machine and no output sinks are configured. To wire alerts to Splunk / Slack / S3 / etc., drop a `daemon_config.json` (outputs[]) or `notifications.json` into `/Library/Application Support/MacCrab/`. Discovered tools (BlockBlock, LuLu, KnockKnock, OverSight, Santa, Little Snitch, etc.) appear here automatically after the daemon's next scan (~2 min).")
+                        Text(LocalizedStringKey(String(localized: "ui.V2IntelligenceWorkspace.nothing.to.surface.yet.maccrab.hasn.t", defaultValue: "Nothing to surface yet. MacCrab hasn't detected any third-party security tools on this machine and no output sinks are configured. To wire alerts to Splunk / Slack / S3 / etc., drop a `daemon_config.json` (outputs[]) or `notifications.json` into `/Library/Application Support/MacCrab/`. Discovered tools (BlockBlock, LuLu, KnockKnock, OverSight, Santa, Little Snitch, etc.) appear here automatically after the daemon's next scan (~2 min).")))
                             .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                     }
                     .padding(16)
@@ -1369,7 +1369,7 @@ public struct V2IntelligenceWorkspace: View {
                     .v2Panel()
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Configured integrations & detected tools (\(integrations.count))")
+                        Text(String(localized: "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools", defaultValue: "Configured integrations & detected tools (\(integrations.count))"))
                             .font(V2Theme.sectionTitle())
                             .foregroundStyle(V2Theme.primaryText)
                         VStack(spacing: 6) {
@@ -1578,9 +1578,9 @@ public struct V2FeedConfigSheet: View {
             }
 
             if enrichThreatIntel {
-                V2StatusChip("Built-in · active — fetched every 4h", kind: .healthy, icon: "checkmark.seal")
+                V2StatusChip(String(localized: "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h", defaultValue: "Built-in · active — fetched every 4h"), kind: .healthy, icon: "checkmark.seal")
             } else {
-                V2StatusChip("Built-in · opt in to enable fetching", kind: .info, icon: "checkmark.seal")
+                V2StatusChip(String(localized: "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching", defaultValue: "Built-in · opt in to enable fetching"), kind: .info, icon: "checkmark.seal")
             }
 
             Text(feed.description)

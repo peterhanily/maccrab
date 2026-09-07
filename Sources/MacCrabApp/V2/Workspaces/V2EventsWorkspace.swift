@@ -77,7 +77,7 @@ struct V2EventsWorkspace: View {
             Image(systemName: "scope")
                 .foregroundStyle(V2Theme.brand)
                 .scaledSystem(12, weight: .semibold)
-            Text("Filtered to events matching")
+            Text(String(localized: "ui.V2EventsWorkspace.filtered.to.events.matching", defaultValue: "Filtered to events matching"))
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)
             // WCAG 1.4.3: `brand` as body text is 3.90:1 on the light canvas /
@@ -90,7 +90,7 @@ struct V2EventsWorkspace: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             if let centreLabel {
-                Text("around")
+                Text(String(localized: "ui.V2EventsWorkspace.around", defaultValue: "around"))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                 Text(centreLabel)
@@ -105,7 +105,7 @@ struct V2EventsWorkspace: View {
                 HStack(spacing: 4) {
                     Image(systemName: "xmark")
                         .scaledSystem(9, weight: .semibold)
-                    Text("Clear filter")
+                    Text(String(localized: "ax.clearFilter", defaultValue: "Clear filter"))
                         .font(V2Theme.meta())
                 }
                 .foregroundStyle(V2Theme.mutedText)
@@ -143,7 +143,7 @@ struct V2EventsWorkspace: View {
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)
             Spacer()
-            V2ActionButton("Reconnect", icon: "arrow.triangle.2.circlepath", style: .secondary) {
+            V2ActionButton(String(localized: "system.reconnect", defaultValue: "Reconnect"), icon: "arrow.triangle.2.circlepath", style: .secondary) {
                 Task { await state.connectLiveData() }
             }
         }

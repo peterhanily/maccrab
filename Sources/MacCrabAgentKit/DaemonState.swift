@@ -571,6 +571,7 @@ struct TraceStoreStartupAdmissionStatus: Sendable, Equatable {
 /// Holds all engine and component references shared across the daemon.
 /// Created once during initialization and passed to all subsystems.
 final class DaemonState {
+    let runtimeConfigurationReporter = RuntimeConfigurationReporter()
     // MARK: - Paths
     let isRoot: Bool
     let supportDir: String

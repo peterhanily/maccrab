@@ -12,6 +12,27 @@ struct DaemonProcessIdentity: Sendable, Equatable {
     let startedAtUnix: Double
     let version: String
     let build: String
+    private let startedAtUptime = Foundation.ProcessInfo.processInfo.systemUptime
+
+    init(pid: Int, startedAtUnix: Double, version: String, build: String) {
+        self.pid = pid
+        self.startedAtUnix = startedAtUnix
+        self.version = version
+        self.build = build
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.pid == rhs.pid && lhs.startedAtUnix == rhs.startedAtUnix
+            && lhs.version == rhs.version && lhs.build == rhs.build
+    }
+
+    var uptimeSeconds: TimeInterval {
+        max(0, Foundation.ProcessInfo.processInfo.systemUptime - startedAtUptime)
+    }
+
+    var telemetryIdentity: EngineTelemetryIdentity {
+        .init(pid: pid, startedAtUnix: startedAtUnix, version: version, build: build)
+    }
 
     static let current = DaemonProcessIdentity(
         pid: Int(ProcessInfo.processInfo.processIdentifier),
@@ -66,23 +87,45 @@ enum DaemonSetup {
         try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
     }
 
-    /// v1.7.6: write a crash-report file when storage recovery exhausts
-    /// retries. The dashboard reads this and surfaces a "Detection
-    /// database failed to initialize" banner with the exact error +
-    /// a "Recover" button.
-    private static func writeCrashReport(supportDir: String, error: String, action: String) {
+    /// Persist classified support fields separately from raw local diagnostics.
+    /// The dashboard can explain recovery without displaying error payloads or
+    /// guessing whether the database family was preserved from an error string.
+    private static func writeCrashReport(
+        supportDir: String, error: String, action: String,
+        database: String, failure: Error, preservation: String
+    ) {
         let path = supportDir + "/last_crash.json"
         let payload: [String: Any] = [
             "occurred_at_unix": Date().timeIntervalSince1970,
+            "schema_version": 2,
+            "database": database,
+            "reason": startupFailureReason(failure),
+            "preservation_outcome": preservation,
+            "engine_pid": DaemonProcessIdentity.current.pid,
+            "engine_started_at_unix": DaemonProcessIdentity.current.startedAtUnix,
             "error": error,
             "recovery_action": action,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
-        let tmp = path + ".tmp"
-        try? data.write(to: URL(fileURLWithPath: tmp))
-        try? FileManager.default.removeItem(atPath: path)
-        try? FileManager.default.moveItem(atPath: tmp, toPath: path)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
+        } catch {
+            setupLogger.error("Could not persist the startup failure report")
+        }
+    }
+
+    static func startupFailureReason(_ error: Error) -> String {
+        if error is DatabaseEncryptionAvailabilityError { return "key_unavailable" }
+        if let admission = error as? SQLitePersistentStoreAdmissionError,
+           admission.isOperationalPressure { return "storage_pressure" }
+        if let store = error as? EventStoreError, case .diskFull = store {
+            return "storage_pressure"
+        }
+        if SQLiteFailureClassifier.disposition(for: error) == .quarantineExplicitCorruption {
+            return "integrity_failure"
+        }
+        return "initialization_failed"
     }
 
     enum DatabaseQuarantineAuthorizationError: Error, LocalizedError {
@@ -154,6 +197,8 @@ enum DaemonSetup {
         supportDir: String,
         database: String,
         originalError: String,
+        failure: Error,
+        preservation: String,
         action: String,
         logger: Logger
     ) -> Never {
@@ -162,7 +207,10 @@ enum DaemonSetup {
         writeCrashReport(
             supportDir: supportDir,
             error: originalError,
-            action: action
+            action: action,
+            database: database,
+            failure: failure,
+            preservation: preservation
         )
         fputs("FATAL: \(message)\n", stderr)
         exit(1)
@@ -210,16 +258,20 @@ enum DaemonSetup {
         } catch let authorization as DatabaseQuarantineAuthorizationError {
             failRequiredStoreRecovery(
                 supportDir: supportDir,
-                database: "EventStore",
+                database: "events.db",
                 originalError: originalError,
+                failure: retryFailure,
+                preservation: "preserved",
                 action: authorization.localizedDescription,
                 logger: logger
             )
         } catch {
             failRequiredStoreRecovery(
                 supportDir: supportDir,
-                database: "EventStore",
+                database: "events.db",
                 originalError: originalError,
+                failure: retryFailure,
+                preservation: "unverified",
                 action: "atomic corruption quarantine failed: \(error.localizedDescription)",
                 logger: logger
             )
@@ -234,7 +286,9 @@ enum DaemonSetup {
         } catch {
             let msg = "EventStore recovery failed: \(error.localizedDescription)"
             logger.error("\(msg, privacy: .public)")
-            writeCrashReport(supportDir: supportDir, error: originalError, action: "EventStore recovery failed: \(error)")
+            writeCrashReport(supportDir: supportDir, error: originalError,
+                             action: "EventStore recovery failed: \(error)",
+                             database: "events.db", failure: error, preservation: "quarantined")
             fputs("FATAL: \(msg)\n", stderr)
             exit(1)
         }
@@ -272,16 +326,20 @@ enum DaemonSetup {
         } catch let authorization as DatabaseQuarantineAuthorizationError {
             failRequiredStoreRecovery(
                 supportDir: supportDir,
-                database: "AlertStore",
+                database: "alerts.db",
                 originalError: originalError,
+                failure: retryFailure,
+                preservation: "preserved",
                 action: authorization.localizedDescription,
                 logger: logger
             )
         } catch {
             failRequiredStoreRecovery(
                 supportDir: supportDir,
-                database: "AlertStore",
+                database: "alerts.db",
                 originalError: originalError,
+                failure: retryFailure,
+                preservation: "unverified",
                 action: "atomic corruption quarantine failed: \(error.localizedDescription)",
                 logger: logger
             )
@@ -295,7 +353,9 @@ enum DaemonSetup {
         } catch {
             let msg = "AlertStore recovery failed: \(error.localizedDescription)"
             logger.error("\(msg, privacy: .public)")
-            writeCrashReport(supportDir: supportDir, error: originalError, action: "AlertStore recovery failed: \(error)")
+            writeCrashReport(supportDir: supportDir, error: originalError,
+                             action: "AlertStore recovery failed: \(error)",
+                             database: "alerts.db", failure: error, preservation: "quarantined")
             fputs("FATAL: \(msg)\n", stderr)
             exit(1)
         }
@@ -1096,6 +1156,7 @@ enum DaemonSetup {
         let notifier = NotificationOutput(minimumSeverity: notifConfig.minSeverity)
         await notifier.setEnabled(notifConfig.enabled)
         let responseEngine = ResponseEngine(supportDirectory: supportDir)
+        await responseEngine.startNetworkBlockMaintenance()
 
         Self.logBootStep(label: "after_response_engine", startedAt: startedAt)
         // Construct now; MonitorTasks starts and owns this only after
@@ -1613,7 +1674,8 @@ enum DaemonSetup {
         // reported Healthy there for the life of the feature.
         await collectorRegistry.register(
             name: "FSEventsCollector", expectedIntervalSeconds: 30,
-            eventDriven: true, started: false)
+            eventDriven: true, started: false, enabled: !isRoot,
+            disabledReason: "Endpoint Security provides file monitoring in the System Extension")
         await collectorRegistry.register(name: "TCCMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "EDRMonitor", expectedIntervalSeconds: 120, eventDriven: true)
         await collectorRegistry.register(name: "USBMonitor", expectedIntervalSeconds: 10, eventDriven: true)
@@ -1621,9 +1683,11 @@ enum DaemonSetup {
         // Ultrasonic requires microphone access and is opt-in; its consumer task
         // is started unconditionally but the monitor behind it is not, so it
         // must not claim health until the opt-in gate actually opens.
+        let ultrasonicEnabled = config.ultrasonicEnabled || ProcessInfo.processInfo.environment["MACCRAB_ULTRASONIC"] == "1"
         await collectorRegistry.register(
             name: "UltrasonicMonitor", expectedIntervalSeconds: 60,
-            eventDriven: true, started: false)
+            eventDriven: true, started: false, enabled: ultrasonicEnabled,
+            disabledReason: "Optional microphone monitoring is turned off")
         await collectorRegistry.register(name: "RootkitDetector", expectedIntervalSeconds: 120, eventDriven: true)
         await collectorRegistry.register(name: "EventTapMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "SystemPolicyMonitor", expectedIntervalSeconds: 300, eventDriven: true)
@@ -1724,7 +1788,6 @@ enum DaemonSetup {
         // Ultrasonic attack monitor -- FFT mic sampling for DolphinAttack/NUIT
         // Opt-in: requires microphone access which triggers a TCC permission popup.
         // Enable with "ultrasonicEnabled": true in daemon_config.json or MACCRAB_ULTRASONIC=1.
-        let ultrasonicEnabled = config.ultrasonicEnabled || ProcessInfo.processInfo.environment["MACCRAB_ULTRASONIC"] == "1"
         let ultrasonicMonitor = UltrasonicMonitor(pollInterval: config.ultrasonicPollInterval)
         if ultrasonicEnabled {
             await ultrasonicMonitor.start()
@@ -2184,11 +2247,19 @@ enum DaemonSetup {
         // EventLoop invokes it only through the bounded advisory lifecycle.
         await ruleGenerator.configureLLMService(llmService)
 
-        // DNS collector (BPF capture or passive mode)
+        // Capture diagnostics are installed before start so setup failures are
+        // visible even when the collector has never produced a DNS event.
         Self.logBootStep(label: "before_dns_collector", startedAt: startedAt)
-        let dnsCollector = DNSCollector()
+        let dnsCollector = DNSCollector { status in
+            switch status {
+            case .capturing:
+                await collectorRegistry.recordRecovery(name: "DNSCollector")
+            case .unavailable(let reason):
+                await collectorRegistry.recordError(name: "DNSCollector", message: reason)
+            }
+        }
         await dnsCollector.start()
-        print("DNS collector active")
+        print("DNS collector capture task started")
 
         // Event tap monitor (keylogger detection)
         let eventTapMonitor = EventTapMonitor(pollInterval: config.eventTapPollInterval)
@@ -2272,7 +2343,7 @@ enum DaemonSetup {
         // (typically <1 KB on a fresh install), so the cost is ~ms.
         // Switch back to a synchronous await before any collector
         // starts.
-        let suppressionManager = SuppressionManager(dataDir: supportDir)
+        let suppressionManager = SuppressionManager(dataDir: supportDir, publishReadableSnapshot: true)
         await suppressionManager.load()
         let suppressionStats = await suppressionManager.stats()
         if suppressionStats.ruleCount > 0 {
@@ -2632,13 +2703,21 @@ enum DaemonSetup {
                     logger.warning("eslogger preflight failed: \(preflightError)")
                     print("  eslogger: \(preflightError)")
                 } else if EsloggerCollector.isAvailable() {
-                    esloggerCollector = EsloggerCollector()
+                    await collectorRegistry.register(name: "EsloggerCollector", expectedIntervalSeconds: 30,
+                                                     eventDriven: true, expectsContinuousTraffic: true, started: false)
+                    esloggerCollector = EsloggerCollector { status in
+                        await collectorRegistry.recordSetupStatus(name: "EsloggerCollector", status: status)
+                    }
                     await esloggerCollector!.start()
                     logger.info("eslogger proxy collector started")
                     esMode = "eslogger proxy"
                 } else if KdebugCollector.isAvailable() {
                     // Third fallback: kdebug via fs_usage (root only, no entitlement, no FDA)
-                    let kdebug = KdebugCollector()
+                    await collectorRegistry.register(name: "KdebugCollector", expectedIntervalSeconds: 30,
+                                                     eventDriven: true, expectsContinuousTraffic: true, started: false)
+                    let kdebug = KdebugCollector { status in
+                        await collectorRegistry.recordSetupStatus(name: "KdebugCollector", status: status)
+                    }
                     await kdebug.start()
                     kdebugCollector = kdebug
                     logger.info("kdebug collector started via fs_usage")
@@ -2651,7 +2730,11 @@ enum DaemonSetup {
         } else {
             // Non-root: try eslogger (needs root but fail gracefully)
             if EsloggerCollector.isAvailable() {
-                esloggerCollector = EsloggerCollector()
+                await collectorRegistry.register(name: "EsloggerCollector", expectedIntervalSeconds: 30,
+                                                 eventDriven: true, expectsContinuousTraffic: true, started: false)
+                esloggerCollector = EsloggerCollector { status in
+                    await collectorRegistry.recordSetupStatus(name: "EsloggerCollector", status: status)
+                }
                 await esloggerCollector!.start()
                 esMode = "eslogger proxy (may need root)"
             }
@@ -2846,6 +2929,27 @@ enum DaemonSetup {
         // 0) or kill the rule (threshold > 1).
         state.intentPosteriorThreshold = max(0.5, min(1.0, config.intentPosteriorThreshold))
         state.intentPosteriorMinDistinctEvidence = max(1, min(10, config.intentPosteriorMinDistinctEvidence))
+
+        var runtimeEntries = config.effectiveRuntimeEntries()
+        if ultrasonicEnabled != config.ultrasonicEnabled {
+            runtimeEntries["ultrasonic_enabled"]?.value = .boolean(ultrasonicEnabled)
+            runtimeEntries["ultrasonic_enabled"]?.source = "environment"
+            runtimeEntries["ultrasonic_enabled"]?.adjustment = "MACCRAB_ULTRASONIC enables the monitor"
+        }
+        for key in ["subscribe_file_open_events", "subscribe_introspection_events"] {
+            runtimeEntries[key]?.adjustment = "Effective subscription policy; native sensor availability and enabled-rule demand govern actual capture"
+        }
+        for definition in RuntimeConfigurationContract.definitions where definition.key.hasSuffix("_poll_interval") {
+            runtimeEntries[definition.key]?.adjustment = "Base interval; the power policy may lengthen polling"
+        }
+        do {
+            try await state.runtimeConfigurationReporter.configure(
+                directory: supportDir,
+                snapshot: .init(engineIdentity: DaemonProcessIdentity.current.telemetryIdentity, values: runtimeEntries)
+            )
+        } catch {
+            logger.error("Runtime configuration status could not be persisted: \(error.localizedDescription)")
+        }
 
         // v1.12.0 post-audit (M-Int1): bind state.agentLineageService
         // to the SAME instance the PromptIntentBridge captured above.

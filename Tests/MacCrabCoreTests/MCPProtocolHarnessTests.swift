@@ -23,9 +23,9 @@ import MacCrabCore
 //      `swift build --product maccrab-mcp` thundering herd; CI now pre-builds
 //      the binary (swift build links maccrab-mcp), so binaryURL() finds it and
 //      never builds in-test, but serialization still bounds spawn concurrency.
-//   2. hermetic HOME (see `hermeticHome`) — the spawned server's store is an
-//      isolated temp dir whose canonical empty schemas are created by the
-//      harness before the read-only server starts.
+//   2. explicit private data and Foundation home directories (see
+//      `hermeticHome`) — both stores and MCP audit files stay in the fixture;
+//      canonical empty schemas are created before the read-only server starts.
 //   3. a 60s read watchdog (see `drive`) — generous enough that a load-starved
 //      first spawn's DB-create/migrate completes instead of being killed →
 //      empty response. A healthy server still answers in milliseconds.
@@ -34,6 +34,14 @@ struct MCPProtocolHarnessTests {
 
     /// Locate the built maccrab-mcp binary, building it once if absent.
     static func binaryURL() -> URL? {
+        // A scratch-path test run must use its own linked products. An
+        // explicitly selected missing product is a failure, never permission
+        // to test an older binary in the checkout's default .build directory.
+        if let directory = ProcessInfo.processInfo.environment["MACCRAB_BIN_DIR"],
+           !directory.isEmpty {
+            let binary = URL(fileURLWithPath: directory).appendingPathComponent("maccrab-mcp")
+            return FileManager.default.isExecutableFile(atPath: binary.path) ? binary : nil
+        }
         let root = URL(fileURLWithPath: #filePath)   // .../Tests/MacCrabCoreTests/<this>.swift
             .deletingLastPathComponent()             // MacCrabCoreTests
             .deletingLastPathComponent()             // Tests
@@ -58,14 +66,11 @@ struct MCPProtocolHarnessTests {
         return fm.isExecutableFile(atPath: debug.path) ? debug : nil
     }
 
-    /// A hermetic, per-process app-support root for the spawned server. The
-    /// server resolves its store under HOME (`~/Library/Application Support/
-    /// MacCrab`, `main.swift` resolveDataDir/mcpUserDir). Pointing HOME here
-    /// means the harness (a) never reads or writes the developer/CI MacCrab
-    /// store — so the suite tests the real empty-store contract rather than
-    /// whatever happens to be on the machine — and (b) a slow first-spawn
-    /// SQLite migration on a load-saturated CI runner cannot half-write the
-    /// shared store and poison a later test (the intermittent isError flakes).
+    /// A per-process private user home for the spawned server. `driveOnce`
+    /// selects stores with MACCRAB_DATA_DIR and Foundation's user-support
+    /// location with CFFIXED_USER_HOME. HOME alone does not redirect either
+    /// Foundation lookup on macOS. Preparing the fixture stores before launch
+    /// keeps the protocol checks independent of installed database contents.
     static let hermeticHome: URL = {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-mcp-harness-\(ProcessInfo.processInfo.globallyUniqueString)",
@@ -79,8 +84,8 @@ struct MCPProtocolHarnessTests {
     /// empty result, and the server must not create or migrate it on demand.
     /// Bootstrap canonical empty schemas in the writer-capable test process so
     /// bounded-absence assertions exercise a real readable snapshot.
-    static func prepareCanonicalStores(at home: URL) throws {
-        let dataDir = home.appendingPathComponent(
+    static func prepareCanonicalStores(at home: URL, dataDirectory: URL? = nil) throws {
+        let dataDir = dataDirectory ?? home.appendingPathComponent(
             "Library/Application Support/MacCrab",
             isDirectory: true
         )
@@ -99,16 +104,20 @@ struct MCPProtocolHarnessTests {
     /// in the serialized suite are fast (binary + store warm in the page cache),
     /// so a retry of the cold first call almost always succeeds. A genuinely
     /// broken server returns empty on every attempt → the test still fails.
-    func drive(_ requestLines: [String], home: URL = MCPProtocolHarnessTests.hermeticHome) -> [[String: Any]] {
+    func drive(
+        _ requestLines: [String],
+        home: URL = MCPProtocolHarnessTests.hermeticHome,
+        dataDirectory: URL? = nil
+    ) -> [[String: Any]] {
         do {
-            try Self.prepareCanonicalStores(at: home)
+            try Self.prepareCanonicalStores(at: home, dataDirectory: dataDirectory)
         } catch {
             Issue.record("failed to prepare canonical MCP stores: \(error)")
             return []
         }
         var objs: [[String: Any]] = []
         for _ in 0..<3 {
-            objs = driveOnce(requestLines, home: home)
+            objs = driveOnce(requestLines, home: home, dataDirectory: dataDirectory)
             if !objs.isEmpty { break }
         }
         if objs.isEmpty {
@@ -121,20 +130,18 @@ struct MCPProtocolHarnessTests {
     /// misbehaving (or fatally starved) server can't hang the suite. Returns
     /// [] on any failure — the caller (`drive`) decides whether to retry or
     /// record an issue, so a transient first-attempt failure isn't a test fail.
-    private func driveOnce(_ requestLines: [String], home: URL) -> [[String: Any]] {
+    private func driveOnce(_ requestLines: [String], home: URL, dataDirectory: URL?) -> [[String: Any]] {
         guard let bin = Self.binaryURL() else { return [] }
         let proc = Process()
         proc.executableURL = bin
         var env = ProcessInfo.processInfo.environment
         env["HOME"] = home.path
-        // v1.21.5 (Phase 2d): HOME alone never actually isolated the spawned
-        // server's store — FileManager.urls(for: .applicationSupportDirectory)
-        // resolves the home via getpwuid(3), not $HOME, so on a dev box with a
-        // live system store resolveDataDir kept picking /Library/Application
-        // Support/MacCrab. Pass the explicit override the server now honors so
-        // the hermetic-home design holds everywhere.
-        env["MACCRAB_DATA_DIR"] = home
-            .appendingPathComponent("Library/Application Support/MacCrab").path
+        // MCP audit files use the Foundation user-support directory separately
+        // from its selected event stores. Isolate both locations; HOME alone
+        // does not redirect FileManager's user-domain lookup on macOS.
+        env["CFFIXED_USER_HOME"] = home.path
+        env["MACCRAB_DATA_DIR"] = (dataDirectory ?? home
+            .appendingPathComponent("Library/Application Support/MacCrab")).path
         proc.environment = env
         let inPipe = Pipe(), outPipe = Pipe()
         proc.standardInput = inPipe
@@ -231,6 +238,64 @@ struct MCPProtocolHarnessTests {
         let result = byId(objs, id)?["result"] as? [String: Any]
         let content = result?["content"] as? [[String: Any]]
         return content?.first?["text"] as? String ?? ""
+    }
+
+    @Test("Trace reads stay with the selected engine despite another newer graph")
+    func selectedTraceSource() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-mcp-trace-source-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let selected = root.appendingPathComponent("selected-engine", isDirectory: true)
+        let other = home.appendingPathComponent("Library/Application Support/MacCrab", isDirectory: true)
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        for (directory, id, title) in [
+            (selected, "selected-trace", "Selected engine trace"),
+            (other, "other-trace", "Other engine trace"),
+        ] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let store = try await SQLiteCausalGraphStore(
+                databasePath: directory.appendingPathComponent("tracegraph.db").path,
+                encryption: nil
+            )
+            try await store.saveTrace(Trace(
+                id: id, title: title, anchorEventId: "ordinary-event", rootEntityId: nil,
+                severity: "low", confidence: 0.5, createdAt: now, updatedAt: now,
+                daemonVersion: "fixture", rulesetVersion: "fixture", policyId: "default",
+                policyVersion: "1", policySha256: "fixture", policySnapshotJson: "{}",
+                traceSigningKeyMode: "filesystem_degraded", replayScope: "declared_deterministic_subset",
+                attributionOverridePolicy: "include_as_human_annotation_do_not_apply_by_default"
+            ), members: [])
+            await store.close()
+        }
+        // An idle selected engine may have an older database than a separate
+        // development engine. That difference must not change this session.
+        try FileManager.default.setAttributes([.modificationDate: now],
+            ofItemAtPath: selected.appendingPathComponent("tracegraph.db").path)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(60)],
+            ofItemAtPath: other.appendingPathComponent("tracegraph.db").path)
+
+        let responses = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_traces","arguments":{}}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_trace_detail","arguments":{"trace_id":"selected-trace"}}}"#,
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"hunt_trace","arguments":{"query":"engine trace"}}}"#,
+        ], home: home, dataDirectory: selected)
+        #expect(responses.count == 3)
+        for id in 1...3 {
+            let result = try #require(byId(responses, id)?["result"] as? [String: Any])
+            #expect(result["isError"] as? Bool != true)
+            #expect(resultText(responses, id).contains("Selected engine trace"))
+            #expect(!resultText(responses, id).contains("Other engine trace"))
+        }
+
+        let missing = root.appendingPathComponent("engine-without-graph", isDirectory: true)
+        let unavailable = drive([
+            #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_traces","arguments":{}}}"#,
+        ], home: home, dataDirectory: missing)
+        let result = try #require(byId(unavailable, 4)?["result"] as? [String: Any])
+        #expect(result["isError"] as? Bool == true)
+        #expect(!resultText(unavailable, 4).contains("Other engine trace"))
+        #expect(!FileManager.default.fileExists(atPath: missing.appendingPathComponent("tracegraph.db").path))
     }
 
     @Test("tools/list exposes forensics_create_case + dynamically-registered plugin tools")
@@ -442,13 +507,16 @@ struct MCPProtocolHarnessTests {
     }
 
     @Test("agent-session read tools are advertised and return well-formed (non-error) results")
-    func agentSessionTools() {
+    func agentSessionTools() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-mcp-read-audit-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
         let objs = drive([
             #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
             #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
             #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_agent_sessions","arguments":{}}}"#,
             #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_agent_session","arguments":{"session_id":"no-such-session"}}}"#,
-        ])
+        ], home: home)
         let names = Set(((byId(objs, 2)?["result"] as? [String: Any])?["tools"] as? [[String: Any]] ?? [])
             .compactMap { $0["name"] as? String })
         #expect(names.contains("list_agent_sessions"))
@@ -457,6 +525,18 @@ struct MCPProtocolHarnessTests {
         // unknown session — they return an empty list / empty timeline.
         #expect((byId(objs, 3)?["result"] as? [String: Any])?["isError"] as? Bool != true)
         #expect((byId(objs, 4)?["result"] as? [String: Any])?["isError"] as? Bool != true)
+
+        // Ordinary read calls are audited too. Verify their records in the
+        // fixture user-support tree without inspecting any live user files.
+        let auditURL = home.appendingPathComponent("Library/Application Support/MacCrab/mcp_tool_calls.jsonl")
+        let audit = try String(contentsOf: auditURL, encoding: .utf8)
+        var auditedTools = Set<String>()
+        for line in audit.split(separator: "\n") {
+            let row = try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            auditedTools.insert(try #require(row["tool"] as? String))
+        }
+        let expectedTools: Set<String> = ["list_agent_sessions", "get_agent_session"]
+        #expect(auditedTools == expectedTools)
     }
 
     // v1.21.5 (Phase 2d): get_intent_posterior now reads the DAEMON's

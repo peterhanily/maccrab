@@ -69,6 +69,12 @@ publish.
 
 ### Step 0 — preconditions
 
+- v1.22.0 needs a disposable installed upgrade rehearsal with preserved event
+  history and a consistent pre-upgrade backup. It has no qualified database
+  downgrade target. Also reconcile any legacy temporary PF rules in the shared
+  `com.maccrab` anchor before publication: the new dedicated response anchor
+  deliberately cannot erase potentially unrelated legacy rules. See
+  `KNOWN_LIMITS.md` and `PREVENTION_RESEARCH.md` for the boundaries.
 - `gh` installed, authenticated, and authorized to write this repository before
   the qualified second phase. Publisher credentials are deliberately not read
   and no GitHub/distribution mutation is attempted by the first-phase artifact
@@ -279,6 +285,16 @@ are copied back to the checkout.
 > is stamped into `release.json` for provenance. Bump the pin
 > deliberately, with the design QA done — not as a side effect of
 > updating Xcode.
+
+The exact qualification identity is also locked in
+`scripts/swift-toolchain.json`: Xcode 26.4.1 (17E202) and Apple Swift 6.3.1
+(swiftlang-6.3.1.1.2, clang-2100.0.123.102). CI and the unsigned release stage
+verify these complete version/build values before compilation and print a
+retained toolchain-evidence log directory. The host Target line is not pinned.
+A toolchain upgrade requires a deliberate lock update and a new clean build,
+full serial suite, and candidate qualification; the Xcode-major design gate
+above still applies. `Testing` comes from that toolchain rather than an
+independently resolved source package.
 
 1. `swift build -c release` for ALL release targets (MacCrabCore,
    MacCrabAgentKit, maccrabctl, maccrab-mcp, maccrabd, MacCrabApp,

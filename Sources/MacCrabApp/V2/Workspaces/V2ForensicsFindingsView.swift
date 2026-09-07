@@ -184,7 +184,7 @@ struct V2ForensicsFindingsView: View {
             Image(systemName: "exclamationmark.triangle")
                 .scaledSystem(10)
                 .foregroundStyle(.orange)
-            Text(String(localized: "findings.skippedNote", defaultValue: "\(skippedScanCount) scan\(skippedScanCount == 1 ? "" : "s") couldn't be read and were skipped. Open them from the Scans tab to see why."))
+            Text(String(localized: "findings.skippedNote", defaultValue: "\(skippedScanCount) scans couldn't be read and were skipped. Open them from the Scans tab to see why."))
                 .scaledSystem(10)
                 .foregroundStyle(.secondary)
         }
@@ -236,7 +236,7 @@ struct V2ForensicsFindingsView: View {
                 Text(g.scanName)
                     .scaledSystem(13, weight: .semibold)
                 Spacer()
-                Text(String(localized: "findings.findingCount", defaultValue: "\(g.findings.count) finding\(g.findings.count == 1 ? "" : "s")"))
+                Text(String(localized: "findings.findingCount", defaultValue: "\(g.findings.count) findings"))
                     .scaledSystem(11)
                     .foregroundStyle(.tertiary)
                 Text(verbatim: "·")

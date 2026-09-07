@@ -516,7 +516,7 @@ struct EventStream: View {
 
                 // Category filter
                 Picker("Category", selection: $filterCategory) {
-                    Text("All Categories").tag(EventCategory?.none)
+                    Text(String(localized: "events.allCategories", defaultValue: "All Categories")).tag(EventCategory?.none)
                     Divider()
                     // #9: `.registry` has no macOS collector — every event that
                     // reaches this view is process/file/network/auth/tcc. Drop
@@ -526,7 +526,7 @@ struct EventStream: View {
                     }
                 }
                 .frame(width: 160)
-                .accessibilityLabel("Filter by event category")
+                .accessibilityLabel(String(localized: "ui.EventStream.filter.by.event.category", defaultValue: "Filter by event category"))
 
                 TextField("Filter...", text: $filterText)
                     .textFieldStyle(.roundedBorder)
@@ -550,8 +550,8 @@ struct EventStream: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .controlSize(.small)
-                .help("Reload events")
-                .accessibilityLabel("Reload events")
+                .help(String(localized: "ui.EventStream.reload.events", defaultValue: "Reload events"))
+                .accessibilityLabel(String(localized: "ui.EventStream.reload.events", defaultValue: "Reload events"))
                 .keyboardShortcut("r", modifiers: .command)
 
                 Divider()
@@ -569,7 +569,7 @@ struct EventStream: View {
                 .help(showHistogram
                     ? String(localized: "events.histogramHide", defaultValue: "Hide time histogram")
                     : String(localized: "events.histogramShow", defaultValue: "Show time histogram"))
-                .accessibilityLabel("Toggle time histogram")
+                .accessibilityLabel(String(localized: "ui.EventStream.toggle.time.histogram", defaultValue: "Toggle time histogram"))
 
                 Button {
                     isPaused.toggle()
@@ -613,7 +613,7 @@ struct EventStream: View {
                 .fixedSize()
                 .disabled(isAggregateMode ? identifiedAggregates.isEmpty : filteredCache.isEmpty)
                 .help(String(localized: "events.export.help", defaultValue: "Export the current events to CSV or JSON"))
-                .accessibilityLabel("Export events")
+                .accessibilityLabel(String(localized: "ui.EventStream.export.events", defaultValue: "Export events"))
             }
             .padding()
 
@@ -874,7 +874,7 @@ struct EventStream: View {
                         .foregroundColor(.green)
                 }
                 Spacer()
-                Text("\(appState.eventsPerSecond) events/sec")
+                Text(String(localized: "ui.final.eventsPerSecond", defaultValue: "Events/sec: \(appState.eventsPerSecond)"))
                     .foregroundColor(.secondary)
             }
             .font(.caption)
@@ -1097,7 +1097,7 @@ private struct EventDetailPanel: View {
                                 .font(.caption2).foregroundColor(.secondary).padding(.top, 2)
                         }.padding(4)
                     } label: {
-                        Label("Triggered \(triggeredAlerts.count) alert\(triggeredAlerts.count == 1 ? "" : "s")",
+                        Label(String(localized: "ui.EventStream.triggered.alerts", defaultValue: "Triggered alerts: \(triggeredAlerts.count)"),
                               systemImage: "bell.badge.fill")
                             .foregroundColor(.orange)
                     }

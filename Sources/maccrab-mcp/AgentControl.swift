@@ -390,11 +390,15 @@ func handleSetBuiltinRuleSetting(_ args: [String: Any]) -> Any {
 }
 
 func handleReloadRules() -> Any {
-    auditLog("reload_rules", details: "ppid=\(getppid())")
-    if let err = dropInboxRequest(verb: "reload-rules", payload: ["requestedAt": isoFormatter.string(from: Date())]) {
-        return toolError(err)
-    }
-    return ["content": [["type": "text", "text": "Queued a rule reload. The engine re-reads compiled_rules + user_rules within ~5 s."]]]
+    do {
+        auditLog("reload_rules", details: "ppid=\(getppid())")
+        let id = try RuntimeConfigurationFiles.submit(operation: "reload-rules", payload: [:], directory: dataDir)
+        return ["content": [["type": "text", "text": jsonStringify([
+            "schema_version": 1, "state": "pending", "request_id": id.uuidString,
+            "operation": "reload-rules",
+            "status": "Read get_daemon_config with request_id; submission does not establish reload completion",
+        ])]]]
+    } catch { return toolError(error.localizedDescription) }
 }
 
 func handleRefreshThreatIntel() -> Any {
@@ -405,81 +409,26 @@ func handleRefreshThreatIntel() -> Any {
     return ["content": [["type": "text", "text": "Queued a threat-intel feed refresh."]]]
 }
 
-/// Safe (config-tier) tunables → {key: kind}. snake_case matches daemon_config.json.
-let daemonConfigSafeKeys: [String: String] = [
-    "behavior_alert_threshold": "double",
-    "behavior_critical_threshold": "double",
-    "statistical_z_threshold": "double",
-    "statistical_min_samples": "int",
-    "usb_poll_interval": "double",
-    "clipboard_poll_interval": "double",
-    "browser_extension_poll_interval": "double",
-    "rootkit_poll_interval": "double",
-    "event_tap_poll_interval": "double",
-    "system_policy_poll_interval": "double",
-    "prompt_injection_confidence": "int",
-    "intent_posterior_threshold": "double",
-]
-
-/// Defense-affecting (response-tier) keys → {key: kind}. Turning these off
-/// REDUCES detection coverage, so they require the top capability tier.
-let daemonConfigResponseKeysTyped: [String: String] = [
-    "subscribe_file_open_events": "bool",
-    "subscribe_introspection_events": "bool",
-    "ultrasonic_enabled": "bool",
-]
-let daemonConfigResponseKeys = Set(daemonConfigResponseKeysTyped.keys)
-
-/// v1.21.6 (audit DOC-11): network-enrichment switches an agent may set to
-/// `false` but never to `true`. Mirrors DaemonTimers.agentDisableOnlyConfigKeys
-/// and ConfigCommands.configEgressDisableOnlyKeys — the daemon re-checks this
-/// independently, so a divergence here is a usability bug, not a hole.
-/// Disabling reduces egress and is safe for anything holding the config tier to
-/// call; enabling would let an agent turn on outbound calls that publish the
-/// host's resolved domains (cert transparency) and installed software inventory
-/// (osv.dev), so that direction stays a human action in the dashboard.
-let daemonConfigEgressDisableOnlyKeys: Set<String> = [
-    "threat_intel_enabled",
-    "vuln_scan_enabled",
-    "package_freshness_enabled",
-    "cert_transparency_enabled",
-]
+// The capability gate and value validator share the daemon's catalog.
+let daemonConfigResponseKeys = Set(RuntimeConfigurationContract.definitions.filter(\.responseCapability).map(\.key))
 
 func handleSetDaemonConfig(_ args: [String: Any]) -> Any {
-    guard let key = args["key"] as? String else { return toolError("'key' is required") }
-    let kind = daemonConfigSafeKeys[key] ?? daemonConfigResponseKeysTyped[key]
-        ?? (daemonConfigEgressDisableOnlyKeys.contains(key) ? "bool" : nil)
-    guard let kind else {
-        let allowed = (daemonConfigSafeKeys.keys.sorted()
-                       + daemonConfigResponseKeysTyped.keys.sorted()
-                       + daemonConfigEgressDisableOnlyKeys.sorted().map { "\($0) (false only)" })
-            .joined(separator: ", ")
-        return toolError("'\(key)' is not a settable key. Allowed: \(allowed)")
+    guard let key = args["key"] as? String,
+          let definition = RuntimeConfigurationContract.byKey[key], let raw = args["value"] else {
+        return toolError("Provide a known key and value; allowed keys: " + RuntimeConfigurationContract.byKey.keys.sorted().joined(separator: ", "))
     }
-    // Disable-only: refuse the enabling direction here so the agent gets a
-    // reason instead of a silent daemon-side rejection.
-    if daemonConfigEgressDisableOnlyKeys.contains(key), (args["value"] as? Bool) == true {
-        return toolError("'\(key)' can only be set to false. Enabling it turns on outbound network calls, which is a human action: Settings > Network enrichment in MacCrab.app.")
-    }
-    // Coerce + validate the value to the declared kind. Reject anything else.
-    var coerced: Any
-    switch kind {
-    case "bool":
-        guard let b = args["value"] as? Bool else { return toolError("'\(key)' expects a boolean value") }
-        coerced = b
-    case "int":
-        guard let i = args["value"] as? Int else { return toolError("'\(key)' expects an integer value") }
-        coerced = i
-    default: // double
-        if let d = args["value"] as? Double { coerced = d }
-        else if let i = args["value"] as? Int { coerced = Double(i) }
-        else { return toolError("'\(key)' expects a number value") }
-    }
-    auditLog("set_daemon_config", details: "key=\(key) ppid=\(getppid())")
-    if let err = dropInboxRequest(verb: "set-daemon-config", payload: ["key": key, "value": coerced]) {
-        return toolError(err)
-    }
-    return ["content": [["type": "text", "text": "Queued daemon_config update: \(key) = \(coerced). Takes effect on the engine's next config reload / restart."]]]
+    do {
+        let requested = try definition.typed(raw)
+        let normalized = try definition.normalized(requested)
+        auditLog("set_daemon_config", details: "key=\(key) ppid=\(getppid())")
+        let id = try RuntimeConfigurationFiles.submit(operation: "set-daemon-config",
+            payload: ["key": key, "value": requested.foundationValue], directory: dataDir)
+        let payload: [String: Any] = ["schema_version": 1, "state": "pending", "request_id": id.uuidString,
+            "key": key, "requested_value": requested.foundationValue,
+            "normalized_value": normalized.foundationValue, "application": definition.application.rawValue,
+            "status": "Read get_daemon_config with request_id to inspect the daemon's durable outcome"]
+        return ["content": [["type": "text", "text": jsonStringify(payload)]]]
+    } catch { return toolError(error.localizedDescription) }
 }
 
 // MARK: - Tier "authoring": create / delete rules

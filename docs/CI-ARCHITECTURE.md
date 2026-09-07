@@ -40,16 +40,26 @@ phases do not invoke SwiftPM or dependency discovery.
 
 ## What the gates cover
 
-`scripts/ci-local.sh` — 20 checks, ~150s warm:
+`scripts/ci-local.sh` runs the checks below. Duration and test counts come
+from the retained run evidence; they are not fixed performance promises.
 
 | Group | Checks |
 |---|---|
+| Toolchain | Exact Xcode and Swift compiler build identity from `scripts/swift-toolchain.json`; checked before resolution/build |
 | Build | `swift build`, `swift build --build-tests` |
-| Tests | full `swift test` suite |
+| Tests | full serial `swift test --no-parallel` suite; localization key, format, and plural contracts |
 | Rules | YAML→JSON compile, rule-count consistency, rule lint (filter coverage), rule trust-anchor fixtures |
 | Required gates | broker fd fuzz (ASan/UBSan), deterministic architectural audit, release-dependency provenance, release supply-chain fixtures, exact-candidate qualification fixtures, SQLCipher provenance fixtures, secret/host-path diff scan, release-artifact lifecycle regression |
 | Assessment harness | builds, tests, and stays out of the shipped build |
 | Code quality | no force unwraps in `Sources`, no TODO/FIXME in `Sources` |
+
+Every phase runs through `scripts/run-ci-phase.py` with a 30-minute deadline
+and a 15-second termination grace period. Clean dependency resolution has a
+10-minute deadline. The runner terminates the entire process group and retains
+stdout/stderr plus an atomic JSON outcome for success, failure, interruption,
+and timeout. Evidence directories are private temporary siblings of the build
+workspace, so a clean build does not erase the failing phase. A timeout is a
+failure; a partial or filtered Swift run cannot establish a passing suite.
 
 ## The tradeoff, stated plainly
 
@@ -186,3 +196,19 @@ removed.
 - `scripts/pre-release-audit.sh` — the deeper pre-release audit, incl. advisory passes
 - `scripts/candidate-qualification.py` — exact-DMG runtime + containment gate
 - `RELEASE_PROCESS.md` — the full local sign / notarise / publish flow
+
+### Qualifying a toolchain update
+
+CI and release compilation currently require Xcode 26.4.1 (17E202) and Apple
+Swift 6.3.1 (swiftlang-6.3.1.1.2, clang-2100.0.123.102). The data-only source of
+truth is `scripts/swift-toolchain.json`; host architecture and OS target triples
+are not compiler identities. Tests import the toolchain's `Testing` module.
+Run `/usr/bin/python3 -I scripts/check-swift-toolchain.py` to check the selected
+installation without building. CI and release builds retain this output and
+phase status in the printed private evidence directory.
+
+To upgrade, select the intended Xcode installation, deliberately update the lock
+from its complete version/build output, then run a clean build, the full serial
+test suite, and candidate qualification. A changed lock is not qualification.
+Do not add a separate Testing package to work around a toolchain mismatch.
+Ordinary `swift build` remains independent of this release/CI toolchain policy.

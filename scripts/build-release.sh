@@ -554,6 +554,13 @@ load_sparkle_config() {
 #   local reproducibility checks; this repository has no hosted CI runner.
 # ═════════════════════════════════════════════════════════════════════
 stage_unsigned_build() {
+    local toolchain_evidence_dir
+    toolchain_evidence_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/maccrab-release-toolchain.XXXXXX")
+    echo "Toolchain qualification evidence: $toolchain_evidence_dir"
+    /usr/bin/python3 -I "$SCRIPT_DIR/run-ci-phase.py" \
+        --label "Release Swift toolchain identity" --timeout-seconds 30 \
+        --log "$toolchain_evidence_dir/toolchain.log" --result "$toolchain_evidence_dir/toolchain.json" \
+        -- /usr/bin/python3 -I "$SCRIPT_DIR/check-swift-toolchain.py"
     if [ "${MACCRAB_REQUIRE_TRACKED_RELEASE_INPUTS:-0}" = "1" ]; then
         require_tracked_signing_inputs
     fi
@@ -745,6 +752,13 @@ stage_assemble() {
         fi
     done
     echo "    ✓ Bundled $lproj_count localizations → Resources/*.lproj (Bundle.main)"
+
+    # Keep redistribution notices with the installed app, including the
+    # vendored SQLCipher and bundled PyYAML components. Copy before signing so
+    # installed notices are bound to the same sealed bundle as their binaries.
+    cp "$PROJECT_DIR/LICENSE" "$APP/Contents/Resources/"
+    cp "$PROJECT_DIR/THIRD_PARTY_LICENSES.md" "$APP/Contents/Resources/"
+    cp -R "$PROJECT_DIR/ThirdPartyNotices" "$APP/Contents/Resources/"
 
     # v1.12.0 RC16 (in-dashboard Sigma editor): bundle compile_rules.py
     # plus a hash-locked copy of PyYAML's pure-Python module so the dashboard
@@ -1497,6 +1511,8 @@ stage_publish() {
     # ─── Supporting files + install.sh ───────────────────────────────
     cp "$PROJECT_DIR/LICENSE" "$STAGING_DIR/"
     cp "$PROJECT_DIR/README.md" "$STAGING_DIR/"
+    cp "$PROJECT_DIR/THIRD_PARTY_LICENSES.md" "$STAGING_DIR/"
+    cp -R "$PROJECT_DIR/ThirdPartyNotices" "$STAGING_DIR/"
 
     cp "$SCRIPT_DIR/install.sh" "$STAGING_DIR/install.sh"
     chmod +x "$STAGING_DIR/install.sh"

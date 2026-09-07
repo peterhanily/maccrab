@@ -21,8 +21,8 @@ struct RuleEnginePushedRulesTests {
     /// `count` real compiled rules copied into an isolated dir (exercises the
     /// real decoder), returned with the list of file URLs.
     private func makeBaseDir(count: Int) throws -> (dir: URL, files: [URL]) {
-        ensureRulesCompiled()
-        let src = URL(fileURLWithPath: "/tmp/maccrab_v3")
+        try ensureRulesCompiled()
+        let src = compiledRulesDirectory
         let dst = FileManager.default.temporaryDirectory
             .appendingPathComponent("pushed-base-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dst, withIntermediateDirectories: true)

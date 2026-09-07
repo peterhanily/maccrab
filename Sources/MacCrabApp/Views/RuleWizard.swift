@@ -105,7 +105,7 @@ struct RuleWizard: View {
             // Navigation buttons
             HStack {
                 if step != .metadata {
-                    Button("Back") {
+                    Button(String(localized: "ui.RuleWizard.back", defaultValue: "Back")) {
                         if reduceMotion {
                             step = WizardStep(rawValue: step.rawValue - 1) ?? .metadata
                         } else {
@@ -116,17 +116,17 @@ struct RuleWizard: View {
                 Spacer()
                 if step == .preview {
                     if savedPath != nil {
-                        Button("Done") { dismiss() }
+                        Button(String(localized: "overview.sheetDone", defaultValue: "Done")) { dismiss() }
                             .keyboardShortcut(.return)
                     } else {
                         Button { saveRule() } label: {
                             if saving {
                                 HStack(spacing: 6) {
                                     ProgressView().controlSize(.small)
-                                    Text("Installing…")
+                                    Text(String(localized: "rave.consent.installing", defaultValue: "Installing…"))
                                 }
                             } else {
-                                Text("Save & Install Rule")
+                                Text(String(localized: "ui.RuleWizard.save.install.rule", defaultValue: "Save & Install Rule"))
                             }
                         }
                         .keyboardShortcut(.return)
@@ -134,7 +134,7 @@ struct RuleWizard: View {
                         .disabled(saving)
                     }
                 } else {
-                    Button("Next") {
+                    Button(String(localized: "ui.RuleWizard.next", defaultValue: "Next")) {
                         if reduceMotion {
                             step = WizardStep(rawValue: step.rawValue + 1) ?? .preview
                         } else {
@@ -455,7 +455,7 @@ private struct DetectionStep: View {
                         Image(systemName: "minus.circle.fill").foregroundColor(.red)
                     }
                     .buttonStyle(.borderless)
-                    .accessibilityLabel("Remove condition")
+                    .accessibilityLabel(String(localized: "ui.RuleWizard.remove.condition", defaultValue: "Remove condition"))
                     .disabled(rule.conditions.count <= 1)
                 }
             }
@@ -463,16 +463,16 @@ private struct DetectionStep: View {
             Button {
                 rule.conditions.append(RuleConditionEntry())
             } label: {
-                Label("Add Condition", systemImage: "plus.circle")
+                Label(String(localized: "ui.RuleWizard.add.condition", defaultValue: "Add Condition"), systemImage: "plus.circle")
             }
 
             if rule.category == "process_creation" {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(String(localized: "wizard.example", defaultValue: "Example")).font(.caption).fontWeight(.semibold)
-                        Text("Field: Image | Modifier: endswith | Value: /curl, /wget")
+                        Text(String(localized: "ui.RuleWizard.field.image.modifier.endswith.value.curl.wget", defaultValue: "Field: Image | Modifier: endswith | Value: /curl, /wget"))
                             .font(.caption).foregroundColor(.secondary)
-                        Text("Field: CommandLine | Modifier: contains | Value: --insecure")
+                        Text(String(localized: "ui.RuleWizard.field.commandline.modifier.contains.value.insecure", defaultValue: "Field: CommandLine | Modifier: contains | Value: --insecure"))
                             .font(.caption).foregroundColor(.secondary)
                     }
                     .padding(4)
@@ -525,7 +525,7 @@ private struct FiltersStep: View {
                         Image(systemName: "minus.circle.fill").foregroundColor(.red)
                     }
                     .buttonStyle(.borderless)
-                    .accessibilityLabel("Remove filter")
+                    .accessibilityLabel(String(localized: "ui.RuleWizard.remove.filter", defaultValue: "Remove filter"))
                 }
             }
 
@@ -533,19 +533,19 @@ private struct FiltersStep: View {
                 Button {
                     rule.filters.append(RuleFilterEntry())
                 } label: {
-                    Label("Add Custom Filter", systemImage: "plus.circle")
+                    Label(String(localized: "ui.RuleWizard.add.custom.filter", defaultValue: "Add Custom Filter"), systemImage: "plus.circle")
                 }
 
                 Divider().frame(height: 20)
 
                 Text(String(localized: "wizard.quickAdd", defaultValue: "Quick add:")).font(.caption).foregroundColor(.secondary)
 
-                Button("Exclude Apple-signed") {
+                Button(String(localized: "ui.RuleWizard.exclude.apple.signed", defaultValue: "Exclude Apple-signed")) {
                     rule.filters.append(RuleFilterEntry(field: "SignerType", values: ["apple", "appStore", "devId"]))
                 }
                 .font(.caption)
 
-                Button("Exclude Terminal parents") {
+                Button(String(localized: "ui.RuleWizard.exclude.terminal.parents", defaultValue: "Exclude Terminal parents")) {
                     rule.filters.append(RuleFilterEntry(field: "ParentImage", modifier: "endswith", values: ["/Terminal", "/iTerm2", "/login", "/sshd"]))
                 }
                 .font(.caption)
@@ -612,16 +612,16 @@ private struct PreviewStep: View {
         VStack(alignment: .leading, spacing: 16) {
             if savedPath != nil {
                 HStack {
-                    Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.title2)
+                    Image(systemName: "clock").foregroundColor(.blue).font(.title2)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading) {
-                        Text(String(localized: "wizard.savedTitle", defaultValue: "Rule installed")).font(.headline)
-                        Text(String(localized: "wizard.savedSubtitle", defaultValue: "Compiled and loaded into the engine. It now appears in Detection → Rules and fires immediately."))
+                        Text(String(localized: "wizard.savedTitle", defaultValue: "Rule installation requested")).font(.headline)
+                        Text(String(localized: "wizard.savedSubtitle", defaultValue: "The compiled rule was queued for installation. Review Detection → Rules to confirm it is saved; engine reload may still be pending."))
                             .font(.caption).foregroundColor(.secondary)
                     }
                 }
                 .padding()
-                .background(Color.green.opacity(0.1))
+                .background(Color.blue.opacity(0.1))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
 
@@ -657,7 +657,7 @@ private struct PreviewStep: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(rule.toYAML(id: ruleId), forType: .string)
                 } label: {
-                    Label("Copy YAML", systemImage: "doc.on.doc")
+                    Label(String(localized: "ui.V2DetectionWorkspace.copy.yaml", defaultValue: "Copy YAML"), systemImage: "doc.on.doc")
                 }
             }
         }

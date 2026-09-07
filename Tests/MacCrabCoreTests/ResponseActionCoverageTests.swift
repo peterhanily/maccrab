@@ -1,8 +1,8 @@
 // ResponseActionCoverageTests.swift
 // Fills the gaps the pre-existing EngineTests ResponseEngineTests left
-// uncovered: blockNetwork, script, and escalateNotification. The first
-// two run their real implementations (pfctl fails gracefully without
-// root; script uses /bin/echo in a temp dir). The third is verified at
+// uncovered: blockNetwork, script, and escalateNotification. The
+// network path uses injected PF outcomes; script uses /bin/echo in a
+// temp dir. The notification action is verified at
 // the config-load layer so we don't pop real system notifications mid-
 // test run.
 
@@ -78,8 +78,15 @@ struct ResponseActionCoverageTests {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
+        let temporaryBlocks = TemporaryNetworkBlocks(
+            io: .init(write: { _ in false },
+                      reload: { .init(loaded: false, enforcing: false) },
+                      legacyStateUnverified: { false }),
+            sleep: { _ in throw CancellationError() }
+        )
         let engine = ResponseEngine(
-            quarantineDir: dir.appendingPathComponent("quarantine").path
+            quarantineDir: dir.appendingPathComponent("quarantine").path,
+            temporaryNetworkBlocks: temporaryBlocks
         )
         await engine.setActions(forRule: "test.rule", actions: [
             ResponseActionConfig(
@@ -97,8 +104,8 @@ struct ResponseActionCoverageTests {
         #expect(log.count == 1)
         #expect(log[0].action == .blockNetwork)
         #expect(log[0].target == "203.0.113.42")
-        // Success is environment-dependent (pfctl needs root) — what we
-        // care about is that the attempt was logged at all.
+        #expect(!log[0].success)
+        await temporaryBlocks.stopMaintenance()
     }
 
     @Test("blockNetwork with no destination IP is recorded as failed")

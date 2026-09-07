@@ -49,7 +49,8 @@ public actor KdebugCollector {
 
     /// Watchdog state.
     private var backoffSeconds: Double = 1.0
-    private var lastSuccessfulStart: Date?
+    private var lastSuccessfulStart: ContinuousClock.Instant?
+    private let setupStatusHandler: @Sendable (CollectorSetupStatus) async -> Void
 
     /// Our own PID for self-muting.
     private let selfPid = Foundation.ProcessInfo.processInfo.processIdentifier
@@ -76,7 +77,10 @@ public actor KdebugCollector {
 
     // MARK: - Initialization
 
-    public init() {
+    public init(
+        setupStatusHandler: @escaping @Sendable (CollectorSetupStatus) async -> Void = { _ in }
+    ) {
+        self.setupStatusHandler = setupStatusHandler
         var capturedContinuation: AsyncStream<Event>.Continuation!
         self.events = AsyncStream<Event>(
             bufferingPolicy: .bufferingNewest(Self.eventStreamCapacity)
@@ -88,14 +92,14 @@ public actor KdebugCollector {
 
     // MARK: - Start / Stop
 
-    public func start() {
+    public func start() async {
         guard lifecyclePhase == .initialized else {
             logger.warning("kdebug start rejected after its one-shot lifecycle advanced")
             return
         }
         lifecyclePhase = .running
         lifecycleGeneration &+= 1
-        launchFsUsage(generation: lifecycleGeneration)
+        await launchFsUsage(generation: lifecycleGeneration)
     }
 
     public func stop() {
@@ -142,7 +146,7 @@ public actor KdebugCollector {
 
     // MARK: - Launch fs_usage subprocess
 
-    private func launchFsUsage(generation: UInt64) {
+    private func launchFsUsage(generation: UInt64) async {
         guard lifecyclePhase == .running,
               generation == lifecycleGeneration else { return }
         let proc = Process()
@@ -159,7 +163,10 @@ public actor KdebugCollector {
             try proc.run()
             self.process = proc
             logger.info("kdebug collector started via fs_usage (PID \(proc.processIdentifier))")
-            self.lastSuccessfulStart = Date()
+            self.lastSuccessfulStart = .now
+            await setupStatusHandler(.configured)
+            // stop() may run while the registry receives this transition.
+            guard lifecyclePhase == .running, generation == lifecycleGeneration else { return }
 
             let fileHandle = pipe.fileHandleForReading
             let continuation = self.continuation
@@ -178,6 +185,7 @@ public actor KdebugCollector {
         } catch {
             logger.error("Failed to launch fs_usage: \(error.localizedDescription)")
             process = nil
+            await setupStatusHandler(.unavailable(reason: "fs_usage could not launch; retrying setup"))
             scheduleRestart(generation: generation)
         }
     }
@@ -442,17 +450,18 @@ public actor KdebugCollector {
 
     // MARK: - Watchdog Restart
 
-    private func handleExit(generation: UInt64) {
+    private func handleExit(generation: UInt64) async {
         guard lifecyclePhase == .running,
               generation == lifecycleGeneration else { return }
         process = nil
 
         // Reset backoff if it ran for > 60 seconds
         if let lastStart = lastSuccessfulStart,
-           Date().timeIntervalSince(lastStart) > 60 {
+           lastStart.duration(to: .now) > .seconds(60) {
             backoffSeconds = 1.0
         }
 
+        await setupStatusHandler(.unavailable(reason: "fs_usage output ended; retrying setup"))
         scheduleRestart(generation: generation)
     }
 
@@ -474,12 +483,12 @@ public actor KdebugCollector {
         }
     }
 
-    private func restartAfterBackoff(generation: UInt64) {
+    private func restartAfterBackoff(generation: UInt64) async {
         guard lifecyclePhase == .running,
               generation == lifecycleGeneration,
               !Task.isCancelled else { return }
         backoffSeconds = min(backoffSeconds * 2, 30.0)
-        launchFsUsage(generation: generation)
+        await launchFsUsage(generation: generation)
     }
 
     // MARK: - Deinit

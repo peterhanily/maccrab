@@ -746,21 +746,22 @@ struct SettingsView: View {
 
                 GroupBox(String(localized: "settings.netEnrich", defaultValue: "Network enrichment (privacy)")) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(String(localized: "settings.netEnrichHelp", defaultValue: "MacCrab is on-device by default — none of these make any network request until you turn them on. Local detection (rules, sequences, campaigns, bundled threat-intel) is unaffected. Each lookup below reaches a public service; turn on only what you want."))
+                        Text(String(localized: "settings.netEnrichHelp", defaultValue: "Local detection works offline. These optional lookups contact public services only when enabled. Each service receives your IP address and the request data described below. Other features, including update checks, can use the network."))
                             .font(.caption).foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Toggle(isOn: $enrichThreatIntel) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(String(localized: "settings.enrich.threatIntel", defaultValue: "Threat-intel feeds (abuse.ch)"))
-                                Text(String(localized: "settings.enrich.threatIntelDesc", defaultValue: "Download IOC lists (URLhaus / MalwareBazaar / Feodo) every 4 hours. Download-only — nothing about your machine is uploaded."))
+                                Text(String(localized: "settings.enrich.threatIntelDesc", defaultValue: "Download IOC lists (URLhaus / MalwareBazaar / Feodo) every 4 hours. URLhaus and MalwareBazaar require the Auth-Key below. Requests include your IP address and normal request metadata, but no observed events or software inventory."))
                                     .font(.caption).foregroundColor(.orange)
                             }
                         }
                         .onChange(of: enrichThreatIntel) { _ in syncEnrichmentOverrides() }
+                        ThreatIntelCredentialView()
                         Toggle(isOn: $enrichVulnScan) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(String(localized: "settings.enrich.vulnScan", defaultValue: "Vulnerability scan (osv.dev)"))
-                                Text(String(localized: "settings.enrich.vulnScanDesc", defaultValue: "Look up CVEs for your installed apps/packages. Sends your software inventory (anonymous, but it is your machine's software list)."))
+                                Text(String(localized: "settings.enrich.vulnScanDesc", defaultValue: "Look up known vulnerabilities for installed apps and packages. Sends package names and versions to osv.dev; the service also receives your IP address."))
                                     .font(.caption).foregroundColor(.orange)
                             }
                         }
@@ -949,12 +950,12 @@ struct SettingsView: View {
                         HStack(spacing: 8) {
                             Text(String(localized: "settings.retentionLabel", defaultValue: "Auto-delete scans older than:"))
                             Picker("", selection: $forensicsRetentionDays) {
-                                Text("Never").tag(0)
-                                Text("7 days").tag(7)
-                                Text("30 days").tag(30)
-                                Text("90 days").tag(90)
-                                Text("180 days").tag(180)
-                                Text("1 year").tag(365)
+                                Text(String(localized: "ui.SettingsView.never", defaultValue: "Never")).tag(0)
+                                Text(String(localized: "ui.finalPrefix.SettingsView.7.days", defaultValue: "7 days")).tag(7)
+                                Text(String(localized: "ui.finalPrefix.SettingsView.30.days", defaultValue: "30 days")).tag(30)
+                                Text(String(localized: "ui.finalPrefix.SettingsView.90.days", defaultValue: "90 days")).tag(90)
+                                Text(String(localized: "ui.finalPrefix.SettingsView.180.days", defaultValue: "180 days")).tag(180)
+                                Text(String(localized: "ui.finalPrefix.SettingsView.1.year", defaultValue: "1 year")).tag(365)
                             }
                             .labelsHidden()
                             .frame(width: 140)
@@ -1235,7 +1236,7 @@ struct SettingsView: View {
                                 }
                                 .disabled(llmTestStatus == .testing)
                                 .controlSize(.small)
-                                .accessibilityLabel("Test LLM backend connection")
+                                .accessibilityLabel(String(localized: "ui.SettingsView.test.llm.backend.connection", defaultValue: "Test LLM backend connection"))
 
                                 switch llmTestStatus {
                                 case .untested:
@@ -1279,7 +1280,7 @@ struct SettingsView: View {
                                 // A4-06: be honest that cloud redaction is
                                 // best-effort heuristics, not a guarantee, and
                                 // point operators at the fully-private option.
-                                Text(String(localized: "settings.llmCloudPrivacy", defaultValue: "Sensitive data (usernames, private IPs, hostnames, API-key-shaped tokens) is redacted before sending. This is best-effort heuristic scrubbing, not a guarantee — novel data shapes can still slip through. To avoid Internet egress from MacCrab, use Ollama through a loopback endpoint."))
+                                Text(String(localized: "settings.llmCloudPrivacy", defaultValue: "Cloud AI and remote Ollama endpoints can send alert context to the selected provider. Redaction is best effort and may leave sensitive details. Use a loopback Ollama endpoint to keep AI requests on this Mac; update checks and other enabled network features are separate."))
                                     .font(.caption)
                                     .foregroundColor(.orange)
                             }
@@ -2163,7 +2164,7 @@ struct SettingsView: View {
                 Text("🦀")
                     .scaledSystem(64)
 
-                Text("MacCrab")
+                Text(verbatim: "MacCrab")
                     .font(.title)
                     .fontWeight(.bold)
 

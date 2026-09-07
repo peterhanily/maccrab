@@ -107,8 +107,8 @@ struct V2OfflineDataProviderCompletenessTests {
             #expect(await p.deleteAlert(id: id) == false)
             #expect(await p.unsuppressCampaign(id: id) == false)   // protocol default
         }
-        #expect(await p.liftSuppression(ruleId: "r1", scope: "any") == false)
-        #expect(await p.liftSuppression(ruleId: "", scope: "") == false)
+        #expect(await p.liftSuppression(id: "r1") == false)
+        #expect(await p.liftSuppression(id: "") == false)
         #expect(await p.refreshThreatIntel() == false)
     }
 
@@ -145,7 +145,7 @@ struct V2OfflineDataProviderCompletenessTests {
             // mutations
             "suppressAlert(id:)", "unsuppressAlert(id:)", "deleteAlert(id:)",
             "suppressAlerts(ids:)", "suppressCampaign(id:)", "unsuppressCampaign(id:)",
-            "refreshThreatIntel()", "liftSuppression(ruleId:scope:)",
+            "refreshThreatIntel()", "liftSuppression(id:)",
         ]
         // The count is pinned: any drift (add/remove) is a visible diff that
         // forces the maintainer back to this file. As of the V2DataProvider

@@ -1,9 +1,9 @@
-SQLCipher 4.16.0 (https://github.com/sqlcipher/sqlcipher)
-  - Upstream tag: v4.16.0
-  - Upstream commit: e2a6040f2ae5cfff2b3e08eb3320007d93cdf3fc
-  - Bundled SQLite version: 3.53.1
-  - sqlite3.c SHA-256: 0c8371853e124f20bb7728368559fe743ac3d1f0b97d317ba68b70bfe802bcb2
-  - sqlite3.h SHA-256: 126a6cdd1a2b2b3f47ec1952defc8e2434ebecfa239f917463e11fdffcfe16dd
+SQLCipher 4.18.0 (https://github.com/sqlcipher/sqlcipher)
+  - Upstream tag: v4.18.0
+  - Upstream commit: 63697beb0fafcb61faa7a3e6fd267036548ab11b
+  - Bundled SQLite version: 3.53.4
+  - sqlite3.c SHA-256: 964c72bd1d3e031862588202e2bf6342d36ec68a2cae4f4276d9cd79e6571acb
+  - sqlite3.h SHA-256: 8a9d1bff44d75174ca6dea3ea9bac50a6104d86facb566647b8bb839375b7b3a
   - Crypto backend: CommonCrypto (Apple)
-  - Amalgamation built 2026-05-19
+  - Amalgamation built 2026-09-07
   - Machine-readable record: PROVENANCE

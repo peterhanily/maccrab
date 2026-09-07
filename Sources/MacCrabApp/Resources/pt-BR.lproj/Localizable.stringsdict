@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>findings.findingCount</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>%1$lld achados</string>
+			<key>one</key>
+			<string>%1$lld achado</string>
+			<key>other</key>
+			<string>%1$lld achados</string>
+		</dict>
+	</dict>
+	<key>findings.skippedNote</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>Não foi possível ler %1$lld análises, que foram ignoradas. Abra-as na aba Análises para ver o motivo.</string>
+			<key>one</key>
+			<string>Não foi possível ler %1$lld análise, que foi ignorada. Abra-a na aba Análises para ver o motivo.</string>
+			<key>other</key>
+			<string>Não foi possível ler %1$lld análises, que foram ignoradas. Abra-as na aba Análises para ver o motivo.</string>
+		</dict>
+	</dict>
+	<key>kit.footerSummary</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>%1$lld analisadores · v%2$@ · %3$@</string>
+			<key>one</key>
+			<string>%1$lld analisador · v%2$@ · %3$@</string>
+			<key>other</key>
+			<string>%1$lld analisadores · v%2$@ · %3$@</string>
+		</dict>
+	</dict>
+	<key>overview.crab.quipCritical</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>O MacCrab está alarmado! %1$lld campanhas críticas ativas.</string>
+			<key>one</key>
+			<string>O MacCrab está alarmado! %1$lld campanha crítica ativa.</string>
+			<key>other</key>
+			<string>O MacCrab está alarmado! %1$lld campanhas críticas ativas.</string>
+		</dict>
+	</dict>
+	<key>pastScans.bulkDeleteConfirm</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>Excluir %1$lld análises</string>
+			<key>one</key>
+			<string>Excluir %1$lld análise</string>
+			<key>other</key>
+			<string>Excluir %1$lld análises</string>
+		</dict>
+	</dict>
+	<key>pastScans.bulkDeleteTitle</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>Excluir %1$lld análises permanentemente?</string>
+			<key>one</key>
+			<string>Excluir %1$lld análise permanentemente?</string>
+			<key>other</key>
+			<string>Excluir %1$lld análises permanentemente?</string>
+		</dict>
+	</dict>
+	<key>pastScans.bulkDeletedToast</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>%1$lld análises excluídas · %2$@ liberados.</string>
+			<key>one</key>
+			<string>%1$lld análise excluída · %2$@ liberados.</string>
+			<key>other</key>
+			<string>%1$lld análises excluídas · %2$@ liberados.</string>
+		</dict>
+	</dict>
+	<key>scans.rowsCollected</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>· %1$lld linhas coletadas até agora</string>
+			<key>one</key>
+			<string>· %1$lld linha coletada até agora</string>
+			<key>other</key>
+			<string>· %1$lld linhas coletadas até agora</string>
+		</dict>
+	</dict>
+	<key>scans.scannersDidntRun</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>%1$lld analisadores não foram executados:</string>
+			<key>one</key>
+			<string>%1$lld analisador não foi executado:</string>
+			<key>other</key>
+			<string>%1$lld analisadores não foram executados:</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

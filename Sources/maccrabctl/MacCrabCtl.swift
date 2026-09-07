@@ -31,7 +31,11 @@ struct MacCrabCtl {
 
         switch command {
         case "status":
-            await showStatus()
+            guard args.dropFirst(2).allSatisfy({ $0 == "--json" }) else {
+                usageError("Usage: maccrabctl status [--json]")
+            }
+            if args.contains("--json") { await showJSONStatus() }
+            else { await showStatus() }
         case "rules":
             // `rules list|count` inspect the LOADED corpus; everything else
             // (update / check-updates / status) is the v1.20 signed rule-update
@@ -39,9 +43,15 @@ struct MacCrabCtl {
             // `case "rules"` later in this switch is dead (first match wins),
             // which silently shadowed the whole channel CLI.
             if args.count >= 3 && args[2] == "list" {
-                await listRules()
+                guard args.dropFirst(3).allSatisfy({ $0 == "--json" }) else {
+                    usageError("Usage: maccrabctl rules list [--json]")
+                }
+                await listRules(json: args.contains("--json"))
             } else if args.count >= 3 && args[2] == "count" {
-                await countRules()
+                guard args.dropFirst(3).allSatisfy({ $0 == "--json" }) else {
+                    usageError("Usage: maccrabctl rules count [--json]")
+                }
+                await countRules(json: args.contains("--json"))
             } else {
                 await dispatchRules(args: Array(args.dropFirst(2)))
             }
@@ -237,8 +247,10 @@ struct MacCrabCtl {
             await runAllow(args: args)
         case "why":
             await runWhy(args: args)
+        case "storage":
+            runStorageCheck(args: Array(args.dropFirst(2)))
         case "repair":
-            await runRepair(args: args)
+            await runRepair(args: Array(args.dropFirst(2)))
         case "rollup":
             // v1.8.0: force the tier-rollup-and-prune sweep immediately,
             // outside the daemon's 6h timer. Useful for ops + first-launch

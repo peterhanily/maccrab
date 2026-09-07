@@ -630,6 +630,24 @@ struct RootWholeFileReadBoundaryTests {
         #expect(eventLoop.contains("eventAction: enrichedEvent.eventAction"))
         let timers = try source("Sources/MacCrabAgentKit/DaemonTimers.swift")
         #expect(timers.contains("state.crashReportMiner.scan()"))
+        #expect(timers.contains("RuntimeConfigurationFiles.readConfigured(at: configPath)"),
+                "configuration merging must retain the bounded control-file reader")
+
+        let suppressions = try source("Sources/MacCrabCore/Detection/SuppressionManager.swift")
+        #expect(suppressions.contains("RuntimeConfigurationFiles.readControlData(at: filePath, maximumBytes: 4 * 1024 * 1024)"),
+                "suppression loading must retain its bounded control-file reader")
+
+        // These new GUI/CLI/MCP readers live in Core, so the inverse census
+        // also covers them. Reuse the existing finite metadata boundaries
+        // instead of adding new legacy whole-file exceptions.
+        let inventory = try source("Sources/MacCrabCore/Detection/RuleInventoryDocument.swift")
+        #expect(inventory.contains("RuleFileLoadingPolicy.read(file)"))
+        let telemetry = try source("Sources/MacCrabCore/Detection/RuleTelemetryContext.swift")
+        #expect(telemetry.contains("BoundedRegularFileReader.read("))
+        #expect(telemetry.contains("object(\"heartbeat.json\", maximumBytes: maximumLivenessBytes)"))
+        #expect(telemetry.contains("object(\"heartbeat_rich.json\", maximumBytes: maximumRichHeartbeatBytes)"))
+        #expect(RuleTelemetryContext.maximumLivenessBytes == 64 * 1024)
+        #expect(RuleTelemetryContext.maximumRichHeartbeatBytes == 4 * 1024 * 1024)
 
         let notifications = try source(
             "Sources/MacCrabCore/Output/NotificationIntegrations.swift"
@@ -782,7 +800,7 @@ struct RootWholeFileReadBoundaryTests {
         // classified for root reachability, ownership, carrier type and cap.
         let expected: [String: [String: Int]] = [
             "MacCrabAgentKit/DaemonState.swift": ["string": 1],
-            "MacCrabAgentKit/DaemonTimers.swift": ["data": 2],
+            "MacCrabAgentKit/DaemonTimers.swift": ["data": 1],
             "MacCrabAgentKit/BundledRuleSynchronizer.swift": ["readToEnd": 1],
             "MacCrabCore/AIGuard/AgentLineageService.swift": ["data": 1],
             "MacCrabCore/AIGuard/MCPBehavioralBaseline.swift": ["data": 1],
@@ -794,7 +812,6 @@ struct RootWholeFileReadBoundaryTests {
             "MacCrabCore/Detection/BuiltinRuleSettings.swift": ["data": 1],
             "MacCrabCore/Detection/ProcessTreeAnalyzer.swift": ["data": 1],
             "MacCrabCore/Detection/RuleEngine.swift": ["data": 1],
-            "MacCrabCore/Detection/SuppressionManager.swift": ["data": 1],
             "MacCrabCore/Detection/SecurityScorer.swift": ["nsDictionary": 1],
             "MacCrabCore/Detection/UEBAEngine.swift": ["data": 1],
             "MacCrabCore/Enrichment/ThreatIntelFeed.swift": ["data": 2, "string": 1],

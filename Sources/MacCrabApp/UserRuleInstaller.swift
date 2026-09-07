@@ -18,8 +18,8 @@
 import Foundation
 
 enum UserRuleInstaller {
-    static let userRulesDir = "/Library/Application Support/MacCrab/user_rules"
-    static let reloadTickPath = userRulesDir + "/.reload_tick"
+    static var userRulesDir: String { V2EngineSource.session.directory + "/user_rules" }
+    static var reloadTickPath: String { userRulesDir + "/.reload_tick" }
 
     enum Result {
         case success
@@ -44,7 +44,7 @@ enum UserRuleInstaller {
                                 payload: ["ruleId": ruleId, "yaml": yaml, "json": json])
     }
 
-    static let inboxDir = "/Library/Application Support/MacCrab/inbox"
+    static var inboxDir: String { V2EngineSource.session.directory + "/inbox" }
 
     /// Drop a JSON request into the daemon's privileged inbox (mode 1777 sticky —
     /// a non-root user can write, the root daemon validates the owner uid +

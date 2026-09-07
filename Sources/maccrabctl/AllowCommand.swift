@@ -174,12 +174,11 @@ extension MacCrabCtl {
 
     private static func allowRemove(args: [String]) async {
         guard args.count >= 4 else {
-            print("Usage: maccrabctl allow remove <id>")
-            return
+            cliFailure("Usage: maccrabctl allow remove <id>")
         }
         let id = args[3]
 
-        let mgr = SuppressionManager(dataDir: maccrabDataDir())
+        let mgr = SuppressionManager(dataDir: maccrabDataDir(), publishReadableSnapshot: true)
         await mgr.load()
 
         // Allow partial-id match (first 8 chars) for operator convenience.
@@ -187,16 +186,16 @@ extension MacCrabCtl {
         let candidates = all.filter { $0.id.hasPrefix(id) }
         switch candidates.count {
         case 0:
-            print("✗ No suppression matching '\(id)'")
+            cliFailure("allow remove: no suppression matching '\(id)'")
         case 1:
             let match = candidates[0]
-            _ = await mgr.remove(id: match.id)
-            print("✓ Removed \(match.id) — \(match.scope.summary)")
+            do {
+                let removed = try await mgr.removePersisted(ids: [match.id])
+                guard !removed.isEmpty else { throw RuntimeConfigContractError("Suppression is no longer present") }
+                print("Saved removal of \(match.id) — \(match.scope.summary). Runtime reload may still be pending.")
+            } catch { cliFailure("allow remove: \(error.localizedDescription)") }
         default:
-            print("✗ '\(id)' is ambiguous (\(candidates.count) matches). Use a longer prefix.")
-            for c in candidates {
-                print("    \(c.id)  \(c.scope.summary)")
-            }
+            cliFailure("allow remove: '\(id)' is ambiguous (\(candidates.count) matches). Use a longer prefix.")
         }
     }
 

@@ -68,7 +68,7 @@ struct V2ForensicsWorkspace: View {
                     .padding(.vertical, 10)
             }
             .buttonStyle(.plain)
-            .help("Forensics settings")
+            .help(String(localized: "ui.V2ForensicsSettingsSheet.forensics.settings", defaultValue: "Forensics settings"))
         }
         .padding(.horizontal, 8)
     }

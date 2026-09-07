@@ -50,7 +50,7 @@ struct ArtifactTimelineView: View {
                     dayBlock(group.day, items: group.items)
                 }
                 if artifacts.isEmpty {
-                    Text("No events for this content type.")
+                    Text(String(localized: "ui.ArtifactTimelineView.no.events.for.this.content.type", defaultValue: "No events for this content type."))
                         .scaledSystem(11)
                         .foregroundStyle(.tertiary)
                         .padding(20)
@@ -76,7 +76,7 @@ struct ArtifactTimelineView: View {
                     eventRow(it)
                 }
                 if items.count > 200 {
-                    Text("+ \(items.count - 200) more on this day")
+                    Text(String(localized: "ui.finalPrefix.ArtifactTimelineView.more.on.this.day", defaultValue: "+ \(items.count - 200) more on this day"))
                         .scaledSystem(10)
                         .foregroundStyle(.tertiary)
                         .padding(.leading, 60)

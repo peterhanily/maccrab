@@ -1,262 +1,154 @@
-// ConfigCommands.swift -- `maccrabctl config get|set` (PARITY-04).
-//
-// Headless mirror of the MCP `set_daemon_config` handler
-// (maccrab-mcp/AgentControl.swift::handleSetDaemonConfig). Same SAFE
-// allow-list, same type coercion, and the SAME privileged-inbox drop
-// (`set-daemon-config` verb) the daemon authorizes by file-owner uid and
-// re-validates against its own whitelist (DaemonTimers.swift). The CLI is
-// NOT trusted — it only queues; the root engine is the authority.
-//
-// `get` reads daemon_config.json directly (read-only), so an operator can
-// see the current value before/after a `set`.
-//
-// NOTE ON THE ALLOW-LIST: ideally this list would be shared with the MCP
-// server (AgentControl.swift::daemonConfigSafeKeys / …ResponseKeysTyped)
-// and the daemon (DaemonTimers). It is NOT factored into DaemonConfig.swift
-// because that type lives in the MacCrabAgentKit target, which neither
-// maccrabctl nor maccrab-mcp link (both depend only on MacCrabCore +
-// MacCrabForensics). A truly shared list would have to move to MacCrabCore;
-// see the kit's sharedEdits note. Until then this mirrors the MCP's keys
-// verbatim — keep the three lists in lockstep when adding a tunable.
-
+// Configuration reads and mutation submission use the shared runtime contract.
 import Foundation
 import MacCrabCore
 
-/// Safe (config-tier) tunables → declared kind. Mirrors
-/// AgentControl.swift::daemonConfigSafeKeys (snake_case = daemon_config.json).
-private let configSafeKeys: [String: String] = [
-    "behavior_alert_threshold": "double",
-    "behavior_critical_threshold": "double",
-    "statistical_z_threshold": "double",
-    "statistical_min_samples": "int",
-    "usb_poll_interval": "double",
-    "clipboard_poll_interval": "double",
-    "browser_extension_poll_interval": "double",
-    "rootkit_poll_interval": "double",
-    "event_tap_poll_interval": "double",
-    "system_policy_poll_interval": "double",
-    "prompt_injection_confidence": "int",
-    "intent_posterior_threshold": "double",
-]
-
-/// Defense-affecting (response-tier in the MCP) keys → declared kind.
-/// Turning these off REDUCES coverage. Mirrors
-/// AgentControl.swift::daemonConfigResponseKeysTyped. The CLI doesn't gate
-/// on agent capability tiers (a human at a terminal is already the
-/// authority), but we keep the set so `set` can warn before queueing.
-private let configResponseKeys: [String: String] = [
-    "subscribe_file_open_events": "bool",
-    "subscribe_introspection_events": "bool",
-    "ultrasonic_enabled": "bool",
-]
-
-/// v1.21.6 (audit DOC-11): the four network-enrichment switches, settable
-/// **to `false` only**.
-///
-/// PRIVACY.md offered three ways to stop MacCrab's outbound network calls and
-/// two of them did not work for a non-root user — `config set` rejected these
-/// keys outright, and hand-editing daemon_config.json needs sudo because the
-/// engine writes it root-owned 0600.
-///
-/// They are asymmetric on purpose. `config set` does not edit a file; it drops
-/// a request into the mode-1777 privileged inbox, which the daemon authorizes
-/// on uid alone — the same control plane the S-01/S-02/S-05 findings are about.
-/// Setting one of these **false** only ever reduces egress, so post-compromise
-/// code running as the console user gains nothing by driving it. Setting one
-/// **true** would ENABLE egress (cert-transparency leaks every observed domain;
-/// osv.dev leaks the installed software inventory), which is a capability that
-/// plane should not carry. Turning them back ON is therefore a dashboard /
-/// root-config action, and `set` says so rather than failing opaquely.
-private let configEgressDisableOnlyKeys: Set<String> = [
-    "threat_intel_enabled",
-    "vuln_scan_enabled",
-    "package_freshness_enabled",
-    "cert_transparency_enabled",
-]
-
-/// Dispatch `maccrabctl config <get|set> ...`. Called from MacCrabCtl.main
-/// when args[1] == "config" (rest == args.dropFirst(2)).
 func dispatchConfig(args: [String]) {
-    guard let sub = args.first else {
-        printConfigUsage()
-        exit(0)
-    }
+    let command = args.first ?? "help"
     let rest = Array(args.dropFirst())
-    switch sub {
-    case "get":
-        configGet(args: rest)
-    case "set":
-        configSet(args: rest)
-    case "help", "-h", "--help":
-        printConfigUsage()
-    default:
-        print("Unknown config subcommand: \(sub)")
-        printConfigUsage()
-        exit(1)
-    }
+    do {
+        switch command {
+        case "get": try configGet(args: rest)
+        case "effective": try configEffective(args: rest)
+        case "schema":
+            guard rest.isEmpty || rest == ["--json"] else { throw RuntimeConfigContractError("Usage: maccrabctl config schema [--json]") }
+            try printCLIJSON(RuntimeConfigurationContract.definitions)
+        case "status": try configRequestStatus(args: rest)
+        case "set": try configSet(args: rest)
+        case "help", "-h", "--help": printConfigUsage()
+        default: throw RuntimeConfigContractError("Unknown config subcommand: \(command)")
+        }
+    } catch { cliFailure("config \(command): \(error.localizedDescription)") }
 }
 
 func printConfigUsage() {
-    let safe = configSafeKeys.keys.sorted().joined(separator: ", ")
-    let resp = configResponseKeys.keys.sorted().joined(separator: ", ")
-    let egress = configEgressDisableOnlyKeys.sorted().joined(separator: ", ")
     print("""
     Usage: maccrabctl config <subcommand>
 
-    Subcommands:
-      get [<key>]            Show the current value of <key> from daemon_config.json,
-                             or the whole file when no key is given.
-      set <key> <value>      Queue a daemon_config update via the privileged inbox.
-                             The engine applies it on its next config reload / restart.
+      get [key] [--json]         Configured file values and defaults; not an applied-state claim.
+      effective [key] [--json]   Runtime values, source, adjustments and applied generation.
+      schema [--json]            Shared key/type/bounds/application contract.
+      set <key> <value> [--json] Submit a request; returns its ID without claiming it applied.
+      status <request-id> [--json] Read the daemon's durable request outcome.
 
-    Settable keys (safe tunables — thresholds / poll intervals):
-      \(safe)
-
-    Defense-affecting keys (turning these off reduces detection coverage):
-      \(resp)
-
-    Network-enrichment keys (settable to FALSE only — disables outbound calls):
-      \(egress)
-      Enabling these back on is a dashboard / root-config action; see PRIVACY.md.
+    Effective output covers the shared runtime-tunable catalog. Other configuration
+    remains visible through get. Numeric values use the documented bounds. Network
+    enrichment switches can only be disabled here; the app enables them.
+    Request outcomes are retained for up to 30 days and the newest 4096 requests.
     """)
 }
 
-// MARK: - get
+private func readArguments(_ args: [String]) throws -> (key: String?, json: Bool) {
+    let positional = args.filter { $0 != "--json" }
+    guard positional.count <= 1, !positional.contains(where: { $0.hasPrefix("--") }) else {
+        throw RuntimeConfigContractError("Expected at most one key and optional --json")
+    }
+    return (positional.first, args.contains("--json"))
+}
 
-private func configGet(args: [String]) {
-    let path = maccrabDataDir() + "/daemon_config.json"
+func configuredConfigDocument(directory: String, key: String?) throws -> [String: Any] {
+    let path = directory + "/daemon_config.json"
+    let configured = try RuntimeConfigurationFiles.readConfigured(at: path)
+    var values = configured ?? [:]
+    for definition in RuntimeConfigurationContract.definitions {
+        values[definition.key] = values[definition.property] ?? values[definition.key]
+            ?? definition.defaultValue.foundationValue
+        values.removeValue(forKey: definition.property)
+    }
+    if let key {
+        guard let value = values[key] else { throw RuntimeConfigContractError("Unknown configuration key '\(key)'") }
+        values = [key: value]
+    }
+    return ["schema_version": 1, "view": "configured", "source_directory": directory,
+            "file_present": configured != nil, "values": values]
+}
 
-    // Distinguish "no config file" (genuine all-defaults) from "config file
-    // exists but this uid can't read it" (release builds write a root-owned
-    // 0600 daemon_config.json under /Library/Application Support/MacCrab/; a
-    // uid-501 CLI gets EACCES). Reporting "all defaults" in the unreadable
-    // case is misleading — the engine may be running a very different config.
-    let fileExists = FileManager.default.fileExists(atPath: path)
-    let data: Data
-    do {
-        data = try Data(contentsOf: URL(fileURLWithPath: path))
-    } catch {
-        if fileExists {
-            // Present but unreadable (typically EACCES on a root-owned 0600 file).
-            print("A daemon_config.json exists at \(path) but is not readable by this user (likely root-owned).")
-            print("Run via the app or with sudo to inspect it; values below cannot be shown.")
-        } else {
-            print("No daemon_config.json found at \(path) (using defaults — no config file).")
-            if let key = args.first {
-                print("Key '\(key)' is therefore at its default value.")
-            }
-        }
-        return
-    }
-    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-        print("daemon_config.json at \(path) is present but could not be parsed as JSON.")
-        return
-    }
-    if let key = args.first {
-        if let value = json[key] {
-            print("\(key) = \(value)")
-        } else if configSafeKeys[key] != nil || configResponseKeys[key] != nil
-                    || configEgressDisableOnlyKeys.contains(key) {
-            print("\(key) is not set in daemon_config.json (using its built-in default).")
-        } else {
-            print("'\(key)' is not present in daemon_config.json.")
-            print("Settable keys: \(allowedKeyList())")
-        }
-        return
-    }
-    // No key: dump the whole file, sorted for stable output.
-    print("daemon_config.json (\(path)):")
-    for k in json.keys.sorted() {
-        print("  \(k) = \(json[k]!)")
+private func configGet(args: [String]) throws {
+    let options = try readArguments(args)
+    let document = try configuredConfigDocument(directory: maccrabDataDir(), key: options.key)
+    if options.json { try printCLIJSONObject(document); return }
+    print("Configured values (runtime application is shown by `config effective`):")
+    let values = document["values"] as? [String: Any] ?? [:]
+    for key in values.keys.sorted() {
+        guard let value = values[key] else { continue }
+        print("  \(key) = \(value)")
     }
 }
 
-// MARK: - set
-
-private func configSet(args: [String]) {
-    guard args.count >= 2 else {
-        print("Usage: maccrabctl config set <key> <value>")
-        print("Settable keys: \(allowedKeyList())")
-        exit(1)
+private func configEffective(args: [String]) throws {
+    let options = try readArguments(args)
+    let directory = maccrabDataDir()
+    var snapshot = try RuntimeConfigurationFiles.readEffective(directory: directory)
+    if let key = options.key {
+        guard let entry = snapshot.values[key] else { throw RuntimeConfigContractError("'\(key)' is not in the runtime-tunable catalog") }
+        snapshot.values = [key: entry]
     }
-    let key = args[0]
-    let raw = args[1]
-
-    // Disable-only egress keys: accept `false`, refuse `true` with the reason
-    // and the path that does work. Checked before the kind lookup so the
-    // refusal names the actual constraint instead of "not a settable key".
-    if configEgressDisableOnlyKeys.contains(key) {
-        guard let b = parseBool(raw) else {
-            print("'\(key)' expects a boolean value (true / false).")
-            exit(1)
-        }
-        if b {
-            print("'\(key)' cannot be enabled from the CLI.")
-            print("Turning it ON enables outbound network calls, and `config set` writes through the")
-            print("privileged inbox, which authorizes on uid alone — so an egress-enabling verb there")
-            print("would be reachable by anything running as you. Disabling is allowed; enabling is not.")
-            print("To enable: Settings → Network enrichment in MacCrab.app, or edit daemon_config.json as root.")
-            exit(1)
-        }
+    let heartbeat = try RuntimeConfigurationFiles.readConfigured(at: directory + "/heartbeat.json")
+    let written = heartbeat?["written_at_unix"] as? Double
+    let age = written.map { Date().timeIntervalSince1970 - $0 }
+    let current = heartbeat.flatMap(EngineTelemetryIdentity.init(heartbeat:)) == snapshot.engineIdentity
+        && (age.map { $0 >= 0 && $0 <= 120 } ?? false)
+    if options.json {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
+        var object = try JSONSerialization.jsonObject(with: encoder.encode(snapshot)) as? [String: Any] ?? [:]
+        object["view"] = "effective_runtime_tunables"
+        object["current"] = current
+        object["source_directory"] = directory
+        try printCLIJSONObject(object)
+        return
     }
-
-    let kind = configSafeKeys[key] ?? configResponseKeys[key]
-        ?? (configEgressDisableOnlyKeys.contains(key) ? "bool" : nil)
-    guard let kind else {
-        print("'\(key)' is not a settable key.")
-        print("Allowed: \(allowedKeyList())")
-        exit(1)
+    print("\(current ? "Current" : "Historical / unverified") runtime configuration; generation \(snapshot.generation):")
+    for key in snapshot.values.keys.sorted() {
+        guard let entry = snapshot.values[key] else { continue }
+        print("  \(key) = \(entry.value?.description ?? "unsupported") [\(entry.source)]")
+        if let adjustment = entry.adjustment { print("    \(adjustment); configured: \(entry.configuredValue)") }
     }
+}
 
-    // Coerce + validate the string argument to the declared kind, mirroring
-    // the MCP handler's per-kind validation.
-    let coerced: Any
-    switch kind {
-    case "bool":
-        guard let b = parseBool(raw) else {
-            print("'\(key)' expects a boolean value (true / false).")
-            exit(1)
-        }
-        coerced = b
-    case "int":
-        guard let i = Int(raw) else {
-            print("'\(key)' expects an integer value.")
-            exit(1)
-        }
-        coerced = i
-    default: // double
-        guard let d = Double(raw) else {
-            print("'\(key)' expects a number value.")
-            exit(1)
-        }
-        coerced = d
+private func configRequestStatus(args: [String]) throws {
+    let options = try readArguments(args)
+    guard let raw = options.key, let id = UUID(uuidString: raw) else {
+        throw RuntimeConfigContractError("Usage: maccrabctl config status <request-UUID> [--json]")
     }
+    let directory = maccrabDataDir()
+    if let receipt = try RuntimeConfigurationFiles.readReceipt(directory: directory, requestID: id) {
+        if options.json { try printCLIJSON(receipt) }
+        else { print("\(receipt.requestID.uuidString): \(receipt.state.rawValue) — \(receipt.reason)") }
+        return
+    }
+    let pending = ["set-daemon-config", "reload-rules", "remove-suppression"].contains {
+        FileManager.default.fileExists(atPath: directory + "/inbox/" + $0 + "-" + id.uuidString + ".json")
+    }
+    if options.json {
+        try printCLIJSONObject(["schema_version": 1, "request_id": id.uuidString,
+                                "state": pending ? "pending" : "unknown"])
+    } else { print("\(id.uuidString): \(pending ? "pending daemon acknowledgement" : "unknown or expired request")") }
+    if !pending { cliFailure("No retained outcome exists for this request", code: 4) }
+}
 
-    // Mirror the MCP's capability framing for operators: defense-affecting
-    // keys are coverage-reducing. The CLI doesn't enforce a tier (a local
-    // operator is the authority), but it warns so the impact is explicit.
-    if configResponseKeys[key] != nil, parseBool(raw) == false {
-        print("⚠️  '\(key)' is defense-affecting — setting it false REDUCES detection coverage.")
+private func configSet(args: [String]) throws {
+    let positional = args.filter { $0 != "--json" }
+    guard positional.count == 2 else { throw RuntimeConfigContractError("Usage: maccrabctl config set <key> <value> [--json]") }
+    let key = positional[0]
+    guard let definition = RuntimeConfigurationContract.byKey[key] else {
+        throw RuntimeConfigContractError("'\(key)' is not a settable key; see config schema")
     }
-
-    // Drop a `set-daemon-config` request into the privileged inbox the engine
-    // polls (same dir + verb-prefix + payload contract as the MCP handler and
-    // the dashboard). The daemon re-validates the key against its own
-    // whitelist and authorizes by file-owner uid; the CLI only queues.
-    let payload: [String: Any] = ["key": key, "value": coerced]
-    if let err = dropCtlInboxRequest(verb: "set-daemon-config", payload: payload) {
-        print("Could not queue config update: \(err)")
-        print("(The engine may not be running, or this shell can't write its inbox.)")
-        exit(1)
-    }
-    print("Queued daemon_config update: \(key) = \(coerced).")
-    if configEgressDisableOnlyKeys.contains(key) {
-        // The daemon applies these four the moment it drains the inbox rather
-        // than at the next reload — a privacy control that took effect "on the
-        // next restart" would look like it worked while enrichment kept talking.
-        print("The engine stops this feed's egress as soon as it drains the inbox (within ~5s), not at the next restart.")
+    let requested = try definition.parse(positional[1])
+    let normalized = try definition.normalized(requested)
+    let id = try RuntimeConfigurationFiles.submit(
+        operation: "set-daemon-config", payload: ["key": key, "value": requested.foundationValue], directory: maccrabDataDir()
+    )
+    if args.contains("--json") {
+        try printCLIJSONObject(["schema_version": 1, "state": "pending", "request_id": id.uuidString,
+                                "operation": "set-daemon-config", "key": key,
+                                "requested_value": requested.foundationValue,
+                                "normalized_value": normalized.foundationValue,
+                                "application": definition.application.rawValue])
     } else {
-        print("The engine applies it on its next config reload / restart.")
+        print("Submitted \(key) = \(requested); request \(id.uuidString).")
+        if requested != normalized { print("The documented bounds normalize this to \(normalized).") }
+        print("Application: \(definition.application.rawValue). Check: maccrabctl config status \(id.uuidString)")
     }
 }
 
@@ -268,7 +160,7 @@ private func configSet(args: [String]) {
 /// dashboard could read it, so the record of what an AGENT changed was legible
 /// only through the agent's own tooling — which inverts the trust relationship
 /// the agent-capability tiers exist to establish. Reads both rails the writers
-/// use: `dashboard_audit.log` (what the root engine APPLIED from its inbox,
+/// use: `dashboard_audit.log` (engine request acceptance, rejection and application,
 /// written by DaemonTimers.auditLogInbox) and `mcp_mutations.jsonl` (what an
 /// MCP client REQUESTED, written by maccrab-mcp's auditLog into the USER
 /// app-support dir, which is a different directory from the engine's).
@@ -296,25 +188,10 @@ func dispatchAudit(args: [String]) {
         print("")
     }
 
-    tail(maccrabDataDir() + "/dashboard_audit.log", label: "Applied by the engine")
+    tail(maccrabDataDir() + "/dashboard_audit.log", label: "Engine request audit")
     let userDir = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)
         .first.map { $0.appendingPathComponent("MacCrab").path }
         ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
     tail(userDir + "/mcp_mutations.jsonl", label: "Requested via MCP")
-}
-
-// MARK: - helpers
-
-private func allowedKeyList() -> String {
-    (configSafeKeys.keys.sorted() + configResponseKeys.keys.sorted()
-        + configEgressDisableOnlyKeys.sorted().map { "\($0) (false only)" }).joined(separator: ", ")
-}
-
-private func parseBool(_ s: String) -> Bool? {
-    switch s.lowercased() {
-    case "true", "1", "yes", "on": return true
-    case "false", "0", "no", "off": return false
-    default: return nil
-    }
 }

@@ -1677,11 +1677,20 @@ actor BatchedEventWriter {
         }
         guard let workspaceLease = await liveMemoryBudget.acquire(
             bytes: EventTerminalDeltaValidator.maximumPreparationWorkspaceBytes,
-            owner: .journalPrepared
+            owner: .journalPrepared,
+            deadline: settlementDeadline
         ) else {
+            let status: EventJournalContextStatus =
+                !Task.isCancelled && settlementClock.now >= settlementDeadline
+                    ? .timedOut : .dropped
             recordTerminalOffered(lane: lane)
-            recordTerminalDrop(lane: lane)
-            return proof(status: .dropped)
+            recordTerminalDrop(lane: lane, reason: status)
+            await StorageErrorTracker.shared.recordEventError(
+                EventStoreError.memoryLeaseUnavailable(
+                    "terminal delta preparation workspace acquisition \(status)"
+                )
+            )
+            return proof(status: status)
         }
 
         let storagePrepared: EventTerminalDeltaStoragePreparation

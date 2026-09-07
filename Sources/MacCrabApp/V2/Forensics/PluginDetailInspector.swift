@@ -116,7 +116,7 @@ struct PluginDetailInspector: View {
                 Text(model.displayName).font(.headline)
                 HStack(spacing: 6) {
                     provenanceBadge
-                    Text("v\(model.version)").scaledSystem(11).foregroundStyle(.tertiary)
+                    Text(verbatim: "v\(model.version)").scaledSystem(11).foregroundStyle(.tertiary)
                 }
                 Text(model.provenance.explanation)
                     .scaledSystem(10).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -187,24 +187,24 @@ struct PluginDetailInspector: View {
                     dismiss()
                     DispatchQueue.main.async { onRun() }
                 } label: {
-                    Label("Run on this Mac", systemImage: "play.fill")
+                    Label(String(localized: "raveDetail.run.button", defaultValue: "Run on this Mac"), systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
             }
             if let onUpdate {
-                Button { onUpdate() } label: { Label("Update", systemImage: "arrow.up.circle.fill") }
+                Button { onUpdate() } label: { Label(String(localized: "ui.PluginDetailInspector.update", defaultValue: "Update"), systemImage: "arrow.up.circle.fill") }
                     .tint(.blue)
             }
             if let onVerify {
-                Button { onVerify() } label: { Label("Verify", systemImage: "checkmark.shield") }
+                Button { onVerify() } label: { Label(String(localized: "ui.PluginDetailInspector.verify", defaultValue: "Verify"), systemImage: "checkmark.shield") }
             }
             Spacer()
             if let onUninstall {
                 Button(role: .destructive) { onUninstall(); dismiss() } label: {
-                    Label("Uninstall", systemImage: "trash")
+                    Label(String(localized: "scans.uninstall.button", defaultValue: "Uninstall"), systemImage: "trash")
                 }
             }
-            Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+            Button(String(localized: "ax.close", defaultValue: "Close")) { dismiss() }.keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
     }

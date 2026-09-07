@@ -556,21 +556,32 @@ public actor RuleEngine {
     /// tick; the app reads via `RuleEngine.readTelemetrySnapshot(at:)`.
     public struct TelemetrySnapshot: Codable, Sendable {
         public let writtenAt: Date
+        public let engineIdentity: EngineTelemetryIdentity?
+        public let loadedRuleIds: [String]?
+        public let enabledRuleIds: [String]?
         public let stats: [RuleStats]
         /// Rule ids the engine auto-disabled at RUNTIME (pathological/ReDoS guard).
         /// The dashboard rebuilds rule state from compiled_rules/ on disk, where a
         /// runtime auto-disable never lands — so without this it shows a silenced
         /// detection as enabled. Decode-safe: snapshots predating the field → [].
         public let autoDisabledRuleIds: [String]
-        public init(writtenAt: Date, stats: [RuleStats], autoDisabledRuleIds: [String] = []) {
+        public init(writtenAt: Date, stats: [RuleStats], autoDisabledRuleIds: [String] = [],
+                    engineIdentity: EngineTelemetryIdentity? = nil,
+                    loadedRuleIds: [String]? = nil, enabledRuleIds: [String]? = nil) {
             self.writtenAt = writtenAt
+            self.engineIdentity = engineIdentity
+            self.loadedRuleIds = loadedRuleIds
+            self.enabledRuleIds = enabledRuleIds
             self.stats = stats
             self.autoDisabledRuleIds = autoDisabledRuleIds
         }
-        private enum CodingKeys: String, CodingKey { case writtenAt, stats, autoDisabledRuleIds }
+        private enum CodingKeys: String, CodingKey { case writtenAt, stats, autoDisabledRuleIds, engineIdentity, loadedRuleIds, enabledRuleIds }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             self.writtenAt = try c.decode(Date.self, forKey: .writtenAt)
+            self.engineIdentity = try c.decodeIfPresent(EngineTelemetryIdentity.self, forKey: .engineIdentity)
+            self.loadedRuleIds = try c.decodeIfPresent([String].self, forKey: .loadedRuleIds)
+            self.enabledRuleIds = try c.decodeIfPresent([String].self, forKey: .enabledRuleIds)
             self.stats = try c.decode([RuleStats].self, forKey: .stats)
             self.autoDisabledRuleIds = (try? c.decode([String].self, forKey: .autoDisabledRuleIds)) ?? []
         }
@@ -578,11 +589,14 @@ public actor RuleEngine {
 
     private let snapshotWriter: CoalescingSnapshotWriter<TelemetrySnapshot>
 
-    public func writeTelemetrySnapshot(to path: String) async {
+    public func writeTelemetrySnapshot(to path: String, engineIdentity: EngineTelemetryIdentity? = nil) async {
         let snapshot = TelemetrySnapshot(
             writtenAt: Date(),
             stats: Array(ruleStats.values).sorted { $0.fireCount > $1.fireCount },
-            autoDisabledRuleIds: Array(autoDisabledRules).sorted()
+            autoDisabledRuleIds: Array(autoDisabledRules).sorted(),
+            engineIdentity: engineIdentity,
+            loadedRuleIds: allRules.keys.sorted(),
+            enabledRuleIds: allRules.values.filter(\.enabled).map(\.id).sorted()
         )
         await snapshotWriter.publish(snapshot, to: path)
     }

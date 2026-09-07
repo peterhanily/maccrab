@@ -93,7 +93,7 @@ struct ArtifactTableView: View {
                                 Divider()
                             }
                             if filtered.count > 500 {
-                                Text("Showing first 500 of \(filtered.count). Use search to narrow.")
+                                Text(String(localized: "ui.ArtifactTableView.showing.first.500.of.use.search.to", defaultValue: "Showing first 500 of \(filtered.count). Use search to narrow."))
                                     .scaledSystem(11)
                                     .foregroundStyle(.tertiary)
                                     .padding(.vertical, 8)
@@ -124,7 +124,7 @@ struct ArtifactTableView: View {
             TextField("Search rows", text: $query)
                 .textFieldStyle(.plain)
                 .scaledSystem(12)
-            Text("\(filtered.count) row\(filtered.count == 1 ? "" : "s")")
+            Text(String(localized: "ui.final.tableRows", defaultValue: "Rows: \(filtered.count)"))
                 .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }

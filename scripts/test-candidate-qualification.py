@@ -11,6 +11,7 @@ import importlib.util
 import inspect
 import re
 import json
+import io
 import os
 import pathlib
 import signal
@@ -254,11 +255,32 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
     installed_identity = {
         **installed_agent,
         "engine_pid": 4321,
+        "pid": 4321,
+        "process_start_abstime": 987654321,
+        "running_cdhash": installed_agent["cdhashes"]["arm64"],
+        "cdhash": installed_agent["cdhashes"]["arm64"],
+        "architecture": "arm64",
         "executable_path": (
             "/Library/SystemExtensions/fixture/"
             "com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
         ),
         "system_extension_bundle_identifier": qualification.EXPECTED_AGENT_IDENTIFIER,
+    }
+    gui_image = next(entry for entry in manifest["artifact_verification"]["payload_inventory"]["entries"]
+                     if entry["path"] == qualification.GUI_PAYLOAD_PATH)
+    gui_process = {
+        "pid": 5432, "process_start_abstime": 123456789,
+        "executable_path": "/Applications/" + qualification.GUI_PAYLOAD_PATH,
+        "executable_sha256": gui_image["sha256"],
+        "running_cdhash": manifest["artifact_verification"]["app_cdhashes"]["arm64"],
+    }
+    gui_identity = {
+        **gui_process, "developer_id": qualification.EXPECTED_DEVELOPER_ID,
+        "team_id": qualification.EXPECTED_TEAM_ID,
+        "signing_identifier": qualification.EXPECTED_APP_IDENTIFIER,
+        "cdhash": "b" * 40, "bundle_identifier": qualification.EXPECTED_APP_IDENTIFIER,
+        "architecture": "arm64",
+        "bundle_version": candidate["version"], "build_version": candidate["build_number"],
     }
     sqlite_rows = [
         {
@@ -294,6 +316,8 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 sample["recorded_at"], "fixture sample time"
             ).timestamp(),
             "engine_pid": sample["engine_pid"],
+            "engine_started_at_unix": qualification.parse_time(iso(-600), "fixture boot").timestamp(),
+            "engine_uptime_seconds": 600 + sample["offset_seconds"],
             "engine_version": VERSION,
             "engine_build": BUILD_NUMBER,
             "event_pipeline": pipeline,
@@ -529,6 +553,13 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "patch_bytes_conserved": True,
                 "within_capacity": True,
             },
+            "event_journal_index": {
+                "refreshes_total": 1 + sample["offset_seconds"] // 30,
+                "slow_refreshes_total": 0,
+                "last_refresh_ms": 1,
+                "full_rebuilds_total": 1,
+                "append_refreshes_total": sample["offset_seconds"] // 30,
+            },
             "llm": llm_heartbeat_payload(
                 healthy=True,
                 started=11 if sample["offset_seconds"] >= 330 else 10,
@@ -559,6 +590,9 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                     "mtime_unix": heartbeat["written_at_unix"],
                 },
                 "process": {
+                    "pid": installed_identity["pid"],
+                    "process_start_abstime": installed_identity["process_start_abstime"],
+                    "running_cdhash": installed_identity["running_cdhash"],
                     "engine_cpu_seconds_total": sample["engine_cpu_seconds_total"],
                     "engine_disk_write_bytes_total": sample[
                         "engine_disk_write_bytes_total"
@@ -567,6 +601,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                     "executable_path": installed_identity["executable_path"],
                     "executable_sha256": installed_identity["executable_sha256"],
                 },
+                "gui_process": copy.deepcopy(gui_process),
                 "gui_background_cpu_percent": sample[
                     "gui_background_cpu_percent"
                 ],
@@ -711,7 +746,8 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
         f"IDENTITY: run_id={workload_run_id} "
         f"alert_executable={workload_alert_path} bulk_path={workload_bulk_path}\n"
         f"PASS: fixed workload completed run_id={workload_run_id} "
-        "iterations=20000 otlp_spans=1 alert_triggers=1 sequence_probes=1\n"
+        f"iterations={qualification.FIXED_WORKLOAD_ITERATIONS} "
+        "otlp_spans=1 alert_triggers=1 sequence_probes=1\n"
     )
     evidence = {
         "preinstall_clean_ci": copy.deepcopy(manifest["preinstall_clean_ci"]),
@@ -760,13 +796,15 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
         "live_sighup": {
             "signal": "SIGHUP",
             "target_pid": 4321,
-            "sample_offset_seconds": 450,
-            "sent_at": iso(450),
+            "sample_offset_seconds": qualification.BURST_DRAIN_OFFSET_SECONDS,
+            "sent_at": iso(qualification.BURST_DRAIN_OFFSET_SECONDS),
         },
     }
     probes = {
-        "installed_engine_start": {**installed_identity, "recorded_at": iso(0)},
-        "installed_engine_end": {**installed_identity, "recorded_at": iso(900)},
+        "installed_engine_start": {**installed_identity, "inspection_started_at": iso(0), "recorded_at": iso(0)},
+        "installed_engine_end": {**installed_identity, "inspection_started_at": iso(900), "recorded_at": iso(900)},
+        "installed_gui_start": {**gui_identity, "inspection_started_at": iso(0), "recorded_at": iso(0)},
+        "installed_gui_end": {**gui_identity, "inspection_started_at": iso(900), "recorded_at": iso(900)},
         "crash_count": 0,
         "watchdog_exit_count": 0,
         "complete_rule_corpus_evaluated": True,
@@ -819,6 +857,279 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
 
 
 class CandidateQualificationTests(unittest.TestCase):
+    def test_process_scope_records_boot_and_monotonic_age(self) -> None:
+        process = self.runtime["measurements"]["process"]
+        self.assertEqual(process["engine_uptime_seconds_at_t0"], 600)
+        self.assertEqual(process["engine_uptime_seconds_at_end"], 1500)
+        self.assertEqual(self.runtime["counter_scope_policy"], qualification.RUNTIME_COUNTER_SCOPE_POLICY)
+        self.validate_runtime()
+
+    def test_same_pid_with_new_boot_is_not_one_epoch(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[-1]["heartbeat"]["engine_started_at_unix"] += 1
+        self.rebind_observation_heartbeat(observations[-1])
+        with self.assertRaisesRegex(qualification.QualificationError, "process start changed"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_process_uptime_is_required_and_cannot_reset(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[-1]["heartbeat"]["engine_uptime_seconds"] = 1
+        self.rebind_observation_heartbeat(observations[-1])
+        with self.assertRaisesRegex(qualification.QualificationError, "uptime did not advance"):
+            self.rebuild_runtime_from_observations(observations)
+        del observations[-1]["heartbeat"]["engine_uptime_seconds"]
+        self.rebind_observation_heartbeat(observations[-1])
+        with self.assertRaisesRegex(qualification.QualificationError, "engine_uptime_seconds"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_steady_epoch_requires_completed_warmup(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            observation["heartbeat"]["engine_uptime_seconds"] = 10 + observation["offset_seconds"]
+            self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(qualification.QualificationError, "250-second engine warmup"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_present_candidate_gui_identity_is_bound_to_all_samples(self) -> None:
+        process = self.runtime["samples"][0]["gui_process"]
+        self.assertEqual(process["pid"], 5432)
+        self.assertEqual(self.runtime["measurements"]["cpu"]["gui_cpu_statistic"], "ps-pcpu-snapshot")
+        self.validate_runtime()
+
+    def test_absent_gui_process_evidence_cannot_mean_zero_cpu(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[-1].pop("gui_process")
+        observations[-1]["gui_background_cpu_percent"] = 0
+        with self.assertRaisesRegex(qualification.QualificationError, "gui_process"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_present_idle_candidate_gui_can_have_measured_zero_cpu(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            observation["gui_background_cpu_percent"] = 0
+        report = self.rebuild_runtime_from_observations(observations)
+        self.assertEqual(report["measurements"]["cpu"]["gui_background_p95_percent"], 0)
+        self.validate_runtime(report)
+
+    def test_gui_restart_and_reused_pid_fail_epoch_continuity(self) -> None:
+        for field in ("pid", "process_start_abstime"):
+            with self.subTest(field=field):
+                observations = copy.deepcopy(self.runtime["recorder_observations"])
+                observations[-1]["gui_process"][field] += 1
+                with self.assertRaisesRegex(qualification.QualificationError, "GUI process identity changed"):
+                    self.rebuild_runtime_from_observations(observations)
+
+    def test_another_gui_image_cannot_supply_candidate_cpu_samples(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[-1]["gui_process"]["executable_sha256"] = "c" * 64
+        with self.assertRaisesRegex(qualification.QualificationError, "exact candidate GUI image"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_gui_endpoint_requires_same_signed_candidate_and_process(self) -> None:
+        for key, value, reason in (
+            ("build_version", "prior-build", "version/build/identifier"),
+            ("pid", 5433, "every sampled process"),
+            ("process_start_abstime", 123456790, "every sampled process"),
+        ):
+            with self.subTest(key=key):
+                report = copy.deepcopy(self.runtime)
+                report["installed_gui"]["end"][key] = value
+                with self.assertRaisesRegex(qualification.QualificationError, reason):
+                    self.validate_runtime(report)
+
+    def test_gui_probe_requires_exactly_one_present_process(self) -> None:
+        line = "5432 5.0 /Applications/MacCrab.app/Contents/MacOS/MacCrab\n"
+        for output in ("1 0.0 /sbin/launchd\n", line + line.replace("5432", "6543")):
+            with self.subTest(output=output), mock.patch.object(qualification, "command_text", return_value=output):
+                with self.assertRaisesRegex(qualification.QualificationError, "exactly one running MacCrab GUI"):
+                    qualification.gui_process_observation()
+
+    def test_gui_probe_records_present_process_and_focused_ps_snapshot(self) -> None:
+        process = copy.deepcopy(self.runtime["samples"][0]["gui_process"])
+        usage = qualification.DarwinRUsageInfoV4()
+        usage.ri_proc_start_abstime = process["process_start_abstime"]
+        discovery = f"5432 5.0 {process['executable_path']}\n"
+        measured = f"5432 7.5 {process['executable_path']}\n"
+        with mock.patch.object(qualification, "command_text", side_effect=[discovery, measured]), \
+                mock.patch.object(qualification, "darwin_process_metrics", return_value=process), \
+                mock.patch.object(qualification, "darwin_process_cdhash", return_value=process["running_cdhash"]), \
+                mock.patch.object(qualification, "darwin_process_rusage", return_value=usage), \
+                mock.patch.object(qualification, "darwin_process_path", return_value=pathlib.Path(process["executable_path"])):
+            observed = qualification.gui_process_observation()
+        self.assertEqual(observed, {"process": process, "cpu_percent": 7.5})
+
+    def test_gui_probe_detects_disappearance_and_restart_during_sample(self) -> None:
+        process = copy.deepcopy(self.runtime["samples"][0]["gui_process"])
+        line = f"5432 5.0 {process['executable_path']}\n"
+        usage = qualification.DarwinRUsageInfoV4()
+        usage.ri_proc_start_abstime = process["process_start_abstime"] + 1
+        for second, reason in (("", "disappeared"), (line, "changed while")):
+            with self.subTest(reason=reason), \
+                    mock.patch.object(qualification, "command_text", side_effect=[line, second]), \
+                    mock.patch.object(qualification, "darwin_process_metrics", return_value=process), \
+                    mock.patch.object(qualification, "darwin_process_cdhash", return_value=process["running_cdhash"]), \
+                    mock.patch.object(qualification, "darwin_process_rusage", return_value=usage), \
+                    mock.patch.object(qualification, "darwin_process_path", return_value=pathlib.Path(process["executable_path"])):
+                with self.assertRaisesRegex(qualification.QualificationError, reason):
+                    qualification.gui_process_observation()
+
+    def test_prior_running_gui_hash_does_not_match_replaced_candidate_disk_image(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        # Ordinary upgrade state: disk now holds this candidate while the older
+        # GUI process still owns its previous CodeDirectory identity.
+        observations[-1]["gui_process"]["running_cdhash"] = "e" * 40
+        with self.assertRaisesRegex(qualification.QualificationError, "running CDHash"):
+            self.rebuild_runtime_from_observations(observations)
+        observations[-1]["gui_process"].pop("running_cdhash")
+        with self.assertRaisesRegex(qualification.QualificationError, "running_cdhash"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_both_signed_candidate_gui_slices_can_be_the_running_image(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            observation["gui_process"]["running_cdhash"] = "d" * 40
+        report = self.rebuild_runtime_from_observations(observations)
+        for endpoint in report["installed_gui"].values():
+            endpoint.update(running_cdhash="d" * 40, cdhash="d" * 40, architecture="x86_64")
+        self.validate_runtime(report)
+
+    def test_gui_native_query_uses_operation_five_and_twenty_byte_result(self) -> None:
+        expected = bytes(range(1, 21))
+        def query(pid, operation, buffer, size):
+            self.assertEqual((pid, operation, size), (5432, 5, 20))
+            qualification.ctypes.memmove(buffer, expected, size)
+            return 0
+        library = mock.Mock()
+        library.csops.side_effect = query
+        with mock.patch.object(qualification.ctypes, "CDLL", return_value=library):
+            self.assertEqual(qualification.darwin_process_cdhash(5432), expected.hex())
+        library.csops.side_effect = None
+        library.csops.return_value = -1
+        with mock.patch.object(qualification.ctypes, "CDLL", return_value=library):
+            with self.assertRaisesRegex(qualification.QualificationError, "cannot inspect running process"):
+                qualification.darwin_process_cdhash(5432)
+
+    def test_gui_endpoint_rejects_delayed_actual_inspection(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        report["installed_gui"]["end"]["recorded_at"] = iso(940)
+        with self.assertRaisesRegex(qualification.QualificationError, "bounded interval"):
+            self.validate_runtime(report)
+        report["installed_gui"]["end"]["inspection_started_at"] = iso(940)
+        with self.assertRaisesRegex(qualification.QualificationError, "epoch boundary"):
+            self.validate_runtime(report)
+
+    def test_gui_endpoint_records_actual_inspection_times(self) -> None:
+        process = copy.deepcopy(self.runtime["samples"][0]["gui_process"])
+        identity = copy.deepcopy(self.runtime["installed_gui"]["start"])
+        usage = qualification.DarwinRUsageInfoV4()
+        usage.ri_proc_start_abstime = process["process_start_abstime"]
+        start = qualification.parse_time(iso(900), "fixture time")
+        end = qualification.parse_time(iso(902), "fixture time")
+        plist = qualification.plistlib.dumps({
+            "CFBundleIdentifier": qualification.EXPECTED_APP_IDENTIFIER,
+            "CFBundleShortVersionString": VERSION, "CFBundleVersion": BUILD_NUMBER,
+        })
+        with mock.patch.object(qualification, "darwin_process_metrics", return_value=process), \
+                mock.patch.object(qualification, "darwin_process_cdhash", return_value=process["running_cdhash"]), \
+                mock.patch.object(qualification, "darwin_process_rusage", return_value=usage), \
+                mock.patch.object(qualification, "darwin_process_path", return_value=pathlib.Path(process["executable_path"])), \
+                mock.patch.object(qualification, "run_checked"), \
+                mock.patch.object(qualification, "fixed_tool", side_effect=lambda path: path), \
+                mock.patch.object(qualification, "gui_slice_signing_identities", return_value={"arm64": identity}), \
+                mock.patch.object(pathlib.Path, "open", return_value=io.BytesIO(plist)), \
+                mock.patch.object(qualification.dt, "datetime") as clock:
+            clock.now.side_effect = [start, end]
+            observed = qualification.installed_gui_identity(5432)
+        self.assertEqual(observed["inspection_started_at"], start.isoformat())
+        self.assertEqual(observed["recorded_at"], end.isoformat())
+
+    def test_gui_candidate_requires_both_architecture_identities(self) -> None:
+        verification = copy.deepcopy(self.manifest["artifact_verification"])
+        verification["app_cdhashes"].pop("x86_64")
+        with self.assertRaisesRegex(qualification.QualificationError, "both supported architecture"):
+            qualification.validate_gui_candidate_process(
+                self.runtime["samples"][0]["gui_process"], candidate_verification=verification, path="fixture GUI"
+            )
+
+    def test_prior_running_engine_hash_cannot_borrow_new_candidate_disk_image(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[-1]["process"]["running_cdhash"] = "e" * 40
+        with self.assertRaisesRegex(qualification.QualificationError, "running CDHash.*engine slice"):
+            self.rebuild_runtime_from_observations(observations)
+        observations[-1]["process"].pop("running_cdhash")
+        with self.assertRaisesRegex(qualification.QualificationError, "running_cdhash"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_engine_epoch_accepts_the_attested_intel_slice(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            observation["process"]["running_cdhash"] = "c" * 40
+        report = self.rebuild_runtime_from_observations(observations)
+        for endpoint in report["installed_engine"].values():
+            endpoint.update(running_cdhash="c" * 40, cdhash="c" * 40, architecture="x86_64")
+        self.validate_runtime(report)
+
+    def test_engine_native_start_is_required_to_remain_stable(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[-1]["process"]["process_start_abstime"] += 1
+        with self.assertRaisesRegex(qualification.QualificationError, "native engine process identity changed"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_engine_observation_brackets_native_image_identity(self) -> None:
+        metrics = copy.deepcopy(self.runtime["recorder_observations"][0]["process"])
+        usage = qualification.DarwinRUsageInfoV4()
+        usage.ri_proc_start_abstime = metrics["process_start_abstime"]
+        for after_hash, succeeds in (("a" * 40, True), ("c" * 40, False)):
+            with self.subTest(succeeds=succeeds), \
+                    mock.patch.object(qualification, "darwin_process_metrics", return_value=metrics), \
+                    mock.patch.object(qualification, "darwin_process_cdhash", side_effect=["a" * 40, after_hash]), \
+                    mock.patch.object(qualification, "darwin_process_rusage", return_value=usage), \
+                    mock.patch.object(qualification, "darwin_process_path", return_value=pathlib.Path(metrics["executable_path"])):
+                if succeeds:
+                    self.assertEqual(qualification.engine_process_observation(4321)["running_cdhash"], "a" * 40)
+                else:
+                    with self.assertRaisesRegex(qualification.QualificationError, "engine process changed"):
+                        qualification.engine_process_observation(4321)
+
+    def test_engine_endpoint_records_actual_inspection_times(self) -> None:
+        metrics = copy.deepcopy(self.runtime["recorder_observations"][0]["process"])
+        identity = copy.deepcopy(self.runtime["installed_engine"]["start"])
+        usage = qualification.DarwinRUsageInfoV4()
+        usage.ri_proc_start_abstime = metrics["process_start_abstime"]
+        start = qualification.parse_time(iso(900), "fixture time")
+        end = qualification.parse_time(iso(902), "fixture time")
+        plist = qualification.plistlib.dumps({
+            "CFBundleIdentifier": qualification.EXPECTED_AGENT_IDENTIFIER,
+            "CFBundleShortVersionString": VERSION, "CFBundleVersion": BUILD_NUMBER,
+        })
+        with mock.patch.object(qualification, "engine_process_observation", return_value=metrics), \
+                mock.patch.object(qualification, "darwin_process_cdhash", return_value=metrics["running_cdhash"]), \
+                mock.patch.object(qualification, "darwin_process_rusage", return_value=usage), \
+                mock.patch.object(qualification, "darwin_process_path", return_value=pathlib.Path(metrics["executable_path"])), \
+                mock.patch.object(qualification, "run_checked"), \
+                mock.patch.object(qualification, "fixed_tool", side_effect=lambda path: path), \
+                mock.patch.object(qualification, "slice_signing_identities", return_value={"arm64": identity}), \
+                mock.patch.object(pathlib.Path, "open", return_value=io.BytesIO(plist)), \
+                mock.patch.object(qualification.dt, "datetime") as clock:
+            clock.now.side_effect = [start, end]
+            observed = qualification.installed_engine_identity(4321)
+        self.assertEqual(observed["inspection_started_at"], start.isoformat())
+        self.assertEqual(observed["recorded_at"], end.isoformat())
+
+    def test_engine_endpoint_rejects_delayed_actual_capture(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        report["installed_engine"]["end"]["recorded_at"] = iso(940)
+        with self.assertRaisesRegex(qualification.QualificationError, "bounded interval"):
+            self.validate_runtime(report)
+        report["installed_engine"]["end"]["inspection_started_at"] = iso(940)
+        with self.assertRaisesRegex(qualification.QualificationError, "epoch boundary"):
+            self.validate_runtime(report)
+
+    def test_candidate_engine_requires_both_signed_architecture_slices(self) -> None:
+        self.manifest["artifact_verification"]["system_extension"]["cdhashes"].pop("x86_64")
+        with self.assertRaisesRegex(qualification.QualificationError, "both supported architecture"):
+            self.validate_candidate()
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="maccrab-qualification-test.")
         self.root = pathlib.Path(self.temporary.name)
@@ -892,6 +1203,8 @@ class CandidateQualificationTests(unittest.TestCase):
         measurements = self.runtime["measurements"]
         process = measurements["process"]
         return {
+            "installed_gui_start": copy.deepcopy(self.runtime["installed_gui"]["start"]),
+            "installed_gui_end": copy.deepcopy(self.runtime["installed_gui"]["end"]),
             "installed_engine_start": copy.deepcopy(
                 self.runtime["installed_engine"]["start"]
             ),
@@ -927,7 +1240,7 @@ class CandidateQualificationTests(unittest.TestCase):
         }
 
     def rebuild_runtime_from_observations(
-        self, observations: list[dict]
+        self, observations: list[dict], *, probes: dict | None = None
     ) -> dict:
         return qualification.build_runtime_report_from_observations(
             candidate_manifest=self.manifest,
@@ -935,7 +1248,7 @@ class CandidateQualificationTests(unittest.TestCase):
             observations=observations,
             host=copy.deepcopy(self.runtime["host"]),
             workload=copy.deepcopy(self.runtime["workload"]),
-            probes=self.recorder_probes(),
+            probes=probes if probes is not None else self.recorder_probes(),
             capture_mode="deterministic-fixture",
         )
 
@@ -1217,6 +1530,144 @@ class CandidateQualificationTests(unittest.TestCase):
             f"fixture.observations[{index}]",
         )
         cls.rehash_samples(report)
+
+    def produce_unconfigured_alert_proofs(self, evidence: dict) -> None:
+        """Use the live proof producer with ordinary committed-alert fixtures."""
+        for name in ("llm_prewarm", "workload"):
+            template = evidence[name]["alert_investigation"]
+            observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+            observation["heartbeat"]["llm"] = {"configured": False}
+            observation["captured_at"] = template["observed_at"]
+            observation["recorded_at"] = template["observed_at"]
+            observation["heartbeat"]["written_at_unix"] = qualification.parse_time(
+                template["observed_at"], "fixture observation"
+            ).timestamp()
+            self.rebind_observation_heartbeat(observation)
+            row = {
+                **template["alert"], "process_path": template["process_path"],
+                "llm_investigation_json": None,
+            }
+            with mock.patch.object(
+                qualification, "readonly_alert_rows_for_process",
+                return_value=([row], copy.deepcopy(template["database"])),
+            ):
+                proof, alert_id = qualification.causal_alert_proof_if_ready(
+                    phase=template["phase"],
+                    database_path=pathlib.Path(template["database"]["path"]),
+                    process_path=template["process_path"],
+                    trigger_started_at=qualification.parse_time(
+                        template["trigger_started_at"], "fixture trigger"
+                    ),
+                    telemetry_before={"configured": False},
+                    observation=observation, stable_alert_id=None,
+                )
+            self.assertIsNotNone(proof)
+            self.assertEqual(alert_id, row["id"])
+            self.assertIsNone(proof["investigation_json"])
+            self.assertIsNone(proof["investigation_sha256"])
+            evidence[name]["alert_investigation"] = proof
+
+    def test_live_reload_producer_evidence_passes_validator(self) -> None:
+        evidence = copy.deepcopy(self.runtime["recorder_probe_evidence"])
+        with mock.patch.object(qualification.os, "kill") as send:
+            evidence["live_sighup"] = qualification.send_live_rule_reload_probe(
+                target_pid=4321, offset=qualification.BURST_DRAIN_OFFSET_SECONDS,
+            )
+        send.assert_called_once_with(4321, qualification.signal.SIGHUP)
+        qualification.validate_recorder_probe_evidence(
+            evidence, source_root=ROOT,
+            expected_preinstall_clean_ci=self.manifest["preinstall_clean_ci"],
+        )
+        evidence["live_sighup"]["sample_offset_seconds"] = 450
+        with self.assertRaisesRegex(qualification.QualificationError, "fixed SIGHUP probe"):
+            qualification.validate_recorder_probe_evidence(
+                evidence, source_root=ROOT,
+                expected_preinstall_clean_ci=self.manifest["preinstall_clean_ci"],
+            )
+
+    def test_unconfigured_proof_still_requires_committed_high_alert(self) -> None:
+        evidence = copy.deepcopy(self.runtime["recorder_probe_evidence"])
+        self.produce_unconfigured_alert_proofs(evidence)
+        proof = evidence["workload"]["alert_investigation"]
+        for field, value, message in (
+            ("alert", None, "must be an object"),
+            ("investigation_json", "{}", "must not claim"),
+            ("telemetry_after", {"configured": True}, "configuration changed"),
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(proof)
+                changed[field] = value
+                with self.assertRaisesRegex(qualification.QualificationError, message):
+                    qualification.validate_alert_investigation_proof(changed, "fixture proof")
+        proof["alert"]["severity"] = "low"
+        with self.assertRaisesRegex(qualification.QualificationError, "HIGH or CRITICAL"):
+            qualification.validate_alert_investigation_proof(proof, "fixture proof")
+
+    def test_flowing_queue_uses_one_live_and_reported_drain_contract(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        drain = qualification.BURST_DRAIN_OFFSET_SECONDS
+        for observation in observations:
+            if observation["offset_seconds"] in (drain - 30, drain):
+                heartbeat = observation["heartbeat"]
+                heartbeat["events_storage_write_offered_by_lane"]["file"] += 1
+                heartbeat["events_storage_write_buffer_depth_by_lane"]["file"] += 1
+                self.rebind_observation_heartbeat(observation)
+        previous = qualification.sample_from_recorder_observation(
+            observations[drain // 30 - 1], "previous flow observation"
+        )
+        current = observations[drain // 30]
+        qualification.validate_runtime_readiness(
+            current, "flow observation", phase="drain", require_drained=True,
+            expected_pid=4321, previous_sample=previous,
+        )
+        # A nonzero t0 queue still lacks earlier epoch evidence of progress.
+        with self.assertRaisesRegex(qualification.QualificationError, "not drained"):
+            qualification.validate_runtime_readiness(
+                current, "flow observation", phase="t0", require_drained=True,
+            )
+        with mock.patch.object(
+            qualification, "capture_runtime_observation", return_value=current,
+        ), mock.patch.object(qualification.time, "sleep"):
+            drained = qualification.wait_for_runtime_drain(
+                initial=observations[drain // 30 - 1], phase="fixture drain",
+                heartbeat_path=self.root / "unused-heartbeat.json",
+                candidate=self.manifest["candidate"], data_dirs=[self.root],
+                sqlite_overrides={}, expected_pid=4321,
+            )
+        self.assertEqual(drained, current)
+        report = self.rebuild_runtime_from_observations(observations)
+        self.validate_runtime(report)
+        window = qualification.derive_workload_ingress(report["samples"])
+        self.assertEqual(
+            window["file_persistence_offered_delta"]
+            - window["file_persistence_completed_delta"], 1,
+        )
+
+    def test_flowing_queue_never_forgives_unproven_or_unbounded_work(self) -> None:
+        name = "file-event-persistence"
+        previous = {name: {
+            "offered": 101, "completed": 100, "queued": 1,
+            "in_flight": 0, "explicitly_shed": 0,
+        }}
+        healthy = {name: {
+            "offered": 201, "completed": 200, "queued": 1,
+            "in_flight": 0, "explicitly_shed": 0,
+        }}
+        pending = [f"{name} queued=1 in_flight=0"]
+        self.assertEqual(
+            qualification.forgive_flowing_boundary_lanes(pending, healthy, previous), [],
+        )
+        for changes in (
+            {"completed": 100}, {"queued": 2}, {"in_flight": 1},
+            {"queued": qualification.RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT + 1},
+        ):
+            with self.subTest(changes=changes):
+                current = copy.deepcopy(healthy)
+                current[name].update(changes)
+                self.assertEqual(
+                    qualification.forgive_flowing_boundary_lanes(pending, current, previous),
+                    pending,
+                )
 
     def test_complete_report_passes_every_threshold(self) -> None:
         self.validate_runtime()
@@ -1709,7 +2160,7 @@ class CandidateQualificationTests(unittest.TestCase):
             database_path=database,
             process_path=exact_path,
             trigger_started_at=dt.datetime.fromtimestamp(100.0, dt.timezone.utc),
-            telemetry_before={},
+            telemetry_before={"configured": True},
             observation={},
             stable_alert_id=None,
         )
@@ -1723,7 +2174,7 @@ class CandidateQualificationTests(unittest.TestCase):
             database_path=database,
             process_path=exact_path,
             trigger_started_at=dt.datetime.fromtimestamp(100.0, dt.timezone.utc),
-            telemetry_before={},
+            telemetry_before={"configured": True},
             observation={},
             stable_alert_id="22222222-2222-4222-8222-222222222222",
         )
@@ -1859,7 +2310,7 @@ class CandidateQualificationTests(unittest.TestCase):
             database_path=database,
             process_path=exact_path,
             trigger_started_at=dt.datetime.fromtimestamp(100.0, dt.timezone.utc),
-            telemetry_before={},
+            telemetry_before={"configured": True},
             observation=observation,
             stable_alert_id=None,
         )
@@ -1944,7 +2395,7 @@ class CandidateQualificationTests(unittest.TestCase):
                 database_path=database,
                 process_path=exact_path,
                 trigger_started_at=dt.datetime.fromtimestamp(100.0, dt.timezone.utc),
-                telemetry_before={},
+                telemetry_before={"configured": True},
                 observation=self.runtime["recorder_observations"][0],
                 stable_alert_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             )
@@ -2290,7 +2741,7 @@ class CandidateQualificationTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(
-            qualification.QualificationError, "did not exercise alert investigation"
+            qualification.QualificationError, "completion is not a later raw LLM sample"
         ):
             self.validate_runtime(report)
 
@@ -2304,6 +2755,7 @@ class CandidateQualificationTests(unittest.TestCase):
         for index, observation in enumerate(report["recorder_observations"]):
             observation["heartbeat"]["llm"] = {"configured": False}
             self.rederive_sample(report, index)
+        self.produce_unconfigured_alert_proofs(report["recorder_probe_evidence"])
         report["measurements"]["ai_quality"] = {
             "configured": False,
             "feature_disabled_entire_epoch": True,
@@ -2328,6 +2780,7 @@ class CandidateQualificationTests(unittest.TestCase):
             self.rederive_sample(report, index)
         # Claims disabled, but the aggregate shows alert-investigation work —
         # not graceful degradation.
+        self.produce_unconfigured_alert_proofs(report["recorder_probe_evidence"])
         report["measurements"]["ai_quality"] = {
             "configured": False,
             "feature_disabled_entire_epoch": True,
@@ -2654,7 +3107,9 @@ class CandidateQualificationTests(unittest.TestCase):
         for observation in observations:
             observation["heartbeat"]["llm"] = {"configured": False}
             self.rebind_observation_heartbeat(observation)
-        report = self.rebuild_runtime_from_observations(observations)
+        probes = self.recorder_probes()
+        self.produce_unconfigured_alert_proofs(probes["evidence"])
+        report = self.rebuild_runtime_from_observations(observations, probes=probes)
 
         self.assertEqual(
             report["measurements"]["ai_quality"],
@@ -3077,23 +3532,19 @@ class CandidateQualificationTests(unittest.TestCase):
                 observation, "fixture incomplete journal recovery"
             )
 
-    def test_event_journal_index_sample_absent_is_not_sampled(self) -> None:
-        """v1.22.0: absence is 'not sampled', never a passing zero."""
-        result = qualification.event_journal_index_sample({})
-        self.assertEqual(
-            result,
-            {
-                "present": False,
-                "full_rebuilds_total": None,
-                "append_refreshes_total": None,
-            },
-        )
-
-    def test_event_journal_index_sample_non_dict_is_not_present(self) -> None:
-        result = qualification.event_journal_index_sample(
-            {"event_journal_index": "not-a-mapping"}
-        )
-        self.assertFalse(result["present"])
+    def test_event_journal_index_sample_requires_current_telemetry(self) -> None:
+        for heartbeat in ({}, {"event_journal_index": None}):
+            with self.subTest(heartbeat=heartbeat):
+                with self.assertRaisesRegex(
+                    qualification.QualificationError, "event_journal_index must be an object",
+                ):
+                    qualification.event_journal_index_sample(heartbeat)
+        for missing in ("full_rebuilds_total", "append_refreshes_total"):
+            counters = {"full_rebuilds_total": 1, "append_refreshes_total": 1}
+            del counters[missing]
+            with self.subTest(missing=missing):
+                with self.assertRaisesRegex(qualification.QualificationError, missing):
+                    qualification.event_journal_index_sample({"event_journal_index": counters})
 
     def test_event_journal_index_sample_normalizes_present_counters(self) -> None:
         result = qualification.event_journal_index_sample(
@@ -3145,23 +3596,14 @@ class CandidateQualificationTests(unittest.TestCase):
             self.rederive_sample(report, index)
         self.validate_runtime(report)
 
-    def test_event_journal_index_recurrence_gate_skips_when_not_sampled_everywhere(
-        self,
-    ) -> None:
+    def test_missing_journal_index_sample_cannot_build_or_validate_pass(self) -> None:
         report = copy.deepcopy(self.runtime)
-        last_index = len(report["recorder_observations"]) - 1
-        observation = report["recorder_observations"][last_index]
-        # Only the last observation carries event_journal_index; every other
-        # observation still lacks it entirely, so `present` is False on at
-        # least one sample. Even though these counters look exactly like the
-        # fatal signature above, the gate must skip (NOTE) rather than pass
-        # or fail on a partial view of the recurrence.
-        observation["heartbeat"]["event_journal_index"] = {
-            "full_rebuilds_total": 99,
-            "append_refreshes_total": 99,
-        }
-        self.rederive_sample(report, last_index)
-        self.validate_runtime(report)
+        del report["recorder_observations"][12]["heartbeat"]["event_journal_index"]
+        self.rebind_observation_heartbeat(report["recorder_observations"][12])
+        with self.assertRaisesRegex(qualification.QualificationError, "event_journal_index"):
+            self.rebuild_runtime_from_observations(report["recorder_observations"])
+        with self.assertRaisesRegex(qualification.QualificationError, "event_journal_index"):
+            self.validate_runtime(report)
 
     def test_unavailable_trace_store_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)

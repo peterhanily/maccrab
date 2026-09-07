@@ -81,11 +81,11 @@ struct UpgradeHandoffHardeningTests {
             reprobeDir: "/a", reprobeDegraded: false) == false)
     }
 
-    @Test("a changed data directory adopts the re-probe (system⇄user-home)")
+    @Test("an automatic re-probe cannot change the selected data directory")
     func swapOnDirChange() {
         #expect(V2DashboardState.shouldAdoptReprobe(
             currentMode: .live, currentDir: "/a", currentDegraded: false,
-            reprobeDir: "/b", reprobeDegraded: false))
+            reprobeDir: "/b", reprobeDegraded: false) == false)
     }
 
     @Test("MUST-FIX: a DEGRADED live provider is recovered by a clean re-probe")

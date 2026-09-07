@@ -277,6 +277,7 @@ struct SQLitePersistentStoreAdmissionTests {
             "MacCrabCore/Storage/CampaignStore.swift",
             "MacCrabCore/Storage/EventStore.swift",
             "MacCrabCore/Storage/SQLiteCausalGraphStore.swift",
+            "MacCrabCore/Storage/SQLiteIntegrityDiagnostic.swift",
             "MacCrabCore/Storage/TraceStore.swift",
             "MacCrabForensics/Plugins/Analyzers/PostureAnalyzer.swift",
             "MacCrabForensics/Plugins/Collectors/ChromiumLite/ChromiumLitePlugin.swift",

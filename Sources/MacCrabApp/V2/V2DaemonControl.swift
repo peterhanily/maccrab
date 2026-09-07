@@ -78,7 +78,7 @@ private enum DashboardAgentCapabilitiesError: Error, LocalizedError {
 
 public enum V2DaemonControl {
     private static let installedAgentCapabilitiesPath =
-        "/Library/Application Support/MacCrab/mcp_capabilities.json"
+        V2EngineSource.session.directory + "/mcp_capabilities.json"
     private static let maximumAgentCapabilitiesBytes: off_t = 64 * 1024
 
     /// Load the authoritative root-owned state the MCP server trusts. Missing
@@ -346,24 +346,9 @@ public enum V2DaemonControl {
         return (try? data.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil
     }
 
-    /// Resolve the data directory the daemon actually writes to, matching
-    /// V2LiveDataProvider.pickDataDirectory: prefer the root sysext's
-    /// /Library path, else the dev daemon's ~/Library path.
+    /// Mutations target the same engine that this app session displays.
     private static func resolveInboxDir() -> String? {
-        let system = "/Library/Application Support/MacCrab"
-        let user = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("MacCrab").path
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let fm = FileManager.default
-        for base in [system, user] {
-            if fm.fileExists(atPath: base + "/inbox")
-                || fm.fileExists(atPath: base + "/alerts.db")
-                || fm.fileExists(atPath: base + "/events.db") {
-                return base + "/inbox"
-            }
-        }
-        return nil
+        V2EngineSource.session.directory + "/inbox"
     }
 
     /// Drop a parameterless reload-rules request the daemon coalesces.

@@ -28,7 +28,7 @@ struct ArtifactLayoutView: View {
     var body: some View {
         Group {
             if template == nil {
-                Text("Plugin selected viewer=.layout but didn't supply a template. Falling back to JSON tree.")
+                Text(String(localized: "ui.ArtifactLayoutView.plugin.selected.viewer.layout.but.didn.t", defaultValue: "Plugin selected viewer=.layout but didn't supply a template. Falling back to JSON tree."))
                     .scaledSystem(11)
                     .foregroundStyle(.orange)
                     .padding(10)
@@ -174,7 +174,7 @@ struct LayoutNodeView: View {
                 }
             }
         } else {
-            Text("(not a list)")
+            Text(String(localized: "ui.finalPrefix.ArtifactLayoutView.not.a.list", defaultValue: "(not a list)"))
                 .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }

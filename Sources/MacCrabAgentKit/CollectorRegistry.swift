@@ -50,11 +50,14 @@ public actor CollectorRegistry {
         /// and rendered Healthy. A boolean that cannot express "I was never
         /// asked to run" is not a health signal.
         public let reason: String
+        public let state: CollectorHealthState
+        public let enabled: Bool
 
         public init(name: String, lastTick: Date?, eventCount: UInt64,
                     errorCount: UInt64, lastError: String?,
                     expectedIntervalSeconds: Int, healthy: Bool,
-                    reason: String = "") {
+                    reason: String = "", state: CollectorHealthState? = nil,
+                    enabled: Bool = true) {
             self.name = name
             self.lastTick = lastTick
             self.eventCount = eventCount
@@ -63,6 +66,10 @@ public actor CollectorRegistry {
             self.expectedIntervalSeconds = expectedIntervalSeconds
             self.healthy = healthy
             self.reason = reason
+            self.enabled = enabled
+            self.state = state ?? .resolve(
+                state: nil, enabled: enabled, healthy: healthy,
+                reason: reason, lastError: lastError)
         }
     }
 
@@ -73,6 +80,9 @@ public actor CollectorRegistry {
         var eventCount: UInt64 = 0
         var errorCount: UInt64 = 0
         var lastError: String?
+        /// Cleared only by verified recovery, never by an unrelated event tick.
+        var activeError: String?
+        var lastVerifiedRecovery: Date?
         let expectedIntervalSeconds: Int
         /// Event-driven collectors (USB, BrowserExtension, etc.) can be
         /// idle for hours without that being unhealthy. Mark them
@@ -112,6 +122,8 @@ public actor CollectorRegistry {
         /// a never-ticked event-driven collector was judged solely on
         /// `errorCount == 0` and `recordError` had no call sites.
         var started: Bool = false
+        var enabled: Bool = true
+        var disabledReason: String? = nil
     }
 
     private var entries: [String: InternalEntry] = [:]
@@ -151,7 +163,9 @@ public actor CollectorRegistry {
         expectedIntervalSeconds: Int,
         eventDriven: Bool = false,
         expectsContinuousTraffic: Bool = false,
-        started: Bool = true
+        started: Bool = true,
+        enabled: Bool = true,
+        disabledReason: String? = nil
     ) {
         entries[name] = InternalEntry(
             lastTick: nil,
@@ -162,7 +176,9 @@ public actor CollectorRegistry {
             eventDriven: eventDriven,
             expectsContinuousTraffic: expectsContinuousTraffic,
             registeredAt: Date(),
-            started: started
+            started: started,
+            enabled: enabled,
+            disabledReason: disabledReason
         )
     }
 
@@ -174,6 +190,7 @@ public actor CollectorRegistry {
     /// the operator needs to see.
     public func recordStarted(name: String) {
         guard var entry = entries[name] else { return }
+        guard entry.enabled else { return }
         entry.started = true
         entries[name] = entry
     }
@@ -225,7 +242,7 @@ public actor CollectorRegistry {
             expectedIntervalSeconds: 300,
             eventDriven: false,
             expectsContinuousTraffic: false,
-            registeredAt: Date()
+            registeredAt: Date(), started: true
         )
     }
 
@@ -253,7 +270,27 @@ public actor CollectorRegistry {
         guard var entry = entries[name] else { return }
         entry.errorCount &+= 1
         entry.lastError = String(message.prefix(200))
+        entry.activeError = entry.lastError
         entries[name] = entry
+    }
+
+    /// Report a successfully reconfigured source after checking its setup. This
+    /// clears the current fault while preserving lifetime error history. It
+    /// starts a new liveness grace period without inventing an event tick and
+    /// cannot revive an ended consumer stream or an intentionally disabled one.
+    public func recordRecovery(name: String, at date: Date = Date()) {
+        guard var entry = entries[name], entry.enabled, !entry.streamEnded else { return }
+        entry.activeError = nil
+        entry.lastVerifiedRecovery = date
+        entry.started = true
+        entries[name] = entry
+    }
+
+    public func recordSetupStatus(name: String, status: CollectorSetupStatus) {
+        switch status {
+        case .configured: recordRecovery(name: name)
+        case .unavailable(let reason): recordError(name: name, message: reason)
+        }
     }
 
     public func recordDrop(reason: String) {
@@ -265,65 +302,60 @@ public actor CollectorRegistry {
 
     // MARK: - Snapshot
 
-    /// Snapshot for the heartbeat writer. Computes `healthy` per entry:
-    ///   - event-driven collectors are healthy unless `errorCount > 0`
-    ///     and `lastError` is recent
-    ///   - polling collectors are unhealthy if `lastTick` is nil after
-    ///     2× expected interval has elapsed (computed against first
-    ///     tick), OR if `lastTick` is older than 5× expected interval.
+    /// Snapshot for the heartbeat writer. Explicit disablement is separate from
+    /// health. Polling collectors get five intervals to tick; continuous event
+    /// sources get ten. Reported errors remain failed until verified recovery;
+    /// ended streams remain terminal. Lifetime error counts never reset here.
     public func snapshot(now: Date = Date()) -> [Status] {
         entries.map { (name, entry) in
-            let healthy: Bool
-            var reason: String
-            // A continuous-traffic collector is judged on LIVENESS (did anything
-            // arrive recently), not just on whether an error was recorded — the
-            // silence of a dead sensor is otherwise indistinguishable from health.
-            // Grace window is 10× the expected interval, measured from the last
-            // tick or, if it never ticked, from registration.
+            let state: CollectorHealthState
+            let reason: String
             let silenceBudget = Double(entry.expectedIntervalSeconds) * 10
-            if !entry.started {
-                // Registered but never started. Previously indistinguishable
-                // from "event-driven and quiet", which is how two permanently
-                // dead sensors shipped green.
-                healthy = false
-                reason = "not started"
+            if !entry.enabled {
+                state = .disabled
+                reason = entry.disabledReason ?? "disabled by configuration"
             } else if entry.streamEnded {
-                // v1.21.6 (RES-11): terminal. The stream finished while the daemon
-                // was running, so no future tick is possible and no supervisor
-                // will restart it. Checked FIRST so a collector that ticked
-                // recently and then died cannot report healthy on the strength of
-                // its last tick.
-                healthy = false
+                state = .failed
                 reason = "stream ended"
+            } else if entry.activeError != nil {
+                // Polling errors are failures too; a recent tick must not hide
+                // an explicit collector error on the same heartbeat.
+                state = .failed
+                reason = "errors reported"
+            } else if !entry.started {
+                state = now.timeIntervalSince(entry.registeredAt) < silenceBudget
+                    ? .starting : .failed
+                reason = "not started"
+            } else if let recovery = entry.lastVerifiedRecovery,
+                      entry.lastTick.map({ $0 < recovery }) ?? true {
+                let withinGrace = entry.eventDriven
+                    ? (!entry.expectsContinuousTraffic
+                        || now.timeIntervalSince(recovery) < silenceBudget)
+                    : now.timeIntervalSince(recovery)
+                        < Double(entry.expectedIntervalSeconds) * 5
+                state = withinGrace ? (entry.eventDriven ? .healthy : .starting) : .stalled
+                reason = withinGrace
+                    ? "reconfigured, awaiting events"
+                    : "no events after verified recovery"
             } else if let last = entry.lastTick {
                 let age = now.timeIntervalSince(last)
-                if entry.eventDriven {
-                    healthy = entry.errorCount == 0
-                        && (!entry.expectsContinuousTraffic || age < silenceBudget)
-                    reason = healthy
-                        ? "receiving events"
-                        : (entry.errorCount > 0 ? "errors reported" : "silent past grace window")
-                } else {
-                    healthy = age < Double(entry.expectedIntervalSeconds) * 5
-                    reason = healthy ? "ticking" : "no tick within 5x its interval"
-                }
+                let receiving = entry.eventDriven
+                    ? (!entry.expectsContinuousTraffic || age < silenceBudget)
+                    : age < Double(entry.expectedIntervalSeconds) * 5
+                state = receiving ? .healthy : .stalled
+                reason = receiving
+                    ? (entry.eventDriven ? "receiving events" : "ticking")
+                    : (entry.eventDriven ? "silent past grace window" : "no tick within 5x its interval")
             } else if entry.eventDriven {
-                // No tick yet. A bursty event-driven collector (USB, browser
-                // extensions) may legitimately idle for days, so it keeps the
-                // benefit of the doubt. A continuous-traffic one does not: past
-                // the grace window, never having emitted is a fault.
-                healthy = entry.errorCount == 0
-                    && (!entry.expectsContinuousTraffic
-                        || now.timeIntervalSince(entry.registeredAt) < silenceBudget)
-                // Say plainly that this is an absence of evidence, not evidence
-                // of health. The dashboard can then show "started, no events
-                // yet" instead of a green check.
-                reason = healthy
-                    ? "started, no events yet"
-                    : (entry.errorCount > 0 ? "errors reported" : "no events past grace window")
+                let withinGrace = !entry.expectsContinuousTraffic
+                    || now.timeIntervalSince(entry.registeredAt) < silenceBudget
+                state = withinGrace ? .healthy : .stalled
+                reason = withinGrace ? "started, no events yet" : "no events past grace window"
             } else {
-                healthy = false   // polling collector, no tick yet — pending
-                reason = "started, awaiting first tick"
+                let withinGrace = now.timeIntervalSince(entry.registeredAt)
+                    < Double(entry.expectedIntervalSeconds) * 5
+                state = withinGrace ? .starting : .stalled
+                reason = withinGrace ? "started, awaiting first tick" : "no tick within 5x its interval"
             }
             return Status(
                 name: name,
@@ -332,8 +364,10 @@ public actor CollectorRegistry {
                 errorCount: entry.errorCount,
                 lastError: entry.lastError,
                 expectedIntervalSeconds: entry.expectedIntervalSeconds,
-                healthy: healthy,
-                reason: reason
+                healthy: state == .healthy,
+                reason: reason,
+                state: state,
+                enabled: entry.enabled
             )
         }
         .sorted { $0.name < $1.name }

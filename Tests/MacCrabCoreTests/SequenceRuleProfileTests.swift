@@ -17,7 +17,7 @@
 //     operator recompiles.
 //
 // Fixtures are REAL compiled sequence rules (one status:stable + one
-// status:experimental from /tmp/maccrab_v3/sequences) so the status field
+// status:experimental from this process’s compiled sequence fixture) so the status field
 // travels the true decode path, plus a stable rule with the status key
 // stripped to model a pre-v1.21.5 compiled dir, plus a deprecated copy —
 // deprecated is skipped unconditionally, under EVERY profile including nil.
@@ -37,8 +37,8 @@ struct SequenceRuleProfileTests {
     /// compiled dir produced by a pre-v1.21.5 compiler, and a copy with
     /// `status: deprecated` (a retired detection — must never load).
     private func makeProfileDir() throws -> (dir: URL, stableID: String, experimentalID: String, noStatusID: String, deprecatedID: String) {
-        ensureRulesCompiled()
-        let src = URL(fileURLWithPath: "/tmp/maccrab_v3/sequences")
+        try ensureRulesCompiled()
+        let src = compiledRulesDirectory.appendingPathComponent("sequences")
         let files = try FileManager.default
             .contentsOfDirectory(at: src, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }

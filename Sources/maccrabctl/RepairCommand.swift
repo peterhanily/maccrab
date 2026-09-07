@@ -9,15 +9,16 @@
 //
 // Three phases:
 // 1. Diagnose — report process liveness, heartbeat staleness,
-//    sysext state, orphaned tmp files, on-disk perms.
-// 2. Auto-repair (safe-only) — clean orphaned writeSnapshot tmp
-//    files, SIGHUP daemon to reload config, SIGUSR1 to refresh
-//    threat-intel feeds. Nothing destructive; nothing requiring sudo.
+//    sysext state, temporary files, on-disk perms.
+// 2. Request a reload with SIGHUP. Temporary files are reported
+//    without deletion because their ownership cannot be inferred by suffix.
+//    No database files are moved or recreated.
 // 3. Recommend — print operator-action steps for issues we can't
 //    fix automatically (reboot to clear zombie sysexts, re-approve
 //    extension, grant FDA).
 
 import Foundation
+import MacCrabCore
 
 private struct AnsiColor {
     // Gated on the same `isTerminal` (isatty) check the rest of the CLI uses
@@ -52,108 +53,28 @@ private func info(_ msg: String) {
 
 @discardableResult
 private func runShell(_ command: String, args: [String]) -> (status: Int32, stdout: String, stderr: String) {
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: command)
-    proc.arguments = args
-    let outPipe = Pipe()
-    let errPipe = Pipe()
-    proc.standardOutput = outPipe
-    proc.standardError = errPipe
-    do {
-        try proc.run()
-        proc.waitUntilExit()
-    } catch {
-        return (-1, "", error.localizedDescription)
-    }
-    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-    return (
-        proc.terminationStatus,
-        String(data: outData, encoding: .utf8) ?? "",
-        String(data: errData, encoding: .utf8) ?? ""
-    )
+    guard let result = BoundedPrivilegedProcessRunner.run(
+        executable: command, arguments: args, timeout: 10,
+        maximumOutputBytes: 256 * 1_024
+    ) else { return (-1, "", "command could not start") }
+    let output = String(decoding: result.output, as: UTF8.self)
+    if result.timedOut { return (124, "", "command exceeded its 10-second deadline") }
+    if result.outputLimitExceeded { return (1, "", "command exceeded its output limit") }
+    let status = result.terminationStatus ?? -1
+    return status == 0 ? (status, output, "") : (status, "", output)
+
 }
 
 func runRepair(args: [String]) async {
     let dryRun = args.contains("--dry-run") || args.contains("-n")
-    let fixStorage = args.contains("--fix-storage")
+    guard args.allSatisfy({ ["--dry-run", "-n"].contains($0) }) else {
+        MacCrabCtl.usageError("Usage: maccrabctl repair [--dry-run]. Legacy --fix-storage/--force-fix-storage are retired: they cannot safely repair v8 journal stores. Use `maccrabctl storage check --directory PATH` for an explicit read-only diagnostic; preserve the complete database family for support.")
+    }
     let supportDir = "/Library/Application Support/MacCrab"
 
     print("\(AnsiColor.bold)MacCrab repair\(AnsiColor.reset)")
     if dryRun {
         info("dry-run mode: diagnostics only, no auto-fix actions")
-    }
-    if fixStorage {
-        info("--fix-storage: will back up corrupt events.db files and let the daemon recreate them on next launch")
-    }
-
-    // v1.7.6: --fix-storage path is the escape hatch for the case where
-    // launchd has hit its respawn-throttle ceiling and the daemon
-    // stopped trying. Mirrors what v1.7.6+ daemons do automatically on
-    // init failure (DaemonSetup.recoverEventStore).
-    if fixStorage {
-        sectionHeader("Storage recovery (--fix-storage)")
-        let dbPath = supportDir + "/events.db"
-        if !FileManager.default.fileExists(atPath: dbPath) {
-            ok("No events.db found at \(dbPath) — nothing to recover")
-        } else {
-            // Best-effort integrity check before backing up: if the DB
-            // is healthy, recovery would lose data unnecessarily.
-            let probe = runShell("/usr/bin/sqlite3", args: [dbPath, "PRAGMA integrity_check;"])
-            let result = probe.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            // v1.7.9: schema-version sanity check on the alerts table.
-            // PRAGMA integrity_check passes for the v1.7.5 → v1.7.6 bug
-            // (alerts table missing llm_investigation_json column from
-            // a silently-skipped migration) because the file IS valid
-            // SQLite — it's just stale. Probe the columns we expect
-            // alerts to carry; if any are missing, the DB is "logically
-            // broken" even though physically intact.
-            let alertsSchema = runShell("/usr/bin/sqlite3",
-                                         args: [dbPath, "PRAGMA table_info(alerts);"])
-            let expectedAlertColumns = ["llm_investigation_json"]
-            let alertsCols = alertsSchema.stdout
-            let missingAlertCols = expectedAlertColumns.filter { !alertsCols.contains($0) }
-            let logicallyBroken = !missingAlertCols.isEmpty
-
-            if result == "ok" && !logicallyBroken {
-                warn("integrity_check returned 'ok' AND alerts schema looks current — events.db doesn't appear corrupt.")
-                info("If the daemon still crashes on init, the issue is something else (permissions, locking). Skipping backup. Re-run with --force-fix-storage to back up anyway.")
-                if !args.contains("--force-fix-storage") {
-                    return
-                }
-                info("--force-fix-storage set — proceeding with backup despite both checks passing")
-            } else if logicallyBroken {
-                warn("alerts table missing expected column(s): \(missingAlertCols.joined(separator: ", "))")
-                info("This is the v1.7.5 → v1.7.6 SchemaMigrator bug shape. Installing v1.7.6+ alone repairs the schema in-place — back up only if the daemon still can't recover.")
-                if !args.contains("--force-fix-storage") {
-                    return
-                }
-                info("--force-fix-storage set — backing up despite repairable schema state")
-            } else {
-                warn("integrity_check failed: \(result.prefix(200)) — backing up corrupt files")
-            }
-            if !dryRun {
-                let ts = Int(Date().timeIntervalSince1970)
-                for suffix in ["", "-wal", "-shm", "-journal"] {
-                    let src = "\(supportDir)/events.db\(suffix)"
-                    let dst = "\(supportDir)/events.db\(suffix).corrupt-\(ts)"
-                    if FileManager.default.fileExists(atPath: src) {
-                        let mv = runShell("/bin/mv", args: [src, dst])
-                        if mv.status == 0 {
-                            info("moved \(src) → \(dst)")
-                        } else {
-                            warn("mv failed (status \(mv.status)): \(mv.stderr.prefix(200)) — may need sudo")
-                        }
-                    }
-                }
-                ok("Files backed up. Daemon will recreate events.db on next launch (within ~10 s via launchd respawn)")
-            } else {
-                info("dry-run: would back up events.db / -wal / -shm / -journal to .corrupt-<ts> sibling files")
-            }
-        }
-        // Continue with the standard diagnose phases below so the
-        // operator sees the post-recovery state.
     }
 
     // ─── 1. Process liveness ───────────────────────────────────────
@@ -208,25 +129,14 @@ func runRepair(args: [String]) async {
         info("\(zombies.count) prior version(s) queued for uninstall on reboot — normal during upgrade")
     }
 
-    // ─── 4. Orphaned writeSnapshot temp files ──────────────────────
-    sectionHeader("Orphaned snapshot temp files")
-    let tmpFiles = (try? FileManager.default.contentsOfDirectory(atPath: supportDir)) ?? []
-    let orphans = tmpFiles.filter { $0.hasSuffix(".tmp") }
-    if orphans.isEmpty {
-        ok("No orphaned .tmp files in \(supportDir)")
+    // A .tmp suffix does not prove abandonment while the writer is running.
+    // Report presence, but leave ownership and cleanup to the producing code.
+    sectionHeader("Snapshot temporary files")
+    if let files = try? FileManager.default.contentsOfDirectory(atPath: supportDir) {
+        let count = files.filter { $0.hasSuffix(".tmp") }.count
+        info("\(count) temporary file(s) present; they may belong to active writes and were left in place")
     } else {
-        warn("\(orphans.count) orphaned .tmp file(s) found:")
-        for f in orphans { print("    \(f)") }
-        if !dryRun {
-            for f in orphans {
-                let path = supportDir + "/" + f
-                if (try? FileManager.default.removeItem(atPath: path)) != nil {
-                    info("removed \(path)")
-                }
-            }
-        } else {
-            info("dry-run: would remove these")
-        }
+        warn("Could not inspect the support directory")
     }
 
     // ─── 5. SIGHUP the daemon to force config + rule reload ────────
@@ -235,7 +145,7 @@ func runRepair(args: [String]) async {
         if !dryRun {
             let kill = runShell("/usr/bin/pkill", args: ["-HUP", "com.maccrab.agent"])
             if kill.status == 0 {
-                ok("Sent SIGHUP — daemon will reload config + rules without restart")
+                info("SIGHUP sent. Confirm the new rule/configuration generation before assuming the reload applied.")
             } else {
                 warn("pkill -HUP failed (status \(kill.status))")
             }

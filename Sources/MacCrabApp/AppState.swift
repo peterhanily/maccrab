@@ -139,7 +139,10 @@ final class AppState: ObservableObject {
         /// is ~4× the 30s write cadence: tolerates one missed tick and
         /// common IO hiccups without false-positive banner.
         static let staleThreshold: TimeInterval = 120
-        var isStale: Bool { Date().timeIntervalSince(writtenAt) > Self.staleThreshold }
+        var isStale: Bool {
+            let age = Date().timeIntervalSince(writtenAt)
+            return age < 0 || age > Self.staleThreshold
+        }
 
         /// v1.12.0 RC15: boot-phase tracker. The daemon writes phase
         /// updates at milestones during DaemonSetup.initialize: a
@@ -149,18 +152,18 @@ final class AppState: ObservableObject {
         /// Phase progression: starting → stores_ready → rules_loaded →
         /// ready. `nil` for v1.11.x and earlier daemons (treated as
         /// "ready" if liveness:true).
+        var engineIdentity: EngineTelemetryIdentity? = nil
         var bootPhase: String?
+        var liveness: Bool?
         /// Wall-clock time at which the daemon started its boot. Used
         /// to display elapsed time in the dashboard's "starting" banner.
         var startedAt: Date?
         /// True when the daemon has finished initialising. Falls back
         /// to liveness for older daemons that don't write boot_phase.
-        var isReady: Bool {
-            if let phase = bootPhase { return phase == "ready" }
-            // No boot_phase field → pre-RC15 daemon. Fall back to the
-            // legacy liveness signal.
-            return true
+        var readiness: V2EngineReadiness {
+            V2EngineReadiness(bootPhase: bootPhase, liveness: liveness)
         }
+        var isReady: Bool { readiness == .ready }
     }
 
     public struct CollectorHealthEntry: Hashable, Codable {
@@ -171,6 +174,14 @@ final class AppState: ObservableObject {
         public let lastError: String?
         public let expectedIntervalSeconds: Int
         public let healthy: Bool
+        public var reason: String? = nil
+        public var state: String? = nil
+        public var enabled: Bool? = nil
+
+        public var resolvedState: V2CollectorState {
+            .resolve(state: state, enabled: enabled, healthy: healthy,
+                     reason: reason, lastError: lastError)
+        }
     }
     @Published var heartbeat: HeartbeatSnapshot?
 
@@ -206,7 +217,16 @@ final class AppState: ObservableObject {
     var isProtectionDegraded: Bool {
         if isConnected && rulesLoaded == 0 { return true }
         if let snap = storageErrors, hasConcerningStorageError(snap) { return true }
-        if let hb = heartbeat, hb.isStale { return true }
+        if let hb = heartbeat {
+            if hb.isStale || !hb.isReady { return true }
+            let collectors = V2CollectorSummary(states: (hb.collectorHealth ?? []).map(\.resolvedState))
+            if !collectors.allEnabledHealthy { return true }
+        } else {
+            // A database provider may connect before AppState's first poll.
+            // Missing readiness must also prevent the sidebar from claiming
+            // active protection during that interval.
+            return true
+        }
         if ruleTamper != nil { return true }
         // v1.21.4 Phase-1 D2: the ES sensor is losing telemetry to a
         // possible-evasion file-flood — surface it as degraded protection.
@@ -392,7 +412,7 @@ final class AppState: ObservableObject {
     /// Called from `refresh()`; low cost (tiny file, no parsing on the
     /// hot path). Silent if file is absent — no errors yet recorded.
     func refreshStorageHealth() {
-        let path = "/Library/Application Support/MacCrab/storage_errors.json"
+        let path = dataDir + "/storage_errors.json"
         // v1.7.11: skip re-parse when file hasn't changed since last poll.
         let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
         if let mtime, let last = lastStorageHealthMtime, mtime <= last {
@@ -424,7 +444,7 @@ final class AppState: ObservableObject {
     /// healthy (no tamper); any present file is a live tamper
     /// indicator the Overview banner surfaces.
     func refreshRuleTamper() {
-        let path = "/Library/Application Support/MacCrab/rule_tamper.json"
+        let path = dataDir + "/rule_tamper.json"
         // v1.7.11: skip re-parse when file hasn't changed since last poll.
         let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
         if let mtime, let last = lastRuleTamperMtime, mtime <= last {
@@ -460,7 +480,7 @@ final class AppState: ObservableObject {
     /// everything to heartbeat.json — those fields still decode if
     /// present (backward-compatible).
     func refreshHeartbeat() {
-        let path = "/Library/Application Support/MacCrab/heartbeat.json"
+        let path = dataDir + "/heartbeat.json"
         // v1.7.11: skip re-parse when neither heartbeat.json nor
         // heartbeat_rich.json have changed since the last successful
         // refresh. The daemon writes heartbeat every 30 s; the dashboard
@@ -472,7 +492,7 @@ final class AppState: ObservableObject {
         // its NSTableView, which inflates Auto Layout constraints that
         // never release until the view is dismantled. Field-reproduced:
         // ~333 constraints/sec, ~1.5 GB/day on a parked dashboard.
-        let richPathForMtime = "/Library/Application Support/MacCrab/heartbeat_rich.json"
+        let richPathForMtime = dataDir + "/heartbeat_rich.json"
         let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
         let richMtime = (try? FileManager.default.attributesOfItem(atPath: richPathForMtime)[.modificationDate]) as? Date
         let combined = [mtime, richMtime].compactMap { $0 }.max()
@@ -524,7 +544,10 @@ final class AppState: ObservableObject {
                         ?? UInt64(d["error_count"] as? Int ?? 0),
                     lastError: d["last_error"] as? String,
                     expectedIntervalSeconds: interval,
-                    healthy: healthy
+                    healthy: healthy,
+                    reason: d["reason"] as? String,
+                    state: d["state"] as? String,
+                    enabled: d["enabled"] as? Bool
                 ))
             }
             if droppedCount > 0 {
@@ -610,9 +633,10 @@ final class AppState: ObservableObject {
         var richLLMModel = inlineLLM?["model"] as? String
         var richLLMReportedAt: Date? = inlineLLM == nil
             ? nil : Date(timeIntervalSince1970: writtenAtUnix)
-        let richPath = "/Library/Application Support/MacCrab/heartbeat_rich.json"
+        let richPath = dataDir + "/heartbeat_rich.json"
         if let richData = try? Data(contentsOf: URL(fileURLWithPath: richPath)),
-           let richJSON = try? JSONSerialization.jsonObject(with: richData) as? [String: Any] {
+           let richJSON = try? JSONSerialization.jsonObject(with: richData) as? [String: Any],
+           V2HeartbeatPayload.currentRich(richJSON, minimal: json) {
             if let counts = richJSON["event_type_counts_1h"] as? [String: Int] {
                 richEventTypeCounts = counts
             }
@@ -632,7 +656,10 @@ final class AppState: ObservableObject {
                             ?? UInt64(d["error_count"] as? Int ?? 0),
                         lastError: d["last_error"] as? String,
                         expectedIntervalSeconds: interval,
-                        healthy: healthy
+                        healthy: healthy,
+                        reason: d["reason"] as? String,
+                        state: d["state"] as? String,
+                        enabled: d["enabled"] as? Bool
                     ))
                 }
                 richCollectorHealth = decoded
@@ -723,6 +750,8 @@ final class AppState: ObservableObject {
             }
         }
 
+        let identity = EngineTelemetryIdentity(heartbeat: json)
+        reconcileEngineIdentity(identity)
         var snapshot = HeartbeatSnapshot(
             writtenAt: Date(timeIntervalSince1970: writtenAtUnix),
             uptimeSeconds: json["uptime_seconds"] as? Int ?? 0,
@@ -764,7 +793,9 @@ final class AppState: ObservableObject {
         // when it's there. Older daemons (v1.11.x and earlier) won't
         // write this field; snapshot.isReady falls back to liveness for
         // those.
+        snapshot.engineIdentity = identity
         snapshot.bootPhase = json["boot_phase"] as? String
+        snapshot.liveness = json["liveness"] as? Bool
         if let startedAt = json["started_at_unix"] as? TimeInterval {
             snapshot.startedAt = Date(timeIntervalSince1970: startedAt)
         }
@@ -821,26 +852,16 @@ final class AppState: ObservableObject {
     /// want to burn UI thread time decoding it twice for nothing.
     private var lastLineageMtime: Date?
 
-    /// mtime of the rule-telemetry snapshot. v1.7.1.
-    private var lastRuleTelemetryMtime: Date?
-
     /// Refresh per-rule fire counts + exec time stats from the daemon
     /// snapshot at `<dataDir>/rule_telemetry.json`. The rebuilt
     /// `RuleBrowser` reads these to show fire-count, last-fired, and
     /// mean-exec-ms columns on each rule row.
     func refreshRuleTelemetry() {
-        let path = dataDir + "/rule_telemetry.json"
-        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
-        if let mtime, let last = lastRuleTelemetryMtime, mtime <= last {
-            return
-        }
-        guard let snapshot = RuleEngine.readTelemetrySnapshot(at: path) else { return }
-        var dict: [String: RuleEngine.RuleStats] = [:]
-        dict.reserveCapacity(snapshot.stats.count)
-        for s in snapshot.stats { dict[s.ruleId] = s }
-        ruleTelemetry = dict
-        ruleTelemetryLastRefresh = snapshot.writtenAt
-        lastRuleTelemetryMtime = mtime
+        let context = RuleTelemetryContext.load(directory: dataDir)
+        ruleTelemetry = context.statsByID
+        ruleTelemetryLastRefresh = context.snapshotWrittenAt
+        ruleTelemetryFreshness = context.freshness.rawValue
+
     }
 
     /// Refresh the AI agent-lineage timeline from the daemon-written
@@ -1122,6 +1143,7 @@ final class AppState: ObservableObject {
     /// (v1.7.1). Keyed by ruleId for O(1) lookup when rendering rows.
     @Published var ruleTelemetry: [String: RuleEngine.RuleStats] = [:]
     @Published var ruleTelemetryLastRefresh: Date?
+    @Published var ruleTelemetryFreshness: String = "missing"
 
     /// Security posture score (0-100) and letter grade.
     /// Computed by SecurityScorer on first load and refreshed every 5 minutes.
@@ -1288,98 +1310,60 @@ final class AppState: ObservableObject {
     /// configs in 50 ms.
     private var pendingAgentTracesSync: Task<Void, Never>?
 
-    /// Resolve the MacCrab data directory.
-    /// Prefers the system dir (root daemon) when its DB exists and is newer
-    /// than the user dir DB, which may contain stale data from a previous
-    /// non-root run. v1.4: use *readable* checks (not just `fileExists`),
-    /// log the chosen path so operators can diagnose, and do not fall
-    /// through to an unreadable path silently.
-    private let dataDir: String = {
-        let fm = FileManager.default
-        let logger = Logger(subsystem: "com.maccrab.app", category: "data-dir")
-        // v1.21.4 (UI-test seam): honor MACCRAB_DATA_DIR so UI / integration
-        // tests can point the whole dashboard at a SEEDED fixture directory
-        // instead of the live daemon DB — making data-driven UI tests
-        // deterministic without a running root daemon. Gated on the
-        // `-ui-testing` launch arg AND the dir existing, so it can never affect
-        // a production launch. (Foundation.ProcessInfo — MacCrabCore defines its
-        // own ProcessInfo type.)
-        if CommandLine.arguments.contains("-ui-testing"),
-           let override = Foundation.ProcessInfo.processInfo.environment["MACCRAB_DATA_DIR"],
-           fm.fileExists(atPath: override) {
-            logger.info("dataDir=override (MACCRAB_DATA_DIR + -ui-testing)")
-            return override
-        }
-        let userDir = fm.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first.map { $0.appendingPathComponent("MacCrab").path }
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let systemDir = "/Library/Application Support/MacCrab"
+    /// Shared with every dashboard provider; stable for the app session.
+    let engineSource: V2EngineSource
+    private var dataDir: String { engineSource.directory }
+    private var storeGeneration: UInt64 = 0
+    private var lastVerifiedEngineIdentity: EngineTelemetryIdentity?
 
-        let userDB = userDir + "/events.db"
-        let systemDB = systemDir + "/events.db"
-        let userReadable = fm.isReadableFile(atPath: userDB)
-        let systemReadable = fm.isReadableFile(atPath: systemDB)
-
-        // If both are readable, prefer whichever was written to more recently.
-        // v1.21.6 (audit DL-08): "more recently" must fold in the `-wal`
-        // sidecar. In WAL mode the main `.db` mtime only advances at CHECKPOINT
-        // (field-observed four-week lag between campaigns.db and its -wal), so
-        // the bare-mtime comparison this used to do picked whichever store
-        // checkpointed last, not whichever is live. Patched here as well as in
-        // maccrabctl and maccrab-mcp so the dashboard, the CLI and every MCP
-        // tool cannot resolve to different stores.
-        func lastWrite(_ path: String) -> Date? {
-            let main = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
-            let wal = (try? fm.attributesOfItem(atPath: path + "-wal"))?[.modificationDate] as? Date
-            guard let main else { return wal }
-            guard let wal else { return main }
-            return max(main, wal)
-        }
-        if userReadable && systemReadable {
-            let userMod = lastWrite(userDB)
-            let sysMod = lastWrite(systemDB)
-            if let s = sysMod, let u = userMod, s >= u {
-                logger.info("dataDir=system (system DB newer than user DB)")
-                return systemDir
-            }
-            logger.info("dataDir=user (user DB newer than system DB)")
-            return userDir
-        }
-        if systemReadable {
-            logger.info("dataDir=system (only system DB readable)")
-            return systemDir
-        }
-        if userReadable {
-            logger.info("dataDir=user (only user DB readable)")
-            return userDir
-        }
-        // Neither is readable. That's either a first-run (no DB yet) or a
-        // filesystem-level problem (both DBs exist but permissions deny
-        // us — e.g. system DB is root-600 and we're non-root). The former
-        // is normal, the latter is an install/upgrade bug. Warn and
-        // return systemDir as the "expected" location so the sysext's DB
-        // gets picked up as soon as it's first readable.
-        let systemExists = fm.fileExists(atPath: systemDB)
-        let userExists = fm.fileExists(atPath: userDB)
-        if systemExists || userExists {
-            logger.warning("dataDir fallback to system: system-exists=\(systemExists, privacy: .public) user-exists=\(userExists, privacy: .public) but neither is readable — possible permissions issue")
-        } else {
-            logger.info("dataDir=system (first-run: no DB at either location yet)")
-        }
-        return systemDir
-    }()
+    /// Missing telemetry does not erase the epoch needed to identify a later
+    /// restart. Cached readers and their cursors belong to that verified epoch.
+    @discardableResult
+    func reconcileEngineIdentity(_ identity: EngineTelemetryIdentity?) -> Bool {
+        guard V2DashboardState.updateEngineIdentity(&lastVerifiedEngineIdentity, next: identity) else { return false }
+        storeGeneration &+= 1
+        cachedAlertStore = nil
+        cachedEventStore = nil
+        cachedTraceStore = nil
+        cachedAlertStorePath = nil
+        cachedEventStorePath = nil
+        cachedTraceStorePath = nil
+        traceDbLastChecked = .distantPast
+        alertCursor = nil
+        eventCursor = nil
+        lastAlertTimestamp = .distantPast
+        lastEventTimestamp = .distantPast
+        hasMoreAlerts = false
+        hasMoreEvents = false
+        dashboardAlerts = []
+        recentAlerts = []
+        aiAnalysisAlerts = []
+        totalAlerts = 0
+        events = []
+        previousEventCount = nil
+        previousStatsHeartbeatWrittenAt = nil
+        eventsPerSecond = 0
+        recentTraceIds = []
+        selectedTraceId = nil
+        selectedTraceSpans = []
+        return true
+    }
 
     // MARK: Initialization
 
-    init() {
+    init(engineSource: V2EngineSource = .session, startBackgroundWork: Bool = true) {
+        self.engineSource = engineSource
+        // Ordinary presentation fixtures opt out of timers, Keychain requests,
+        // file reads and store-opening tasks; production starts them normally.
+        guard startBackgroundWork else { return }
         startPolling()
         // Start the root→dashboard trace-key handshake at launch rather than
         // waiting for the operator to open Agent Traces. The same envelope also
         // unlocks the V2 causal-graph reader after its normal reconnect probe.
+        let selectedDirectory = dataDir
         Task.detached(priority: .utility) {
-            guard FileManager.default.fileExists(
+            guard selectedDirectory == "/Library/Application Support/MacCrab",
+                  FileManager.default.fileExists(
                 atPath: "/Library/Application Support/MacCrab/traces.db"
             ) || FileManager.default.fileExists(
                 atPath: "/Library/Application Support/MacCrab/tracegraph.db"
@@ -1430,21 +1414,9 @@ final class AppState: ObservableObject {
     /// calls on @MainActor short-circuit on the cache (path-change
     /// detection only).
     private func warmUpStoresOffMain() async {
-        let userDir = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first?.appendingPathComponent("MacCrab").path
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let systemDir = "/Library/Application Support/MacCrab"
-        let alertDir = Self.pickFreshestDir(
-            candidates: [dataDir, userDir, systemDir],
-            fileName: "alerts.db",
-            defaultDir: dataDir
-        )
-        let eventDir = Self.pickFreshestDir(
-            candidates: [dataDir, userDir, systemDir],
-            fileName: "events.db",
-            defaultDir: dataDir
-        )
+        let generation = storeGeneration
+        let alertDir = dataDir
+        let eventDir = dataDir
         // Wave 9A.1 (v1.12.6 RC2): dashboard opens both stores read-only.
         // Mutation paths (suppress / unsuppress / delete) route through
         // the inbox file-IPC channel per v1.10.1; the direct
@@ -1466,6 +1438,7 @@ final class AppState: ObservableObject {
             )
         }.value
         let (alert, event) = await (alertResult, eventResult)
+        guard generation == storeGeneration else { return }
         if let store = alert {
             cachedAlertStore = store
             cachedAlertStorePath = alertDir
@@ -1474,32 +1447,6 @@ final class AppState: ObservableObject {
             cachedEventStore = store
             cachedEventStorePath = eventDir
         }
-    }
-
-    /// Path-probe helper used by warmUpStoresOffMain (and matches the
-    /// shape of the alertStore() / eventStore() probe). `nonisolated`
-    /// so the background Task can call it without hopping to main.
-    nonisolated private static func pickFreshestDir(
-        candidates rawCandidates: [String],
-        fileName: String,
-        defaultDir: String
-    ) -> String {
-        let candidates = Array(Set(rawCandidates))
-        // v1.21.6 (audit DL-08): rank on LAST WRITE (db or -wal), not the main
-        // file's mtime. This picker chooses the per-store directory for
-        // alerts.db and events.db independently, so a WAL-blind comparison could
-        // even split the two across different data dirs — alerts read from one
-        // store while events read from another.
-        return candidates
-            .map { (dir: String) -> (String, Date) in
-                let fm = FileManager.default
-                let path = dir + "/" + fileName
-                let main = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
-                let wal = (try? fm.attributesOfItem(atPath: path + "-wal"))?[.modificationDate] as? Date
-                return (dir, max(main ?? .distantPast, wal ?? .distantPast))
-            }
-            .max(by: { $0.1 < $1.1 })?.0
-            ?? defaultDir
     }
 
     /// Start the 10-second poll. Idempotent: safe to call when the
@@ -1638,25 +1585,26 @@ final class AppState: ObservableObject {
     // which the ROOT daemon owns (the app can't write the system support dir).
     // Route the change through the inbox IPC; the daemon writes the file and
     // AlertSink applies it at the submit chokepoint.
-    func setBuiltinRuleEnabled(ruleId: String, enabled: Bool) {
+    @discardableResult
+    func setBuiltinRuleEnabled(ruleId: String, enabled: Bool) -> Bool {
         dropBuiltinRuleSetting(["ruleId": ruleId, "enabled": enabled])
     }
     /// `severityRaw == nil` clears the override (revert to the catalog default).
-    func setBuiltinRuleSeverity(ruleId: String, severityRaw: String?) {
+    @discardableResult
+    func setBuiltinRuleSeverity(ruleId: String, severityRaw: String?) -> Bool {
         dropBuiltinRuleSetting(["ruleId": ruleId, "severityOverride": severityRaw ?? NSNull()])
     }
-    private func dropBuiltinRuleSetting(_ fields: [String: Any]) {
+    private func dropBuiltinRuleSetting(_ fields: [String: Any]) -> Bool {
         var obj = fields
         obj["schema_version"] = 1
         obj["requester"] = "MacCrabApp"
-        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
-        let inboxDir = "/Library/Application Support/MacCrab/inbox"
-        let userInboxDir = NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"
-        for dir in [inboxDir, userInboxDir] {
-            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            let path = "\(dir)/builtin-rule-setting-\(Int(Date().timeIntervalSince1970))-\(getpid())-\(UUID().uuidString.prefix(8)).json"
-            try? data.write(to: URL(fileURLWithPath: path))
-        }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return false }
+        let directory = dataDir + "/inbox"
+        let path = directory + "/builtin-rule-setting-" + UUID().uuidString + ".json"
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            return true
+        } catch { return false }
     }
 
     /// Stop the poll timer and release its subscription. Called from the
@@ -1704,20 +1652,7 @@ final class AppState: ObservableObject {
     /// events.db field-observed. Reopen only when the chosen path
     /// actually changed; SQLite WAL handles fresh reads natively.
     private func alertStore() throws -> AlertStore {
-        let userDir = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first?.appendingPathComponent("MacCrab").path
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let systemDir = "/Library/Application Support/MacCrab"
-        let candidates = Array(Set([dataDir, userDir, systemDir]))
-        let chosen: String = candidates
-            .map { (dir: String) -> (String, Date) in
-                let mtime = (try? FileManager.default
-                    .attributesOfItem(atPath: dir + "/alerts.db"))?[.modificationDate] as? Date
-                return (dir, mtime ?? .distantPast)
-            }
-            .max(by: { $0.1 < $1.1 })?.0
-            ?? dataDir
+        let chosen = dataDir
         if let store = cachedAlertStore, cachedAlertStorePath == chosen {
             return store
         }
@@ -1739,23 +1674,7 @@ final class AppState: ObservableObject {
     /// the running non-root daemon wrote to user-dir → no events
     /// visible). Same shape as the traces.db fix.
     private func eventStore() throws -> EventStore {
-        let userDir = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first?.appendingPathComponent("MacCrab").path
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let systemDir = "/Library/Application Support/MacCrab"
-        let candidates = Array(Set([dataDir, userDir, systemDir]))
-        // Pick the directory whose events.db was modified most
-        // recently. Empty dirs / missing files yield distantPast
-        // and lose to any concrete file.
-        let chosen: String = candidates
-            .map { (dir: String) -> (String, Date) in
-                let mtime = (try? FileManager.default
-                    .attributesOfItem(atPath: dir + "/events.db"))?[.modificationDate] as? Date
-                return (dir, mtime ?? .distantPast)
-            }
-            .max(by: { $0.1 < $1.1 })?.0
-            ?? dataDir
+        let chosen = dataDir
         // v1.12.0 fix: see alertStore() — reopen only on path change,
         // not every 30s. FTS5 quick_check on a 962 MB events.db blocks
         // main thread for seconds.
@@ -1914,24 +1833,8 @@ final class AppState: ObservableObject {
     /// when the resolved path changes (user-dir/system-dir flip) so a
     /// stale handle never wins after a daemon restart.
     private func traceStoreOrNil() -> TraceStore? {
-        let userDir = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first?.appendingPathComponent("MacCrab").path
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let candidates = Array(Set([
-            dataDir + "/traces.db",
-            userDir + "/traces.db",
-        ]))
-        let chosenPath: String? = candidates
-            .compactMap { (path: String) -> (String, Date)? in
-                guard FileManager.default.isReadableFile(atPath: path),
-                      let mtime = (try? FileManager.default
-                          .attributesOfItem(atPath: path))?[.modificationDate] as? Date
-                else { return nil }
-                return (path, mtime)
-            }
-            .max(by: { $0.1 < $1.1 })?.0
-        guard let path = chosenPath else { return nil }
+        let path = dataDir + "/traces.db"
+        guard FileManager.default.isReadableFile(atPath: path) else { return nil }
 
         // Cache hit: same path AND under TTL.
         if let store = cachedTraceStore,
@@ -1967,19 +1870,12 @@ final class AppState: ObservableObject {
     /// a semantically incompatible denominator.
     @MainActor
     func refreshAgentTraces(limit: Int = 200, force: Bool = false) async {
-        let userDir = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first?.appendingPathComponent("MacCrab").path
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-
-        // Resolve the most recent mtime across user + system paths for
-        // each file (whichever side wrote last is the one we care about).
+        // Only the selected engine can invalidate its trace cache. Operator
+        // verdict overrides remain account-owned UI state by design.
         func newestMtime(for filename: String) -> Date? {
-            let paths = [dataDir + "/" + filename, userDir + "/" + filename]
-            let mtimes = paths.compactMap {
-                (try? FileManager.default.attributesOfItem(atPath: $0)[.modificationDate]) as? Date
-            }
-            return mtimes.max()
+            let directory = filename == "attribution_overrides.db"
+                ? NSHomeDirectory() + "/Library/Application Support/MacCrab" : dataDir
+            return (try? FileManager.default.attributesOfItem(atPath: directory + "/" + filename)[.modificationDate]) as? Date
         }
 
         let tracesMtime = newestMtime(for: "traces.db")
@@ -2285,12 +2181,7 @@ final class AppState: ObservableObject {
     /// when we last sent SIGUSR2.
     @MainActor
     func refreshStorageFlushStatus() {
-        let userDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let systemDir = "/Library/Application Support/MacCrab"
-        let candidates = Array(Set([systemDir, userDir]))
-
-        // Newest snapshot wins (across user + system dirs, mirroring
-        // the eventStore() path probe).
+        let candidates = [dataDir]
         var newest: StorageFlushStatus?
         for dir in candidates {
             if let s = StorageFlushStatus.read(from: dir),
@@ -2321,11 +2212,7 @@ final class AppState: ObservableObject {
     /// regular refresh tick alongside refreshAgentTraces.
     @MainActor
     func refreshAgentTracesStatus() {
-        // Probe both system and user dirs (the running daemon may be
-        // root-deployed sysext or non-root dev build).
-        let userDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let systemDir = "/Library/Application Support/MacCrab"
-        let candidates = [systemDir, userDir]
+        let candidates = [dataDir]
         var newest: AgentTracesStatus?
         for dir in candidates {
             if let s = AgentTracesStatusStore.read(from: dir),
@@ -2490,6 +2377,7 @@ final class AppState: ObservableObject {
     /// restore the heartbeat, the banner stays up and the user takes
     /// over.
     private func maybeKickWatchdog() {
+        guard dataDir == "/Library/Application Support/MacCrab" else { return }
         guard let hb = heartbeat, hb.isStale else { return }
         guard let callback = sysextWatchdogActivate else { return }
         if let last = lastSysextWatchdogAt,
@@ -2502,6 +2390,7 @@ final class AppState: ObservableObject {
     }
 
     func loadAlerts(limit: Int = 500, filter: String? = nil) async {
+        let generation = storeGeneration
         do {
             let store = try alertStore()
             let isSearch = filter.map { !$0.isEmpty } ?? false
@@ -2511,6 +2400,7 @@ final class AppState: ObservableObject {
             } else {
                 alerts = try await store.alerts(since: Date.distantPast, limit: limit)
             }
+            guard generation == storeGeneration else { return }
             // Apply suppressedIDs overlay: if the user suppressed an alert this session,
             // keep it suppressed regardless of what the DB says (handles read-only DB case).
             let overlay = suppressedIDs
@@ -2551,6 +2441,7 @@ final class AppState: ObservableObject {
         until: Date = .distantFuture,
         category: MacCrabCore.EventCategory? = nil
     ) async {
+        let generation = storeGeneration
         do {
             let store = try eventStore()
             let raw: [Event]
@@ -2616,6 +2507,7 @@ final class AppState: ObservableObject {
                 raw = snapshot.events.filter { $0.timestamp <= until }
                 eventSearchCoverageWarning = nil
             }
+            guard generation == storeGeneration else { return }
             events = raw.map { eventToViewModel($0) }
             // Gate the live poll: while a search is active, the events array
             // holds FTS-ranked results; the live prepend would mix unrelated
@@ -2680,9 +2572,11 @@ final class AppState: ObservableObject {
         if isLoadingOlderAlerts { return }
         isLoadingOlderAlerts = true
         defer { isLoadingOlderAlerts = false }
+        let generation = storeGeneration
         do {
             let store = try alertStore()
             let page = try await store.alerts(before: cursor, pageSize: pageSize)
+            guard generation == storeGeneration else { return }
             let overlay = suppressedIDs
             // Dedup against what we already have. The cursor's strict-less-than
             // predicate means duplicates only happen if a fetch overlapped a
@@ -2709,6 +2603,7 @@ final class AppState: ObservableObject {
         if isLoadingOlderEvents { return }
         isLoadingOlderEvents = true
         defer { isLoadingOlderEvents = false }
+        let generation = storeGeneration
         do {
             let store = try eventStore()
             let page = try await store.exactEventsPageSnapshot(
@@ -2716,6 +2611,7 @@ final class AppState: ObservableObject {
                 category: category,
                 pageSize: pageSize
             )
+            guard generation == storeGeneration else { return }
             let existing = Set(events.map { $0.id })
             let appended = page.items
                 .filter { !existing.contains($0.id) }
@@ -2730,28 +2626,9 @@ final class AppState: ObservableObject {
     }
 
     func loadRules() async {
-        // Search for compiled rules in multiple locations
-        let candidates = [
-            dataDir + "/compiled_rules",
-            // User-specific directory (populated by `make compile-rules`)
-            FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            ).first.map { $0.appendingPathComponent("MacCrab/compiled_rules").path }
-                ?? NSHomeDirectory() + "/Library/Application Support/MacCrab/compiled_rules",
-            // System dir the ROOT daemon enforces from — unconditional fallback so
-            // the app never reads 0 rules (→ false "degraded") when dataDir
-            // resolved to the user side but the engine runs system-side.
-            "/Library/Application Support/MacCrab/compiled_rules",
-            // Development: next to the maccrabd binary
-            URL(fileURLWithPath: CommandLine.arguments[0])
-                .deletingLastPathComponent()
-                .deletingLastPathComponent() // out of .app bundle
-                .deletingLastPathComponent()
-                .appendingPathComponent("debug/compiled_rules").path,
-            // Direct build dir
-            FileManager.default.currentDirectoryPath + "/.build/debug/compiled_rules",
-        ]
+        // Compiled rules describe the selected engine only. A missing corpus
+        // must not be replaced with another daemon or a development checkout.
+        let candidates = [dataDir + "/compiled_rules"]
 
         for dir in candidates {
             if let files = try? FileManager.default.contentsOfDirectory(atPath: dir),
@@ -2773,6 +2650,7 @@ final class AppState: ObservableObject {
             }
         }
         rulesLoaded = 0
+        rules = []
     }
 
     func unsuppressAlert(_ alertId: String) async {
@@ -3165,9 +3043,11 @@ final class AppState: ObservableObject {
         // Mirror loadEventsIncremental: skip the prepend during search so the
         // relevance-ordered LIKE results stay intact between poll ticks.
         if alertSearchActive { return }
+        let generation = storeGeneration
         do {
             let store = try alertStore()
             let newAlerts = try await store.alerts(since: lastAlertTimestamp, limit: 100)
+            guard generation == storeGeneration else { return }
             let existingIDs = Set(dashboardAlerts.map { $0.id })
             let overlay = suppressedIDs
             let newViewModels = newAlerts
@@ -3223,12 +3103,14 @@ final class AppState: ObservableObject {
         // its WAL read-mark (with the Overview provider's) was defeating the
         // engine's checkpoint under burst and forcing event shed.
         guard eventsWorkspaceVisible else { return }
+        let generation = storeGeneration
         do {
             let store = try eventStore()
             let snapshot = try await store.exactEventsSnapshot(
                 since: lastEventTimestamp,
                 limit: 200
             )
+            guard generation == storeGeneration else { return }
             guard snapshot.isComplete else {
                 eventSearchCoverageWarning =
                     "Incremental event evidence is incomplete."

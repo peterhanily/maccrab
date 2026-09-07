@@ -3,9 +3,68 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.22.0] — 2026-09-03
+## [1.22.0] — Unreleased
+
+Final installed qualification is still pending. Development measurements below
+describe earlier candidates and do not qualify the current source.
 
 ### Fixed
+- **Process code hashes now identify the actual running code image.**
+  The extractor uses the correct native operation and queries each request instead
+  of returning stale PID-cached hashes or unrelated process-identity bytes.
+- **Temporary firewall responses have independent expiration and retry scheduling.**
+  Complete rule snapshots and a dedicated anchor prevent expiry from replacing the
+  threat-intelligence blocklist. Failed reloads retain reconciliation work. Legacy
+  shared-anchor rules require explicit review during upgrade qualification.
+- **Firewall status verifies attachment in the active main ruleset.**
+  Readable rules in an unreferenced anchor no longer count as enforcement prerequisites.
+- **Release and test builds use the explicitly recorded Apple toolchain.**
+  Toolchain-provided Swift Testing avoids the mismatched external compiler transport;
+  compiler and Xcode identity checks run before compilation.
+- **Configuration and rule-reload status now reports durable request outcomes.**
+  CLI, MCP and the engine share supported keys, types and bounds. Effective values
+  and generations identify the running engine; accepted requests do not imply application.
+- **MCP causal traces use the same selected engine directory as events and alerts.**
+  Shared JSON status also identifies Agent Traces as unauthenticated self-reports,
+  independently of current receiver health or storage admission.
+- **Suppression removal preserves unrelated entries and confirms persisted results.**
+  The app reads a dedicated administrative snapshot and submits exact-ID removals.
+- **Threat-intelligence downloads use the current provider endpoints and credential contract.**
+  URLhaus and MalwareBazaar require an abuse.ch Auth-Key, configurable in Keychain
+  through Network enrichment settings. Failed downloads preserve the prior cache.
+- **Storage diagnostics are explicit, read-only and time-bounded.**
+  `maccrabctl storage check` reports SQLite integrity without initializing or repairing
+  stores. Startup failures expose a typed recovery reason and preservation status.
+- **Status copy and plural resources are complete across the fourteen bundled languages.**
+  Format and catalog checks cover the new messages; native-language and packaged
+  accessibility acceptance remain part of final qualification.
+- **Fallback collector recovery, DNS loss diagnostics and startup stage timing are visible.**
+  Verified recovery preserves incident history. The dashboard clears retained state
+  when the engine identity changes, and power-policy cache age uses monotonic time.
+- **CI phases have deadlines and retain structured results and full logs.**
+  Qualification records boot identity, a minimum warmup age and explicit counter
+  time scopes; loss limits remain strict.
+- **Legacy database upgrades now budget schema work separately from event writes.**
+  Large timestamp indexes no longer have to fit the fixed row-write reserve;
+  the atomic transition still requires actual disk headroom and preserves write guards.
+- **Protection status now reflects startup, storage readiness and collector health.**
+  Disabled optional collectors are shown separately, and stale telemetry from a
+  previous boot cannot supply the current engine's health.
+- **DNS capture now uses macOS BPF record alignment and DNS-relative compression
+  offsets.** It follows primary IPv4 interface changes and reports capture failures
+  and verified recovery to collector health.
+- **Alert actions distinguish queued requests from confirmed saved state.**
+  Rows remain truthful while requests are pending, bulk Undo waits for confirmation,
+  and slow table refreshes cannot starve confirmation. Plugin removal errors remain visible.
+- **Terminal settlement includes preparation-memory waiting in its shared deadline.**
+  Cancelled waits release their credit; timeout outcomes reach existing error counters.
+- **Startup reuses each journal base already authenticated during index rebuilding.**
+  Separate terminal, projection and search integrity checks remain in place.
+- **The manual uninstaller verifies System Extension removal before cleanup.**
+  Pending approval, reboot, cancellation or unknown status preserves the app and data,
+  including when `--yes` was supplied.
+- **Tests compile their rule fixtures for the current process.**
+  They no longer reuse another checkout's timestamp-based temporary cache.
 - **Engine crash on the heavy-enrichment timeout path.** A budget split that
   divides already-granted credit was gated as though it were new growth, and
   keyed on a global gauge, so it was refused precisely when operations time out.
@@ -105,6 +164,15 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   cost it governs grew.
 
 ### Changed
+- SQLCipher is updated to 4.18.0 with SQLite 3.53.4, with exact upstream commit,
+  regenerated-source hashes and shipped license notices retained.
+- Sparkle is pinned to 2.9.6 across application and release tooling. App and DMG
+  packaging now preserve the bundled dependencies' license notices.
+- Qualification recording and validation share reload timing, conditional LLM
+  evidence and bounded-flow accounting. Journal refresh telemetry is required;
+  loss checks and resource ceilings have not been relaxed by these repairs.
+- Privacy, storage-budget, recurring-startup and downgrade guidance now reflect
+  the current implementation. There is no qualified database downgrade target.
 - **Installed-host qualification measures memory as `phys_footprint`, not
   `resident_size`.** Resident size counts clean file-backed and shared pages the
   process is not charged for — the stores' 64 MiB SQLite mmap windows and the
@@ -112,12 +180,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   reference host: 1,101.1 MiB resident against a 371.5 MiB footprint. The 450 MiB
   bound is unchanged; only the metric it read was wrong. Report fields are
   renamed accordingly and both evidence schema strings are bumped.
-- **The fixed qualification burst is sized from the gate's own reference load.**
-  It offered ~834,000 events against merged detection-input streams that cap at
-  100,000 each, so the engine had to shed several hundred thousand events and the
-  same gate then failed the candidate for shedding them. 2,000 iterations reach
-  ~2,800 events/s against the predeclared 1,274 events/s floor while leaving both
-  lanes under half their capacity.
+- **Qualification records the prescribed burst and its drain boundary together.**
+  Offered volume alone does not establish required queue capacity: concurrent
+  processing and the measured tail also matter. The current workload and resource
+  limits still need a completed exact-candidate run and independent workstation
+  acceptance budgets.
 - **The qualification drain boundary judges the sequence journal by flow.** It
   required every conservation boundary to report `queued=0` at the fixed drain
   instant, including the journal's durable set of out-of-order partial sequence

@@ -11,7 +11,7 @@ import Foundation
 @Suite("v1.12.0: WormSelfPropagation rule corpus")
 struct WormSelfPropagationRuleCompilationTests {
 
-    private let compiledDir = "/tmp/maccrab_v3"
+    private let compiledDir = compiledRulesDirectory.path
 
     /// Slugs of the 20 single-event YAML rules added in v1.12.0
     /// (initial 9 worm-loop wedge + 11 dep-confusion / content-anomaly
@@ -73,8 +73,8 @@ struct WormSelfPropagationRuleCompilationTests {
     private let sequenceRuleSlug = "worm_self_propagation_signal"
 
     @Test("All 42 v1.12.0 single-event YAML rules compile to JSON predicates")
-    func singleEventRulesCompile() {
-        ensureRulesCompiled()
+    func singleEventRulesCompile() throws {
+        try ensureRulesCompiled()
         for slug in singleEventRuleSlugs {
             let path = "\(compiledDir)/\(slug).json"
             #expect(
@@ -85,8 +85,8 @@ struct WormSelfPropagationRuleCompilationTests {
     }
 
     @Test("Worm-self-propagation sequence rule compiles to JSON")
-    func sequenceRuleCompiles() {
-        ensureRulesCompiled()
+    func sequenceRuleCompiles() throws {
+        try ensureRulesCompiled()
         let path = "\(compiledDir)/sequences/\(sequenceRuleSlug).json"
         #expect(
             FileManager.default.fileExists(atPath: path),
@@ -96,7 +96,7 @@ struct WormSelfPropagationRuleCompilationTests {
 
     @Test("Each compiled rule decodes as JSON with required top-level fields")
     func compiledRulesAreWellFormed() throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         for slug in singleEventRuleSlugs {
             let path = "\(compiledDir)/\(slug).json"
             let data = try Data(contentsOf: URL(fileURLWithPath: path))
@@ -113,7 +113,7 @@ struct WormSelfPropagationRuleCompilationTests {
 
     @Test("Critical-severity worm rules are tagged as critical")
     func criticalRulesAreCritical() throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         // v1.17.1 critical-tier recalibration: CRITICAL is reserved for
         // intrinsic-malice / known-IOC rules with tight filters. Heuristic
         // "self-propagation / non-interactive-parent / hostname-egress" worm

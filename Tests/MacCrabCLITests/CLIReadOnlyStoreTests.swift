@@ -476,8 +476,11 @@ struct CLIReadOnlyStoreTests {
         #expect(mcpAlertConstructors[0].0 == "ReadOnlyStores.swift")
         #expect(mcpAlertConstructors[0].1.contains("forceReadOnly: true"))
         #expect(mcpCampaignConstructors.isEmpty)
-        #expect(mcpEventReaderCalls == 7)
-        #expect(mcpAlertReaderCalls == 13)
+        // Five event and eleven alert invocations, plus each declaration.
+        // Status now reads through the shared RuntimeStatusDocument, whose
+        // constructors are audited below instead of in this executable folder.
+        #expect(mcpEventReaderCalls == 6)
+        #expect(mcpAlertReaderCalls == 12)
 
         func constructorCalls(named marker: String, in source: String) -> [String] {
             var calls: [String] = []
@@ -502,6 +505,22 @@ struct CLIReadOnlyStoreTests {
             }
             return calls
         }
+
+        let runtimeStatusSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabCore/Assessment/RuntimeStatusDocument.swift"
+            ),
+            encoding: .utf8
+        )
+        let statusEventCalls = constructorCalls(named: "EventStore(", in: runtimeStatusSource)
+        let statusAlertCalls = constructorCalls(named: "AlertStore(", in: runtimeStatusSource)
+        #expect(statusEventCalls.count == 1,
+                "classify every shared status EventStore open")
+        #expect(statusAlertCalls.count == 1,
+                "classify every shared status AlertStore open")
+        #expect((statusEventCalls + statusAlertCalls).allSatisfy {
+            $0.contains("forceReadOnly: true")
+        }, "CLI and MCP status must keep both shared evidence stores query-only")
 
         let graphCalls = constructorCalls(
             named: "SQLiteCausalGraphStore(",

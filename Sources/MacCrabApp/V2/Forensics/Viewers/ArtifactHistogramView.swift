@@ -60,7 +60,7 @@ struct ArtifactHistogramView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("\(artifacts.count) event\(artifacts.count == 1 ? "" : "s") · per \(bucketLabel)")
+            Text(String(localized: "ui.final.histogramCount", defaultValue: "Events: \(artifacts.count) · Interval: \(bucketLabel)"))
                 .scaledSystem(12, weight: .semibold)
             Spacer()
             if let first = buckets.first?.start, let last = buckets.last?.start {
@@ -72,7 +72,7 @@ struct ArtifactHistogramView: View {
     }
 
     private var emptyState: some View {
-        Text("No timestamped events for this content type.")
+        Text(String(localized: "ui.ArtifactHistogramView.no.timestamped.events.for.this.content.type", defaultValue: "No timestamped events for this content type."))
             .scaledSystem(11)
             .foregroundStyle(.tertiary)
             .padding(.vertical, 20)
@@ -114,11 +114,11 @@ struct ArtifactHistogramView: View {
 
     private var bucketLabel: String {
         switch bucket {
-        case .minute: return "minute"
-        case .hour:   return "hour"
-        case .day:    return "day"
-        case .week:   return "week"
-        case .month:  return "month"
+        case .minute: return String(localized: "ui.final.unit.minute", defaultValue: "minute")
+        case .hour:   return String(localized: "ui.final.unit.hour", defaultValue: "hour")
+        case .day:    return String(localized: "ui.final.unit.day", defaultValue: "day")
+        case .week:   return String(localized: "ui.final.unit.week", defaultValue: "week")
+        case .month:  return String(localized: "ui.final.unit.month", defaultValue: "month")
         }
     }
 

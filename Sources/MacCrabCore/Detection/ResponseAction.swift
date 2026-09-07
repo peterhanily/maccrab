@@ -135,11 +135,8 @@ public actor ResponseEngine {
     /// Action execution log for auditing.
     private var executionLog: [(timestamp: Date, ruleId: String, action: ResponseActionType, target: String, success: Bool)] = []
 
-    /// Path to the PF anchor file used for temporary block rules.
-    private let pfAnchorPath: String
-
-    /// Currently active network blocks for expiration tracking.
-    private var activeBlocks: [NetworkBlock] = []
+    /// Serialized temporary blocks in the dedicated response-action anchor.
+    private let temporaryNetworkBlocks: TemporaryNetworkBlocks
 
     /// Optional AlertSink for emitting "pending operator confirmation"
     /// alerts when an action is gated by requireConfirmation. v1.6.21:
@@ -149,14 +146,6 @@ public actor ResponseEngine {
     /// grant or execute the action; containment still requires a separately
     /// authorized manual workflow. Suppression remains the dismiss path.
     private var alertSinkForPending: AlertSink?
-
-    /// Tracks info about a temporary PF block rule.
-    private struct NetworkBlock: Sendable {
-        let ip: String
-        let addedAt: Date
-        let expiresAt: Date
-        let ruleId: String
-    }
 
     public init(quarantineDir: String? = nil, supportDirectory: String? = nil) {
         let appSupport: String = {
@@ -173,11 +162,26 @@ public actor ResponseEngine {
         } else {
             self.quarantineDir = (appSupport as NSString).appendingPathComponent("quarantine")
         }
-        self.pfAnchorPath = (appSupport as NSString).appendingPathComponent("maccrab_blocks.conf")
+        self.temporaryNetworkBlocks = TemporaryNetworkBlocks(
+            io: TemporaryNetworkBlocks.liveIO(supportDirectory: appSupport)
+        )
         try? FileManager.default.createDirectory(
             atPath: self.quarantineDir,
             withIntermediateDirectories: true
         )
+    }
+
+    /// Internal dependency injection for response routing fixtures. Creating a
+    /// fixture must not open the live PF control plane or the real support dir.
+    init(quarantineDir: String, temporaryNetworkBlocks: TemporaryNetworkBlocks) {
+        self.quarantineDir = quarantineDir
+        self.temporaryNetworkBlocks = temporaryNetworkBlocks
+    }
+
+    /// Start owned background cleanup without blocking collector startup.
+    /// Expiry/retry remains independent of whether another alert ever arrives.
+    public func startNetworkBlockMaintenance() async {
+        await temporaryNetworkBlocks.startMaintenance()
     }
 
     /// Wire an AlertSink for emitting pending-confirmation alerts.
@@ -336,9 +340,6 @@ public actor ResponseEngine {
         let actions = ruleActions[alert.ruleId] ?? defaultActions
         guard !actions.isEmpty else { return }
 
-        // Expire any stale network blocks before processing new actions
-        await expireNetworkBlocks()
-
         for config in actions {
             guard alert.severity >= config.minimumSeverity else { continue }
 
@@ -484,9 +485,11 @@ public actor ResponseEngine {
         executionLog
     }
 
-    /// Get currently active network blocks.
-    public func getActiveBlocks() -> [(ip: String, expiresAt: Date, ruleId: String)] {
-        activeBlocks.map { ($0.ip, $0.expiresAt, $0.ruleId) }
+    /// Last committed temporary blocks. Expired entries remain visible while
+    /// their kernel removal is pending; a deadline alone does not remove them.
+    public func getActiveBlocks() async -> [(ip: String, expiresAt: Date, ruleId: String)] {
+        let snapshot = await temporaryNetworkBlocks.snapshot()
+        return snapshot.blocks.map { ($0.ip, $0.expiresAt, $0.ruleID) }
     }
 
     // MARK: - Action Implementations
@@ -626,33 +629,14 @@ public actor ResponseEngine {
         // would otherwise silently take down DNS, OCSP, or LAN.
         guard SafeBlockableIP.isSafeToBlock(ip: ip) else { return false }
 
-        // Check if this IP is already blocked
-        if activeBlocks.contains(where: { $0.ip == ip }) {
-            logger.info("blockNetwork: \(ip) is already blocked")
-            return true
-        }
-
-        // Write the block rule to the anchor file
-        let rule = "block drop out quick on en0 to \(ip)\nblock drop out quick on en1 to \(ip)\n"
-        let success = writePFAnchor(appendingRule: rule)
-        guard success else { return false }
-
-        // Reload the PF anchor
-        let reloadSuccess = await reloadPFAnchor()
-        guard reloadSuccess else { return false }
-
-        // Track the block for expiration
-        let now = Date()
-        let block = NetworkBlock(
-            ip: ip,
-            addedAt: now,
-            expiresAt: now.addingTimeInterval(TimeInterval(durationSeconds)),
-            ruleId: ruleId
+        let applied = await temporaryNetworkBlocks.add(
+            ip: ip, durationSeconds: durationSeconds, ruleID: ruleId
         )
-        activeBlocks.append(block)
-
-        logger.info("Added PF block rule for \(ip) (expires in \(durationSeconds)s)")
-        return true
+        await temporaryNetworkBlocks.startMaintenance()
+        if applied {
+            logger.info("Confirmed temporary response PF block for \(ip)")
+        }
+        return applied
     }
 
     /// Validate that a string is a well-formed IPv4 or IPv6 address using the
@@ -666,77 +650,6 @@ public actor ResponseEngine {
         // Check IPv6
         if inet_pton(AF_INET6, ip, &addr6) == 1 { return true }
         return false
-    }
-
-    /// Append a rule to the PF anchor file.
-    private func writePFAnchor(appendingRule rule: String) -> Bool {
-        let fm = FileManager.default
-        let dir = (pfAnchorPath as NSString).deletingLastPathComponent
-        do {
-            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            if fm.fileExists(atPath: pfAnchorPath) {
-                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: pfAnchorPath))
-                handle.seekToEndOfFile()
-                if let data = rule.data(using: .utf8) {
-                    handle.write(data)
-                }
-                handle.closeFile()
-            } else {
-                try rule.write(toFile: pfAnchorPath, atomically: true, encoding: .utf8)
-            }
-            return true
-        } catch {
-            logger.error("Failed to write PF anchor: \(error.localizedDescription)")
-            return false
-        }
-    }
-
-    /// Reload the PF anchor using pfctl. Requires root.
-    private nonisolated func reloadPFAnchor() async -> Bool {
-        // v1.21.6-rc.45: `pfctl -f` exits 0 even when PF is DISABLED, so a
-        // successful load is not evidence of enforcement. Require the anchor to
-        // be reachable and PF to be running before reporting a block.
-        let loaded = BoundedPrivilegedProcessRunner.run(
-            executable: "/sbin/pfctl",
-            arguments: ["-a", "com.maccrab", "-f", pfAnchorPath],
-            timeout: 10,
-            maximumOutputBytes: nil
-        )?.succeeded == true
-        guard loaded else { return false }
-        return PFEnforcement.probe(anchorName: "com.maccrab").enforcing
-    }
-
-    /// Remove expired network blocks and rewrite the anchor file.
-    private func expireNetworkBlocks() async {
-        let now = Date()
-        let expired = activeBlocks.filter { $0.expiresAt <= now }
-        guard !expired.isEmpty else { return }
-
-        activeBlocks.removeAll { $0.expiresAt <= now }
-
-        for block in expired {
-            logger.info("Expiring PF block for \(block.ip) (rule \(block.ruleId))")
-        }
-
-        // Rewrite the anchor file with only active blocks
-        rewritePFAnchor()
-        await reloadPFAnchor()
-    }
-
-    /// Rewrite the entire PF anchor file from the active blocks list.
-    private func rewritePFAnchor() {
-        var content = "# MacCrab temporary block rules\n"
-        content += "# Auto-generated — do not edit manually\n\n"
-        for block in activeBlocks {
-            content += "block drop out quick on en0 to \(block.ip)\n"
-            content += "block drop out quick on en1 to \(block.ip)\n"
-        }
-
-        do {
-            try content.write(toFile: pfAnchorPath, atomically: true, encoding: .utf8)
-        } catch {
-            logger.error("Failed to rewrite PF anchor: \(error.localizedDescription)")
-        }
     }
 
     // MARK: Escalate Notification

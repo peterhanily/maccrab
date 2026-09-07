@@ -54,13 +54,13 @@ struct ResponseActionsView: View {
                     Label(String(localized: "responseActions.resetDefaults", defaultValue: "Reset to Defaults"), systemImage: "arrow.counterclockwise")
                 }
                 .controlSize(.small)
-                .accessibilityLabel("Reset all response actions to defaults")
+                .accessibilityLabel(String(localized: "ui.ResponseActionsView.reset.all.response.actions.to.defaults", defaultValue: "Reset all response actions to defaults"))
                 Button { showAddSheet = true } label: {
                     Label(String(localized: "responseActions.addRuleAction", defaultValue: "Add Rule Action"), systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .accessibilityLabel("Add a new response action rule")
+                .accessibilityLabel(String(localized: "ui.ResponseActionsView.add.a.new.response.action.rule", defaultValue: "Add a new response action rule"))
             }
             .padding()
 
@@ -126,7 +126,7 @@ struct ResponseActionsView: View {
                                             Image(systemName: "trash").foregroundColor(.red).font(.caption)
                                         }
                                         .buttonStyle(.borderless)
-                                        .accessibilityLabel("Delete this action")
+                                        .accessibilityLabel(String(localized: "ui.ResponseActionsView.delete.this.action", defaultValue: "Delete this action"))
                                     }
 
                                     ForEach((config.rules[ruleId] ?? []).indices, id: \.self) { i in
@@ -145,7 +145,7 @@ struct ResponseActionsView: View {
                                         config.rules[ruleId]?.append(ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil, requireConfirmation: nil))
                                         save()
                                     } label: {
-                                        Label("Add Action", systemImage: "plus.circle")
+                                        Label(String(localized: "addRuleAction.add", defaultValue: "Add Action"), systemImage: "plus.circle")
                                     }.font(.caption)
 
                                     Divider()
@@ -386,7 +386,7 @@ private struct ActionRow: View {
                     .font(.caption)
             }
             .toggleStyle(.checkbox)
-            .help("When checked, MacCrab logs this action as pending instead of auto-executing. Useful as a safety gate on kill / quarantine / blockNetwork.")
+            .help(String(localized: "ui.ResponseActionsView.when.checked.maccrab.logs.this.action.as", defaultValue: "When checked, MacCrab logs this action as pending instead of auto-executing. Useful as a safety gate on kill / quarantine / blockNetwork."))
 
             Spacer()
 
@@ -394,7 +394,7 @@ private struct ActionRow: View {
                 Image(systemName: "minus.circle").foregroundColor(.red)
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel("Delete this action")
+            .accessibilityLabel(String(localized: "ui.ResponseActionsView.delete.this.action", defaultValue: "Delete this action"))
         }
         .padding(.vertical, 2)
     }
@@ -456,7 +456,7 @@ private struct AddRuleActionSheet: View {
                 if DEFAULT_REQUIRE_CONFIRM.contains(action.action) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(.orange)
-                        .accessibilityLabel("Destructive action")
+                        .accessibilityLabel(String(localized: "ui.ResponseActionsView.destructive.action", defaultValue: "Destructive action"))
                 }
                 Toggle(isOn: Binding(
                     get: {

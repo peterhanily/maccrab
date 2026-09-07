@@ -179,47 +179,13 @@ struct V2IntelligenceFeedsLoaderTests {
         #expect(rows.first?.entries == 17)
     }
 
-    @Test("candidateThreatIntelCacheDirs returns the system path first when preferred is nil")
-    func candidateDirsOrderWithNoPreferred() {
-        let dirs = V2LiveDataProvider.candidateThreatIntelCacheDirs(preferring: nil)
-        // Canonical priority: system sysext path wins because release
-        // builds run the daemon as root and write there. User-home is
-        // the dev-workflow fallback.
-        #expect(dirs.first == "/Library/Application Support/MacCrab/threat_intel")
-        #expect(dirs.count >= 1)
-        #expect(dirs.contains(where: { $0.hasSuffix("/Library/Application Support/MacCrab/threat_intel") }))
-    }
-
-    @Test("candidateThreatIntelCacheDirs prepends preferred and de-duplicates against the canonical paths")
-    func candidateDirsPreferredFirst() {
-        let dirs = V2LiveDataProvider.candidateThreatIntelCacheDirs(
-            preferring: "/private/tmp/maccrab-test"
-        )
-        // Preferred dir comes first with /threat_intel appended; system
-        // + user-home paths come after; no duplicate entry if the user
-        // happened to pass `/Library/Application Support/MacCrab`
-        // (suffix collision).
-        #expect(dirs.first == "/private/tmp/maccrab-test/threat_intel")
-        // Even with a preferred dir, the canonical paths must still be
-        // probed as fallbacks. Pin the count >= 2 contract; 3 when
-        // user-home differs from system (the normal case).
-        #expect(dirs.count >= 2)
-    }
-
-    @Test("candidateThreatIntelCacheDirs de-duplicates when preferred equals the system path")
-    func candidateDirsDeDuplicatesPreferredEqualsSystem() {
-        // The live provider's `dataDir` is "/Library/Application Support/
-        // MacCrab" in production. The helper should NOT double-probe
-        // the same path — pre-fix a naive implementation would emit
-        // [system/threat_intel, system/threat_intel, user/threat_intel]
-        // and ThreatIntelFeed.cachedIOCs(at:) would be called twice on
-        // the same path on every refresh tick.
-        let dirs = V2LiveDataProvider.candidateThreatIntelCacheDirs(
-            preferring: "/Library/Application Support/MacCrab"
-        )
-        let uniqueCount = Set(dirs).count
-        #expect(uniqueCount == dirs.count, "candidate dirs must be unique")
-        #expect(dirs.first == "/Library/Application Support/MacCrab/threat_intel")
+    @Test("feed reads are scoped to the session or an explicitly supplied source")
+    func candidateDirsStaySelected() {
+        #expect(V2LiveDataProvider.candidateThreatIntelCacheDirs() == [V2EngineSource.session.directory + "/threat_intel"])
+        #expect(V2LiveDataProvider.candidateThreatIntelCacheDirs(preferring: "/private/tmp/maccrab-test")
+                == ["/private/tmp/maccrab-test/threat_intel"])
+        #expect(V2LiveDataProvider.candidateThreatIntelCacheDirs(preferring: "/Library/Application Support/MacCrab")
+                == ["/Library/Application Support/MacCrab/threat_intel"])
     }
 
     @Test("loadFeedsFromCache row staleness flips to .warning past the 6-hour cutoff")

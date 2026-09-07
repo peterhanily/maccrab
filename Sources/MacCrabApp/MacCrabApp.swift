@@ -121,7 +121,7 @@ struct MacCrabApp: App {
                     // opt-in (chained so the two sheets never overlap).
                     if !hasSeenEnrichmentPrompt { showEnrichmentPrompt = true }
                 }) {
-                    WelcomeView(isPresented: $showWelcome, sysextManager: sysextManager)
+                    WelcomeView(isPresented: $showWelcome, sysextManager: sysextManager, engineSource: appState.engineSource)
                 }
                 .sheet(isPresented: $showEnrichmentPrompt) {
                     EnrichmentOptInView(isPresented: $showEnrichmentPrompt)
@@ -242,7 +242,7 @@ struct MacCrabApp: App {
             // same keyboard behavior) but adds the website link users
             // expect from a modern Mac app.
             CommandGroup(replacing: .appInfo) {
-                Button("About MacCrab") {
+                Button(String(localized: "ui.MacCrabApp.about.maccrab", defaultValue: "About MacCrab")) {
                     MacCrabApp.showAboutPanel()
                 }
             }
@@ -255,18 +255,18 @@ struct MacCrabApp: App {
             // convention — apps with a website put "Visit XXX Website"
             // in the Help menu so users can find it consistently.
             CommandGroup(replacing: .help) {
-                Button("Visit maccrab.com") {
+                Button(String(localized: "ui.MacCrabApp.visit.maccrab.com", defaultValue: "Visit maccrab.com")) {
                     if let url = URL(string: "https://maccrab.com") {
                         NSWorkspace.shared.open(url)
                     }
                 }
-                Button("MacCrab Documentation") {
+                Button(String(localized: "ui.MacCrabApp.maccrab.documentation", defaultValue: "MacCrab Documentation")) {
                     if let url = URL(string: "https://github.com/peterhanily/maccrab#readme") {
                         NSWorkspace.shared.open(url)
                     }
                 }
                 Divider()
-                Button("Report an Issue…") {
+                Button(String(localized: "ui.MacCrabApp.report.an.issue", defaultValue: "Report an Issue…")) {
                     if let url = URL(string: "https://github.com/peterhanily/maccrab/issues/new") {
                         NSWorkspace.shared.open(url)
                     }
@@ -898,7 +898,7 @@ struct AlertPopoverView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     // Title row
                     HStack {
-                        Text("MacCrab")
+                        Text(verbatim: "MacCrab")
                             .font(.system(.caption, weight: .semibold))
                             .foregroundColor(.secondary)
                         Spacer()
@@ -957,7 +957,7 @@ struct AlertPopoverView: View {
                         Spacer()
 
                         Button(action: onShowDashboard) {
-                            Text("View")
+                            Text(String(localized: "pastScans.view", defaultValue: "View"))
                                 .font(.system(.caption2, weight: .semibold))
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 10)

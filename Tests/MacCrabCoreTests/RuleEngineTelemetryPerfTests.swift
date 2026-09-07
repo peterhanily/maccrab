@@ -125,9 +125,9 @@ struct RuleEngineTelemetryPerfTests {
 
     @Test("evaluate() records exact eval/fire counts and a bounded reservoir")
     func engineRecordsExactCountsThroughModifySubscript() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         let nvram = "d1a2b3c4-0342-4000-a000-000000000342"
 
         let iterations = 10

@@ -108,9 +108,9 @@ struct V2ForensicsPastScansView: View {
             } ?? String(localized: "pastScans.unknownSize", defaultValue: "unknown size")
             Text(String(localized: "pastScans.deleteMessage", defaultValue: "This removes the scan + its evidence database (\(sizeStr)) from disk. You can't undo this. Exported CSV/JSON files are not affected."))
         }
-        .alert(String(localized: "pastScans.bulkDeleteTitle", defaultValue: "Delete \(selectedIDs.count) scan\(selectedIDs.count == 1 ? "" : "s") permanently?"),
+        .alert(String(localized: "pastScans.bulkDeleteTitle", defaultValue: "Delete \(selectedIDs.count) scans permanently?"),
                isPresented: $pendingBulkDelete) {
-            Button(String(localized: "pastScans.bulkDeleteConfirm", defaultValue: "Delete \(selectedIDs.count) scan\(selectedIDs.count == 1 ? "" : "s")"), role: .destructive) {
+            Button(String(localized: "pastScans.bulkDeleteConfirm", defaultValue: "Delete \(selectedIDs.count) scans"), role: .destructive) {
                 bulkDelete()
             }
             Button(String(localized: "pastScans.cancel", defaultValue: "Cancel"), role: .cancel) { }
@@ -204,7 +204,7 @@ struct V2ForensicsPastScansView: View {
             bcf.countStyle = .file
             if failed == 0 {
                 deleteResult = DeleteToast(
-                    message: String(localized: "pastScans.bulkDeletedToast", defaultValue: "Deleted \(ok) scan\(ok == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed))."),
+                    message: String(localized: "pastScans.bulkDeletedToast", defaultValue: "Deleted \(ok) scans · freed \(bcf.string(fromByteCount: freed))."),
                     success: true)
             } else {
                 deleteResult = DeleteToast(

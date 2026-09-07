@@ -8,6 +8,8 @@ import MacCrabCore
 public struct V2SystemWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @State private var heartbeat: V2HeartbeatSnapshot?
+    @State private var startupFailure: V2StartupFailure?
+    @State private var diagnosticsPreview: V2DiagnosticsExport?
     @State private var permissions: [V2MockPermission] = []
     /// Cached trust-substrate status. Pre-fix the trustSubstrateCard
     /// computed `V2TrustSubstrateInfo.read(...)` inline on every body
@@ -63,12 +65,17 @@ public struct V2SystemWorkspace: View {
             // tick interval, the new refreshTick cancelled the body
             // before heartbeat/permissions ever landed in @State.
             // Same root cause as Wave 9G in V2IntelligenceWorkspace.
+            let source = state.engineSource
+            let report = await Task.detached(priority: .utility) {
+                V2StartupFailure.read(directory: source.directory)
+            }.value
+            self.startupFailure = report
             let h = await state.provider.heartbeat()
             await MainActor.run { self.heartbeat = h }
 
             // Read trust-substrate info on a detached task so the
             // disk I/O doesn't block main.
-            let dir = state.provider.dataDir ?? "/Library/Application Support/MacCrab"
+            let dir = state.engineSource.directory
             let ts = await Task.detached(priority: .userInitiated) {
                 V2TrustSubstrateInfo.status(dataDir: dir)
             }.value
@@ -98,6 +105,9 @@ public struct V2SystemWorkspace: View {
             let p = await state.provider.permissions()
             await MainActor.run { self.permissions = p }
         }
+        .sheet(item: $diagnosticsPreview) { preview in
+            diagnosticsPreviewView(preview)
+        }
     }
 
     @ViewBuilder
@@ -116,6 +126,10 @@ public struct V2SystemWorkspace: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 dataSourceCard
+                if let startupFailure { startupFailureCard(startupFailure) }
+                if let heartbeat, !heartbeat.isStale, !heartbeat.isReady {
+                    startupStatusBanner(heartbeat)
+                }
                 if heartbeat?.esSensorDegraded == true {
                     sensorDegradedBanner
                 }
@@ -133,54 +147,54 @@ public struct V2SystemWorkspace: View {
                    timers.featureDegraded {
                     lifecycleDegradedBanner(
                         timers,
-                        title: "Engine maintenance lifecycle degraded",
-                        workLabel: "maintenance timer",
-                        impact: "A maintenance or retention operation was lost, did not join cleanly, or could not be accounted for completely. Live event detection may continue, but the affected maintenance guarantee is not healthy."
+                        title: String(localized: "ui.final.lifecycle1.title", defaultValue: "Engine maintenance lifecycle degraded"),
+                        workLabel: String(localized: "ui.final.lifecycle1.workLabel", defaultValue: "maintenance timer"),
+                        impact: String(localized: "ui.final.lifecycle1.impact", defaultValue: "A maintenance or retention operation was lost, did not join cleanly, or could not be accounted for completely. Live event detection may continue, but the affected maintenance guarantee is not healthy.")
                     )
                 }
                 if let liveness = heartbeat?.livenessTimerLifecycle,
                    liveness.featureDegraded {
                     lifecycleDegradedBanner(
                         liveness,
-                        title: "Liveness writer lifecycle degraded",
-                        workLabel: "liveness heartbeat",
-                        impact: "The independent liveness writer lost work, did not join cleanly, or reported incomplete accounting, so external process-health observations may be incomplete."
+                        title: String(localized: "ui.final.lifecycle2.title", defaultValue: "Liveness writer lifecycle degraded"),
+                        workLabel: String(localized: "ui.final.lifecycle2.workLabel", defaultValue: "liveness heartbeat"),
+                        impact: String(localized: "ui.final.lifecycle2.impact", defaultValue: "The independent liveness writer lost work, did not join cleanly, or reported incomplete accounting, so external process-health observations may be incomplete.")
                     )
                 }
                 if let startup = heartbeat?.startupWorkLifecycle,
                    startup.featureDegraded {
                     lifecycleDegradedBanner(
                         startup,
-                        title: "Startup work lifecycle degraded",
-                        workLabel: "startup worker",
-                        impact: "A boot hydration or long-lived startup worker was lost, did not join cleanly, or reported incomplete accounting. Review the named counters before trusting that startup features are complete."
+                        title: String(localized: "ui.final.lifecycle3.title", defaultValue: "Startup work lifecycle degraded"),
+                        workLabel: String(localized: "ui.final.lifecycle3.workLabel", defaultValue: "startup worker"),
+                        impact: String(localized: "ui.final.lifecycle3.impact", defaultValue: "A boot hydration or long-lived startup worker was lost, did not join cleanly, or reported incomplete accounting. Review the named counters before trusting that startup features are complete.")
                     )
                 }
                 if let detection = heartbeat?.detectionWorkLifecycle,
                    detection.detectionProtectionDegraded {
                     lifecycleDegradedBanner(
                         detection,
-                        title: "Protection degraded — detection work lost",
-                        workLabel: "detection task",
-                        impact: "A security decision was rejected after close, shed, left unjoined, or could not be accounted for completely. Some derived detections may be missing; lossless inline overload fallback and intentional coalescing are not counted as loss."
+                        title: String(localized: "ui.final.lifecycle4.title", defaultValue: "Protection degraded — detection work lost"),
+                        workLabel: String(localized: "ui.final.lifecycle4.workLabel", defaultValue: "detection task"),
+                        impact: String(localized: "ui.final.lifecycle4.impact", defaultValue: "A security decision was rejected after close, shed, left unjoined, or could not be accounted for completely. Some derived detections may be missing; lossless inline overload fallback and intentional coalescing are not counted as loss.")
                     )
                 }
                 if let advisory = heartbeat?.advisoryWorkLifecycle,
                    advisory.featureDegraded {
                     lifecycleDegradedBanner(
                         advisory,
-                        title: "AI advisory features degraded",
-                        workLabel: "advisory task",
-                        impact: "Optional model-backed explanations or enrichments shed work or reported incomplete ownership. Deterministic detection and locally persisted alerts continue."
+                        title: String(localized: "ui.final.lifecycle5.title", defaultValue: "AI advisory features degraded"),
+                        workLabel: String(localized: "ui.final.lifecycle5.workLabel", defaultValue: "advisory task"),
+                        impact: String(localized: "ui.final.lifecycle5.impact", defaultValue: "Optional model-backed explanations or enrichments shed work or reported incomplete ownership. Deterministic detection and locally persisted alerts continue.")
                     )
                 }
                 if let output = heartbeat?.outputWorkLifecycle,
                    output.featureDegraded {
                     lifecycleDegradedBanner(
                         output,
-                        title: "Alert delivery features degraded",
-                        workLabel: "output task",
-                        impact: "A notification, webhook, syslog, or additional output may not have been delivered or fully accounted for. Detection and local alert persistence continue."
+                        title: String(localized: "ui.final.lifecycle6.title", defaultValue: "Alert delivery features degraded"),
+                        workLabel: String(localized: "ui.final.lifecycle6.workLabel", defaultValue: "output task"),
+                        impact: String(localized: "ui.final.lifecycle6.impact", defaultValue: "A notification, webhook, syslog, or additional output may not have been delivered or fully accounted for. Detection and local alert persistence continue.")
                     )
                 }
                 if splitWorkLifecycleUnavailable,
@@ -188,9 +202,9 @@ public struct V2SystemWorkspace: View {
                    legacy.featureDegraded {
                     lifecycleDegradedBanner(
                         legacy,
-                        title: "Legacy derived-work lifecycle degraded",
-                        workLabel: "derived task",
-                        impact: "This older engine reports one aggregate lane, so MacCrab cannot distinguish detection loss from advisory or delivery loss. Upgrade for exact attribution."
+                        title: String(localized: "ui.final.lifecycle7.title", defaultValue: "Legacy derived-work lifecycle degraded"),
+                        workLabel: String(localized: "ui.final.lifecycle7.workLabel", defaultValue: "derived task"),
+                        impact: String(localized: "ui.final.lifecycle7.impact", defaultValue: "This older engine reports one aggregate lane, so MacCrab cannot distinguish detection loss from advisory or delivery loss. Upgrade for exact attribution.")
                     )
                 }
                 if let otlp = heartbeat?.otlpReceiverLifecycle,
@@ -215,11 +229,84 @@ public struct V2SystemWorkspace: View {
                 healthActionsCard
                 healthSummaryRow
                 collectorsTable
+                if let capture = heartbeat?.dnsCapture { dnsCaptureCard(capture) }
                 trustSubstrateCard
                 auditTrailCard
             }
             .padding(16)
         }
+    }
+
+    private func dnsCaptureCard(_ capture: V2DNSCaptureStatus) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(String(localized: "system.dns.title", defaultValue: "DNS capture coverage")).font(V2Theme.cardTitle())
+            Text(String(localized: "system.dns.scope", defaultValue: "Captures Ethernet / IPv4 UDP port 53 on the primary IPv4 interface. Scoped or VPN routes, IPv6 transport, DNS over TCP and encrypted DNS are outside this capture scope."))
+                .font(V2Theme.body()).fixedSize(horizontal: false, vertical: true)
+            Text(String(localized: "system.dns.interface", defaultValue: "Reported interface: \(capture.interface ?? "—")"))
+                .font(V2Theme.meta())
+            V2StatusChip(capture.available && heartbeat?.isStale == false
+                         ? String(localized: "system.dns.available", defaultValue: "Capture available within scope")
+                         : String(localized: "system.dns.unavailable", defaultValue: "Capture unavailable or stale"),
+                         kind: capture.available && heartbeat?.isStale == false ? .info : .warning)
+            Text(String(localized: "system.dns.kernel", defaultValue: "BPF packets this boot: \(capture.kernelReceived) received, \(capture.kernelDropped) dropped"))
+                .font(V2Theme.meta())
+            if !capture.kernelStatisticsAvailable {
+                Text(String(localized: "system.dns.statisticsUnavailable", defaultValue: "Current BPF packet statistics are unavailable; zero recorded drops does not establish no packet loss."))
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
+            }
+            Text(String(localized: "system.dns.stream", defaultValue: "Parsed queries this boot: \(capture.streamOffered) offered, \(capture.streamDropped) dropped, \(capture.streamTerminated) after stream termination"))
+                .font(V2Theme.meta())
+        }.frame(maxWidth: .infinity, alignment: .leading).v2Panel()
+    }
+
+    private func startupFailureCard(_ report: V2StartupFailure) -> some View {
+        let historical = report.isHistorical(heartbeat: heartbeat)
+        return VStack(alignment: .leading, spacing: 8) {
+            Label(historical
+                  ? String(localized: "startup.failure.previousTitle", defaultValue: "Previous startup issue")
+                  : String(localized: "startup.failure.title", defaultValue: "Startup needs attention"),
+                  systemImage: historical ? "clock.arrow.circlepath" : "exclamationmark.shield.fill")
+                .font(V2Theme.cardTitle())
+                .foregroundStyle(historical ? V2Theme.mutedText : V2Theme.warning)
+            Text(report.reasonText).font(V2Theme.body())
+            Text(String(localized: "startup.failure.store", defaultValue: "Store: \(report.database)"))
+                .font(V2Theme.meta())
+            if let date = report.occurredAt {
+                Text(date, format: .dateTime.year().month().day().hour().minute())
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+            }
+            Text(report.preservationText).font(V2Theme.body())
+            Text(historical
+                 ? String(localized: "startup.failure.recovered", defaultValue: "A newer engine startup is ready. This report is retained as history.")
+                 : report.nextAction)
+                .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+            V2ActionButton(String(localized: "system.exportDiagnostics", defaultValue: "Export diagnostics"),
+                           icon: "square.and.arrow.up", style: .secondary) { exportDiagnostics() }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .v2Panel()
+    }
+
+    private func startupStatusBanner(_ heartbeat: V2HeartbeatSnapshot) -> some View {
+        let starting = heartbeat.readiness == .starting
+        let storageBlocked = heartbeat.bootPhase == "storage_not_ready"
+        return VStack(alignment: .leading, spacing: 6) {
+            Label(starting
+                  ? String(localized: "system.startupTitle", defaultValue: "Protection is starting")
+                  : (storageBlocked
+                     ? String(localized: "system.storageNotReadyTitle", defaultValue: "Storage needs attention")
+                     : String(localized: "system.notReadyTitle", defaultValue: "The engine is not ready")),
+                  systemImage: starting ? "hourglass" : "exclamationmark.shield.fill")
+                .font(V2Theme.cardTitle()).foregroundStyle(V2Theme.warning)
+            Text(starting
+                 ? String(localized: "system.startupDetail", defaultValue: "The engine is preparing storage, rules, and sensors. Protection will be confirmed after startup completes.")
+                 : String(localized: "system.notReadyDetail", defaultValue: "Monitoring has not started. Export diagnostics to include the startup state when reporting this issue."))
+                .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .v2Panel()
     }
 
     /// Engine repair / diagnostics actions — surfaced on Health precisely
@@ -237,7 +324,9 @@ public struct V2SystemWorkspace: View {
                 .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
-                V2ActionButton(String(localized: "system.reactivateSysext", defaultValue: "Reactivate System Extension"), icon: "arrow.triangle.2.circlepath", style: .secondary) {
+                V2ActionButton(startupFailure != nil && !(startupFailure?.isHistorical(heartbeat: heartbeat) ?? false)
+                    ? String(localized: "startup.failure.retry", defaultValue: "Retry startup after addressing the issue")
+                    : String(localized: "system.reactivateSysext", defaultValue: "Reactivate System Extension"), icon: "arrow.triangle.2.circlepath", style: .secondary) {
                     sysextManager.activate()
                     state.showToast(V2Toast(
                         kind: .info,
@@ -263,131 +352,63 @@ public struct V2SystemWorkspace: View {
         .v2Panel()
     }
 
-    /// Write a JSON diagnostics bundle from the currently-loaded health state.
+    /// Prepare the exact redacted file for review before opening a save panel.
     private func exportDiagnostics() {
-        let hb = heartbeat
-        let perms = permissions
-        let ti = trustStatus.info
-        let providerMode = state.provider.mode.label
-        let dataDirPath = state.provider.dataDir ?? "—"
-        let lastError = state.provider.lastErrorDescription
-        let iso = ISO8601DateFormatter()
+        do {
+            diagnosticsPreview = try V2DiagnosticsExport.make(
+                source: state.engineSource, mode: state.provider.mode.label,
+                heartbeat: heartbeat, failure: startupFailure, permissions: permissions,
+                providerReadFailed: state.provider.lastErrorDescription != nil)
+        } catch {
+            state.showToast(V2Toast(kind: .error,
+                title: String(localized: "system.exportDiagnosticsFailTitle", defaultValue: "Export failed"),
+                detail: String(localized: "diagnostics.prepareFailed", defaultValue: "The status snapshot could not be encoded. Refresh System health and try again.")))
+        }
+    }
 
-        var diag: [String: Any] = [
-            "generated_at": iso.string(from: Date()),
-            "app_version": (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "unknown",
-            "provider_mode": providerMode,
-            "data_dir": dataDirPath,
-        ]
-        if let lastError { diag["last_error"] = lastError }
-        if let hb {
-            // Omit optional keys when absent rather than encoding nil — a nil
-            // boxed as Any is not a valid JSON value and would make
-            // JSONSerialization throw for the whole bundle.
-            var hbDict: [String: Any] = [
-                "written_at": iso.string(from: hb.writtenAt),
-                "age_seconds": hb.ageSeconds,
-                "is_stale": hb.isStale,
-                "uptime_seconds": hb.uptimeSeconds,
-                "events_processed": hb.eventsProcessed,
-                "alerts_emitted": hb.alertsEmitted,
-                "sysext_has_fda": hb.sysextHasFDA,
-                "payload_truncated_total": hb.payloadTruncatedTotal,
-                "eslogger_dropped_total": hb.esloggerDroppedTotal,
-                "es_sensor_degraded": hb.esSensorDegraded,
-            ]
-            if let eventRate = hb.eventsPerSecond1h {
-                hbDict["events_per_second_1h"] = eventRate
+    private func diagnosticsPreviewView(_ preview: V2DiagnosticsExport) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(String(localized: "diagnostics.previewTitle", defaultValue: "Review diagnostic export"))
+                .font(.title2).fontWeight(.semibold)
+            Text(String(localized: "diagnostics.previewScope", defaultValue: "One JSON file with engine identity, readiness, counters, collector states, permission status and the classified startup report. Raw errors, events, paths, software inventory, keys and audit logs are excluded."))
+                .fixedSize(horizontal: false, vertical: true)
+            Text(verbatim: preview.filename).font(.system(.body, design: .monospaced))
+            Text(ByteCountFormatter.string(fromByteCount: Int64(preview.data.count), countStyle: .file))
+                .foregroundStyle(.secondary)
+            ScrollView([.horizontal, .vertical]) {
+                Text(verbatim: String(decoding: preview.data, as: UTF8.self))
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let window = hb.eventTypeCountWindow {
-                hbDict["event_type_count_window"] = [
-                    "query_available": window.queryAvailable,
-                    "requested_duration_seconds":
-                        window.requestedDurationSeconds,
-                    "effective_duration_seconds":
-                        window.effectiveDurationSeconds,
-                    "requested_window_complete":
-                        window.requestedWindowComplete,
-                    "complete": window.complete,
-                    "gap_records": window.gapRecords,
-                ]
-            }
-            if let mem = hb.residentMemoryMB { hbDict["resident_memory_mb"] = mem }
-            if let sev = hb.esSensorDegradedSeverity { hbDict["es_sensor_degraded_severity"] = sev }
-            if let pipeline = hb.eventPipeline {
-                hbDict["event_pipeline"] = pipeline.diagnosticDictionary
-            }
-            if let browserInventory = hb.browserInventory {
-                hbDict["browser_inventory"] = browserInventory.diagnosticDictionary
-            }
-            if let sequenceCheckpoint = hb.sequenceCheckpoint {
-                hbDict["sequence_checkpoint"] = sequenceCheckpoint.diagnosticDictionary
-            }
-            if let llm = hb.llm {
-                hbDict["llm"] = llm.diagnosticDictionary
-            }
-            if let traceGraph = hb.traceGraphStorageAdmission {
-                hbDict["tracegraph_storage_admission"] = traceGraph.diagnosticDictionary
-            }
-            if let budget = hb.alertEvidenceBudget,
-               let data = try? JSONEncoder().encode(budget),
-               let object = try? JSONSerialization.jsonObject(with: data) {
-                hbDict["alert_evidence_budget"] = object
-            }
-            if let timers = hb.timerLifecycle,
-               let data = try? JSONEncoder().encode(timers),
-               let object = try? JSONSerialization.jsonObject(with: data) {
-                hbDict["timer_lifecycle"] = object
-            }
-            let lifecycleBlocks: [(String, MacCrabCore.HeartbeatSnapshot.TimerLifecycle?)] = [
-                ("liveness_timer_lifecycle", hb.livenessTimerLifecycle),
-                ("startup_work_lifecycle", hb.startupWorkLifecycle),
-                ("detection_work_lifecycle", hb.detectionWorkLifecycle),
-                ("advisory_work_lifecycle", hb.advisoryWorkLifecycle),
-                ("output_work_lifecycle", hb.outputWorkLifecycle),
-                ("derived_work_lifecycle", hb.legacyDerivedWorkLifecycle),
-            ]
-            for (key, lifecycle) in lifecycleBlocks {
-                if let lifecycle,
-                   let data = try? JSONEncoder().encode(lifecycle),
-                   let object = try? JSONSerialization.jsonObject(with: data) {
-                    hbDict[key] = object
+            .frame(minHeight: 180, idealHeight: 280)
+            Text(String(localized: "diagnostics.localCopy", defaultValue: "Saving creates a local file. Share it only with your intended recipient. Removing MacCrab does not erase exported copies."))
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button(String(localized: "common.cancel", defaultValue: "Cancel")) { diagnosticsPreview = nil }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(String(localized: "diagnostics.save", defaultValue: "Choose where to save…")) {
+                    diagnosticsPreview = nil
+                    saveDiagnostics(preview)
                 }
-            }
-            if let otlp = hb.otlpReceiverLifecycle,
-               let data = try? JSONEncoder().encode(otlp),
-               let object = try? JSONSerialization.jsonObject(with: data) {
-                hbDict["otlp_receiver_lifecycle"] = object
-            }
-            diag["heartbeat"] = hbDict
-            diag["collectors"] = hb.collectors.map { c -> [String: Any] in
-                var m: [String: Any] = ["name": c.name, "event_count": c.eventCount, "healthy": c.healthy]
-                if let lt = c.lastTick { m["last_tick"] = iso.string(from: lt) }
-                return m
+                .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
         }
-        diag["permissions"] = perms.map { p -> [String: Any] in
-            ["service": p.service, "granted": p.granted, "required": p.required, "detail": p.description]
-        }
-        if let ti {
-            diag["trust_substrate"] = ["mode": ti.modeLabel, "fingerprint": ti.fingerprintFull]
-        }
+        .padding(20)
+        .frame(minWidth: 540, idealWidth: 650, minHeight: 400, idealHeight: 580)
+    }
 
+    private func saveDiagnostics(_ preview: V2DiagnosticsExport) {
         let panel = NSSavePanel()
         panel.title = String(localized: "system.exportDiagnosticsPanelTitle", defaultValue: "Export diagnostics")
         panel.allowedContentTypes = [.json]
-        panel.allowsOtherFileTypes = true
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd-HHmm"
-        fmt.timeZone = .current
-        panel.nameFieldStringValue = "maccrab-diagnostics-\(fmt.string(from: Date())).json"
+        panel.allowsOtherFileTypes = false
+        panel.nameFieldStringValue = preview.filename
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             DispatchQueue.global(qos: .userInitiated).async {
-                var ok = false
-                if let data = try? JSONSerialization.data(withJSONObject: diag, options: [.prettyPrinted, .sortedKeys]) {
-                    ok = (try? data.write(to: url, options: .atomic)) != nil
-                }
+                let ok = (try? preview.data.write(to: url, options: .atomic)) != nil
                 DispatchQueue.main.async {
                     state.showToast(ok
                         ? V2Toast(kind: .success,
@@ -395,7 +416,7 @@ public struct V2SystemWorkspace: View {
                                   detail: url.lastPathComponent)
                         : V2Toast(kind: .error,
                                   title: String(localized: "system.exportDiagnosticsFailTitle", defaultValue: "Export failed"),
-                                  detail: url.path))
+                                  detail: String(localized: "diagnostics.writeFailed", defaultValue: "The chosen location could not be written. Choose another location and try again.")))
                 }
             }
         }
@@ -608,7 +629,7 @@ public struct V2SystemWorkspace: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .scaledSystem(13, weight: .semibold)
-                Text("\(impact) Offered \(timers.offeredHandlersTotal ?? 0), accepted \(timers.acceptedHandlersTotal ?? 0), completed \(timers.completedHandlersTotal ?? 0), in flight \(timers.inFlightHandlers ?? 0) of \(timers.maximumInFlightHandlers ?? 0), rejected \(timers.rejectedHandlersTotal ?? 0) (closed \(timers.closedRejectedHandlersTotal ?? 0), overload shed \(timers.overloadShedHandlersTotal ?? 0)), coalesced \(timers.coalescedHandlersTotal ?? 0), lossless inline fallback \(timers.inlineFallbackHandlersTotal ?? 0). Accepted conservation \(timers.conservesAcceptedHandlers.map { String($0) } ?? "unknown"); offered conservation \(timers.conservesOfferedHandlers.map { String($0) } ?? "unknown"). Current in-flight \(workLabel) work is normal when both conservation ledgers hold.")
+                Text(String(localized: "ui.final.lifecycleDetail", defaultValue: "\(impact) Offered \(timers.offeredHandlersTotal ?? 0), accepted \(timers.acceptedHandlersTotal ?? 0), completed \(timers.completedHandlersTotal ?? 0), in flight \(timers.inFlightHandlers ?? 0) of \(timers.maximumInFlightHandlers ?? 0), rejected \(timers.rejectedHandlersTotal ?? 0) (closed \(timers.closedRejectedHandlersTotal ?? 0), overload shed \(timers.overloadShedHandlersTotal ?? 0)), coalesced \(timers.coalescedHandlersTotal ?? 0), lossless inline fallback \(timers.inlineFallbackHandlersTotal ?? 0). Accepted conservation \(timers.conservesAcceptedHandlers.map { String($0) } ?? "unknown"); offered conservation \(timers.conservesOfferedHandlers.map { String($0) } ?? "unknown"). Current in-flight \(workLabel) work is normal when both conservation ledgers hold."))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -756,7 +777,7 @@ public struct V2SystemWorkspace: View {
 
     private var dataSourceCard: some View {
         let isLive = state.provider.mode == .live
-        let dirNote = state.provider.dataDir.map { " · \($0)" } ?? ""
+        let dirNote = " · " + state.engineSource.directory
         let subtitle: String
         switch state.provider.mode {
         case .live:    subtitle = String(localized: "system.dataSourceLive", defaultValue: "Reading from MacCrabCore stores\(dirNote)")
@@ -783,6 +804,8 @@ public struct V2SystemWorkspace: View {
                 Text(subtitle)
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
+                Text(String(localized: "system.sourceSession", defaultValue: "This session reads one engine directory. Reconnect reopens that same source."))
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                 if let err = state.provider.lastErrorDescription {
                     Text(String(localized: "system.lastError", defaultValue: "Last error: \(err)"))
                         .font(V2Theme.meta())
@@ -810,13 +833,14 @@ public struct V2SystemWorkspace: View {
         // canonical 120s `isStale`, not on the snapshot merely existing — a
         // 2–5 min outage must read "Stale", not "Running".
         let stale = h?.isStale ?? false          // present but >120s old
-        let live = h != nil && !stale
+        let live = h?.isReady == true && !stale
         let staleAgeMin = (h?.ageSeconds ?? 0) / 60
         // B3: `[].allSatisfy` is vacuously true — zero collectors = no event
         // sources = NOT healthy. Only green on a fresh, non-empty, all-healthy set.
         let collectors = h?.collectors ?? []
-        let collectorCount = collectors.count
-        let collectorsAllHealthy = !collectors.isEmpty && collectors.allSatisfy { $0.healthy }
+        let collectorSummary = V2CollectorSummary(states: collectors.map(\.resolvedState))
+        let collectorCount = collectorSummary.enabledCount
+        let collectorsAllHealthy = live && collectorSummary.allEnabledHealthy
         let collectorsKind: V2ChipKind
         let collectorsTrend: String
         if h == nil {
@@ -828,6 +852,9 @@ public struct V2SystemWorkspace: View {
         } else if stale {
             collectorsKind = .warning
             collectorsTrend = String(localized: "system.collectorsStale", defaultValue: "stale")
+        } else if h?.readiness == .starting || (collectorSummary.startingCount > 0 && collectorSummary.failedCount == 0) {
+            collectorsKind = .info
+            collectorsTrend = String(localized: "system.collectorsStarting", defaultValue: "starting")
         } else if collectorsAllHealthy {
             collectorsKind = .healthy
             collectorsTrend = String(localized: "system.collectorsAllHealthy", defaultValue: "all healthy")
@@ -857,15 +884,19 @@ public struct V2SystemWorkspace: View {
                     ? String(localized: "system.daemonOffline", defaultValue: "Offline")
                     : (stale
                         ? String(localized: "system.daemonStale", defaultValue: "Stale (\(staleAgeMin)m ago)")
-                        : String(localized: "system.daemonRunning", defaultValue: "Running")),
+                        : (h?.readiness == .starting
+                            ? String(localized: "system.daemonStarting", defaultValue: "Starting")
+                            : (live
+                                ? String(localized: "system.daemonRunning", defaultValue: "Running")
+                                : String(localized: "system.daemonUnavailable", defaultValue: "Not ready")))),
                 trend: h == nil
                     ? String(localized: "system.daemonNoHeartbeat", defaultValue: "no heartbeat")
                     : (stale
                         ? String(localized: "system.daemonStaleTrend", defaultValue: "no recent heartbeat")
                         : (h.map { String(localized: "system.daemonUptime", defaultValue: "uptime \($0.uptimeDisplay)") } ?? "")),
-                trendKind: h == nil ? .high : (stale ? .warning : .healthy),
+                trendKind: h == nil ? .high : (live ? .healthy : .warning),
                 icon: live ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
-                iconColor: h == nil ? V2Theme.high : (stale ? V2Theme.warning : V2Theme.healthy)
+                iconColor: h == nil ? V2Theme.high : (live ? V2Theme.healthy : V2Theme.warning)
             )
             metricCard(
                 title: String(localized: "system.metricCollectors", defaultValue: "Collectors"),
@@ -959,14 +990,16 @@ public struct V2SystemWorkspace: View {
             let rows: [V2CollectorRow] = (heartbeat?.collectors ?? []).map { c in
                 V2CollectorRow(
                     id: c.name, name: c.name,
-                    healthy: c.healthy, eventCount: c.eventCount,
+                    state: c.resolvedState,
+                    detail: c.lastError ?? c.reason,
+                    eventCount: c.eventCount,
                     lastTick: c.lastTick
                 )
             }
             if rows.isEmpty {
                 HStack(spacing: 8) {
                     Image(systemName: "tray").foregroundStyle(V2Theme.mutedText)
-                    Text(String(localized: "system.collectorsEmpty", defaultValue: "No daemon heartbeat — start the System Extension or `swift run maccrabd` to see live collector health."))
+                    Text(String(localized: "system.collectorsEmpty", defaultValue: "Sensor status is not available yet. Review System Extension status and permissions while the engine starts."))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(16)
@@ -976,11 +1009,18 @@ public struct V2SystemWorkspace: View {
                 V2DataTable(
                     columns: [
                         V2DataColumn(id: "name", title: String(localized: "system.colCollector", defaultValue: "Collector"), width: .flexible(min: 200)) { c in
-                            V2TableCellText(c.name)
+                            VStack(alignment: .leading, spacing: 3) {
+                                V2TableCellText(c.name)
+                                if let detail = c.detail, !detail.isEmpty {
+                                    Text(detail).font(V2Theme.meta())
+                                        .foregroundStyle(V2Theme.mutedText)
+                                        .lineLimit(2).help(detail)
+                                }
+                            }
                         },
                         V2DataColumn(id: "status", title: String(localized: "system.colStatus", defaultValue: "Status"), width: .fixed(110)) { c in
-                            V2StatusChip(c.healthy ? String(localized: "system.collectorHealthy", defaultValue: "Healthy") : String(localized: "system.collectorStalled", defaultValue: "Stalled"),
-                                         kind: c.healthy ? .healthy : .high)
+                            V2StatusChip(c.state.label, kind: c.state.chipKind)
+                                .help(c.detail ?? c.state.label)
                         },
                         V2DataColumn(id: "events", title: String(localized: "system.colEvents", defaultValue: "Events"), width: .fixed(120)) { c in
                             V2TableCellText("\(fmtCount(c.eventCount))",
@@ -1004,7 +1044,8 @@ public struct V2SystemWorkspace: View {
     private struct V2CollectorRow: Identifiable, Hashable {
         let id: String
         let name: String
-        let healthy: Bool
+        let state: V2CollectorState
+        let detail: String?
         let eventCount: Int
         /// nil when the collector has never ticked. Renders as "—".
         let lastTick: Date?
@@ -1020,7 +1061,7 @@ public struct V2SystemWorkspace: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(String(localized: "system.auditSection", defaultValue: "Privileged-change audit trail"))
                 .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
-            Text(String(localized: "system.auditDesc", defaultValue: "Every suppression, config change, rule toggle and prune the engine applied from its privileged inbox — whether it came from this app, from maccrabctl, or from an AI agent over MCP. Newest last; for the full history run: maccrabctl audit"))
+            Text(String(localized: "system.auditDesc", defaultValue: "Every suppression, config change, rule toggle and prune the engine processed from its privileged inbox — whether it came from this app, from maccrabctl, or from an AI agent over MCP. Newest last; for the full history run: maccrabctl audit"))
                 .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 .fixedSize(horizontal: false, vertical: true)
             if let auditStatus {

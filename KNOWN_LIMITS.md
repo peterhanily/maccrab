@@ -24,57 +24,75 @@ measured number, in the same commit that accepts it.**
 
 ## v1.22.0
 
+The properties below still require qualification against the final candidate.
+Listing them here does not accept a release limit or replace a completed runtime
+evidence record.
+
 ### Disk write volume during heavy activity
 
 MacCrab writes considerably more to disk than the raw size of the events it stores.
 
-**Measured** (installed host, build 1.22.0): about **0.05–0.25 MB/s at ambient load**
+**Development observations** (an earlier installed 1.22.0 candidate): about **0.05–0.25 MB/s at ambient load**
 (30–42 events/s), rising to **~35 MB/s during a heavy activity burst**. Per event
 admitted, a base-insert commit writes ~24 WAL frames (~98 KB) while carrying only ~3
 events, because 16 separate database structures are touched per transaction and roughly
 43 KB of that is a fixed per-transaction cost that does not shrink with batch size.
 
-**Why it happens.** Evidence is committed durably *before* analysis runs, so each event's
-immutable record and its post-analysis enrichment are separate transactions. That
-ordering is the guarantee that an alert can never be durable while the evidence behind it
-is not.
+These observations are not a completed qualification record for the current source.
+The final candidate must be measured using the same intervals and percentiles as the
+resource gate, including a comparable run of the previously shipped version.
 
-**What it means for you.** On a normal workstation this is a few GB per day — well under
-5% of the rated yearly write endurance of the SSD in a modern Mac. It is unchanged from
-v1.21.x; this release does not make it worse.
+**Why it happens.** Each event has an immutable base record and a later enrichment
+revision. Base admission reserves and queues the record before analysis; it is not a
+durable commit at that point. Settlement joins the base write before storing the
+revision. Small transactions and updates to multiple database structures can amplify
+writes. Alerts retain their bounded trigger and expose whether journal verification
+succeeded; an alert alone is not proof that all related journal evidence is durable.
 
-**Reducing it** requires committing the base record and its enrichment in one
-transaction, which means moving evidence admission to *after* analysis. That inverts the
-durability guarantee above, so it is a major-version change.
+**What it means for you.** Disk activity depends on workload, retained history and
+maintenance. We do not yet have a qualified daily-write estimate, an SSD-endurance
+claim, or a measured non-regression result for this candidate.
 
-**Owner:** engine · **Target:** v1.23/v2.0, gated on burst-time write attribution first
-(the ambient measurement does not explain the burst figure, and ranking remediation off
-the wrong term would waste the work).
+**Reducing it** requires measured work on transaction batching and storage costs while
+preserving immutable evidence, bounded memory, and alert/evidence status. A major-version
+change is not established as necessary by the current implementation.
 
-### First launch after upgrading takes longer than usual
+**Owner:** engine · **Target:** final v1.22.0 resource qualification; separately measured
+batching improvements afterward.
 
-This release migrates the event database to a checksummed journal format and rebuilds its
-index.
+### Startup validates retained event history
 
-**Measured:** ~27s migration + ~84s index rebuild on a clean host (≈2 minutes). On a
-large or previously-wedged database it can be longer.
+The upgrade migrates legacy event history into a checksummed journal. On subsequent
+engine starts, journal and search-index integrity validation still runs before event
+producers start. This recurring work scales with retained history.
 
-**What it means for you.** On the first start after upgrading, the menubar icon may look
-idle and detection is not yet running. It completes on its own and does not recur.
+**What it means for you.** The app reports starting or unavailable until the engine
+reports ready. Detection is not active during that phase. Earlier development captures
+showed startup work taking approximately two minutes; that is neither a one-time cost
+nor a qualified bound for every store. Final qualification must include cold starts with
+representative retained history and explicit handling of insufficient storage space.
+Schema work must fit the configured database-family cap and the volume's free-space
+floor. The separate schema budget removes the fixed index-size refusal; it does not
+make an over-cap or low-space legacy store self-recovering. When startup is refused,
+normal post-start retention cannot run. A supported recovery procedure remains part
+of upgrade qualification.
 
-**Owner:** storage · **Target:** progress indication in the next release.
+**Owner:** storage · **Target:** final v1.22.0 upgrade and cold-start qualification.
 
-### Downgrading below v1.21.6 is not supported
+### There is no qualified downgrade target for this database format
 
-v1.22.0 upgrades the on-disk databases and installs a deliberate write barrier so that an
-older MacCrab cannot write to — and therefore cannot corrupt — a newer database.
+v1.22.0 upgrades the on-disk databases and installs a deliberate barrier against
+incompatible event-store writes by older MacCrab versions.
 
-**What it means for you.** Rolling back to **v1.21.5 or earlier** leaves the security
-extension unable to start. Roll back to **v1.21.6**, which refuses the newer database
-cleanly and keeps running, and only if v1.21.6 was installed before the upgrade.
+**What it means for you.** Do not open a v1.22.0 database with v1.21.5 or the unshipped
+v1.21.6 hotfix prefix. Those older recovery paths can move the database aside and start
+with empty history instead of refusing the incompatible format cleanly. The prefix is
+not a supported rollback target. Preserve a consistent pre-upgrade backup before any
+upgrade rehearsal; restoring older data requires a documented procedure with the engine
+fully stopped. Reinstalling an older app alone does not restore the older database.
 
-**Owner:** storage · **Target:** v1.21.6 ships the graceful refusal; this entry is
-removed once v1.21.5 is no longer a plausible rollback target.
+**Owner:** storage/release · **Target:** a qualified recovery procedure before v1.22.0
+publication. No automatic downgrade is currently promised.
 
 ---
 
@@ -83,11 +101,12 @@ removed once v1.21.5 is no longer a plausible rollback target.
 Recorded so they are not mistaken for accepted behaviour:
 
 - **Terminal evidence could be shed silently under load.** An unoverridden 5-second
-  internal default meant a slow database commit could drop the enrichment overlay on an
-  event, invisibly to every operator-facing counter. The immutable record, detection and
-  alerting were never affected. Fixed: the whole settlement now shares one documented
-  30-second budget (which *lowers* the worst-case from 35s), and any residual shed is
-  reported with its reason.
+  internal default could drop an event's enrichment overlay without advancing the
+  storage-error counter. The base record has a separate admission/commit lifecycle;
+  both boundaries must be accounted for. Fixed: settlement uses one shared 30-second
+  deadline, including the preparation-memory wait, and reports residual shed with its
+  reason. This makes the outcome observable; it does not accept terminal evidence
+  loss as a release limit or establish a measured worst-case latency.
 - **The dashboard re-verified the entire event journal on every refresh**, pinning a CPU
   core while open. Fixed: it reads the engine's published counters instead.
 - **Buffered events could be lost on shutdown** when a drain left work behind and the

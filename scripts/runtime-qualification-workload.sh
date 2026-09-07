@@ -34,13 +34,15 @@ ALERT_ONLY=0
 # priority-bound; the ~400 ev/s seen mid-burst is the fast file lane and does
 # not govern time-to-empty).
 #
-# 3,000 iterations offer ~49,200 events. Against the floor: the burst runs ~22s
-# and the recorder launches it on the minute-five sample boundary, so one
-# interval sees ~1,640 ev/s -- 29% above the 1,274/s floor, enough that sampling
-# jitter cannot drop it under. (N=2,700 was measured at 1,119 ev/s, UNDER the
-# floor, because that burst straddled two intervals -- the margin matters.)
-# Against drainability: ~49,200 at ~196 ev/s is ~251s of drain after a ~22s
-# burst, ~273s total, inside the 660s checkpoint with ~30% headroom.
+# Prior-host measurements put 3,000 iterations at ~49,200 offered events and
+# ~22 seconds. Concentrated in one 30-second interval that is ~1,640/s; this
+# does not guarantee the 1,274/s floor when workload timing or heartbeat phase
+# splits the burst across intervals. N=2,700 previously measured only 1,119/s.
+# The current checkpoint is offset 780: 480 seconds after launch at 300, or
+# 390 seconds after the maximum workload deadline at 390. The older ~196 ev/s
+# retirement observation is provenance, not a guaranteed current service rate.
+# Measure actual interval offered rates and each lane's backlog/completions on
+# the candidate; the retained count and checkpoint are provisional load policy.
 #
 # These two bounds are one budget. If either the floor or the engine's write
 # path changes, re-measure BOTH this and BURST_DRAIN_OFFSET_SECONDS together.

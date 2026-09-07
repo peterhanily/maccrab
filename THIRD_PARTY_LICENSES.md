@@ -1,85 +1,44 @@
 # Third-Party Licenses
 
-MacCrab is licensed under the Apache License 2.0 (see [LICENSE](LICENSE)). It
-bundles and links the third-party components listed below. This file provides
-the attribution and license notices required by those components.
+MacCrab is licensed under the Apache License 2.0 (see [LICENSE](LICENSE)).
+The following inventory describes the external components linked or bundled
+with this source tree. Exact upstream notices are preserved in
+[ThirdPartyNotices](ThirdPartyNotices/), including Sparkle's additional bundled
+component notices. Their origins and file digests are recorded in
+[PROVENANCE.json](ThirdPartyNotices/PROVENANCE.json).
 
-The pinned versions are recorded in [`Package.resolved`](Package.resolved).
+| Component | Version | License / notice | Linked / bundled |
+|-----------|---------|------------------|------------------|
+| [Sparkle](https://github.com/sparkle-project/Sparkle) | 2.9.6 | [Full upstream notice](ThirdPartyNotices/Sparkle-LICENSE): MIT and bundled external licenses | App update framework; linked by MacCrabApp only |
+| [SQLCipher](https://github.com/sqlcipher/sqlcipher) | 4.18.0 | [BSD-3-Clause](ThirdPartyNotices/SQLCipher-LICENSE.md); [amalgamation notice](ThirdPartyNotices/SQLCipher-source-notice.txt) | Vendored CSQLCipher target linked by the app, engine, CLI, and MCP server |
+| [SQLite](https://sqlite.org/) | 3.53.4, within SQLCipher | [Public-domain notice](ThirdPartyNotices/SQLite-NOTICE.txt) | SQLCipher's bundled SQLite baseline |
+| [PyYAML](https://github.com/yaml/pyyaml) | 6.0.3 | [MIT](ThirdPartyNotices/PyYAML-LICENSE) | Pure-Python modules bundled with the in-app rule compiler |
+| [Swift Testing](https://github.com/swiftlang/swift-testing) | Supplied by the qualified Swift toolchain | Apache-2.0 with Runtime Library Exception | Test targets only; not shipped |
+| [SwiftSyntax](https://github.com/swiftlang/swift-syntax) | Supplied within the toolchain macro implementation | Apache-2.0 with Runtime Library Exception | Build tooling; no independent SwiftPM dependency or shipped library |
 
-| Component | Version | License | Linked / Bundled |
-|-----------|---------|---------|------------------|
-| [Sparkle](https://github.com/sparkle-project/Sparkle) | 2.9.2 | MIT (with bundled external licenses) | Bundled in `MacCrab.app` only (auto-update framework) |
-| [swift-testing](https://github.com/swiftlang/swift-testing) | 6.2.4 | Apache-2.0 | Test target only — not shipped in release builds |
-| [swift-syntax](https://github.com/swiftlang/swift-syntax) | 602.0.0 | Apache-2.0 | Transitive dependency of swift-testing (test only) — not shipped |
+SwiftPM pins are recorded in [Package.resolved](Package.resolved). SQLCipher
+source provenance is recorded in [Sources/CSQLCipher/PROVENANCE](Sources/CSQLCipher/PROVENANCE).
+PyYAML and release-tool hashes are recorded in
+[scripts/release-dependencies.lock](scripts/release-dependencies.lock) and
+[scripts/release-pyyaml.sha256](scripts/release-pyyaml.sha256).
 
-Notes:
+Release assembly copies this index, MacCrab's license, and `ThirdPartyNotices/`
+into `MacCrab.app/Contents/Resources/` before code signing, and also includes
+them at the DMG root. Sparkle's full license is retained here even when its
+framework packaging layout changes.
 
-- **Sparkle** is the only third-party component bundled into the shipped
-  application. It is linked by the `MacCrabApp` target only; the System
-  Extension (`com.maccrab.agent.systemextension`) and the CLI/daemon targets do
-  not link it.
-- **swift-testing** and its transitive dependency **swift-syntax** are pulled in
-  only by the unit-test targets and are not present in release artifacts.
+## Swift Testing and SwiftSyntax build tooling
 
----
+Tests import the `Testing` module included with the selected Swift toolchain;
+MacCrab does not resolve separate swift-testing or swift-syntax source packages.
+The compiler version and build identity in [scripts/swift-toolchain.json](scripts/swift-toolchain.json)
+identify the testing toolchain used for qualification. These tools are not bundled
+in MacCrab releases.
 
-## Sparkle
-
-Sparkle 2 is distributed under the MIT License. Sparkle additionally bundles a
-small number of files under their own permissive licenses (bsdiff/BSD-2-Clause,
-sais-lite/MIT, a portable Ed25519 implementation/zlib, and SUSignatureVerifier/
-BSD-2-Clause). The full upstream notice is reproduced below.
-
-```
-Copyright (c) 2006-2013 Andy Matuschak.
-Copyright (c) 2009-2013 Elgato Systems GmbH.
-Copyright (c) 2011-2014 Kornel Lesiński.
-Copyright (c) 2015-2017 Mayur Pawashe.
-Copyright (c) 2014 C.W. Betts.
-Copyright (c) 2014 Petroules Corporation.
-Copyright (c) 2014 Big Nerd Ranch.
-All rights reserved.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
-Sparkle's external/bundled-file licenses (bsdiff, sais-lite, Ed25519,
-SUSignatureVerifier) are listed in full in the `LICENSE` file shipped inside the
-Sparkle distribution.
-
----
-
-## swift-testing
-
-Copyright the Swift project authors. Licensed under the Apache License,
-Version 2.0. The full license text is identical to MacCrab's [LICENSE](LICENSE)
-(Apache-2.0). Used by the unit-test targets only; not distributed in release
-builds. See <https://github.com/swiftlang/swift-testing/blob/main/LICENSE.txt>.
-
----
-
-## swift-syntax
-
-Copyright the Swift project authors. Licensed under the Apache License,
-Version 2.0. The full license text is identical to MacCrab's [LICENSE](LICENSE)
-(Apache-2.0). Transitive dependency of swift-testing (test targets only); not
-distributed in release builds. See
-<https://github.com/swiftlang/swift-syntax/blob/main/LICENSE.txt>.
+Both upstream projects are copyright the Swift project authors and licensed
+under Apache-2.0 with the Runtime Library Exception. Their full notices are
+available in the [Swift Testing license](https://github.com/swiftlang/swift-testing/blob/main/LICENSE.txt)
+and [SwiftSyntax license](https://github.com/swiftlang/swift-syntax/blob/main/LICENSE.txt).
 
 ---
 

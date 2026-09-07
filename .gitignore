@@ -214,6 +214,8 @@ coverage/
 # -----------------------------------------------------------------------------
 # Local planning docs (not part of public repo)
 plans/
+# Private release-review handoff (keep local, never publish)
+/REVIEW-HANDOFF.md
 # Security / GA-readiness review artifacts — map exploitable paths at file:line;
 # MUST stay local-only, never published to this public repo.
 review/

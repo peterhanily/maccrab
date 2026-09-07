@@ -39,11 +39,11 @@ struct HiddenFileSignerRegressionTests {
         // that reverts the rule to the v1.6.5 allowlist model and
         // re-opens the Logitech FP.
         // Read the FRESHLY-compiled output (ensureRulesCompiled keeps
-        // /tmp/maccrab_v3 current with the in-tree compiler + Rules/), not
+        // this process’s compiled rule fixture current with the in-tree compiler + Rules/), not
         // the gitignored compiled_rules/ dir — that dir can be stale on a dev
         // box (masking a compiler change) and is absent on a fresh CI checkout.
-        ensureRulesCompiled()
-        let url = URL(fileURLWithPath: "/tmp/maccrab_v3/hidden_file_created.json")
+        try ensureRulesCompiled()
+        let url = compiledRulesDirectory.appendingPathComponent("hidden_file_created.json")
         let data = try Data(contentsOf: url)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let predicates = json["predicates"] as! [[String: Any]]
@@ -74,8 +74,8 @@ struct C2BeaconDevIDApplicationsRegressionTests {
         // — NOT two separately-negated predicates (the old, over-suppressing
         // shape). Read the freshly-compiled output so this tests the current
         // compiler, not a stale (pre-fix) compiled_rules/ file.
-        ensureRulesCompiled()
-        let url = URL(fileURLWithPath: "/tmp/maccrab_v3/c2_beacon_pattern.json")
+        try ensureRulesCompiled()
+        let url = compiledRulesDirectory.appendingPathComponent("c2_beacon_pattern.json")
         let data = try Data(contentsOf: url)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let predicates = json["predicates"] as! [[String: Any]]

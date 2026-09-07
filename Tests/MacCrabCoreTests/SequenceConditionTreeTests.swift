@@ -12,7 +12,7 @@ import Testing
 
 @Suite("Sequence condition-tree preservation")
 struct SequenceConditionTreeTests {
-    private let compiledSequenceDir = URL(fileURLWithPath: "/tmp/maccrab_v3/sequences")
+    private let compiledSequenceDir = compiledRulesDirectory.appendingPathComponent("sequences")
 
     private struct ExpectedTreeRule {
         let filename: String
@@ -188,7 +188,7 @@ struct SequenceConditionTreeTests {
 
     @Test("compiler emits and SequenceEngine decodes all eight affected corpus trees")
     func corpusTreesSurviveCompilerAndDecoder() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
 
         var emittedTreeCount = 0
         for (ruleID, expected) in expectedCorpus {
@@ -232,7 +232,7 @@ struct SequenceConditionTreeTests {
 
     @Test("all eight decoded corpus trees execute their authored branch semantics")
     func affectedCorpusTreesExecuteExactly() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let loader = SequenceEngine(lineage: ProcessLineage())
         _ = try await loader.loadRules(from: compiledSequenceDir)
         let rules = Dictionary(uniqueKeysWithValues: (await loader.listRules()).map { ($0.id, $0) })

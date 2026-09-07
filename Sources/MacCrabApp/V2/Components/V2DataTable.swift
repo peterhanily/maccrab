@@ -380,7 +380,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("Sort by \(col.title)")
+                        .help(String(localized: "ui.V2DataTable.sort.by", defaultValue: "Sort by \(col.title)"))
                     } else {
                         Text(col.title)
                             .font(V2Theme.cardTitle())
@@ -441,7 +441,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
             // traversal collapses each cell's text into one announcement.
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
-            .accessibilityHint("Activate to select this row")
+            .accessibilityHint(String(localized: "ui.V2DataTable.activate.to.select.this.row", defaultValue: "Activate to select this row"))
             .overlay(
                 Rectangle().fill(V2Theme.panelBorder).frame(height: 1),
                 alignment: .bottom
@@ -468,7 +468,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
-                .accessibilityHint("Activate to open this row")
+                .accessibilityHint(String(localized: "ui.V2DataTable.activate.to.open.this.row", defaultValue: "Activate to open this row"))
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 12)

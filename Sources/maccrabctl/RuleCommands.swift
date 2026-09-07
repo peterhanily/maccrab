@@ -2,157 +2,51 @@ import Foundation
 import MacCrabCore
 
 extension MacCrabCtl {
-    static func listRules() async {
-        let supportDir = maccrabDataDir()
-        let compiledDir = supportDir + "/compiled_rules"
-
-        guard FileManager.default.fileExists(atPath: compiledDir) else {
-            print("No compiled rules found. Run: maccrabctl compile <rules-dir> <output-dir>")
-            return
-        }
-
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: compiledDir) else {
-            print("Failed to read compiled rules directory")
-            return
-        }
-
-        // v1.19.0: exclude manifest.json (the rule-bundle manifest, not a rule —
-        // it has no `level` key) so the count matches the engine's loaded total
-        // (438) instead of inflating to 439 / showing a phantom "unknown" level.
-        let jsonFiles = files.filter { $0.hasSuffix(".json") && $0 != "manifest.json" }.sorted()
-
-        // v1.21.6 (audit DET-12): a listing of title + level cannot distinguish
-        // "silent because nothing attacked me" from "silent because it never
-        // ran" — which is exactly the distinction that decides whether an EDR is
-        // trustworthy. Two facts the daemon already publishes close it:
-        //
-        //   * the effective rule_profile — the compiled `enabled` flag is only
-        //     the YAML-level switch, so all 338 experimental rules ship
-        //     enabled:true on disk and were listed as if they run, when the
-        //     default "stable" profile never loads them;
-        //   * rule_telemetry.json — evaluationCount / fireCount per rule, i.e.
-        //     which loaded rules were actually evaluated and how often they hit.
-        //
-        // Prefer the heartbeat's published profile: daemon_config.json is 0600
-        // root-owned, so reading it as the CLI's uid silently yields the
-        // "stable" default and would mislabel an `all`-profile install.
-        // Both inputs are optional — absent data annotates nothing rather than
-        // guessing.
-        var heartbeatProfile: String?
-        if let hbData = try? Data(contentsOf: URL(fileURLWithPath: supportDir + "/heartbeat_rich.json")),
-           let hb = try? JSONSerialization.jsonObject(with: hbData) as? [String: Any] {
-            heartbeatProfile = hb["rule_profile"] as? String
-        }
-        let profileEnablesAll =
-            (heartbeatProfile ?? ruleProfileFromConfig(supportDir: supportDir)).lowercased() == "all"
-        var telemetryByID: [String: RuleEngine.RuleStats] = [:]
-        if let snapshot = RuleEngine.readTelemetrySnapshot(at: supportDir + "/rule_telemetry.json") {
-            for stat in snapshot.stats { telemetryByID[stat.ruleId] = stat }
-        }
-
-        print("Detection Rules (\(jsonFiles.count) total)")
-        if !telemetryByID.isEmpty {
-            print(ANSIColor.wrap(
-                "State tags cover the daemon's CURRENT boot only (rule_telemetry.json).", .gray))
-        }
-        print("══════════════════════════════════════════════════════════════")
-        print("\("Level".padding(toLength: 8, withPad: " ", startingAt: 0)) \("Title".padding(toLength: 50, withPad: " ", startingAt: 0)) Tags")
-        print(String(repeating: "─", count: 80))
-
-        for file in jsonFiles {
-            let path = compiledDir + "/" + file
-            guard let data = FileManager.default.contents(atPath: path),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                continue
+    static func listRules(json: Bool = false) async {
+        do {
+            let document = try RuleInventoryDocument.read(directory: maccrabDataDir())
+            if json { try printCLIJSON(document); return }
+            print("Compiled single-event rules (\(document.rules.count) total)")
+            print(document.telemetryFreshness.reason)
+            if let date = document.telemetryWrittenAt {
+                print("Telemetry written: \(ISO8601DateFormatter().string(from: date))")
             }
-
-            let title = json["title"] as? String ?? "Unknown"
-            let level = json["level"] as? String ?? "?"
-            let tags = (json["tags"] as? [String])?.prefix(3).joined(separator: ", ") ?? ""
-
-            let levelStr: String
-            switch level {
-            case "critical": levelStr = "[CRIT]"
-            case "high":     levelStr = "[HIGH]"
-            case "medium":   levelStr = "[MED] "
-            case "low":      levelStr = "[LOW] "
-            default:         levelStr = "[INFO]"
+            print("Rule profile: \(document.ruleProfile ?? "unknown")")
+            for rule in document.rules {
+                let counts = rule.evaluationCount.map { " — \($0) evaluations, \(rule.fireCount ?? 0) matches" } ?? ""
+                print("[\(rule.level.uppercased())] \(rule.title) [\(rule.coverage.rawValue)]\(counts)")
+                print("  \(rule.id)")
             }
-
-            var line = "\(levelStr.padding(toLength: 8, withPad: " ", startingAt: 0)) \(String(title.prefix(48)).padding(toLength: 50, withPad: " ", startingAt: 0)) \(String(tags.prefix(30)))"
-            // Visually flag deprecated detections — retained (id/title/
-            // suppressions stay valid) but disabled and non-firing.
-            let ruleStatus = (json["status"] as? String)?.lowercased() ?? "experimental"
-            let ruleId = json["id"] as? String ?? ""
-            if ruleStatus == "deprecated" {
-                line += "  " + ANSIColor.wrap("[DEPRECATED]", .orange)
-            } else if !(profileEnablesAll || ruleStatus == "stable") {
-                // v1.21.6 (audit DET-12): NOT LOADED under the active profile.
-                // Previously indistinguishable from a running rule.
-                line += "  " + ANSIColor.wrap("[OFF: rule_profile]", .gray)
-            } else if let stats = telemetryByID[ruleId] {
-                line += stats.fireCount > 0
-                    ? "  " + ANSIColor.wrap("[matched \(stats.fireCount)x]", .yellow)
-                    : "  " + ANSIColor.wrap(
-                        "[quiet: \(stats.evaluationCount) evals, 0 matches]", .gray)
-            } else if telemetryByID.isEmpty {
-                // No telemetry snapshot at all (daemon not running, or it has
-                // not written one yet). Say nothing — mislabelling every rule
-                // dark would be worse than saying nothing.
-            } else {
-                // Loaded, the daemon HAS written telemetry for other rules, and
-                // this one has no entry: it was never evaluated once. That means
-                // its logsource has no live producer — the state that made the
-                // tcc_event rules (DET-06) look identical to healthy quiet rules
-                // from the operator's side.
-                line += "  " + ANSIColor.wrap("[DARK: never evaluated]", .red)
-            }
-            print(line)
-        }
+        } catch { cliFailure("rules list: \(error.localizedDescription)") }
     }
 
-    static func countRules() async {
-        let supportDir = maccrabDataDir()
-        let compiledDir = supportDir + "/compiled_rules"
-
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: compiledDir) else {
-            print("No compiled rules found.")
-            return
-        }
-
-        var bySeverity: [String: Int] = [:]
-        var byCategory: [String: Int] = [:]
-
-        // v1.19.0: skip manifest.json (not a rule, no `level`) so `rules count`
-        // doesn't show a phantom "unknown: 1" severity or a 437 total.
-        for file in files where file.hasSuffix(".json") && file != "manifest.json" {
-            let path = compiledDir + "/" + file
-            guard let data = FileManager.default.contents(atPath: path),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-
-            let level = json["level"] as? String ?? "unknown"
-            bySeverity[level, default: 0] += 1
-
-            if let logsource = json["logsource"] as? [String: String],
-               let category = logsource["category"] {
-                byCategory[category, default: 0] += 1
+    static func countRules(json: Bool = false) async {
+        do {
+            let document = try RuleInventoryDocument.read(directory: maccrabDataDir())
+            var bySeverity: [String: Int] = [:]
+            var byCategory: [String: Int] = [:]
+            for rule in document.rules {
+                bySeverity[rule.level, default: 0] += 1
+                byCategory[rule.category ?? "unknown", default: 0] += 1
             }
-        }
-
-        print("Rules by Severity:")
-        for (level, count) in bySeverity.sorted(by: { $0.value > $1.value }) {
-            print("  \(level): \(count)")
-        }
-        print("\nRules by Log Source:")
-        for (cat, count) in byCategory.sorted(by: { $0.value > $1.value }) {
-            print("  \(cat): \(count)")
-        }
+            if json {
+                try printCLIJSONObject([
+                    "schema_version": 1, "source_directory": document.sourceDirectory,
+                    "total": document.rules.count, "by_severity": bySeverity,
+                    "by_category": byCategory,
+                ])
+                return
+            }
+            print("Compiled single-event rules: \(document.rules.count)")
+            print("Rules by severity:")
+            for key in bySeverity.keys.sorted() { print("  \(key): \(bySeverity[key]!)") }
+            print("Rules by log source:")
+            for key in byCategory.keys.sorted() { print("  \(key): \(byCategory[key]!)") }
+        } catch { cliFailure("rules count: \(error.localizedDescription)") }
     }
 
     static func compileRules(inputDir: String, outputDir: String) {
-        print("Compiling rules from \(inputDir) to \(outputDir)...")
-        print("Note: Use the Python compiler for full Sigma YAML support:")
-        print("  python3 Compiler/compile_rules.py --input-dir \(inputDir) --output-dir \(outputDir)")
+        cliFailure("The CLI does not include a Sigma compiler. From the repository, run Python Compiler/compile_rules.py with --input-dir and --output-dir. No rules were compiled.")
     }
 
     /// Flip a rule's `enabled` flag on disk inside its compiled JSON. The
@@ -163,44 +57,25 @@ extension MacCrabCtl {
     /// Writes to compiled_rules/<file>.json directly; falls back to
     /// scanning the dir for a matching rule id when no filename is given.
     static func setRuleEnabled(ruleId: String, enabled: Bool) {
-        let compiledDir = maccrabDataDir() + "/compiled_rules"
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: compiledDir) else {
-            print("Cannot read \(compiledDir) — is the detection engine installed?")
-            return
-        }
-
-        for file in files where file.hasSuffix(".json") {
-            let path = compiledDir + "/" + file
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-                  var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let id = json["id"] as? String,
-                  id == ruleId else {
-                continue
-            }
-
-            json["enabled"] = enabled
-            guard let rewritten = try? JSONSerialization.data(
-                withJSONObject: json,
-                options: [.prettyPrinted, .sortedKeys]
-            ) else {
-                print("Failed to serialize updated rule JSON")
+        let directory = maccrabDataDir()
+        do {
+            _ = try RuleInventoryDocument.read(directory: directory)
+            let root = URL(fileURLWithPath: directory + "/compiled_rules")
+            let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
+            for file in files {
+                let data = try Data(contentsOf: file)
+                guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      object["id"] as? String == ruleId else { continue }
+                object["enabled"] = enabled
+                let output = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+                try output.write(to: file, options: .atomic)
+                print("Saved enabled=\(enabled) for compiled rule \(ruleId). Runtime application is pending.")
+                print("Run maccrabctl rules reload, then inspect the returned request ID with config status.")
                 return
             }
-
-            do {
-                try rewritten.write(to: URL(fileURLWithPath: path))
-                print("\(enabled ? "Enabled" : "Disabled") rule \(ruleId) (\(file))")
-                print("Send SIGHUP to the detection engine or restart MacCrab.app for the change to take effect:")
-                print("  pkill -HUP com.maccrab.agent   # release sysext")
-                print("  pkill -HUP maccrabd            # dev fallback")
-            } catch {
-                print("Failed to write \(path): \(error.localizedDescription)")
-            }
-            return
-        }
-
-        print("Rule \(ruleId) not found under \(compiledDir)")
-        print("Use `maccrabctl rules list` to find the rule id.")
+            throw RuntimeConfigContractError("Rule '\(ruleId)' was not found in the compiled corpus")
+        } catch { cliFailure("rule \(enabled ? "enable" : "disable"): \(error.localizedDescription)") }
     }
 
     static func createRuleTemplate(category: String) {

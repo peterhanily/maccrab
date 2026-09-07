@@ -87,7 +87,7 @@ public struct V2CommandPalette: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     let groups = groupedItems
                     if groups.isEmpty {
-                        Text("No matches.")
+                        Text(String(localized: "ui.V2CommandPalette.no.matches", defaultValue: "No matches."))
                             .font(V2Theme.body())
                             .foregroundStyle(V2Theme.mutedText)
                             .padding(20)
@@ -121,7 +121,7 @@ public struct V2CommandPalette: View {
             footerHint(label: "Open", icons: ["↵"])
             footerHint(label: "Close", icons: ["Esc"])
             Spacer()
-            Text("\(flatten(groupedItems).count) results")
+            Text(String(localized: "ui.final.paletteResults", defaultValue: "Results: \(flatten(groupedItems).count)"))
                 .font(V2Theme.micro())
                 .foregroundStyle(V2Theme.tertiaryText)
         }

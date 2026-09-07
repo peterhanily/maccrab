@@ -40,6 +40,9 @@ enum ShippedLocale {
 struct WelcomeView: View {
     @Binding var isPresented: Bool
     @ObservedObject var sysextManager: SystemExtensionManager
+    var engineSource: V2EngineSource = .session
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     // See ShippedLocale above: truncating to the bare ISO-639 code left
     // zh-Hans / zh-Hant / pt-BR users with no preselected row, and turned a
     // Traditional-Chinese system into a Simplified-Chinese app at :422.
@@ -52,7 +55,7 @@ struct WelcomeView: View {
     @State private var selectedUIMode: UIMode = .basic
 
     // MARK: - Daemon Health State
-    @State private var daemonDBFound = false
+    @State private var engineReady = false
     @State private var compiledRuleCount = 0
     // v1.21.5: live FDA probe result (was a static instruction row).
     @State private var fdaStatus: FullDiskAccessStatus = .unknown
@@ -87,26 +90,28 @@ struct WelcomeView: View {
             }
             .padding(.top, 20)
 
-            Spacer()
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(String(localized: "welcome.step", defaultValue: "Step \(currentStep + 1) of 3"))
 
-            switch currentStep {
-            case 0:
-                languageStep
-            case 1:
-                welcomeStep
-            case 2:
-                readyStep
-            default:
-                EmptyView()
+            ScrollView {
+                Group {
+                    switch currentStep {
+                    case 0: languageStep
+                    case 1: welcomeStep
+                    case 2: readyStep
+                    default: EmptyView()
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
             }
-
-            Spacer()
+            .id(currentStep)
 
             // Navigation
             HStack {
                 if currentStep > 0 {
-                    Button("Back") {
-                        withAnimation { currentStep -= 1 }
+                    Button(String(localized: "ui.RuleWizard.back", defaultValue: "Back")) {
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { currentStep -= 1 }
                     }
                     .controlSize(.large)
                 }
@@ -114,11 +119,12 @@ struct WelcomeView: View {
                 Spacer()
 
                 if currentStep < 2 {
-                    Button("Next") {
-                        withAnimation { currentStep += 1 }
+                    Button(String(localized: "ui.RuleWizard.next", defaultValue: "Next")) {
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { currentStep += 1 }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+                    .keyboardShortcut(.defaultAction)
                 } else {
                     // Step 3: one-click Enable Protection. Kicking off the
                     // sysext activation request here means the user only
@@ -139,12 +145,27 @@ struct WelcomeView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+                    .keyboardShortcut(.defaultAction)
                 }
             }
             .padding(20)
         }
-        // v1.21.5: 460 → 500 to fit the experience picker on step 2.
-        .frame(width: 500, height: 500)
+        .frame(minWidth: 500, idealWidth: 560, maxWidth: 700,
+               minHeight: 400, idealHeight: 600, maxHeight: 800)
+        .task(id: currentStep) {
+            guard currentStep == 2 else { return }
+            while !Task.isCancelled {
+                if scenePhase == .active { await checkDaemonHealth() }
+                do { try await Task.sleep(for: .seconds(5)) }
+                catch { return }
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active && currentStep == 2 { Task { await checkDaemonHealth() } }
+        }
+        .onChange(of: sysextManager.state) { _ in
+            if currentStep == 2 { Task { await checkDaemonHealth() } }
+        }
     }
 
     // MARK: - Step 1: Language
@@ -279,13 +300,13 @@ struct WelcomeView: View {
                 .foregroundColor(.secondary)
 
             VStack(alignment: .leading, spacing: 8) {
-                // Dynamic: daemon database check
+                // Dynamic: current engine readiness
                 SetupRow(
-                    icon: daemonDBFound ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
-                    color: daemonDBFound ? .green : .orange,
-                    text: daemonDBFound
+                    icon: engineReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                    color: engineReady ? .green : .orange,
+                    text: engineReady
                         ? String(localized: "welcome.setup.engineActive", defaultValue: "Detection engine active")
-                        : String(localized: "welcome.setup.engineInactive", defaultValue: "Detection engine not detected \u{2014} start the daemon first"))
+                        : String(localized: "welcome.setup.engineNotReady", defaultValue: "Protection is not ready yet — review System Extension status and permissions"))
 
                 // Dynamic: compiled rule count. v1.21.5: the fallback lost
                 // its "run make compile-rules" dev jargon — the root System
@@ -304,14 +325,15 @@ struct WelcomeView: View {
                 // Dynamic: the APP's Full Disk Access (v1.21.5, was a
                 // static instruction). The engine self-probes its own FDA
                 // post-install and surfaces it in the System workspace.
-                // An .unknown probe gets the same no-false-alarm
-                // treatment as PermissionsProbe's other consumers.
+                // Unknown remains unverified; it is not affirmative access.
                 SetupRow(
-                    icon: fdaStatus == .denied ? "exclamationmark.shield" : "checkmark.circle.fill",
-                    color: fdaStatus == .denied ? .orange : .green,
+                    icon: fdaStatus == .granted ? "checkmark.circle.fill" : "exclamationmark.shield",
+                    color: fdaStatus == .granted ? .green : .orange,
                     text: fdaStatus == .denied
                         ? String(localized: "welcome.setup.fda", defaultValue: "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add MacCrab.app")
-                        : String(localized: "welcome.setup.fdaGranted", defaultValue: "Full Disk Access granted"))
+                        : (fdaStatus == .granted
+                            ? String(localized: "welcome.setup.fdaGranted", defaultValue: "Full Disk Access granted")
+                            : String(localized: "welcome.setup.fdaUnknown", defaultValue: "Full Disk Access has not been verified — check again after granting access")))
 
                 // Dynamic: System Extension state (v1.21.5, was a static
                 // instruction). Live via @ObservedObject — approval in
@@ -336,12 +358,12 @@ struct WelcomeView: View {
 
             // Refresh button
             Button(action: {
-                checkDaemonHealth()
+                Task { await checkDaemonHealth() }
             }) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.clockwise")
-                        .rotationEffect(.degrees(isChecking ? 360 : 0))
-                        .animation(isChecking ? .linear(duration: 0.6).repeatForever(autoreverses: false) : .default, value: isChecking)
+                        .rotationEffect(.degrees(isChecking && !reduceMotion ? 360 : 0))
+                        .animation(reduceMotion ? nil : (isChecking ? .linear(duration: 0.6).repeatForever(autoreverses: false) : .default), value: isChecking)
                     Text(String(localized: "welcome.setup.checkAgain", defaultValue: "Check Again"))
                 }
             }
@@ -349,13 +371,13 @@ struct WelcomeView: View {
             .disabled(isChecking)
         }
         .padding(.horizontal, 20)
-        .onAppear { checkDaemonHealth() }
+
     }
 
     /// v1.21.5: all live checklist rows green?
     private var checklistComplete: Bool {
         WelcomeChecklist.isComplete(
-            daemonDBFound: daemonDBFound,
+            engineReady: engineReady,
             ruleCount: compiledRuleCount,
             fda: fdaStatus,
             sysext: sysextManager.state)
@@ -381,77 +403,20 @@ struct WelcomeView: View {
 
     // MARK: - Daemon Health Check
 
-    /// Check if the daemon database exists (user or system path) and count compiled rules.
-    /// Uses the same path resolution logic as AppState.dataDir.
-    private func checkDaemonHealth() {
+    /// A retained database/WAL is history, not evidence of a live detector.
+    /// Use the same current-boot heartbeat contract as System health.
+    private func checkDaemonHealth() async {
+        guard !isChecking else { return }
         isChecking = true
-        let fm = FileManager.default
-
-        // v1.21.5: refresh the app's FDA state alongside the daemon
-        // checks (synchronous + cheap — a few stat calls, same as the
-        // Forensics tab's .onAppear usage).
-        fdaStatus = PermissionsProbe.fullDiskAccess()
-
-        // 1. Check daemon DB in both locations
-        let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first.map { $0.appendingPathComponent("MacCrab").path }
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let systemDir = "/Library/Application Support/MacCrab"
-
-        let userDB = userDir + "/events.db"
-        let systemDB = systemDir + "/events.db"
-        let userDBExists = fm.fileExists(atPath: userDB)
-        let systemDBReadable = fm.isReadableFile(atPath: systemDB)
-
-        // Also check for WAL file which indicates active daemon writer
-        let userWAL = fm.fileExists(atPath: userDB + "-wal") || fm.fileExists(atPath: userDB + "-shm")
-        let systemWAL = fm.fileExists(atPath: systemDB + "-wal") || fm.fileExists(atPath: systemDB + "-shm")
-
-        daemonDBFound = (userDBExists && userWAL) || (systemDBReadable && systemWAL)
-
-        // 2. Count compiled rules from all candidate directories (same as AppState.loadRules)
-        let activeDataDir: String
-        if userDBExists && systemDBReadable {
-            let userMod = (try? fm.attributesOfItem(atPath: userDB))?[.modificationDate] as? Date
-            let sysMod = (try? fm.attributesOfItem(atPath: systemDB))?[.modificationDate] as? Date
-            if let s = sysMod, let u = userMod, s >= u {
-                activeDataDir = systemDir
-            } else {
-                activeDataDir = userDir
-            }
-        } else if systemDBReadable {
-            activeDataDir = systemDir
-        } else if userDBExists {
-            activeDataDir = userDir
-        } else {
-            activeDataDir = systemDir
-        }
-
-        // Count from the RESOLVED active dir only (mirrors AppState.loadRules'
-        // dataDir-first behaviour). The old MAX-across-candidates loop surfaced
-        // whichever dir had the most files — e.g. a stale, larger user-side
-        // corpus — instead of the rules the engine actually enforces, so the
-        // welcome screen could claim a rule count the daemon isn't running.
-        let candidates = [
-            activeDataDir + "/compiled_rules",
-            systemDir + "/compiled_rules",
-            userDir + "/compiled_rules",
-            fm.currentDirectoryPath + "/.build/debug/compiled_rules",
-        ]
-        var ruleCount = 0
-        for dir in candidates {
-            if let files = try? fm.contentsOfDirectory(atPath: dir),
-               case let n = files.filter({ $0.hasSuffix(".json") }).count, n > 0 {
-                ruleCount = n
-                break   // first populated dir wins (active → system → user)
-            }
-        }
-        compiledRuleCount = ruleCount
-
-        // Brief delay so the spinner animation is visible
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            isChecking = false
-        }
+        defer { isChecking = false }
+        let source = engineSource
+        let result = await Task.detached(priority: .utility) {
+            WelcomeHealthSnapshot(heartbeat: source.heartbeat(), fda: PermissionsProbe.fullDiskAccess())
+        }.value
+        guard !Task.isCancelled else { return }
+        fdaStatus = result.fda
+        engineReady = result.engineReady
+        compiledRuleCount = result.rulesLoaded
     }
 
     // MARK: - Apply
@@ -475,16 +440,30 @@ struct WelcomeView: View {
 
 // MARK: - Checklist Predicate
 
-/// v1.21.5: pure seam so the "all checklist items green" rule is unit-
-/// testable (the SwiftUI view itself isn't). Language is always set, so
-/// only the four live rows participate. An `.unknown` FDA probe can't
-/// tell either way and must not block the "ready" line — the same
-/// no-false-alarm treatment PermissionsProbe's other consumers use.
+/// Readiness copy requires affirmative evidence; the user may still finish
+/// onboarding and grant permissions afterward.
+struct WelcomeHealthSnapshot: Equatable, Sendable {
+    let engineReady: Bool
+    let rulesLoaded: Int
+    let fda: FullDiskAccessStatus
+
+    init(heartbeat: V2HeartbeatSnapshot?, fda: FullDiskAccessStatus) {
+        engineReady = WelcomeChecklist.engineReady(heartbeat)
+        rulesLoaded = heartbeat?.isStale == false ? heartbeat?.rulesLoaded ?? 0 : 0
+        self.fda = fda
+    }
+}
+
 enum WelcomeChecklist {
-    static func isComplete(daemonDBFound: Bool, ruleCount: Int,
+    static func engineReady(_ heartbeat: V2HeartbeatSnapshot?) -> Bool {
+        guard let heartbeat, !heartbeat.isStale, heartbeat.isReady else { return false }
+        return V2CollectorSummary(states: heartbeat.collectors.map(\.resolvedState)).allEnabledHealthy
+    }
+
+    static func isComplete(engineReady: Bool, ruleCount: Int,
                            fda: FullDiskAccessStatus,
                            sysext: SystemExtensionState) -> Bool {
-        daemonDBFound && ruleCount > 0 && fda != .denied && sysext == .activated
+        engineReady && ruleCount > 0 && fda == .granted && sysext == .activated
     }
 }
 

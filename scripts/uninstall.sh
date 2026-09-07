@@ -28,6 +28,121 @@ info()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[-]${NC} $*" >&2; exit 1; }
 
+# Pure classifier: stdin is a captured systemextensionsctl listing; $1 is the
+# command's exit status. Only a successful, structurally complete listing can
+# prove absence. Sourcing this file defines helpers without running uninstall.
+maccrab_classify_sysext_listing() {
+    awk -v command_status="${1:-1}" -v target="$SYSEXT_ID" -v team="$TEAM_ID" '
+        BEGIN { expected = -1; rows = 0; invalid = 0; present = 0; reboot = 0; cancelled = 0 }
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (line ~ /^[[:space:]]*$/) next
+            if (expected < 0) {
+                if (line !~ /^[0-9]+ extension\(s\)$/) { invalid = 1; next }
+                split(line, header, " ")
+                expected = header[1] + 0
+                next
+            }
+            if (line ~ /^--- / || line ~ /^[[:space:]]*enabled[[:space:]]+active[[:space:]]+teamID[[:space:]]+bundleID/) next
+            count = split(line, fields, /[[:space:]]+/)
+            row = 0
+            for (i = 1; i < count; i++) {
+                if (length(fields[i]) == 10 && fields[i] ~ /^[A-Z0-9]+$/ &&
+                    fields[i+1] ~ /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$/ &&
+                    fields[i+2] ~ /^\(/ && line ~ /\[[^][]+\][[:space:]]*$/) {
+                    row = 1
+                    rows++
+                    if (fields[i+1] == target || fields[i+1] == target ".systemextension") {
+                        if (fields[i] != team) invalid = 1
+                        present = 1
+                        lower = tolower(line)
+                        if (lower ~ /uninstall.*(reboot|restart)/) reboot = 1
+                        if (lower ~ /cancelled|canceled/) cancelled = 1
+                    }
+                    break
+                }
+            }
+            if (!row) invalid = 1
+        }
+        END {
+            if (command_status != "0" || invalid || expected < 0 || rows != expected) print "unknown"
+            else if (reboot) print "pending_reboot"
+            else if (cancelled) print "cancelled"
+            else if (present) print "present"
+            else print "absent"
+        }
+    '
+}
+
+maccrab_removal_permitted() {
+    [ "${1:-unknown}" = "absent" ]
+}
+
+maccrab_read_sysext_state() {
+    local listing list_status
+    if [ ! -x /usr/bin/systemextensionsctl ]; then
+        printf '%s\n' unknown
+        return
+    fi
+    if listing="$(LC_ALL=C /usr/bin/systemextensionsctl list 2>/dev/null)"; then
+        list_status=0
+    else
+        list_status=$?
+    fi
+    printf '%s\n' "$listing" | maccrab_classify_sysext_listing "$list_status"
+}
+
+maccrab_require_sysext_absence() {
+    local state attempt
+    state="$(maccrab_read_sysext_state)"
+    if maccrab_removal_permitted "$state"; then
+        info "System Extension absence verified."
+        return 0
+    fi
+    case "$state" in
+        pending_reboot)
+            error "System Extension removal is pending a reboot. MacCrab and its data are preserved. Reboot, then run this script again." ;;
+        unknown)
+            error "Could not verify System Extension state. MacCrab and its data are preserved. Check systemextensionsctl list, then retry." ;;
+        cancelled)
+            error "System Extension deactivation was cancelled. MacCrab and its data are preserved. Approve deactivation before retrying." ;;
+    esac
+
+    if [ ! -d "$APP_PATH" ]; then
+        error "The System Extension is still registered, but $APP_PATH is missing. Data is preserved. Restore the signed app, deactivate its System Extension, then retry."
+    fi
+    if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = root ]; then
+        error "The System Extension is still registered. Run this script with sudo from your signed-in user account so MacCrab can request deactivation. App and data are preserved."
+    fi
+    info "Asking the installed MacCrab app to deactivate its System Extension..."
+    info "Approve the macOS deactivation prompt. Cleanup waits for verified removal."
+    if ! sudo -u "$SUDO_USER" /usr/bin/open -a "$APP_PATH" "maccrab://deactivate"; then
+        error "Could not request deactivation from $APP_PATH. App and data are preserved. Open MacCrab and deactivate its System Extension, then retry."
+    fi
+
+    # Bound observation time, but never use elapsed time as proof of removal.
+    # Cancellation/approval delays leave the row present and must block cleanup.
+    for ((attempt = 0; attempt < 60; attempt++)); do
+        state="$(maccrab_read_sysext_state)"
+        if maccrab_removal_permitted "$state"; then
+            info "System Extension absence verified."
+            return 0
+        fi
+        case "$state" in
+            pending_reboot)
+                error "macOS will finish System Extension removal after a reboot. App and data are preserved. Reboot, then run this script again." ;;
+            unknown)
+                error "System Extension status became unavailable. App and data are preserved. Check systemextensionsctl list before retrying." ;;
+            cancelled)
+                error "System Extension deactivation was cancelled. App and data are preserved. Approve deactivation before retrying." ;;
+        esac
+        if [ "$attempt" -lt 59 ]; then sleep 2; fi
+    done
+    error "System Extension removal is not confirmed. Approval may be pending or cancelled. App and data are preserved. Complete deactivation (and reboot if macOS requests it), then retry."
+}
+
+maccrab_uninstall_main() {
 AUTO_YES=false
 for arg in "$@"; do
     case "$arg" in
@@ -39,33 +154,9 @@ if [ "$(id -u)" -ne 0 ]; then
     error "This script must be run with sudo."
 fi
 
-# ─── Step 1: Deactivate the system extension ─────────────────────────
-# Must run BEFORE the .app is removed, otherwise sysextd's ledger keeps
-# a "pending" entry forever (visible via `systemextensionsctl list`)
-# since the bundle it references gets deleted out from under it.
-# An ACTIVE Endpoint Security sysext can't be reliably torn down by
-# `systemextensionsctl uninstall` from a shell — OSSystemExtensionRequest
-# deactivation must be submitted by the SIGNED APP running as the console
-# user (and it shows a system approval modal, often completing only after
-# a reboot). So when the bundle is still present, ask the app to do it via
-# the maccrab://deactivate deep link; keep systemextensionsctl as fallback.
-if [ -d "$APP_PATH" ] && [ -n "${SUDO_USER:-}" ]; then
-    info "Asking MacCrab to deactivate its system extension (the reliable path)..."
-    info "  → Approve the macOS prompt in System Settings > General > Login Items & Extensions."
-    sudo -u "$SUDO_USER" open "maccrab://deactivate" 2>/dev/null \
-        || warn "Couldn't open the app — falling back to systemextensionsctl."
-    # Brief pause so the request reaches sysextd before we kill the app.
-    sleep 3
-fi
-if command -v systemextensionsctl >/dev/null 2>&1; then
-    info "Deactivating system extension (fallback)..."
-    # Best-effort: this can fail if the extension was never activated
-    # (manual maccrabd-only install, or sysextd already cleaned it up).
-    systemextensionsctl uninstall "$TEAM_ID" "$SYSEXT_ID" 2>/dev/null \
-        || warn "systemextensionsctl uninstall returned non-zero — extension may already be gone."
-else
-    warn "systemextensionsctl not found — skipping system extension deactivation."
-fi
+# Step 1 is a mandatory OS-completion gate, including for --yes. No process
+# stop, app/CLI removal, data deletion, or credential cleanup precedes it.
+maccrab_require_sysext_absence
 
 # ─── Step 2: Stop running processes ──────────────────────────────────
 info "Stopping any running MacCrab processes..."
@@ -119,23 +210,10 @@ rm -f "/opt/homebrew/bin/maccrabctl" "/opt/homebrew/bin/maccrab-mcp" "/opt/homeb
 # Note: with the v1.17 notification rearchitecture, removing the app
 # alone stops ALL notification banners regardless of sysext state — the
 # app (not the daemon) is the only notification poster now. The sysext
-# teardown below is for ledger hygiene + stopping detection.
+# teardown has already been verified before any cleanup begins.
 if [ -d "$APP_PATH" ]; then
     info "Removing $APP_PATH..."
     rm -rf "$APP_PATH"
-fi
-
-# ─── Step 7: Verify system-extension teardown ────────────────────────
-# sysext removal is async and frequently completes only after a reboot
-# ("terminated waiting to uninstall on reboot"). Give the operator
-# ground truth instead of best-effort silence.
-if command -v systemextensionsctl >/dev/null 2>&1; then
-    if systemextensionsctl list 2>/dev/null | grep -q "$SYSEXT_ID"; then
-        warn "System extension still present — likely pending removal on reboot."
-        warn "  → Reboot to finish, then confirm with: systemextensionsctl list"
-    else
-        info "System extension fully removed."
-    fi
 fi
 
 # ─── Step 7: Optional — data directory + keychain ────────────────────
@@ -221,3 +299,9 @@ fi
 
 echo ""
 info "MacCrab uninstalled."
+
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    maccrab_uninstall_main "$@"
+fi

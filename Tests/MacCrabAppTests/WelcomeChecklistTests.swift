@@ -11,34 +11,49 @@ import Testing
 @Suite("WelcomeChecklist")
 struct WelcomeChecklistTests {
 
-    @Test("complete when DB found, rules loaded, FDA granted, sysext activated")
-    func allGreen() {
-        #expect(WelcomeChecklist.isComplete(
-            daemonDBFound: true, ruleCount: 438, fda: .granted, sysext: .activated))
+    @Test("onboarding uses fresh ready sensor evidence")
+    func heartbeatReadiness() {
+        var raw: [String: Any] = [
+            "written_at_unix": Date().timeIntervalSince1970, "boot_phase": "starting", "liveness": false,
+            "collector_health": [["name": "DNSCollector", "healthy": true]],
+        ]
+        #expect(!WelcomeChecklist.engineReady(nil))
+        #expect(!WelcomeChecklist.engineReady(V2HeartbeatSnapshot.decode(raw: raw)))
+        raw["boot_phase"] = "ready"
+        raw["liveness"] = true
+        #expect(WelcomeChecklist.engineReady(V2HeartbeatSnapshot.decode(raw: raw)))
+        raw["written_at_unix"] = Date().addingTimeInterval(-121).timeIntervalSince1970
+        #expect(!WelcomeChecklist.engineReady(V2HeartbeatSnapshot.decode(raw: raw)))
     }
 
-    @Test("unknown FDA probe does not block completion (no-false-alarm treatment)")
-    func unknownFDA() {
+    @Test("complete when engine ready, rules loaded, FDA granted, sysext activated")
+    func allGreen() {
         #expect(WelcomeChecklist.isComplete(
-            daemonDBFound: true, ruleCount: 1, fda: .unknown, sysext: .activated))
+            engineReady: true, ruleCount: 438, fda: .granted, sysext: .activated))
+    }
+
+    @Test("unknown FDA does not claim that protection setup is complete")
+    func unknownFDA() {
+        #expect(!WelcomeChecklist.isComplete(
+            engineReady: true, ruleCount: 1, fda: .unknown, sysext: .activated))
     }
 
     @Test("denied FDA blocks completion")
     func deniedFDA() {
         #expect(!WelcomeChecklist.isComplete(
-            daemonDBFound: true, ruleCount: 1, fda: .denied, sysext: .activated))
+            engineReady: true, ruleCount: 1, fda: .denied, sysext: .activated))
     }
 
-    @Test("missing daemon DB blocks completion")
+    @Test("engine not ready blocks completion")
     func noDB() {
         #expect(!WelcomeChecklist.isComplete(
-            daemonDBFound: false, ruleCount: 1, fda: .granted, sysext: .activated))
+            engineReady: false, ruleCount: 1, fda: .granted, sysext: .activated))
     }
 
     @Test("zero compiled rules blocks completion")
     func noRules() {
         #expect(!WelcomeChecklist.isComplete(
-            daemonDBFound: true, ruleCount: 0, fda: .granted, sysext: .activated))
+            engineReady: true, ruleCount: 0, fda: .granted, sysext: .activated))
     }
 
     @Test("every non-activated sysext state blocks completion",
@@ -46,7 +61,7 @@ struct WelcomeChecklistTests {
                       .awaitingApproval, .failed("boom")])
     func sysextNotActive(state: SystemExtensionState) {
         #expect(!WelcomeChecklist.isComplete(
-            daemonDBFound: true, ruleCount: 1, fda: .granted, sysext: state))
+            engineReady: true, ruleCount: 1, fda: .granted, sysext: state))
     }
 }
 

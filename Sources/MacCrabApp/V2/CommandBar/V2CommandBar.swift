@@ -90,7 +90,7 @@ public struct V2CommandBar: View {
                     Image(systemName: "magnifyingglass")
                         .scaledSystem(13, weight: .medium)
                         .foregroundStyle(V2Theme.mutedText)
-                    Text("Jump to anything")
+                    Text(String(localized: "ui.V2CommandBar.jump.to.anything", defaultValue: "Jump to anything"))
                         .scaledSystem(14)
                         .foregroundStyle(V2Theme.mutedText)
                     Spacer()
@@ -109,7 +109,7 @@ public struct V2CommandBar: View {
             }
             .buttonStyle(.plain)
             .frame(maxWidth: 480)
-            .accessibilityLabel("Command palette. Press Command Shift P or Command K to open.")
+            .accessibilityLabel(String(localized: "ui.V2CommandBar.command.palette.press.command.shift.p.or", defaultValue: "Command palette. Press Command Shift P or Command K to open."))
 
             Spacer()
 

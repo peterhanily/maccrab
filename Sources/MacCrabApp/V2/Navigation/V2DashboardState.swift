@@ -9,6 +9,7 @@
 
 import SwiftUI
 import Combine
+import MacCrabCore
 
 @MainActor
 public final class V2DashboardState: ObservableObject {
@@ -26,6 +27,8 @@ public final class V2DashboardState: ObservableObject {
     @Published public var history = V2NavigationHistory()
     @Published public var recentDestinations: [V2NavigationDestination] = []
     @Published public var toast: V2Toast? = nil
+    @Published public private(set) var noticeHistory: [V2Toast] = []
+    @Published var ruleChanges = V2RuleChangeTracker()
 
     /// Cross-workspace intent: bumped to navigate to Detection › Rules
     /// AND open the New Rule wizard in one click. Workspaces consume +
@@ -107,6 +110,8 @@ public final class V2DashboardState: ObservableObject {
     /// probe ran before the (re)started sysext had created its on-disk
     /// stores, leaving the dashboard on mock or a *degraded* live provider.
     private var lastBootPhase: String? = nil
+    private var lastEngineIdentity: EngineTelemetryIdentity?
+    private var providerProbeGeneration: UInt64 = 0
 
     /// Refresh cadence in seconds. Aligned with v1
     /// `pollIntervalSeconds` AppStorage so toggling either side
@@ -167,7 +172,10 @@ public final class V2DashboardState: ObservableObject {
 
     private var toastDismissTask: Task<Void, Never>? = nil
 
-    public init() {
+    public let engineSource: V2EngineSource
+
+    public init(engineSource: V2EngineSource = .session) {
+        self.engineSource = engineSource
         // Restore last workspace, else default to Overview.
         let raw = UserDefaults.standard.string(forKey: Self.workspaceKey) ?? V2Workspace.overview.rawValue
         self.currentWorkspace = V2Workspace(rawValue: raw) ?? .overview
@@ -208,7 +216,10 @@ public final class V2DashboardState: ObservableObject {
     /// flips `provider` to a `V2LiveDataProvider`. Idempotent — safe
     /// to call repeatedly (e.g. after the user installs the daemon).
     public func connectLiveData() async {
-        let probed = await V2LiveDataProvider()
+        providerProbeGeneration &+= 1
+        let generation = providerProbeGeneration
+        let probed = await V2LiveDataProvider(source: engineSource)
+        guard generation == providerProbeGeneration else { return }
         // Record that the probe ran BEFORE acting on its result, so any surface
         // gated on didProbeLiveData flips exactly once, in the same main-actor
         // step that swaps the provider.
@@ -231,23 +242,20 @@ public final class V2DashboardState: ObservableObject {
         }
     }
 
-    /// Re-probe the on-disk stores and switch to a (healthier) live provider
-    /// WITHOUT the `connectLiveData()` toasts. Recovers the cases the
-    /// launch-time `connectLiveData()` can miss after a sysext (re)boot:
-    ///   • no DBs existed at the launch probe → still on mock once they appear;
-    ///   • a store's DB was absent at the launch probe (e.g. events.db present
-    ///     but alerts.db not yet created mid-(re)boot) → a *degraded* live
-    ///     provider whose `alerts()` returns [] — `lastErrorDescription` is
-    ///     non-nil — and the DB now opens cleanly;
-    ///   • the canonical data directory changed (system ⇄ user-home).
-    /// Silent on failure (keeps the current provider — e.g. a probe that lands
-    /// mid-VACUUM). Note a merely *locked* DB still opens read-only, so that
-    /// case is already live and needs no recovery. Swaps ONLY when the probe
-    /// succeeds AND the current provider is mock, on a different dir, or
-    /// degraded while the re-probe is clean — so a redundant probe to the same
-    /// healthy live dir is a no-op and steady state never regresses (no thrash).
-    public func reconnectLiveDataIfStale() async {
-        guard let live = await V2LiveDataProvider() else { return }
+    /// Reopen this session's stores after startup or an observed engine restart.
+    /// Automatic recovery cannot change source directories. A generation guard
+    /// prevents an older asynchronous probe from replacing a newer provider.
+    public func reconnectLiveDataIfStale(force: Bool = false) async {
+        providerProbeGeneration &+= 1
+        let generation = providerProbeGeneration
+        if force {
+            provider = V2OfflineDataProvider()
+            paletteAlerts = []; paletteRules = []; paletteTraces = []
+        }
+        let reprobed = await V2LiveDataProvider(source: engineSource)
+        guard generation == providerProbeGeneration else { return }
+        didProbeLiveData = true
+        guard let live = reprobed else { return }
         if Self.shouldAdoptReprobe(
             currentMode: provider.mode,
             currentDir: provider.dataDir,
@@ -259,20 +267,33 @@ public final class V2DashboardState: ObservableObject {
         }
     }
 
-    /// Pure swap decision for `reconnectLiveDataIfStale`, extracted for unit
-    /// testing. Adopt the re-probed provider when the current one is NOT a
-    /// healthy live provider on the same dir: it's mock, on a different data
-    /// directory, or degraded (a store failed to open) while the re-probe is
-    /// clean. A healthy live provider on the same dir is a no-op — so a
-    /// redundant probe never thrashes the provider or regresses steady state.
+    /// Adopt a recovered provider only for the current source. A healthy
+    /// provider is retained unless an explicit epoch refresh discarded it.
     nonisolated static func shouldAdoptReprobe(
         currentMode: V2DataSourceMode, currentDir: String?, currentDegraded: Bool,
         reprobeDir: String?, reprobeDegraded: Bool
     ) -> Bool {
         if currentMode != .live { return true }
-        if currentDir != reprobeDir { return true }
+        if currentDir != reprobeDir { return false }
         if currentDegraded && !reprobeDegraded { return true }
         return false
+    }
+
+    public func onEngineIdentity(_ identity: EngineTelemetryIdentity?) async {
+        let changed = Self.updateEngineIdentity(&lastEngineIdentity, next: identity)
+        if changed { await reconnectLiveDataIfStale(force: true) }
+    }
+
+    nonisolated static func updateEngineIdentity(_ previous: inout EngineTelemetryIdentity?, next: EngineTelemetryIdentity?) -> Bool {
+        guard let next else { return false }
+        let changed = engineEpochChanged(previous: previous, next: next)
+        previous = next
+        return changed
+    }
+
+    nonisolated static func engineEpochChanged(previous: EngineTelemetryIdentity?, next: EngineTelemetryIdentity?) -> Bool {
+        guard let previous, let next else { return false }
+        return previous != next
     }
 
     /// Drive a one-shot reconnect on the sysext's non-ready→ready boot
@@ -385,8 +406,12 @@ public final class V2DashboardState: ObservableObject {
     // MARK: - Toasts
 
     public func showToast(_ toast: V2Toast) {
+        if let previous = self.toast, previous.requiresDismissal, previous.id != toast.id {
+            noticeHistory.append(previous)
+        }
         self.toast = toast
         toastDismissTask?.cancel()
+        guard !toast.requiresDismissal else { return }
         let id = toast.id
         toastDismissTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(toast.displayFor * 1_000_000_000))
@@ -397,7 +422,11 @@ public final class V2DashboardState: ObservableObject {
         }
     }
 
-    public func dismissToast() {
+    public func dismissToast(id: UUID? = nil) {
+        if let id, toast?.id != id {
+            noticeHistory.removeAll { $0.id == id }
+            return
+        }
         toastDismissTask?.cancel()
         toast = nil
     }

@@ -274,7 +274,7 @@ actor StorageErrorTracker {
                 return "page_limit"
             case .sqliteStoragePressure:
                 return "sqlite_storage_pressure"
-            case .invalidPolicy:
+            case .invalidPolicy, .schemaTransactionNotSerialized:
                 return "admission_policy"
             case .unsafeFamilyMember, .partialFamily:
                 return "unsafe_store_family"

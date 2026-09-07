@@ -9,6 +9,16 @@ import MacCrabCore
 
 public struct V2HeartbeatSnapshot: Sendable, Equatable {
     public let writtenAt: Date
+    public var bootPhase: String? = nil
+    public var liveness: Bool? = nil
+    public var rulesLoaded: Int? = nil
+    public var engineIdentity: EngineTelemetryIdentity? = nil
+    var dnsCapture: V2DNSCaptureStatus? = nil
+    public var engineStartedAt: Date? { engineIdentity.map { Date(timeIntervalSince1970: $0.startedAtUnix) } }
+    var readiness: V2EngineReadiness {
+        V2EngineReadiness(bootPhase: bootPhase, liveness: liveness)
+    }
+    public var isReady: Bool { readiness == .ready }
 
     /// v1.21.4: canonical staleness threshold — MUST match
     /// AppState.HeartbeatSnapshot.staleThreshold (120s) so every workspace
@@ -18,7 +28,10 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     /// Prevention "on" chips) falsely reassured during a 2–5 min outage. Gate
     /// live/green state on `!isStale`, not merely on the snapshot existing.
     public static let staleThreshold: TimeInterval = 120
-    public var isStale: Bool { Date().timeIntervalSince(writtenAt) > Self.staleThreshold }
+    public var isStale: Bool {
+        let age = Date().timeIntervalSince(writtenAt)
+        return age < 0 || age > Self.staleThreshold
+    }
     /// Whole seconds since the daemon last wrote a heartbeat (for "N m ago").
     public var ageSeconds: Int { max(0, Int(Date().timeIntervalSince(writtenAt))) }
     public let uptimeSeconds: Int
@@ -107,6 +120,15 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         /// fallback `as? Double ?? 0` produced epoch-0 dates that
         /// rendered as "20583d ago".
         public let lastTickUnix: Double?
+        public var reason: String? = nil
+        public var state: String? = nil
+        public var enabled: Bool? = nil
+        public var lastError: String? = nil
+
+        public var resolvedState: V2CollectorState {
+            .resolve(state: state, enabled: enabled, healthy: healthy,
+                     reason: reason, lastError: lastError)
+        }
 
         public var lastTick: Date? {
             lastTickUnix.map(Date.init(timeIntervalSince1970:))
@@ -948,24 +970,41 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         }
     }
 
-    /// Returns the freshest heartbeat from any candidate dir, or nil.
+    /// Compatibility entry point; source selection is fixed for this session.
     public static func readFreshest() -> V2HeartbeatSnapshot? {
-        let userDir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("MacCrab").path
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let systemDir = "/Library/Application Support/MacCrab"
-        let candidates = Array(Set([userDir, systemDir]))
-        let withMtime: [(String, Date)] = candidates.compactMap { dir in
-            let path = dir + "/heartbeat_rich.json"
-            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-                  let mtime = attrs[.modificationDate] as? Date else { return nil }
-            return (path, mtime)
+        V2EngineSource.session.heartbeat()
+    }
+
+    /// Read readiness even before the first rich heartbeat. Merge only telemetry
+    /// from this process epoch; an old store must not make a restarting engine
+    /// appear to have healthy, running collectors.
+    static func read(directory: String, now: Date = Date()) -> V2HeartbeatSnapshot? {
+        func payload(_ name: String) -> [String: Any]? {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: directory + "/" + name))
+            else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         }
-        guard let chosen = withMtime.max(by: { $0.1 < $1.1 }) else { return nil }
-        // Discard stale heartbeats (>5 minutes old).
-        if chosen.1.timeIntervalSinceNow < -300 { return nil }
-        return decode(at: chosen.0)
+        let minimal = payload("heartbeat.json")
+        let rich = payload("heartbeat_rich.json")
+        var combined: [String: Any]
+        if let minimal {
+            combined = rich.flatMap {
+                V2HeartbeatPayload.currentRich($0, minimal: minimal, now: now) ? $0 : nil
+            } ?? [:]
+            // Minimal heartbeat fields are written independently and describe
+            // the current process. Keep richer schema/count-window metadata.
+            for (key, value) in minimal where key != "schema_version" || combined[key] == nil {
+                combined[key] = value
+            }
+        } else if let rich {
+            combined = rich
+        } else {
+            return nil
+        }
+        guard let written = combined["written_at_unix"] as? TimeInterval,
+              written.isFinite, now.timeIntervalSince1970 - written >= 0,
+              now.timeIntervalSince1970 - written <= 300 else { return nil }
+        return decode(raw: combined)
     }
 
     /// Internal fixture seam; production callers use `readFreshest()`.
@@ -973,6 +1012,10 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
+        return decode(raw: raw)
+    }
+
+    static func decode(raw: [String: Any]) -> V2HeartbeatSnapshot {
         let writtenAt = Date(timeIntervalSince1970: TimeInterval(
             raw["written_at_unix"] as? Double ?? 0
         ))
@@ -983,7 +1026,11 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
                 name: name,
                 eventCount: c["event_count"] as? Int ?? 0,
                 healthy: c["healthy"] as? Bool ?? false,
-                lastTickUnix: c["last_tick_unix"] as? Double
+                lastTickUnix: c["last_tick_unix"] as? Double,
+                reason: c["reason"] as? String,
+                state: c["state"] as? String,
+                enabled: c["enabled"] as? Bool,
+                lastError: c["last_error"] as? String
             )
         }
         let legacyCounts: [String: Int] = (raw["event_type_counts_1h"] as? [String: Any])?
@@ -1032,6 +1079,11 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         )
         return V2HeartbeatSnapshot(
             writtenAt: writtenAt,
+            bootPhase: raw["boot_phase"] as? String,
+            liveness: raw["liveness"] as? Bool,
+            rulesLoaded: raw["rules_loaded"] as? Int,
+            engineIdentity: EngineTelemetryIdentity(heartbeat: raw),
+            dnsCapture: (raw["dns_capture"] as? [String: Any]).map(V2DNSCaptureStatus.init),
             uptimeSeconds: raw["uptime_seconds"] as? Int ?? 0,
             eventsProcessed: raw["events_processed"] as? Int ?? 0,
             alertsEmitted: raw["alerts_emitted"] as? Int ?? 0,

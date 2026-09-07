@@ -160,7 +160,7 @@ struct V2Sidebar: View {
                             .scaledSystem(12)
                             .foregroundStyle(V2Theme.tertiaryText)
                         Spacer(minLength: 0)
-                        Text("⌘K")
+                        Text(verbatim: "⌘K")
                             .scaledSystem(11)
                             .foregroundStyle(V2Theme.tertiaryText)
                     }
@@ -242,10 +242,10 @@ struct V2Sidebar: View {
                         .clipShape(RoundedRectangle(cornerRadius: 9))
 
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("MacCrab")
+                        Text(verbatim: "MacCrab")
                             .scaledSystem(16, weight: .bold)
                             .foregroundStyle(V2Theme.primaryText)
-                        Text("v\(MacCrabVersion.current)")
+                        Text(verbatim: "v\(MacCrabVersion.current)")
                             .scaledSystem(11)
                             .foregroundStyle(V2Theme.tertiaryText)
                     }
@@ -324,7 +324,7 @@ struct V2Sidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("MacCrab protection · click to open System health")
+        .help(String(localized: "ui.V2Sidebar.maccrab.protection.click.to.open.system.health", defaultValue: "MacCrab protection · click to open System health"))
         // v1.10.2 (audit UX HIGH): a11y label was hardcoded "active"
         // regardless of degraded/inactive state. VoiceOver users heard
         // "active" even when the daemon was offline. Use the same

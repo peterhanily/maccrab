@@ -1633,7 +1633,10 @@ public final class ESCollector: @unchecked Sendable {
     /// dashboard rule-enable needs a `pkill -HUP com.maccrab.agent` before ES
     /// actually delivers those events. The log lines below are how an operator
     /// sees which families are live.
-    public func applyOptionalSubscriptions(introspection: Bool, memoryProtection: Bool) {
+    @discardableResult
+    public func applyOptionalSubscriptions(introspection: Bool, memoryProtection: Bool) -> Bool {
+        var applied = false
+        var failed = false
         var toAdd: [es_event_type_t] = []
         var toRemove: [es_event_type_t] = []
         if introspection { toAdd += Self.introspectionEvents } else { toRemove += Self.introspectionEvents }
@@ -1643,11 +1646,13 @@ public final class ESCollector: @unchecked Sendable {
             guard let client = context.client,
                   context.subscribedTypes.contains(where: { $0.rawValue == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue })
             else { continue }
+            applied = true
             if !toAdd.isEmpty {
                 let rc = toAdd.withUnsafeBufferPointer { buf -> es_return_t in
                     es_subscribe(client, buf.baseAddress!, UInt32(buf.count))
                 }
                 if rc != ES_RETURN_SUCCESS {
+                    failed = true
                     // LOUD, not fail-closed: the engine keeps running, but the
                     // detections that need this family are dark until restart.
                     logger.error("ESCollector: es_subscribe for demand-gated families FAILED on \(context.label) (rc=\(rc.rawValue)) — rules selecting those event actions cannot fire until the engine restarts")
@@ -1658,11 +1663,17 @@ public final class ESCollector: @unchecked Sendable {
                     es_unsubscribe(client, buf.baseAddress!, UInt32(buf.count))
                 }
                 if rc != ES_RETURN_SUCCESS {
+                    failed = true
                     logger.warning("ESCollector: es_unsubscribe for demand-gated families FAILED on \(context.label) (rc=\(rc.rawValue)) — an unconsumed firehose keeps costing CPU")
                 }
             }
         }
-        logger.notice("ESCollector demand-gated subscriptions now: introspection=\(introspection), memory_protection=\(memoryProtection)")
+        if applied && !failed {
+            logger.notice("ESCollector demand-gated subscriptions now: introspection=\(introspection), memory_protection=\(memoryProtection)")
+        } else {
+            logger.error("ESCollector demand-gated subscription update was not fully applied")
+        }
+        return applied && !failed
     }
 
     /// Mute noisy paths to reduce kernel-to-userspace traffic. v1.21.4 Phase-4:

@@ -93,7 +93,7 @@ public struct V2ErrorState: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 360)
             if let retry {
-                V2ActionButton("Retry", icon: "arrow.clockwise", style: .secondary, action: retry)
+                V2ActionButton(String(localized: "common.retry", defaultValue: "Retry"), icon: "arrow.clockwise", style: .secondary, action: retry)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -8,12 +8,17 @@
 import Foundation
 import os.log
 import Darwin
+import SystemConfiguration
 
 // BPF ioctl constants not exposed in Swift's Darwin module
 private let BIOCSETIF: UInt = 0x8020426c
 private let BIOCSETF: UInt = 0x80104267
 private let BIOCIMMEDIATE: UInt = 0x80044270
 private let BIOCGBLEN: UInt = 0x40044266
+private let BIOCGDLT: UInt = 0x4004426a
+private let BIOCGSTATS: UInt = 0x4008426f // _IOR('B',111,struct bpf_stat), two UInt32 fields
+private struct bpf_stat { var received: UInt32 = 0; var dropped: UInt32 = 0 }
+private let ethernetDataLinkType: UInt32 = 1 // DLT_EN10MB, <net/bpf.h>
 // _IOW('B', 109, struct timeval); timeval is 16 bytes on 64-bit macOS
 private let BIOCSRTIMEOUT: UInt = 0x8010426d
 
@@ -72,6 +77,62 @@ private struct bpf_hdr {
     }
 }
 
+/// Owns the current BPF connection. Route changes retire the old descriptor
+/// before opening its replacement; a failed open remains retryable.
+struct DNSCaptureBinding {
+    struct Connection: Equatable {
+        let descriptor: Int32
+        let bufferLength: Int
+    }
+
+    private(set) var interface: String?
+    private(set) var connection: Connection?
+
+    mutating func reconcile(
+        selectedInterface: String?,
+        open: (String) -> Connection?,
+        close: (Int32) -> Void
+    ) {
+        if selectedInterface == interface, connection != nil { return }
+        stop(close: close)
+        guard let selectedInterface, let next = open(selectedInterface) else { return }
+        interface = selectedInterface
+        connection = next
+    }
+
+    mutating func stop(close: (Int32) -> Void) {
+        if let connection { close(connection.descriptor) }
+        connection = nil
+        interface = nil
+    }
+}
+
+/// Capture availability is separate from DNS traffic. A configured BPF session
+/// proves setup succeeded; it does not claim that a DNS event was observed.
+public enum DNSCaptureStatus: Sendable, Equatable {
+    case capturing(interface: String)
+    case unavailable(reason: String)
+}
+
+/// The capture loop owns this reporter and awaits each transition, preserving
+/// failure/recovery order without a separate queue or unstructured tasks.
+struct DNSCaptureStatusReporter {
+    private var previous: DNSCaptureStatus?
+    private let handler: @Sendable (DNSCaptureStatus) async -> Void
+
+    init(handler: @escaping @Sendable (DNSCaptureStatus) async -> Void) {
+        self.handler = handler
+    }
+
+    @discardableResult
+    mutating func report(_ status: DNSCaptureStatus) async -> Bool {
+        guard status != previous else { return false }
+        previous = status
+        await handler(status)
+        return true
+    }
+}
+
 /// DNS query/response data extracted from captured packets.
 public struct DnsQuery: Sendable {
     /// The queried domain name.
@@ -107,8 +168,9 @@ public struct DnsQuery: Sendable {
 
 /// Captures DNS traffic via BPF and emits DnsQuery events.
 ///
-/// Uses `/dev/bpf*` to capture UDP packets on port 53. Parses DNS wire
-/// format to extract query names, types, and response IPs. Maintains a
+/// Uses `/dev/bpf*` to capture Ethernet/IPv4 UDP packets on port 53 from
+/// the system's primary IPv4 interface. Parses DNS wire format to extract
+/// query names, types, and response IPs. Maintains a
 /// reverse lookup cache (IP → domain) for enriching network events.
 public actor DNSCollector {
 
@@ -124,10 +186,16 @@ public actor DNSCollector {
     private var continuation: AsyncStream<DnsQuery>.Continuation?
     private var captureTask: Task<Void, Never>?
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    private let captureStatusHandler: @Sendable (DNSCaptureStatus) async -> Void
+    private nonisolated let telemetry = DNSCaptureTelemetry()
+    public nonisolated var captureDiagnostics: DNSCaptureDiagnostics { telemetry.snapshot() }
 
     // MARK: - Initialization
 
-    public init() {
+    public init(
+        captureStatusHandler: @escaping @Sendable (DNSCaptureStatus) async -> Void = { _ in }
+    ) {
+        self.captureStatusHandler = captureStatusHandler
         var capturedContinuation: AsyncStream<DnsQuery>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(256)) { continuation in
             capturedContinuation = continuation
@@ -147,9 +215,14 @@ public actor DNSCollector {
 
         let continuation = self.continuation!
         let logger = self.logger
+        let captureStatusHandler = self.captureStatusHandler
+        let telemetry = self.telemetry
 
         captureTask = Task.detached {
-            await Self.captureLoop(continuation: continuation, logger: logger)
+            await Self.captureLoop(
+                continuation: continuation, logger: logger,
+                captureStatusHandler: captureStatusHandler, telemetry: telemetry
+            )
         }
 
         logger.info("DNS collector started")
@@ -160,7 +233,7 @@ public actor DNSCollector {
         _ = beginStop()
     }
 
-    /// Join the BPF/passive capture task. The BPF fd has a one-second read
+    /// Join the BPF capture task. The BPF fd has a one-second read
     /// timeout, so a healthy worker observes cancellation within this bound.
     @discardableResult
     public func stopAndJoin(deadline: TimeInterval = 1.25) async -> Bool {
@@ -215,99 +288,161 @@ public actor DNSCollector {
 
     // MARK: - Interface selection
 
-    /// Interfaces worth attaching a DNS capture to, best first.
-    ///
-    /// A BPF fd can only be bound to ONE interface, and `BIOCSETIF` succeeds for
-    /// any interface that merely exists — including one that is up but carries no
-    /// address and therefore no traffic. So selection is by capability, not by
-    /// name: running, non-loopback links that actually hold an IPv4/IPv6 address,
-    /// followed by `lo0` for a local resolver. Ordering prefers `en*` (physical
-    /// uplinks) over `utun*`/`bridge*`/`awdl*` virtual links.
-    static func captureCandidateInterfaces() -> [String] {
+    /// Only the system's primary IPv4 interface is eligible. A different
+    /// addressed interface is not evidence that it carries the resolver route.
+    /// Scoped/VPN routes and IPv6 transport need separate capture support.
+    static func captureInterface(
+        primaryInterface: String?, addressedIPv4Interfaces: Set<String>
+    ) -> String? {
+        guard let primaryInterface,
+              addressedIPv4Interfaces.contains(primaryInterface) else { return nil }
+        return primaryInterface
+    }
+
+    private static func currentCaptureInterface() -> String? {
+        let key = SCDynamicStoreKeyCreateNetworkGlobalEntity(
+            nil, kSCDynamicStoreDomainState, kSCEntNetIPv4
+        )
+        let state = SCDynamicStoreCopyValue(nil, key) as? [String: Any]
+        let primary = state?[kSCDynamicStorePropNetPrimaryInterface as String] as? String
         var addressed: Set<String> = []
         var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return ["lo0"] }
+        guard getifaddrs(&head) == 0, let first = head else { return nil }
         defer { freeifaddrs(head) }
-
         for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
             let flags = Int32(ptr.pointee.ifa_flags)
             guard flags & IFF_UP == IFF_UP,
                   flags & IFF_RUNNING == IFF_RUNNING,
                   flags & IFF_LOOPBACK == 0,
-                  let addr = ptr.pointee.ifa_addr else { continue }
-            let family = addr.pointee.sa_family
-            guard family == UInt8(AF_INET) || family == UInt8(AF_INET6) else { continue }
+                  ptr.pointee.ifa_addr?.pointee.sa_family == UInt8(AF_INET) else { continue }
             addressed.insert(String(cString: ptr.pointee.ifa_name))
         }
-
-        // Physical uplinks first, then everything else, then loopback.
-        let ranked = addressed.sorted { a, b in
-            let aPhys = a.hasPrefix("en"), bPhys = b.hasPrefix("en")
-            if aPhys != bPhys { return aPhys }
-            return a < b
-        }
-        return ranked + ["lo0"]
+        return captureInterface(primaryInterface: primary, addressedIPv4Interfaces: addressed)
     }
 
     // MARK: - BPF Capture Loop
 
     private static func captureLoop(
         continuation: AsyncStream<DnsQuery>.Continuation,
-        logger: Logger
+        logger: Logger,
+        captureStatusHandler: @escaping @Sendable (DNSCaptureStatus) async -> Void,
+        telemetry: DNSCaptureTelemetry
     ) async {
-        // Try to open a BPF device
-        var bpfFd: Int32 = -1
-        for i in 0..<20 {
-            let path = "/dev/bpf\(i)"
-            bpfFd = open(path, O_RDONLY)
-            if bpfFd >= 0 {
-                logger.info("Opened BPF device: /dev/bpf\(i)")
-                break
-            }
+        var binding = DNSCaptureBinding()
+        var buffer: UnsafeMutableRawPointer?
+        var allocatedLength = 0
+        var nextInterfaceCheck: TimeInterval = 0
+        var statusReporter = DNSCaptureStatusReporter(handler: captureStatusHandler)
+        var lastKernel = bpf_stat()
+        func sampleKernelStatistics() {
+            guard let connection = binding.connection else { return }
+            var current = bpf_stat()
+            if ioctl(connection.descriptor, BIOCGSTATS, &current) == 0 {
+                telemetry.kernel(received: current.received &- lastKernel.received,
+                                 dropped: current.dropped &- lastKernel.dropped)
+                lastKernel = current
+            } else { telemetry.kernelStatisticsFailed() }
         }
-
-        guard bpfFd >= 0 else {
-            logger.warning("DNS collector: cannot open any BPF device (requires root). Using passive mode.")
-            // Fall back to passive DNS collection via log parsing
-            await passiveDNSLoop(continuation: continuation, logger: logger)
-            return
+        defer {
+            sampleKernelStatistics()
+            binding.stop { _ = Darwin.close($0) }
+            telemetry.availability(.unavailable(reason: "capture stopped"))
+            buffer?.deallocate()
         }
-
-        defer { close(bpfFd) }
-
-        // Interface selection is DYNAMIC. It used to be a hardcoded ["en0", "lo0"]
-        // that broke out of the loop on the first BIOCSETIF success — and
-        // BIOCSETIF succeeds on any interface that merely EXISTS. On a Mac whose
-        // uplink is en1 (Wi-Fi, Thunderbolt/USB Ethernet, a second NIC), en0 is
-        // present-but-unaddressed, so the capture attached to a link carrying no
-        // traffic and produced zero DNS events for the life of the install —
-        // silently voiding every domain-based threat-intel comparison, DGA
-        // detection, and the DNS sinkhole. Require an ADDRESSED, running,
-        // non-loopback link; fall back to lo0 for a local resolver.
-        var ifr = ifreq()
-        let interfaces = Self.captureCandidateInterfaces()
-        logger.info("DNS collector: candidate interfaces \(interfaces.joined(separator: ", "), privacy: .public)")
-        var attached = false
-
-        for iface in interfaces {
-            withUnsafeMutablePointer(to: &ifr.ifr_name) { ptr in
-                let raw = UnsafeMutableRawPointer(ptr)
-                _ = iface.withCString { src in
-                    memcpy(raw, src, min(iface.count, 15))
+        while !Task.isCancelled {
+            let now = Foundation.ProcessInfo.processInfo.systemUptime
+            if now >= nextInterfaceCheck {
+                nextInterfaceCheck = now + 1
+                let selected = currentCaptureInterface()
+                sampleKernelStatistics()
+                var openingFailure: String?
+                binding.reconcile(selectedInterface: selected, open: { interface in
+                    lastKernel = bpf_stat() // New descriptor counters start at zero.
+                    let result = openCapture(interface: interface)
+                    openingFailure = result.failure
+                    return result.connection
+                }, close: { _ = Darwin.close($0) })
+                let status: DNSCaptureStatus
+                if let interface = binding.interface {
+                    status = .capturing(interface: interface)
+                } else {
+                    status = .unavailable(reason: openingFailure
+                        ?? "No primary IPv4 interface is available for supported BPF capture")
+                }
+                if await statusReporter.report(status) {
+                    telemetry.availability(status)
+                    switch status {
+                    case .capturing(let interface):
+                        logger.info("DNS collector: capturing Ethernet/IPv4 DNS on \(interface, privacy: .public)")
+                    case .unavailable(let reason):
+                        logger.warning("DNS collector: \(reason, privacy: .public)")
+                    }
                 }
             }
-            if ioctl(bpfFd, BIOCSETIF, &ifr) == 0 {
-                logger.info("BPF attached to interface: \(iface)")
-                attached = true
-                break
+            guard let connection = binding.connection else {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                continue
+            }
+            if allocatedLength != connection.bufferLength {
+                buffer?.deallocate()
+                buffer = UnsafeMutableRawPointer.allocate(
+                    byteCount: connection.bufferLength, alignment: MemoryLayout<UInt32>.alignment
+                )
+                allocatedLength = connection.bufferLength
+            }
+            guard let buffer else { return }
+            let bytesRead = read(connection.descriptor, buffer, connection.bufferLength)
+            if bytesRead < 0 {
+                if errno == EINTR { continue }
+                if errno == EAGAIN { continue }
+                let reason = "BPF read failed (errno \(errno)); retrying capture"
+                sampleKernelStatistics()
+                binding.stop { _ = Darwin.close($0) }
+                telemetry.availability(.unavailable(reason: reason))
+                if await statusReporter.report(.unavailable(reason: reason)) {
+                    logger.warning("DNS collector: \(reason, privacy: .public)")
+                }
+                continue
+            }
+            if bytesRead == 0 { continue }
+            forEachCapturedDNS(in: UnsafeRawBufferPointer(start: buffer, count: bytesRead)) {
+                telemetry.yielded(continuation.yield($0))
             }
         }
+    }
 
-        guard attached else {
-            logger.error("DNS collector: failed to attach BPF to any interface")
-            return   // bpfFd is closed by the `defer` above — no explicit (double) close
+    /// Configure every new binding completely before it can enter the read loop.
+    /// Ethernet offsets cannot be used on loopback or utun data-link formats.
+    private static func openCapture(interface: String) -> (
+        connection: DNSCaptureBinding.Connection?, failure: String?
+    ) {
+        var bpfFd: Int32 = -1
+        for index in 0..<20 {
+            bpfFd = Darwin.open("/dev/bpf\(index)", O_RDONLY)
+            if bpfFd >= 0 { break }
         }
-
+        guard bpfFd >= 0 else {
+            return (nil, "BPF unavailable (errno \(errno)); capture requires root")
+        }
+        var keepOpen = false
+        defer { if !keepOpen { _ = Darwin.close(bpfFd) } }
+        var ifr = ifreq()
+        guard interface.utf8.count < MemoryLayout.size(ofValue: ifr.ifr_name) else {
+            return (nil, "Primary interface name does not fit the platform interface request")
+        }
+        withUnsafeMutablePointer(to: &ifr.ifr_name) { name in
+            _ = interface.withCString { memcpy(name, $0, interface.utf8.count + 1) }
+        }
+        guard ioctl(bpfFd, BIOCSETIF, &ifr) == 0 else {
+            return (nil, "Cannot bind BPF to \(interface) (errno \(errno))")
+        }
+        var dataLinkType: UInt32 = 0
+        guard ioctl(bpfFd, BIOCGDLT, &dataLinkType) == 0 else {
+            return (nil, "Cannot read BPF data-link type (errno \(errno))")
+        }
+        guard dataLinkType == ethernetDataLinkType else {
+            return (nil, "Unsupported BPF data-link type \(dataLinkType) on \(interface); Ethernet/IPv4 required")
+        }
         // Set BPF filter for UDP port 53
         // BPF filter: ip and udp and (port 53)
         var bpfProgram = bpf_program(bf_len: 0, bf_insns: nil)
@@ -327,103 +462,78 @@ public actor DNSCollector {
             bpf_insn(code: 0x06, jt: 0, jf: 0, k: 0),    // ret #0
         ]
 
-        filterInstructions.withUnsafeBufferPointer { ptr in
+        let filterResult = filterInstructions.withUnsafeBufferPointer { ptr -> Int32 in
             bpfProgram.bf_len = UInt32(ptr.count)
             bpfProgram.bf_insns = UnsafeMutablePointer(mutating: ptr.baseAddress!)
-            ioctl(bpfFd, BIOCSETF, &bpfProgram)
+            return ioctl(bpfFd, BIOCSETF, &bpfProgram)
         }
-
-        // Set immediate mode
+        guard filterResult == 0 else {
+            return (nil, "Cannot install DNS BPF filter (errno \(errno))")
+        }
         var enable: UInt32 = 1
-        ioctl(bpfFd, BIOCIMMEDIATE, &enable)
-
-        // Set a 1s read timeout so a blocking read() returns periodically and
-        // the !Task.isCancelled guard is re-checked even when no DNS packets
-        // match the filter (otherwise read() blocks forever and the capture
-        // Task can't observe cancellation on shutdown). A timeout returns 0,
-        // which falls through to the existing sleep+continue branch below.
-        var readTimeout = timeval(tv_sec: 1, tv_usec: 0)
-        ioctl(bpfFd, BIOCSRTIMEOUT, &readTimeout)
-
-        // Get buffer size
-        var bufLen: UInt32 = 0
-        ioctl(bpfFd, BIOCGBLEN, &bufLen)
-        if bufLen == 0 { bufLen = 4096 }
-
-        let buffer = UnsafeMutableRawPointer.allocate(byteCount: Int(bufLen), alignment: 1)
-        defer { buffer.deallocate() }
-
-        logger.info("DNS BPF capture active (buffer: \(bufLen) bytes)")
-
-        // Read loop
-        while !Task.isCancelled {
-            let bytesRead = read(bpfFd, buffer, Int(bufLen))
-            guard bytesRead > 0 else {
-                if bytesRead < 0 && errno == EINTR { continue }
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                continue
-            }
-
-            // Parse BPF packets
-            var offset = 0
-            while offset + MemoryLayout<bpf_hdr>.size <= bytesRead {
-                let hdr = buffer.advanced(by: offset).assumingMemoryBound(to: bpf_hdr.self).pointee
-                let packetStart = offset + Int(hdr.bh_hdrlen)
-                let packetLen = Int(hdr.bh_caplen)
-
-                // Bounds check: ensure packet data is fully within the read buffer
-                guard packetStart >= 0,
-                      packetLen >= 0,
-                      packetStart + packetLen <= bytesRead else {
-                    break
-                }
-
-                if packetLen > 42 { // Minimum: 14 (eth) + 20 (IP) + 8 (UDP) + DNS header
-                    let packetData = Data(bytes: buffer.advanced(by: packetStart), count: packetLen)
-                    if let query = parseDNSPacket(packetData) {
-                        continuation.yield(query)
-                    }
-                }
-
-                // Advance to next BPF packet (aligned)
-                let advance = BPF_WORDALIGN(Int(hdr.bh_hdrlen) + Int(hdr.bh_caplen))
-                guard advance > 0 else { break } // Prevent infinite loop on zero-advance
-                offset += advance
-            }
+        guard ioctl(bpfFd, BIOCIMMEDIATE, &enable) == 0 else {
+            return (nil, "Cannot enable immediate BPF reads (errno \(errno))")
         }
+        // Bound idle reads so route changes and cancellation are observed.
+        var readTimeout = timeval(tv_sec: 1, tv_usec: 0)
+        guard ioctl(bpfFd, BIOCSRTIMEOUT, &readTimeout) == 0 else {
+            return (nil, "Cannot bound BPF read timeout (errno \(errno))")
+        }
+        var bufferLength: UInt32 = 0
+        guard ioctl(bpfFd, BIOCGBLEN, &bufferLength) == 0, bufferLength > 0 else {
+            return (nil, "Cannot read BPF buffer length (errno \(errno))")
+        }
+        keepOpen = true
+        return (.init(descriptor: bpfFd, bufferLength: Int(bufferLength)), nil)
     }
 
-    // MARK: - Passive DNS (fallback when BPF not available)
-
-    /// Passive DNS collection via `log stream` watching mDNSResponder.
-    private static func passiveDNSLoop(
-        continuation: AsyncStream<DnsQuery>.Continuation,
-        logger: Logger
-    ) async {
-        logger.info("DNS collector in passive mode (Unified Log mDNSResponder)")
-        // In passive mode, DNS events come through UnifiedLogCollector
-        // This task just keeps the collector alive
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 60_000_000_000)
+    /// Iterate the production BPF records using the macOS <net/bpf.h> ABI.
+    /// BPF_ALIGNMENT is sizeof(int32_t), including on LP64 platforms.
+    static func forEachCapturedDNS(
+        in buffer: UnsafeRawBufferPointer, consume: (DnsQuery) -> Void
+    ) {
+        var offset = 0
+        while offset + MemoryLayout<bpf_hdr>.size <= buffer.count {
+            let header = buffer.loadUnaligned(fromByteOffset: offset, as: bpf_hdr.self)
+            let headerLength = Int(header.bh_hdrlen)
+            let packetLength = Int(header.bh_caplen)
+            guard headerLength >= MemoryLayout<bpf_hdr>.size,
+                  headerLength <= buffer.count - offset,
+                  packetLength <= buffer.count - offset - headerLength else { return }
+            let packetStart = offset + headerLength
+            let packet = Data(buffer[packetStart..<(packetStart + packetLength)])
+            if let query = parseDNSPacket(packet, timestamp: header.timestamp) { consume(query) }
+            offset += bpfWordAlign(headerLength + packetLength)
         }
     }
 
     // MARK: - DNS Wire Format Parser
 
-    /// Parse a DNS packet from Ethernet frame data.
-    private static func parseDNSPacket(_ data: Data) -> DnsQuery? {
-        guard data.count > 42 else { return nil }
-
-        // Skip Ethernet header (14 bytes)
+    /// Parse one standard DNS question over Ethernet/IPv4/UDP. Compression
+    /// offsets are relative to the DNS message, never to the Ethernet frame.
+    static func parseDNSPacket(_ packet: Data, timestamp: Date = Date()) -> DnsQuery? {
+        guard packet.count >= 14 + 20 + 8 + 12,
+              packet[12] == 0x08, packet[13] == 0x00 else { return nil }
         let ipStart = 14
-        let ipHeaderLen = Int(data[ipStart] & 0x0F) * 4
-        let udpStart = ipStart + ipHeaderLen
-
-        guard udpStart + 8 < data.count else { return nil }
-
-        // UDP payload starts after 8-byte UDP header
-        let dnsStart = udpStart + 8
-        guard dnsStart + 12 < data.count else { return nil }
+        let ipHeaderLength = Int(packet[ipStart] & 0x0F) * 4
+        guard packet[ipStart] >> 4 == 4, ipHeaderLength >= 20,
+              packet[ipStart + 9] == 17 else { return nil }
+        let ipLength = Int(packet[ipStart + 2]) << 8 | Int(packet[ipStart + 3])
+        let fragment = UInt16(packet[ipStart + 6]) << 8 | UInt16(packet[ipStart + 7])
+        guard fragment & 0x3FFF == 0,
+              ipLength >= ipHeaderLength + 8 + 12,
+              ipLength <= packet.count - ipStart else { return nil }
+        let udpStart = ipStart + ipHeaderLength
+        let sourcePort = UInt16(packet[udpStart]) << 8 | UInt16(packet[udpStart + 1])
+        let destinationPort = UInt16(packet[udpStart + 2]) << 8 | UInt16(packet[udpStart + 3])
+        let udpLength = Int(packet[udpStart + 4]) << 8 | Int(packet[udpStart + 5])
+        guard sourcePort == 53 || destinationPort == 53,
+              udpLength >= 8 + 12,
+              udpLength <= ipLength - ipHeaderLength else { return nil }
+        // Data(...) rebases indices to zero; padding after the UDP datagram is
+        // not part of the DNS message or its compression-pointer address space.
+        let data = Data(packet[(udpStart + 8)..<(udpStart + udpLength)])
+        let dnsStart = 0
 
         // DNS header (12 bytes)
         let flags = UInt16(data[dnsStart + 2]) << 8 | UInt16(data[dnsStart + 3])
@@ -432,7 +542,7 @@ public actor DNSCollector {
         let qdCount = UInt16(data[dnsStart + 4]) << 8 | UInt16(data[dnsStart + 5])
         let anCount = UInt16(data[dnsStart + 6]) << 8 | UInt16(data[dnsStart + 7])
 
-        guard qdCount >= 1 else { return nil }
+        guard qdCount == 1 else { return nil }
 
         // Parse question section
         var offset = dnsStart + 12
@@ -490,14 +600,13 @@ public actor DNSCollector {
             responseCode: responseCode,
             resolvedIPs: resolvedIPs,
             isResponse: isResponse,
-            timestamp: Date()
+            timestamp: timestamp
         )
     }
 
     /// Parse a DNS domain name from wire format (handles compression pointers).
-    /// `internal` (not private) so the compression-pointer cycle guard and
-    /// length bounds can be fuzzed with hand-built adversarial packets — a
-    /// self-referential pointer must terminate, not hang the BPF read loop.
+    /// The buffer starts at the DNS header, so compression pointers retain
+    /// their RFC 1035 message-relative meaning.
     static func parseDomainName(_ data: Data, offset: Int) -> (String, Int)? {
         var labels: [String] = []
         var pos = offset
@@ -544,8 +653,9 @@ public actor DNSCollector {
         return name.isEmpty ? nil : (name, bytesConsumed)
     }
 
-    /// BPF alignment macro equivalent.
-    private static func BPF_WORDALIGN(_ x: Int) -> Int {
-        (x + (MemoryLayout<Int>.size - 1)) & ~(MemoryLayout<Int>.size - 1)
+    /// macOS BPF_WORDALIGN, whose alignment is four bytes even on LP64.
+    static func bpfWordAlign(_ byteCount: Int) -> Int {
+        let alignment = MemoryLayout<Int32>.size
+        return (byteCount + alignment - 1) & ~(alignment - 1)
     }
 }

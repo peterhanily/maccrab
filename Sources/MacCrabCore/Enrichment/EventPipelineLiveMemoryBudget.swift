@@ -305,6 +305,36 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
         return result
     }
 
+    /// Opt-in deadline for callers with an existing end-to-end time budget.
+    /// The ordinary lossless acquisition above keeps its unbounded semantics.
+    /// Structured cancellation joins both children before returning, including
+    /// removal of a queued waiter or release of a concurrently assigned lease.
+    public func acquire(
+        bytes: Int,
+        owner: EventPipelineMemoryOwner,
+        deadline: ContinuousClock.Instant
+    ) async -> EventPipelineMemoryLease? {
+        let clock = ContinuousClock()
+        guard !Task.isCancelled, clock.now < deadline else { return nil }
+        var lease = await withTaskGroup(of: EventPipelineMemoryLease?.self) { group in
+            group.addTask { await self.acquire(bytes: bytes, owner: owner) }
+            group.addTask {
+                try? await clock.sleep(until: deadline)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        // Scheduling can deliver an acquisition after its deadline or after
+        // caller cancellation. Release that credit here, before returning nil.
+        guard !Task.isCancelled, clock.now < deadline else {
+            lease = nil
+            return nil
+        }
+        return lease
+    }
+
     public func snapshot() -> EventPipelineLiveMemorySnapshot {
         lock.lock()
         var owners: [String: Int] = [:]

@@ -49,7 +49,7 @@ struct JSONTreeView: View {
                     Divider()
                 }
                 if artifacts.count > 200 {
-                    Text("Showing first 200 of \(artifacts.count) artifacts.")
+                    Text(String(localized: "ui.JSONTreeView.showing.first.200.of.artifacts", defaultValue: "Showing first 200 of \(artifacts.count) artifacts."))
                         .scaledSystem(11)
                         .foregroundStyle(.tertiary)
                         .padding(.top, 6)
@@ -80,7 +80,7 @@ struct JSONTreeView: View {
         VStack(alignment: .leading, spacing: 4) {
             recordFields(a)
             if !a.record.data.isEmpty {
-                Text("data:")
+                Text(verbatim: "data:")
                     .scaledSystem(10, weight: .semibold, design: .monospaced)
                     .foregroundStyle(.tertiary)
                     .padding(.top, 4)
@@ -142,10 +142,10 @@ struct JSONNodeView: View {
         case .bool(let b):
             Text(b ? "true" : "false").font(leafFont).foregroundStyle(.purple)
         case .null:
-            Text("null").font(leafFont).foregroundStyle(.tertiary)
+            Text(verbatim: "null").font(leafFont).foregroundStyle(.tertiary)
         case .array(let arr):
             if depth >= Self.maxDepth {
-                Text("[…] (\(arr.count) items, max depth)").font(leafFont).foregroundStyle(.tertiary)
+                Text(String(localized: "ui.finalPrefix.JSONTreeView.items.max.depth", defaultValue: "[…] (\(arr.count) items, max depth)")).font(leafFont).foregroundStyle(.tertiary)
             } else {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(Array(arr.enumerated()), id: \.offset) { idx, item in
@@ -159,7 +159,7 @@ struct JSONNodeView: View {
             }
         case .object(let obj):
             if depth >= Self.maxDepth {
-                Text("{…} (\(obj.count) keys, max depth)").font(leafFont).foregroundStyle(.tertiary)
+                Text(String(localized: "ui.finalPrefix.JSONTreeView.keys.max.depth", defaultValue: "{…} (\(obj.count) keys, max depth)")).font(leafFont).foregroundStyle(.tertiary)
             } else {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(obj.keys.sorted(), id: \.self) { k in

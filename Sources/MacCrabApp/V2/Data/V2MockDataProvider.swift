@@ -45,7 +45,7 @@ public final class V2MockDataProvider: V2DataProvider {
     public func suppressCampaign(id: String) async -> Int { 1 }
     public func refreshThreatIntel() async -> Bool { true }
     public func suppressions() async -> [V2SuppressionEntry] { [] }
-    public func liftSuppression(ruleId: String, scope: String) async -> Bool { true }
+    public func liftSuppression(id: String) async -> Bool { true }
     public func traceMembers(traceId: String) async -> [V2TraceMember] { [] }
     public func traceEdges(traceId: String) async -> [V2TraceEdge] { [] }
 

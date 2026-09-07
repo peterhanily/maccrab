@@ -229,7 +229,11 @@ public struct V2MockRule: Identifiable, Sendable, Hashable {
     public let mitre: [String]
     public let isEnabled: Bool
     public let lastFired: Date?
+    /// Legacy field name; live values are cumulative within the verified boot.
     public let firesLastWeek: Int
+    public let telemetryCoverage: V2RuleCoverage
+    public let telemetryWrittenAt: Date?
+    public var recordedMatchesDisplay: String { telemetryCoverage == .unknown ? "—" : String(firesLastWeek) }
     public let isCustom: Bool
     public let description: String
     /// Original Sigma status (stable / test / experimental / deprecated). nil
@@ -251,7 +255,8 @@ public struct V2MockRule: Identifiable, Sendable, Hashable {
     public init(id: String, title: String, category: String, severity: V2Severity,
                 mitre: [String], isEnabled: Bool, lastFired: Date?, firesLastWeek: Int,
                 isCustom: Bool, description: String, status: String? = nil,
-                severityOverrideRaw: String? = nil) {
+                severityOverrideRaw: String? = nil,
+                telemetryCoverage: V2RuleCoverage = .unknown, telemetryWrittenAt: Date? = nil) {
         self.id = id
         self.title = title
         self.category = category
@@ -260,6 +265,8 @@ public struct V2MockRule: Identifiable, Sendable, Hashable {
         self.isEnabled = isEnabled
         self.lastFired = lastFired
         self.firesLastWeek = firesLastWeek
+        self.telemetryCoverage = telemetryCoverage
+        self.telemetryWrittenAt = telemetryWrittenAt
         self.isCustom = isCustom
         self.description = description
         self.status = status

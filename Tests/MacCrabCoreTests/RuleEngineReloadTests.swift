@@ -20,8 +20,8 @@ struct RuleEngineReloadTests {
     /// An isolated rules directory holding `count` real compiled rules copied
     /// from the project's compiled output (so we exercise the real decoder).
     private func makeRulesDir(count: Int) throws -> URL {
-        ensureRulesCompiled()
-        let src = URL(fileURLWithPath: "/tmp/maccrab_v3")
+        try ensureRulesCompiled()
+        let src = compiledRulesDirectory
         let dst = FileManager.default.temporaryDirectory
             .appendingPathComponent("reload-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dst, withIntermediateDirectories: true)

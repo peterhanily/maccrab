@@ -13,7 +13,7 @@ import Testing
 
 @Suite("ES OPEN rule reachability")
 struct ESOpenRuleReachabilityTests {
-    private let compiledDir = URL(fileURLWithPath: "/tmp/maccrab_v3")
+    private let compiledDir = compiledRulesDirectory
     private let base = Date(timeIntervalSince1970: 1_700_000_000)
     private let rootPid: Int32 = 700
     private let childPid: Int32 = 701
@@ -145,7 +145,7 @@ struct ESOpenRuleReachabilityTests {
     }
 
     private func stableRuleEngine() async throws -> RuleEngine {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
         _ = try await engine.loadRules(from: compiledDir, enabledStatuses: ["stable"])
         return engine
@@ -335,7 +335,7 @@ struct ESOpenRuleReachabilityTests {
         #expect(Set(FileContentEnricher.agentConfigFileSuffixes) == expected,
                 "FileContent enrichment drifted from the nine shipped predicates")
 
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let mcpRule = try jsonObject(
             at: compiledDir.appendingPathComponent("mcp_server_suspicious_command.json")
         )
@@ -358,7 +358,7 @@ struct ESOpenRuleReachabilityTests {
 
     @Test("stable HIGH CLOSE census contains only known modified-write rules; read rules use OPEN")
     func closeSemanticsCensus() throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let expectedWriteCloseRules: Set<String> = [
             "690711f9-8a8d-49e4-9124-0710e7d26398", // executable write into .claude
             "d1a2b3c4-2031-4000-a000-000000002031", // config content write
@@ -465,7 +465,7 @@ struct ESOpenRuleReachabilityTests {
 
     @Test("every pip credential predicate is wholly covered by a narrow callback literal")
     func pipCredentialPredicatesMatchCallbackAdmission() throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let object = try jsonObject(at: compiledDir.appendingPathComponent(
             "sequences/pip_install_to_credential_harvest.json"
         ))
@@ -502,7 +502,7 @@ struct ESOpenRuleReachabilityTests {
     // MARK: - Corpus helpers
 
     private func sequenceFires(_ ruleID: String, events: [Event]) async throws -> Bool {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let lineage = ProcessLineage()
         await lineage.recordProcess(
             pid: rootPid, ppid: 1, path: "/private/tmp/root", name: "root", startTime: base

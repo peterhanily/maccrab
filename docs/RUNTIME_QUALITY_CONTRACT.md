@@ -10,6 +10,13 @@ candidate. Thresholds may be revised before a candidate is built, with a
 written rationale; they are never relaxed after a failed run merely to make
 that candidate pass.
 
+The inherited CPU/write/drain ceilings below are provisional regression
+thresholds, not independently accepted workstation budgets. Earlier write and
+GUI thresholds were changed using observations of the candidate series; a
+passing result cannot validate that choice. Release acceptance still requires
+a recorded workload, independently justified user-facing resource targets, and
+measurements of the actual statistics the validator enforces.
+
 ## Feature contract
 
 Every runtime feature must identify all of the following before it is enabled
@@ -124,27 +131,27 @@ reference Mac using the recorded normal-plus-burst workload:
 
 | Surface | Blocking requirement |
 |---|---|
-| Process | One engine PID for the epoch; no crash, watchdog exit, or relaunch. |
+| Process | One engine PID and boot identity for the epoch; monotonic engine uptime at least 250 seconds at t0 and consistent with captured heartbeat intervals. Every observation also binds the native process-start identity and running CDHash to an attested arm64 or x86_64 system-extension slice, with an unchanged executable path and candidate file hash. Signed version/build checks use actual bounded endpoint inspection times. No crash, watchdog exit, or relaunch. |
 | Conservation | Offered equals completed + queued + in-flight + explicitly shed at every lane and persistence boundary. |
-| Fixed workload | The minute-5 burst must move and fully drain both ingress and event-persistence lanes with zero persistence shed. Its measured peak must reach at least 1,274 combined offered events/s, the previously observed failure-state rate; a conserving idle collector does not pass. |
+| Fixed workload | The minute-5 burst must move and fully drain both ingress and event-persistence lanes with zero persistence shed. The drain deadline is offset 780 seconds. At flow-through boundaries, a queue may remain at most 512, non-growing, with positive completions and zero in-flight work; transient queues must be empty at t0. Its measured peak must reach at least 1,274 combined offered events/s, the previously observed failure-state rate; a conserving idle collector does not pass. |
 | Priority fidelity | Zero priority-lane, kernel, callback-copy, or upstream collector loss. |
 | File fidelity | Zero unclassified queue loss. Semantic rejects/coalesces must be attributable to a tested reason that is conservative against the complete enabled rule corpus. |
 | Correlation continuity | At least 900 seconds of sequence recovery coverage and zero checkpoint/journal shed. The source-bound phase-1 clean CI exercises restart, rule reload, expiry, and rule-hash mismatch semantics; the installed engine must also log a successful non-empty SIGHUP reload with no rejection/error and survive later samples. The runtime report does not claim a live restart it did not perform. |
 | Event storage | No unreachable-budget fault and no prune/VACUUM/refill loop. Search-tier gaps, if any, reconcile exactly and are visible. |
-| TraceGraph | At least 99% hard-writable duty and at least 99% foreground-mutation-accepting duty, no mutation/ingest shed, no failed event/batch/row epoch delta, and no recovery oscillation. The bounded recovery-writer ledger must conserve at every sample; its high-watermark stays within the fixed limit, saturation is false and its cumulative counter remains zero throughout, completed and live waits never exceed five seconds, and the final waiter count/oldest wait are zero. Batch/row/observation/coalescing/physical-suppression accounting remains exact. The rule-neutral minute-5 burst must produce positive equal physical-suppressed event and row deltas. Proof-safe suppression is separate from loss and monotonic; no unmeasured coalescing-bound assertion is accepted. |
+| TraceGraph | Hard-writable and foreground-mutation-accepting at every captured observation (the 99% sample-fraction floors permit no failed sample in the fixed 31-sample epoch), no mutation/ingest shed, no failed event/batch/row epoch delta, and no recovery oscillation. The bounded recovery-writer ledger must conserve at every sample; its high-watermark stays within the fixed limit, saturation is false and its cumulative counter remains zero throughout, completed and live waits never exceed five seconds, and the final waiter count/oldest wait are zero. Batch/row/observation/coalescing/physical-suppression accounting remains exact. The rule-neutral minute-5 burst must produce positive equal physical-suppressed event and row deltas. Proof-safe suppression is separate from loss and monotonic; no unmeasured coalescing-bound assertion is accepted. |
 | TraceStore | Agent Traces and the loopback receiver are enabled. `traces.db` is available, unblocked, below its writer-admission threshold and free-space floor, and not recovering at every sample. A fixed OTLP span must increase and fully drain the real TraceStore ingest ledger with zero shed. |
-| Disk writes | Engine average at most 1 MiB/s over the epoch and no 60-second interval above 4 MiB/s; no macOS disk-writes diagnostic. |
-| CPU | Engine average at most 0.50 CPU core over the epoch. Background GUI p95 at most 10% of one core. |
+| Disk writes | Provisional engine average at most 8 MiB/s over the epoch; every captured interval and every sample-aligned span up to 60 seconds at most 48 MiB/s; no macOS disk-writes diagnostic. |
+| CPU | Engine average at most 0.50 CPU core over the epoch. Provisional background GUI nearest-rank p95 of `ps pcpu` snapshots at most 20% of one core, including the prescribed burst. Exactly one running candidate GUI must be present at every sample with unchanged PID, native process-start identity, executable path, candidate file hash and kernel-reported running CDHash. The running CDHash must identify an attested arm64 or x86_64 candidate slice; signed version/build identity is checked at the epoch boundaries using actual bounded inspection timestamps. Missing or ambiguous GUI presence fails; measured zero CPU from a verified present GUI is valid. |
 | Memory | Engine physical footprint (phys_footprint) at most 450 MiB and growth from minute 5 to minute 15 at most 64 MiB. |
 | Disk safety | Every SQLite family stays beneath its exact DB+WAL+SHM cap and preserves the configured free-space floor. |
 | Rules | Sealed rules synchronize before readers, corpus parity holds, and ordinary launch produces no administrator-password flow. |
-| AI quality | Alert investigation is configured and healthy before t0. Every sample carries conserving schema-2 fixed-cardinality telemetry. Both the prewarm and minute-5 harmless HIGH-alert triggers must each create exactly one new row for their unique executable path; the same stable alert ID must acquire non-empty, schema-valid investigation JSON and reconcile with one or more newly started operations, `accepted == started`, zero final rejection, zero unattributed requests, and no unfinished operation. Benign concurrent investigations are allowed but cannot substitute for the causal row proof. Disabled, ambiguous, unrelated-only, or zero-operation runs fail. |
+| AI quality | Both configured and unconfigured AI are valid declared configurations. Each prewarm and minute-5 harmless HIGH-alert trigger must create exactly one committed alert for its unique executable path. With AI configured, that same stable alert ID must acquire schema-valid investigation JSON and reconcile with conserving schema-2 telemetry: newly started operations, `accepted == started`, zero final rejection, zero unattributed requests, and no unfinished operation. With AI unconfigured, no investigation operation may be claimed and the causal committed alerts are still required. Configuration cannot change during the epoch. |
 | Shipped tools | `maccrabctl version` and `maccrab-mcp --version` execute after signing and directly from the mounted DMG under normal SIP/AMFI policy. |
 | Evidence | Candidate report binds source commit/tree, DMG SHA-256, signing/notarization, payload inventory, and the complete host measurements above. |
 
 ### Machine-readable evidence
 
-`scripts/candidate-qualification.py` is the executable form of this table.
+`scripts/candidate-qualification.py` is the executable form of this table. GUI CPU percentages are sampled `ps` observations, not interval CPU-counter deltas. Per-sample native running-image identity, file hashes and endpoint signing checks bind the GUI evidence to the candidate. This also distinguishes an older process still running after its app was replaced on disk. The checks do not attest which screen is visible or prove interaction, continuous between-sample presence, or sub-interval CPU/write peaks. The operator must also exercise the packaged dashboard as prescribed. Sample-aligned rolling write checks reuse the captured cumulative deltas; they are not arbitrary continuous sliding windows.
 `release.sh` records the inspected candidate at
 `.qualification-evidence/MacCrab-v<VERSION>.candidate.json` and creates the
 intentionally failing template
@@ -177,7 +184,9 @@ rule and its real installed alert-investigation path. The recorder opens the
 installed `alerts.db` read-only and no-follow, binds that exact unique process
 path and the trigger-time boundary as query parameters, requires exactly one
 new causal row, retains its stable alert ID, and validates the investigation
-JSON stored on that same row. A global telemetry increase without that row is
+JSON stored on that same row when AI is configured. With AI unconfigured, it
+still requires the causal committed alert and rejects invented investigation
+activity. A global telemetry increase without that row is
 not proof.
 
 The pressure files are created only beneath the unique
@@ -186,7 +195,8 @@ recorder checks that representative paths do not match a fixed filename
 predicate in any stable sequence's later-step corpus. A separate small,
 non-networking shell probe exercises sequence journal admission and expiry;
 bulk pressure and sequence continuity are distinct proofs. The workload must
-exit by offset 390, every required queue must drain by offset 450, and every
+exit by offset 390, every required boundary must satisfy its declared drain
+contract by offset 780, and every
 process in its dedicated process group is terminated and reaped on failure.
 Both transitive workload executors and their SHA-256 values are part of the
 workload binding. The recorder leaves a restart-safe
@@ -201,8 +211,8 @@ CPU and disk-write totals, engine physical footprint (phys_footprint), GUI backg
 conservation-boundary snapshot, all five zero-loss counters, and LLM quality
 state. Aggregate PASS fields must reconcile to those raw observations.
 
-Before recording, enable Agent Traces/the loopback receiver and configure an
-alert-investigation LLM. Initial readiness requires every storage family,
+Before recording, enable Agent Traces/the loopback receiver and record whether
+an alert-investigation LLM is configured. Initial readiness requires every storage family,
 loss/conservation ledger, and circuit state to be sound, then drains pending
 queues before prewarm. It permits the one expected never-used-backend state:
 configured schema-2 telemetry with no prior successful request may still report
@@ -213,13 +223,15 @@ LLM health, and a complete transient-work queue drain before setting
 delta. The sequence journal's `queued` gauge is durable detection working state,
 not transient writer work: it may remain nonzero while its conservation ledger,
 exact pending-depth cross-check, continuity state, and zero shed/eviction gates
-hold. All later samples require full LLM readiness.
+hold. All later samples require full LLM readiness when configured. An unconfigured
+backend instead requires zero investigation operations throughout. Both modes
+require at least 250 seconds of monotonic engine uptime before t0.
 
 The recorder fails before starting the 900-second timer when the running engine
 has any cumulative loss/shed/eviction or failed-write counter, an unreachable
 or sticky storage budget, a blocked alert family, a non-accepting or saturated
 TraceGraph recovery-writer barrier, a non-writable TraceStore, an
-open/failed LLM backend, an over-cap SQLite family, or a free-space-floor
+open/failed configured LLM backend, an over-cap SQLite family, or a free-space-floor
 violation. It also fails during the epoch as soon as one of those states
 appears; it does not wait out the remaining samples. In particular, it never
 derives shed from a balancing residual and never invents offered/completed
@@ -230,7 +242,7 @@ producers. A disabled or startup-blocked TraceStore does not publish a synthetic
 zero ledger and cannot qualify. This is a release-readiness requirement, not an
 operator field to fill by hand.
 
-The v1 schema has an explicit completeness inventory. Conservation must contain
+The runtime schema has an explicit completeness inventory. Conservation must contain
 exactly these shipping boundaries: `priority-ingress`, `file-ingress`,
 `priority-event-persistence`, `file-event-persistence`,
 `sequence-checkpoint`, `sequence-journal`, `trace-graph-mutation`, and
@@ -244,17 +256,28 @@ a gate/schema update so omission cannot manufacture a pass.
 
 ### Clean process epoch versus erased state
 
+The report embeds a versioned counter-scope policy. Loss and failed-outcome
+counters are absolute across the current process and retained durable evidence
+ledgers. Completed-wait maxima and saturation history cover the entire current
+process, including startup and prewarm; maxima are never subtracted. Current
+faults must be absent at every observation. CPU and disk rates use captured
+epoch deltas and actual windows. These deliberately strict qualification rules
+are distinct from product health, where a verified recovery can clear an active
+fault while preserving lifetime error history. Warmup does not erase losses.
+
 Cumulative process counters make a previously contaminated daemon epoch
 ineligible. Preserve the failed capture, heartbeat, status output, and relevant
 logs first; then gracefully deactivate and reactivate Protection (or install
-and activate the exact candidate) and confirm that the engine PID changed.
+and activate the exact candidate) and confirm that both the engine PID and boot identity changed. The recorder
+binds the process start identity and monotonic age in every observation; PID
+reuse alone cannot satisfy this contract.
 Wait for startup storage recovery to finish and run the recorder again with
 the shipping configuration and existing databases. This obtains a fresh
 process epoch without concealing whether the repaired candidate can recover
 real retained state.
 
 Do not delete SQLite files, run `make clear-data`, raise a configured cap,
-disable the LLM/TraceStore, or use `--sqlite-cap` for a shipping family to turn
+disable a configured LLM or TraceStore, or use `--sqlite-cap` for a shipping family to turn
 a failed run green. `make clear-data` is especially unsafe while the installed
 system extension owns open databases. A wiped-data run is a separate
 clean-install test lane and cannot rescue publication after the retained-state
@@ -295,8 +318,9 @@ failed metric after seeing the result.
 
 ## Verification cadence
 
-Use focused suites and deterministic fixtures while developing. At source
-freeze, run one complete Swift suite and one clean local-CI gate. Then build one
+Use source review and deterministic fixtures while developing. At source
+freeze, run one complete serial Swift suite under a deadline and one clean
+local-CI gate; a filtered pass is not a suite verdict. Then build one
 universal signed/notarized candidate and run the installed-host gate above.
 Repeat the expensive full gates only for a reproduced flake, a concurrency-risk
 change, or a new source tree. This keeps assurance high without using repeated

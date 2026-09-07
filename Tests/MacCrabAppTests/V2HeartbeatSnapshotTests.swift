@@ -628,10 +628,16 @@ struct V2HeartbeatSnapshotTests {
         ])
         defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
         let snapshot = try #require(V2HeartbeatSnapshot.decode(at: path.path))
-        #expect(snapshot.alertEvidenceBudget?.eventsAndAlertsTotalCapBytes
-            == 620 * 1_048_576)
-        #expect(snapshot.alertEvidenceBudget?.eventsAndAlertsSteadyStateTotalCapBytes
-            == 520 * 1_048_576)
+        // Explicit Int64 operands avoid AnyHashable equality inference in the
+        // assertion macro while requiring both decoded capacities to be present.
+        let totalCapBytes: Int64 = try #require(
+            snapshot.alertEvidenceBudget?.eventsAndAlertsTotalCapBytes)
+        let steadyStateCapBytes: Int64 = try #require(
+            snapshot.alertEvidenceBudget?.eventsAndAlertsSteadyStateTotalCapBytes)
+        let expectedTotalCapBytes: Int64 = 620 * 1_048_576
+        let expectedSteadyStateCapBytes: Int64 = 520 * 1_048_576
+        #expect(totalCapBytes == expectedTotalCapBytes)
+        #expect(steadyStateCapBytes == expectedSteadyStateCapBytes)
         #expect(snapshot.alertEvidenceBudget?.captureConservationMaintained == true)
         #expect(snapshot.alertEvidenceBudget?.captureDegraded == true)
         #expect(snapshot.timerLifecycle?.inFlightHandlers == 1)

@@ -121,9 +121,9 @@ private func attributedFileWrite(
 /// Compile all rules once per test run (cached by the shared lock) and
 /// return a ready-to-query engine.
 private func loadedEngine() async throws -> RuleEngine {
-    ensureRulesCompiled()
+    try ensureRulesCompiled()
     let engine = RuleEngine()
-    _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+    _ = try await engine.loadRules(from: compiledRulesDirectory)
     return engine
 }
 

@@ -93,7 +93,7 @@ struct V2KitDetailSheet: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(String(localized: "kit.encryptedTitle", defaultValue: "Encrypted scan"))
                     .scaledSystem(12, weight: .semibold)
-                Text(String(localized: "kit.encryptedBody", defaultValue: "Some scanners in this kit extract personal data (messages, mail, call history). MacCrab stores those rows encrypted on disk and asks for your Keychain password once to unlock the encryption key. The plaintext data never leaves your Mac."))
+                Text(String(localized: "kit.encryptedBody", defaultValue: "Some scanners in this kit extract personal data (messages, mail, call history). MacCrab stores those rows encrypted on disk and asks for your Keychain password once to unlock the encryption key. Exported or shared scan results may contain plaintext personal data."))
                     .scaledSystem(11)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -197,7 +197,7 @@ struct V2KitDetailSheet: View {
 
     private var footer: some View {
         HStack {
-            Text(String(localized: "kit.footerSummary", defaultValue: "\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s") · v\(kit.version) · \(kit.maintainer)"))
+            Text(String(localized: "kit.footerSummary", defaultValue: "\(kit.plugins.count) scanners · v\(kit.version) · \(kit.maintainer)"))
                 .scaledSystem(11)
                 .foregroundStyle(.tertiary)
             Spacer()

@@ -336,7 +336,12 @@ final class AlertNotifier: NSObject {
 
     // MARK: - Store + cursor persistence
 
+    private var storeEpoch: EngineTelemetryIdentity?
+
     private func openStoreIfNeeded() -> AlertStore? {
+        let epoch = V2EngineSource.session.heartbeat()?.engineIdentity
+        if let previous = storeEpoch, let epoch, previous != epoch { store = nil }
+        if let epoch { storeEpoch = epoch }
         if let store { return store }
         guard let dataDir else { return nil }
         store = try? AlertStore(directory: dataDir, forceReadOnly: true)
@@ -349,19 +354,10 @@ final class AlertNotifier: NSObject {
         }
     }
 
-    /// Match V2LiveDataProvider.pickDataDirectory / V2DaemonControl: prefer
-    /// the root sysext's /Library path, else the dev daemon's ~/Library.
+    /// Match the dashboard session, including during startup before alerts.db
+    /// appears. Never fall back to another engine's retained notifications.
     nonisolated private static func resolveDataDir() -> String? {
-        let system = "/Library/Application Support/MacCrab"
-        let user = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("MacCrab").path
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let fm = FileManager.default
-        for base in [system, user] where fm.fileExists(atPath: base + "/alerts.db") {
-            return base
-        }
-        return nil
+        V2EngineSource.session.directory
     }
 }
 

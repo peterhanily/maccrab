@@ -160,9 +160,38 @@ public struct Suppression: Codable, Sendable, Hashable, Identifiable {
 
 // MARK: - SuppressionFile (v2 wire format)
 
-private struct SuppressionFile: Codable {
-    let version: Int
-    let entries: [Suppression]
+public struct SuppressionFile: Codable, Sendable {
+    public let version: Int
+    public let entries: [Suppression]
+    public let writtenAt: Date?
+
+    public init(version: Int = 2, entries: [Suppression], writtenAt: Date? = nil) {
+        self.version = version
+        self.entries = entries
+        self.writtenAt = writtenAt
+    }
+
+    public static func decode(data: Data) throws -> SuppressionFile {
+        guard data.count <= 4 * 1024 * 1024 else {
+            throw RuntimeConfigContractError("Suppression document exceeds the supported size")
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let document = try decoder.decode(Self.self, from: data)
+        guard document.version == 2 else {
+            throw RuntimeConfigContractError("Unsupported suppression document version")
+        }
+        return document
+    }
+
+    public static func read(at path: String) throws -> SuppressionFile? {
+        guard let data = try RuntimeConfigurationFiles.readControlData(at: path, maximumBytes: 4 * 1024 * 1024) else { return nil }
+        return try decode(data: data)
+    }
+
+    public static func read(at url: URL) throws -> SuppressionFile? {
+        try read(at: url.path)
+    }
 }
 
 // MARK: - SuppressionAuditEntry
@@ -197,11 +226,13 @@ public actor SuppressionManager {
 
     private let filePath: String
     private let auditPath: String
+    private let publishesReadableSnapshot: Bool
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "SuppressionManager")
 
     // MARK: - Init
 
-    public init(dataDir: String) {
+    public init(dataDir: String, publishReadableSnapshot: Bool = false) {
+        self.publishesReadableSnapshot = publishReadableSnapshot
         self.filePath = (dataDir as NSString).appendingPathComponent("suppressions.json")
         self.auditPath = (dataDir as NSString).appendingPathComponent("suppressions_audit.jsonl")
     }
@@ -211,8 +242,15 @@ public actor SuppressionManager {
     /// Load suppressions from disk. Accepts v1 (flat dict) or v2 (versioned)
     /// formats. v1 rows are migrated into v2 Suppression records on the fly.
     public func load() {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else {
-            logger.info("No suppressions file at \(self.filePath)")
+        let data: Data
+        do {
+            guard let saved = try RuntimeConfigurationFiles.readControlData(at: filePath, maximumBytes: 4 * 1024 * 1024) else {
+                if entries.isEmpty { publishSnapshot() }
+                return
+            }
+            data = saved
+        } catch {
+            logger.error("Suppression store read failed: \(error.localizedDescription)")
             return
         }
 
@@ -221,6 +259,7 @@ public actor SuppressionManager {
 
         if let v2 = try? decoder.decode(SuppressionFile.self, from: data), v2.version == 2 {
             loadEntries(v2.entries)
+            publishSnapshot()
             logger.info("Loaded \(self.entries.count) v2 suppressions")
             return
         }
@@ -371,6 +410,55 @@ public actor SuppressionManager {
         return entry
     }
 
+    /// Persist a removal before changing the running allowlist or appending
+    /// its audit outcome. A failed write leaves the existing state intact.
+    @discardableResult
+    public func removePersisted(ids: Set<String>) throws -> [Suppression] {
+        let removed = entries.values.filter { ids.contains($0.id) }
+        guard !removed.isEmpty else { return [] }
+        let retained = entries.values.filter { !ids.contains($0.id) }.sorted { $0.createdAt < $1.createdAt }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(SuppressionFile(entries: retained))
+            try SecureFileIO.atomicReplace(at: filePath, data: data, mode: 0o600)
+        } catch {
+            lastPersistError = error.localizedDescription
+            throw error
+        }
+        lastPersistError = nil
+        for entry in removed {
+            entries.removeValue(forKey: entry.id)
+            indexRemove(entry)
+            appendAudit(.init(timestamp: Date(), action: .remove, suppressionId: entry.id,
+                              scope: entry.scope, source: entry.source, reason: entry.reason))
+        }
+        publishSnapshot()
+        return removed
+    }
+
+    /// Admin-readable saved-state view; the daemon's authoritative allowlist
+    /// retains its private permissions. Snapshot errors never claim removal.
+    private func publishSnapshot() {
+        guard publishesReadableSnapshot else { return }
+        let path = URL(fileURLWithPath: filePath).deletingLastPathComponent()
+            .appendingPathComponent("suppressions_snapshot.json").path
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        do {
+            let data = try encoder.encode(SuppressionFile(
+                entries: entries.values.sorted { $0.createdAt < $1.createdAt }, writtenAt: Date()))
+            try SecureFileIO.atomicReplace(at: path, data: data, mode: 0o640)
+            if geteuid() == 0 {
+                try FileManager.default.setAttributes([.groupOwnerAccountID: 80], ofItemAtPath: path)
+            }
+        } catch {
+            logger.error("Saved suppression snapshot could not be published: \(error.localizedDescription)")
+        }
+    }
+
     /// Remove every suppression whose TTL has elapsed. Returns the list of
     /// removed entries so the caller can emit audit events or notifications.
     @discardableResult
@@ -485,6 +573,7 @@ public actor SuppressionManager {
             try? FileManager.default.setAttributes(
                 [.posixPermissions: 0o600], ofItemAtPath: filePath
             )
+            publishSnapshot()
             return nil
         } catch {
             logger.error("saveToDisk failed: \(error.localizedDescription)")

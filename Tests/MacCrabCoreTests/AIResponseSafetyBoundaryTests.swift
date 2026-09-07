@@ -134,10 +134,10 @@ struct AIResponseSafetyBoundaryTests {
         // Prove the accepted cached verdict reaches the real shipping Sigma
         // rule. This is not a hand-built alert that could conceal a rule wiring
         // mismatch.
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let ruleEngine = RuleEngine()
         _ = try await ruleEngine.loadRules(
-            from: URL(fileURLWithPath: "/tmp/maccrab_v3")
+            from: compiledRulesDirectory
         )
         let event = installEvent(verdict: cached)
         let matches = await ruleEngine.evaluate(event)

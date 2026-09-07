@@ -105,11 +105,11 @@ struct V2CrabWidget: View {
         if feeding { return String(localized: "overview.crab.quipFed", defaultValue: "Om nom — Crabby snapped up an event! 🦀") }
         if petting { return String(localized: "overview.crab.quipPetted", defaultValue: "♥ MacCrab loves the attention!") }
         switch mood {
-        case .happy:    return String(localized: "overview.crab.quipHappy", defaultValue: "MacCrab is thriving — all clear! 🦀")
+        case .happy:    return String(localized: "overview.crab.quipHappy", defaultValue: "Monitoring is active — no alerts waiting. 🦀")
         case .calm:     return String(localized: "overview.crab.quipCalm", defaultValue: "MacCrab is dozing. Quiet on this Mac.")
         case .alert:    return String(localized: "overview.crab.quipAlert", defaultValue: "MacCrab is uneasy — watching closely.")
         case .critical: return String(localized: "overview.crab.quipCritical",
-                                      defaultValue: "MacCrab is alarmed! \(criticalCampaigns) active critical campaign\(criticalCampaigns == 1 ? "" : "s").")
+                                      defaultValue: "MacCrab is alarmed! \(criticalCampaigns) active critical campaigns.")
         }
     }
 
@@ -379,9 +379,9 @@ struct V2CrabWidget: View {
         HStack(spacing: 10) {
             ForEach(0..<3, id: \.self) { i in
                 Text(verbatim: "❤️").font(.system(size: 12))
-                    .offset(y: petting ? -22 : 6)
-                    .opacity(petting ? 0 : 1)
-                    .animation(.easeOut(duration: 1.2).delay(Double(i) * 0.18), value: petting)
+                    .offset(y: reduceMotion ? 0 : (petting ? -22 : 6))
+                    .opacity(reduceMotion ? 1 : (petting ? 0 : 1))
+                    .animation(reduceMotion ? nil : .easeOut(duration: 1.2).delay(Double(i) * 0.18), value: petting)
             }
         }
         .offset(y: -28)
@@ -389,9 +389,9 @@ struct V2CrabWidget: View {
 
     private var crumb: some View {
         Text(verbatim: "🍪").font(.system(size: 13))
-            .offset(y: feeding ? 18 : -34)
-            .opacity(feeding ? 0 : 1)
-            .animation(.easeIn(duration: 0.8), value: feeding)
+            .offset(y: reduceMotion ? -28 : (feeding ? 18 : -34))
+            .opacity(reduceMotion ? 1 : (feeding ? 0 : 1))
+            .animation(reduceMotion ? nil : .easeIn(duration: 0.8), value: feeding)
     }
 
     // MARK: - Buttons

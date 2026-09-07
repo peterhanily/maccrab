@@ -96,59 +96,32 @@ MIB = 1024 * 1024
 GIB = 1024 * MIB
 MIN_EPOCH_SECONDS = 900.0
 MAX_SAMPLE_GAP_SECONDS = 35.0
-# v1.22.0: these two were free literals, and against this gate's OWN mandated
-# load they were arithmetically unsatisfiable. MIN_BURST_COMBINED_OFFERED_PER_SECOND
-# demands a 1,274 events/s peak; a 4 MiB/s window cap therefore allowed only
-# 3,292 bytes written per event, which is below what one event costs before it is
-# even indexed. No burst sizing fixes that, and no build has ever satisfied the pair.
-#
-# Measured on an installed host (build 1.22.0.1788459825, dashboard closed),
-# running this script's own workload at 6,000 iterations:
-#   ambient, young engine   34.3 ev/s ->   1,506 B/event ->  0.05 MB/s
-#   ambient, 12.6h-old engine 42.1 ev/s -> 5,911 B/event ->  0.25 MB/s
-#   BURST window (150 s)     329 ev/s   -> ~53,660 B per OFFERED event -> 35.16 MB/s
-# Epoch view: the burst wrote 5,274 MB; with ambient over the remaining ~750 s a
-# 900 s epoch totals ~5.4 GB => ~6.0 MB/s average.
-#
-# The amplification is structural, not a regression: a base-insert commit writes
-# 24.3 WAL frames (97.7 KB) carrying ~3 events, dirtying 16 b-trees of which ~43 KB
-# is a fixed per-transaction floor, and one transaction per changed terminal
-# revision is required by the base-before-detection evidence-durability ordering.
-# Removing it means committing base+terminal together, i.e. deferring the base
-# until after detection -- a change to the durability guarantee itself, not a
-# tuning knob. Diverting unmatched revisions to the batched writer was implemented
-# and measured: 97% of changed revisions are rule-matched, so it moved nothing.
-#
-# So these caps are now derived from the measured cost of the load this gate
-# mandates, with explicit margin, and are documented as an amplification CEILING
-# rather than an aspiration: they still fail a candidate that makes the write path
-# materially worse, which is what a gate is for. Lowering them is a product
-# objective that requires the architectural change above -- do not lower them
-# without it, and do not raise them without re-measuring and updating this block.
-MAX_ENGINE_WRITE_BYTES_PER_SECOND = 8 * MIB   # measured ~6.0 MB/s epoch avg, x1.33
-MAX_WINDOW_WRITE_BYTES_PER_SECOND = 48 * MIB  # measured 35.16 MB/s burst window, x1.37
+MIN_ENGINE_UPTIME_AT_EPOCH_SECONDS = 250.0
+# This candidate keeps the strict whole-process policy. Startup/prewarm losses
+# and completed-wait maxima are not erased by selecting a later t0. These are
+# qualification criteria; lifetime history is not presented as current health.
+RUNTIME_COUNTER_SCOPE_POLICY = {
+    "version": 1,
+    "loss_and_failed_outcomes": "absolute: current process plus retained durable evidence ledgers",
+    "current_faults": "absolute: every observation",
+    "historical_wait_and_saturation": "absolute: current process including startup and prewarm",
+    "cpu_and_disk_rates": "deltas: captured 900-second epoch and actual captured windows",
+    "gui_cpu": "nearest-rank p95: ps-pcpu snapshots of one verified candidate GUI epoch",
+    "maxima": "never subtract cumulative maxima",
+}
+# Provisional regression ceilings retained from the earlier candidate series.
+# These are not independently accepted workstation budgets. The old write
+# allowance was derived from a long burst mean; the validator below enforces
+# actual captured intervals and rolling spans, which must be measured directly.
+# Base admission returns an enqueue receipt. The current write amplification is
+# measured behavior, not proof that every small transaction is required by the
+# durability contract. Do not infer a structural lower bound from one build.
+MAX_ENGINE_WRITE_BYTES_PER_SECOND = 8 * MIB
+MAX_WINDOW_WRITE_BYTES_PER_SECOND = 48 * MIB
 MAX_ENGINE_AVERAGE_CORES = 0.50
-# v1.22.0: derived, not a free literal. This is a p95 (nearest-rank, so with a
-# 30-sample epoch it is the second-highest sample) over the WHOLE epoch, and the
-# workload declares "MacCrab dashboard open in background" as a normal operation
-# -- so the epoch deliberately includes the dashboard reacting to a 47,000-event
-# burst. Measured on the notarized candidate (build 1.22.0.1116), 22 samples:
-#   ambient                     0.0% for 17 of 22 samples
-#   post-burst render spikes    8.7 @90, 14.0 @480, 25.9 @510
-#   p95                         14.0
-# Before the v1.22.0 dashboard fixes the same epoch measured p95 56.2 with EVERY
-# sample >= 26.3, because the Overview KPI tile re-verified the entire on-disk
-# journal on every 5s poll (one pool thread pinned 5013/5013 samples) and the
-# Crabby widget's freeze guard tested `scenePhase`, which never goes inactive in
-# an LSUIElement app. Both are fixed; what remains is a genuine, transient render
-# cost while alerts land, and 0.0% is the honest steady state.
-#
-# 20.0 is 14.0 x ~1.43. It still fails the defect that was just fixed (56.2, and
-# anything holding above ~26 the way that build did), while not failing a
-# dashboard for redrawing when a burst produces alerts. Lower it only alongside
-# a measured reduction in that render cost; the sub-1% polish items left on the
-# list (byte-wise credential matching, V2Theme colour identity, FlowGrid
-# measurement memoisation) will not move a spike by 4 points.
+# Nearest-rank p95 over the captured epoch, including prescribed burst work.
+# The inherited 20% ceiling followed a 14% observation; that alone does not
+# establish an independent product target or a packaged UI acceptance verdict.
 MAX_GUI_P95_PERCENT = 20.0
 # Measured as `ri_phys_footprint`, not `ri_resident_size`.  Resident size on
 # macOS counts clean file-backed and shared pages the process is not charged
@@ -168,39 +141,11 @@ MAX_TRACE_RECOVERY_MUTATION_WAIT_NANOSECONDS = 5_000_000_000
 TRACE_RECOVERY_MUTATION_WAITER_LIMIT = 1_024
 BURST_START_OFFSET_SECONDS = 300
 BURST_END_OFFSET_SECONDS = 390
-# v1.22.0: derived from measured retirement, not chosen.
-#
-# The old 450 gave 150s from burst start to drain, and in combination with
-# MIN_BURST_COMBINED_OFFERED_PER_SECOND it was unsatisfiable. That floor demands
-# 1,274 ev/s across one 30s interval = 38,220 events, while the engine's
-# POST-BURST retirement measures ~200 ev/s on the reference host, so only
-# ~30,000 events can be retired inside 150s. 38,220 > 30,000: no BURST_ITERATIONS
-# value satisfies both. Measured directly (build 1.22.0.1788459825):
-#   N=3600 -> 58,998 offered (16.4/iteration), peak interval 1,966 ev/s,
-#             backlog 52,671 -> 17,318 over 180s = 196 ev/s net
-#   N=2700 -> 44,931 offered, peak interval 1,119 ev/s (UNDER the floor -- the
-#             burst straddled two sample intervals), backlog 15,662 at +150s
-#   N=6000 -> ~98,290 offered, ~690s to fully drain
-# The earlier 400 ev/s figure was mid-burst DEQUEUE, when the fast file lane
-# still dominates; the tail is priority-bound at roughly half that, and it is
-# the tail that governs time-to-empty.
-#
-# Sized as burst_start + backlog/tail-retirement + margin, from a FULL recorder
-# epoch on the notarized candidate (build 1.22.0.1116) rather than a standalone
-# burst on an otherwise idle host:
-#   combined offered in the burst interval  47,429  -> 1,581 ev/s peak (floor 1,274)
-#   priority backlog peak                   26,135  at offset 330
-#   priority backlog at offset 630           7,053
-#   => tail retirement (26,135 - 7,053)/300s = 63.6 ev/s; the remaining 7,053
-#      clears at ~741s, and the <=512 flow tolerance is reached at ~730s.
-# The 196 ev/s this was previously sized on was measured with nothing else
-# running. Under the recorder's real load -- its own probes, the causal alert
-# investigation, the live rule reload -- the priority TAIL runs about a third of
-# that, and the tail is precisely what this boundary tests. 780 leaves ~50s over
-# the measured 730s while keeping 120s of epoch tail before MIN_EPOCH_SECONDS,
-# which is itself a strict drain boundary.
-# Re-measure this together with BURST_ITERATIONS if either the floor or the
-# write path changes -- they are one budget, not two independent constants.
+# This inherited boundary followed measurements of a prior candidate. Keep it
+# fixed while assessing the new source; report backlog/retirement over the real
+# capture and distinguish this workload ceiling from a user-facing latency SLO.
+# A prior build's retirement rate does not prove all possible builds incapable
+# of meeting a shorter drain. Workload volume and this boundary form one budget.
 BURST_DRAIN_OFFSET_SECONDS = 780
 WORKLOAD_DEADLINE_SECONDS = (
     BURST_END_OFFSET_SECONDS - BURST_START_OFFSET_SECONDS
@@ -377,6 +322,11 @@ DEFAULT_SQLITE_FREE_SPACE_FLOOR_BYTES = 1024 * MIB
 EXPECTED_DEVELOPER_ID = "Developer ID Application: Peter Hanily (79S425CW99)"
 EXPECTED_TEAM_ID = "79S425CW99"
 EXPECTED_APP_IDENTIFIER = "com.maccrab.app"
+GUI_PAYLOAD_PATH = "MacCrab.app/Contents/MacOS/MacCrab"
+GUI_CPU_STATISTIC = "ps-pcpu-snapshot"
+GUI_ARCHITECTURES = ("arm64", "x86_64")
+CS_OPS_CDHASH = 5
+CDHASH_BYTES = 20
 EXPECTED_AGENT_IDENTIFIER = "com.maccrab.agent"
 AGENT_PAYLOAD_PATH = (
     "MacCrab.app/Contents/Library/SystemExtensions/"
@@ -615,9 +565,14 @@ def assert_exact_clean_source(
         fail(f"{label} requires the clean exact candidate source checkout")
 
 
-def codesign_identity(path: pathlib.Path, *, label: str) -> Dict[str, Any]:
+def codesign_identity(
+    path: pathlib.Path, *, label: str, architecture: str | None = None,
+) -> Dict[str, Any]:
     codesign = fixed_tool("/usr/bin/codesign")
-    details = run_checked([codesign, "-dv", "--verbose=4", str(path)], label)
+    command = [codesign, "-dv", "--verbose=4"]
+    if architecture is not None:
+        command.extend(["--architecture", architecture])
+    details = run_checked([*command, str(path)], label)
     signing_text = (details.stdout or "") + "\n" + (details.stderr or "")
     authorities = re.findall(r"^Authority=(.+)$", signing_text, flags=re.MULTILINE)
     team_match = re.search(r"^TeamIdentifier=(\S+)$", signing_text, flags=re.MULTILINE)
@@ -632,6 +587,42 @@ def codesign_identity(path: pathlib.Path, *, label: str) -> Dict[str, Any]:
         "signing_identifier": identifier_match.group(1),
         "cdhash": cdhash_match.group(1).lower() if cdhash_match else "",
     }
+
+
+def require_cdhash(raw: Any, path: str) -> str:
+    value = string_value(raw, path)
+    if not re.fullmatch(r"[0-9a-f]{40}", value) or value == "0" * 40:
+        fail(f"{path} must be a nonzero 20-byte lowercase CDHash")
+    return value
+
+
+def signed_slice_cdhashes(raw: Any, path: str) -> Dict[str, str]:
+    values = object_value(raw, path)
+    if set(values) != set(GUI_ARCHITECTURES):
+        fail(f"{path} must identify both supported architecture slices")
+    return {architecture: require_cdhash(values[architecture], f"{path}.{architecture}")
+            for architecture in GUI_ARCHITECTURES}
+
+
+def gui_cdhashes(raw: Any, path: str) -> Dict[str, str]:
+    return signed_slice_cdhashes(raw, path)
+
+
+def slice_signing_identities(
+    path: pathlib.Path, *, expected_identifier: str, label_prefix: str,
+) -> Dict[str, Dict[str, Any]]:
+    identities = {}
+    for architecture in GUI_ARCHITECTURES:
+        label = f"{label_prefix} {architecture} signing identity"
+        identity = codesign_identity(path, label=label, architecture=architecture)
+        require_maccrab_signing_identity(identity, expected_identifier=expected_identifier, path=label)
+        require_cdhash(identity.get("cdhash"), f"{label}.cdhash")
+        identities[architecture] = identity
+    return identities
+
+
+def gui_slice_signing_identities(path: pathlib.Path) -> Dict[str, Dict[str, Any]]:
+    return slice_signing_identities(path, expected_identifier=EXPECTED_APP_IDENTIFIER, label_prefix="GUI")
 
 
 def require_maccrab_signing_identity(
@@ -839,6 +830,7 @@ def inspect_artifact_full(dmg: pathlib.Path) -> Dict[str, Any]:
         app_path = mountpoint / "MacCrab.app"
         run_checked([codesign, "--verify", "--deep", "--strict", str(app_path)], "mounted app codesign verification")
         app_identity = codesign_identity(app_path, label="mounted app signing identity inspection")
+        app_slices = gui_slice_signing_identities(mountpoint / GUI_PAYLOAD_PATH)
         require_maccrab_signing_identity(
             app_identity, expected_identifier=EXPECTED_APP_IDENTIFIER,
             path="mounted app signing identity",
@@ -851,6 +843,9 @@ def inspect_artifact_full(dmg: pathlib.Path) -> Dict[str, Any]:
         run_checked([codesign, "--verify", "--strict", str(agent_path)], "mounted system-extension executable codesign verification")
         agent_identity = codesign_identity(
             agent_path, label="mounted system-extension signing identity inspection"
+        )
+        agent_slices = slice_signing_identities(
+            agent_path, expected_identifier=EXPECTED_AGENT_IDENTIFIER, label_prefix="system extension",
         )
         require_maccrab_signing_identity(
             agent_identity, expected_identifier=EXPECTED_AGENT_IDENTIFIER,
@@ -928,11 +923,12 @@ def inspect_artifact_full(dmg: pathlib.Path) -> Dict[str, Any]:
             "app_developer_id": app_identity["developer_id"],
             "app_team_id": app_identity["team_id"],
             "app_signing_identifier": app_identity["signing_identifier"],
+            "app_cdhashes": {architecture: identity["cdhash"] for architecture, identity in app_slices.items()},
             "system_extension": {
                 "developer_id": agent_identity["developer_id"],
                 "team_id": agent_identity["team_id"],
                 "signing_identifier": agent_identity["signing_identifier"],
-                "cdhash": agent_identity["cdhash"],
+                "cdhashes": {architecture: identity["cdhash"] for architecture, identity in agent_slices.items()},
                 "executable_sha256": sha256_file(agent_path),
                 "bundle_version": agent_short_version,
                 "build_version": agent_build_version,
@@ -979,6 +975,12 @@ def inspect_artifact(dmg: pathlib.Path, level: str) -> Dict[str, Any]:
             "sha256": sha256_file(dmg),
         },
         {
+            "path": GUI_PAYLOAD_PATH,
+            "kind": "file",
+            "size_bytes": dmg.stat().st_size,
+            "sha256": sha256_file(dmg),
+        },
+        {
             "path": AGENT_RULE_MANIFEST_PATH,
             "kind": "file",
             "size_bytes": dmg.stat().st_size,
@@ -1001,11 +1003,12 @@ def inspect_artifact(dmg: pathlib.Path, level: str) -> Dict[str, Any]:
         "authority_chain": [],
         "team_id": "TESTFIXTURE",
         "signing_identifier": "test.fixture",
+        "app_cdhashes": {"arm64": "b" * 40, "x86_64": "d" * 40},
         "system_extension": {
             "developer_id": EXPECTED_DEVELOPER_ID,
             "team_id": EXPECTED_TEAM_ID,
             "signing_identifier": EXPECTED_AGENT_IDENTIFIER,
-            "cdhash": "a" * 40,
+            "cdhashes": {"arm64": "a" * 40, "x86_64": "c" * 40},
             "executable_sha256": sha256_file(dmg),
             "bundle_version": "test-fixture",
             "build_version": "test-fixture",
@@ -1255,6 +1258,11 @@ def validate_candidate_document(
         fail("candidate manifest does not describe the exact DMG bytes supplied to the release")
 
     verification = object_value(document.get("artifact_verification"), "artifact_verification")
+    gui_cdhashes(verification.get("app_cdhashes"), "artifact_verification.app_cdhashes")
+    signed_slice_cdhashes(
+        object_value(verification.get("system_extension"), "artifact_verification.system_extension").get("cdhashes"),
+        "artifact_verification.system_extension.cdhashes",
+    )
     recorded_rule_corpus = rule_corpus_artifact_evidence(
         verification.get("rule_corpus"), "artifact_verification.rule_corpus"
     )
@@ -1314,7 +1322,7 @@ def validate_candidate_document(
             path="artifact_verification.system_extension",
         )
         for key in (
-            "developer_id", "team_id", "signing_identifier", "cdhash",
+            "developer_id", "team_id", "signing_identifier", "cdhashes",
             "executable_sha256", "bundle_version", "build_version",
         ):
             if inspected_agent.get(key) != recorded_agent.get(key):
@@ -1331,6 +1339,9 @@ def validate_candidate_document(
             if inspected.get(key) != require_sha(verification.get(key), f"artifact_verification.{key}"):
                 fail(f"current DMG {key} does not match the candidate manifest")
         inspected_inventory = object_value(inspected.get("payload_inventory"), "inspected payload inventory")
+        if gui_cdhashes(verification.get("app_cdhashes"), "artifact_verification.app_cdhashes") \
+                != gui_cdhashes(inspected.get("app_cdhashes"), "inspected app_cdhashes"):
+            fail("mounted candidate GUI slice identities changed since candidate recording")
         if require_sha(recorded_inventory.get("sha256"), "artifact_verification.payload_inventory.sha256") != inspected_inventory.get("sha256"):
             fail("mounted DMG payload inventory changed since candidate recording")
         inspected_rule_corpus = rule_corpus_artifact_evidence(
@@ -1351,6 +1362,167 @@ def require_counter_equation(boundary: Mapping[str, Any], path: str) -> None:
         fail(f"{path} does not conserve: offered != completed + queued + in_flight + explicitly_shed")
 
 
+def runtime_process_epoch(samples: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Bind cumulative counters to one boot and expose their actual age."""
+    starts = [number_value(row.get("engine_started_at_unix"), "sample.engine_started_at_unix", minimum=1)
+              for row in samples]
+    uptimes = [number_value(row.get("engine_uptime_seconds"), "sample.engine_uptime_seconds", minimum=0)
+               for row in samples]
+    if len(set(starts)) != 1:
+        fail("engine process start changed during the epoch (PID reuse is not continuity)")
+    if any(later <= earlier for earlier, later in zip(uptimes, uptimes[1:])):
+        fail("engine monotonic uptime did not advance throughout the epoch")
+    if uptimes[0] < MIN_ENGINE_UPTIME_AT_EPOCH_SECONDS:
+        fail("runtime epoch began before the 250-second engine warmup completed")
+    for prior, current, earlier, later in zip(samples, samples[1:], uptimes, uptimes[1:]):
+        gap = current["heartbeat_written_at_unix"] - prior["heartbeat_written_at_unix"]
+        if abs((later - earlier) - gap) > MAX_HEARTBEAT_CAPTURE_INTERVAL_DRIFT_SECONDS:
+            fail("engine monotonic uptime and heartbeat intervals diverge")
+    return {"engine_started_at_unix": starts[0],
+            "engine_uptime_seconds_at_t0": uptimes[0],
+            "engine_uptime_seconds_at_end": uptimes[-1]}
+
+
+def normalized_gui_process(raw: Any, path: str) -> Dict[str, Any]:
+    process = object_value(raw, path)
+    executable_path = string_value(process.get("executable_path"), f"{path}.executable_path")
+    if not executable_path.startswith("/") or not executable_path.endswith("/" + GUI_PAYLOAD_PATH):
+        fail(f"{path} is not a MacCrab app executable")
+    return {
+        "pid": int_value(process.get("pid"), f"{path}.pid", minimum=1),
+        "process_start_abstime": int_value(
+            process.get("process_start_abstime"), f"{path}.process_start_abstime", minimum=1
+        ),
+        "executable_path": executable_path,
+        "executable_sha256": require_sha(process.get("executable_sha256"), f"{path}.executable_sha256"),
+        "running_cdhash": require_cdhash(process.get("running_cdhash"), f"{path}.running_cdhash"),
+    }
+
+
+def validate_gui_candidate_process(
+    raw: Any, *, candidate_verification: Mapping[str, Any], path: str,
+) -> Dict[str, Any]:
+    process = normalized_gui_process(raw, path)
+    inventory = object_value(candidate_verification.get("payload_inventory"), "candidate.payload_inventory")
+    entries = list_value(inventory.get("entries"), "candidate.payload_inventory.entries", nonempty=True)
+    images = [entry for entry in entries if isinstance(entry, dict) and entry.get("path") == GUI_PAYLOAD_PATH]
+    if len(images) != 1 or images[0].get("kind") != "file" \
+            or images[0].get("sha256") != process["executable_sha256"]:
+        fail(f"{path} does not match the exact candidate GUI image")
+    slices = gui_cdhashes(candidate_verification.get("app_cdhashes"), "candidate.app_cdhashes")
+    if process["running_cdhash"] not in slices.values():
+        fail(f"{path} running CDHash does not match a signed candidate GUI slice")
+    return process
+
+
+def validate_gui_epoch(
+    samples: Sequence[Mapping[str, Any]], *, candidate_verification: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not samples:
+        fail("GUI process epoch has no samples")
+    identities = [validate_gui_candidate_process(
+        sample.get("gui_process"), candidate_verification=candidate_verification,
+        path=f"GUI sample[{index}]",
+    ) for index, sample in enumerate(samples)]
+    if any(identity != identities[0] for identity in identities[1:]):
+        fail("GUI process identity changed during the epoch (PID/start/image continuity required)")
+    return identities[0]
+
+
+def validate_installed_gui_identity(
+    raw: Any, *, path: str, candidate: Mapping[str, Any],
+    candidate_verification: Mapping[str, Any],
+) -> Tuple[Dict[str, Any], dt.datetime]:
+    identity = object_value(raw, path)
+    process = validate_gui_candidate_process(
+        identity, candidate_verification=candidate_verification, path=path,
+    )
+    require_maccrab_signing_identity(identity, expected_identifier=EXPECTED_APP_IDENTIFIER, path=path)
+    if require_cdhash(identity.get("cdhash"), f"{path}.cdhash") != process["running_cdhash"]:
+        fail(f"{path} disk signature does not identify the running GUI image")
+    architecture = string_value(identity.get("architecture"), f"{path}.architecture")
+    slices = gui_cdhashes(candidate_verification.get("app_cdhashes"), "candidate.app_cdhashes")
+    if slices.get(architecture) != process["running_cdhash"]:
+        fail(f"{path} running GUI architecture does not match its candidate slice")
+    if identity.get("bundle_identifier") != EXPECTED_APP_IDENTIFIER \
+            or identity.get("bundle_version") != candidate.get("version") \
+            or identity.get("build_version") != candidate.get("build_number"):
+        fail(f"{path} version/build/identifier does not match the candidate GUI")
+    inspection_start = parse_time(identity.get("inspection_started_at"), f"{path}.inspection_started_at")
+    recorded_at = parse_time(identity.get("recorded_at"), f"{path}.recorded_at")
+    elapsed = (recorded_at - inspection_start).total_seconds()
+    if elapsed < 0 or elapsed > MAX_SAMPLE_GAP_SECONDS:
+        fail(f"{path} GUI identity inspection exceeded its bounded interval")
+    return process, recorded_at
+
+
+def validate_installed_gui_epoch(
+    installed: Any, samples: Sequence[Mapping[str, Any]], *,
+    started: dt.datetime, ended: dt.datetime,
+    candidate: Mapping[str, Any], candidate_verification: Mapping[str, Any],
+) -> None:
+    endpoints = object_value(installed, "runtime.installed_gui")
+    epoch_identity = validate_gui_epoch(samples, candidate_verification=candidate_verification)
+    for name, boundary in (("start", started), ("end", ended)):
+        identity, recorded_at = validate_installed_gui_identity(
+            endpoints.get(name), path=f"runtime.installed_gui.{name}",
+            candidate=candidate, candidate_verification=candidate_verification,
+        )
+        if identity != epoch_identity:
+            fail(f"GUI {name} signing identity does not match every sampled process")
+        if abs((recorded_at - boundary).total_seconds()) > MAX_SAMPLE_GAP_SECONDS:
+            fail(f"GUI {name} signing identity was not recorded at the epoch boundary")
+        inspected_at = parse_time(endpoints[name].get("inspection_started_at"), f"GUI {name} inspection start")
+        if abs((inspected_at - boundary).total_seconds()) > MAX_SAMPLE_GAP_SECONDS:
+            fail(f"GUI {name} signing inspection did not start at the epoch boundary")
+
+
+def normalized_engine_process(raw: Any, path: str) -> Dict[str, Any]:
+    process = object_value(raw, path)
+    executable_path = string_value(process.get("executable_path"), f"{path}.executable_path")
+    if not executable_path.startswith("/Library/SystemExtensions/") \
+            or not executable_path.endswith("/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"):
+        fail(f"{path} is not the installed MacCrab system extension")
+    return {
+        "pid": int_value(process.get("pid"), f"{path}.pid", minimum=1),
+        "process_start_abstime": int_value(process.get("process_start_abstime"), f"{path}.process_start_abstime", minimum=1),
+        "executable_path": executable_path,
+        "executable_sha256": require_sha(process.get("executable_sha256"), f"{path}.executable_sha256"),
+        "running_cdhash": require_cdhash(process.get("running_cdhash"), f"{path}.running_cdhash"),
+    }
+
+
+def validate_engine_candidate_process(
+    raw: Any, *, candidate_verification: Mapping[str, Any], path: str,
+) -> Dict[str, Any]:
+    process = normalized_engine_process(raw, path)
+    agent = object_value(candidate_verification.get("system_extension"), "candidate.system_extension")
+    inventory = object_value(candidate_verification.get("payload_inventory"), "candidate.payload_inventory")
+    entries = list_value(inventory.get("entries"), "candidate.payload_inventory.entries", nonempty=True)
+    images = [entry for entry in entries if isinstance(entry, dict) and entry.get("path") == AGENT_PAYLOAD_PATH]
+    if len(images) != 1 or images[0].get("kind") != "file" \
+            or images[0].get("sha256") != process["executable_sha256"] \
+            or agent.get("executable_sha256") != process["executable_sha256"]:
+        fail(f"{path} does not match the exact candidate engine image")
+    if process["running_cdhash"] not in signed_slice_cdhashes(agent.get("cdhashes"), "candidate.system_extension.cdhashes").values():
+        fail(f"{path} running CDHash does not match a signed candidate engine slice")
+    return process
+
+
+def validate_engine_epoch(
+    samples: Sequence[Mapping[str, Any]], *, candidate_verification: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not samples:
+        fail("engine process epoch has no samples")
+    identities = [validate_engine_candidate_process(
+        sample.get("engine_process"), candidate_verification=candidate_verification,
+        path=f"engine sample[{index}]",
+    ) for index, sample in enumerate(samples)]
+    if any(identity != identities[0] for identity in identities[1:]):
+        fail("native engine process identity changed during the epoch")
+    return identities[0]
+
+
 def validate_installed_engine_identity(
     raw: Any,
     *,
@@ -1360,7 +1532,14 @@ def validate_installed_engine_identity(
 ) -> Tuple[int, dt.datetime]:
     identity = object_value(raw, path)
     pid = int_value(identity.get("engine_pid"), f"{path}.engine_pid", minimum=1)
+    process = validate_engine_candidate_process(identity, candidate_verification=candidate_verification, path=path)
+    if process["pid"] != pid:
+        fail(f"{path} engine PID disagrees with its native process identity")
     recorded_at = parse_time(identity.get("recorded_at"), f"{path}.recorded_at")
+    inspection_start = parse_time(identity.get("inspection_started_at"), f"{path}.inspection_started_at")
+    elapsed = (recorded_at - inspection_start).total_seconds()
+    if elapsed < 0 or elapsed > MAX_SAMPLE_GAP_SECONDS:
+        fail(f"{path} engine identity inspection exceeded its bounded interval")
     executable_path = string_value(identity.get("executable_path"), f"{path}.executable_path")
     if not executable_path.startswith("/Library/SystemExtensions/") \
             or not executable_path.endswith(
@@ -1371,9 +1550,9 @@ def validate_installed_engine_identity(
     require_maccrab_signing_identity(
         identity, expected_identifier=EXPECTED_AGENT_IDENTIFIER, path=path
     )
-    cdhash = string_value(identity.get("cdhash"), f"{path}.cdhash")
-    if not re.fullmatch(r"[0-9a-f]{40,64}", cdhash):
-        fail(f"{path}.cdhash must be a lowercase code-directory hash")
+    cdhash = require_cdhash(identity.get("cdhash"), f"{path}.cdhash")
+    if cdhash != process["running_cdhash"]:
+        fail(f"{path} disk signature does not identify the running engine image")
     if identity.get("system_extension_bundle_identifier") != EXPECTED_AGENT_IDENTIFIER:
         fail(f"{path}.system_extension_bundle_identifier must be {EXPECTED_AGENT_IDENTIFIER}")
     if identity.get("bundle_version") != candidate.get("version"):
@@ -1385,8 +1564,11 @@ def validate_installed_engine_identity(
         candidate_verification.get("system_extension"),
         "artifact_verification.system_extension",
     )
+    architecture = string_value(identity.get("architecture"), f"{path}.architecture")
+    if signed_slice_cdhashes(expected.get("cdhashes"), "candidate.system_extension.cdhashes").get(architecture) != cdhash:
+        fail(f"{path} running engine architecture does not match its candidate slice")
     for key in (
-        "developer_id", "team_id", "signing_identifier", "cdhash",
+        "developer_id", "team_id", "signing_identifier",
         "executable_sha256", "bundle_version", "build_version",
     ):
         if identity.get(key) != expected.get(key):
@@ -1432,6 +1614,18 @@ def validate_live_reload_transcript(output: str, label: str) -> None:
         fail(f"{label} records a rejected or failed live reload")
 
 
+def send_live_rule_reload_probe(*, target_pid: int, offset: int) -> Dict[str, Any]:
+    if offset != BURST_DRAIN_OFFSET_SECONDS:
+        fail("live rule reload must run at the fixed workload drain boundary")
+    sent_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    os.kill(target_pid, signal.SIGHUP)
+    return {
+        "signal": "SIGHUP", "target_pid": target_pid,
+        "sample_offset_seconds": offset,
+        "sent_at": sent_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
 def validate_recorder_probe_evidence(
     raw: Any, *, source_root: pathlib.Path,
     expected_preinstall_clean_ci: Mapping[str, Any],
@@ -1450,7 +1644,7 @@ def validate_recorder_probe_evidence(
         fail("runtime live rule-reload evidence has an incomplete inventory")
     if sighup.get("signal") != "SIGHUP" \
             or int_value(sighup.get("target_pid"), "recorder probes.live_sighup.target_pid", minimum=1) <= 0 \
-            or int_value(sighup.get("sample_offset_seconds"), "recorder probes.live_sighup.sample_offset_seconds") != 450:
+            or int_value(sighup.get("sample_offset_seconds"), "recorder probes.live_sighup.sample_offset_seconds") != BURST_DRAIN_OFFSET_SECONDS:
         fail("runtime live rule-reload evidence is not the fixed SIGHUP probe")
     parse_time(sighup.get("sent_at"), "recorder probes.live_sighup.sent_at")
     for name in sorted(required - {"live_sighup"}):
@@ -1669,6 +1863,10 @@ def validate_runtime_report(
         fail("installed engine start identity was not recorded at the epoch boundary")
     if abs((installed_end_at - ended).total_seconds()) > MAX_SAMPLE_GAP_SECONDS:
         fail("installed engine end identity was not recorded at the epoch boundary")
+    for identity, boundary in ((installed_start_identity, started), (installed_end_identity, ended)):
+        inspection_start = parse_time(identity.get("inspection_started_at"), "installed engine inspection start")
+        if abs((inspection_start - boundary).total_seconds()) > MAX_SAMPLE_GAP_SECONDS:
+            fail("installed engine signing inspection did not start at the epoch boundary")
     require_true(epoch.get("uninterrupted"), "runtime.epoch.uninterrupted")
     sample_interval = number_value(epoch.get("sample_interval_seconds"), "runtime.epoch.sample_interval_seconds", minimum=0.1)
     max_gap = number_value(epoch.get("max_sample_gap_seconds"), "runtime.epoch.max_sample_gap_seconds", minimum=sample_interval)
@@ -1699,8 +1897,18 @@ def validate_runtime_report(
         )
         for index, observation in enumerate(observations)
     ]
+    validate_installed_gui_epoch(
+        report.get("installed_gui"), samples, started=started, ended=ended,
+        candidate=candidate, candidate_verification=candidate_verification,
+    )
+    native_engine_epoch = validate_engine_epoch(samples, candidate_verification=candidate_verification)
+    for identity in (installed_start_identity, installed_end_identity):
+        if normalized_engine_process(identity, "engine endpoint") != native_engine_epoch:
+            fail("engine signing endpoint does not match every sampled native process")
     if normalized_observations != samples:
         fail("runtime samples do not match the raw recorder observations")
+    if report.get("counter_scope_policy") != RUNTIME_COUNTER_SCOPE_POLICY:
+        fail("runtime counter scope policy is missing or does not match the gate")
     for index, observation in enumerate(observations):
         heartbeat = object_value(
             object_value(
@@ -1733,8 +1941,8 @@ def validate_runtime_report(
     sample_gui_values: List[float] = []
     sample_sequence_evictions: List[int] = []
     sample_journal_shed: List[int] = []
-    sample_journal_index_full_rebuilds: List[int | None] = []
-    sample_journal_index_append_refreshes: List[int | None] = []
+    sample_journal_index_full_rebuilds: List[int] = []
+    sample_journal_index_append_refreshes: List[int] = []
     rss_by_offset: Dict[int, int] = {}
     # Previous sample's conservation block, for the flow tolerance at the fixed
     # readiness boundaries. None at offset 0, so that boundary stays strict --
@@ -1757,18 +1965,8 @@ def validate_runtime_report(
             abs(offset - boundary) <= 0.001
             for boundary in (0, BURST_DRAIN_OFFSET_SECONDS, MIN_EPOCH_SECONDS)
         ):
-            # v1.22.0: apply the SAME rc.42 flow tolerance the live drain wait
-            # uses. It lived only inside wait_for_runtime_drain, so a lane
-            # forgiven there as "flowing, queued<=512, in_flight=0" hard-failed
-            # here one boundary later. rc.42's own justification -- that an
-            # instantaneous queued==0 cannot honestly be demanded of a 30-second
-            # gauge on a host with continuous ambient inflow -- applies
-            # identically at 0/450/900. Its cited counter-example was
-            # "file-event-persistence queued=36"; a real run failed here on
-            # queued=1, queued=14 and pending_entity_rows=9 while the engine was
-            # demonstrably persisting. The 512 bound and the requirement that
-            # `completed` actually advanced are what stop a genuine backlog
-            # (observed: priority-ingress queued=39,662) from hiding behind it.
+            # Use the recorder's bounded-flow definition against the preceding
+            # epoch sample. t0 remains empty: no earlier epoch sample proves flow.
             readiness_pending = forgive_flowing_boundary_lanes(
                 readiness_pending,
                 sample.get("conservation"),
@@ -1870,22 +2068,19 @@ def validate_runtime_report(
         sample_journal_index = object_value(
             sample.get("event_journal_index"), f"{path}.event_journal_index"
         )
-        if sample_journal_index.get("present"):
-            sample_journal_index_full_rebuilds.append(
-                int_value(
-                    sample_journal_index.get("full_rebuilds_total"),
-                    f"{path}.event_journal_index.full_rebuilds_total",
-                )
+        require_true(sample_journal_index.get("present"), f"{path}.event_journal_index.present")
+        sample_journal_index_full_rebuilds.append(
+            int_value(
+                sample_journal_index.get("full_rebuilds_total"),
+                f"{path}.event_journal_index.full_rebuilds_total",
             )
-            sample_journal_index_append_refreshes.append(
-                int_value(
-                    sample_journal_index.get("append_refreshes_total"),
-                    f"{path}.event_journal_index.append_refreshes_total",
-                )
+        )
+        sample_journal_index_append_refreshes.append(
+            int_value(
+                sample_journal_index.get("append_refreshes_total"),
+                f"{path}.event_journal_index.append_refreshes_total",
             )
-        else:
-            sample_journal_index_full_rebuilds.append(None)
-            sample_journal_index_append_refreshes.append(None)
+        )
         sample_losses = object_value(sample.get("losses"), f"{path}.losses")
         for loss_name in (
             "priority_lane_loss",
@@ -1933,6 +2128,10 @@ def validate_runtime_report(
 
     metrics = object_value(report.get("measurements"), "runtime.measurements")
     process = object_value(metrics.get("process"), "runtime.measurements.process")
+    process_epoch = runtime_process_epoch(samples)
+    for key, value in process_epoch.items():
+        if process.get(key) != value:
+            fail(f"runtime process age/identity does not reconcile: {key}")
     pids = list_value(process.get("engine_pids"), "runtime.measurements.process.engine_pids", nonempty=True)
     if len(pids) != 1 or not isinstance(pids[0], int) or pids[0] <= 0:
         fail("runtime epoch must contain exactly one positive engine PID")
@@ -2040,37 +2239,25 @@ def validate_runtime_report(
         correlation.get("sequence_state_continuity_maintained_all_samples"),
         "runtime.measurements.correlation_continuity.sequence_state_continuity_maintained_all_samples",
     )
-    # v1.22.0: recurrence gate for the dashboard-starves-expiry bug. A healthy
-    # journal index keeps paying append-only refreshes as the journal expires
-    # and appends; it does NOT keep paying full rebuilds. `present` is False
-    # on any candidate whose heartbeat predates this wiring -- that is "not
-    # sampled", not a pass, so it is surfaced with a NOTE rather than silently
-    # skipped.
-    if all(value is not None for value in sample_journal_index_full_rebuilds):
-        journal_index_rebuild_delta = (
-            sample_journal_index_full_rebuilds[-1]
-            - sample_journal_index_full_rebuilds[0]
-        )
-        journal_index_append_delta = (
-            sample_journal_index_append_refreshes[-1]
-            - sample_journal_index_append_refreshes[0]
-        )
-        if journal_index_rebuild_delta < 0 or journal_index_append_delta < 0:
-            fail("event journal index refresh/rebuild counters moved backwards")
-        if journal_index_rebuild_delta > EVENT_JOURNAL_INDEX_FULL_REBUILD_ALLOWANCE \
-                and journal_index_append_delta > 0:
-            fail(
-                "event journal index full_rebuilds_total increased by "
-                f"{journal_index_rebuild_delta} while append_refreshes_total "
-                f"also increased by {journal_index_append_delta} -- this is "
-                "the dashboard-starves-expiry recurrence signature (v1.22.0)"
-            )
-    else:
-        print(
-            "NOTE: heartbeat.event_journal_index is not present on every "
-            "runtime sample; skipping the full-rebuild-vs-append-refresh "
-            "recurrence gate (instrumentation not yet wired on this "
-            "candidate). This is a skip, not a pass."
+    # The current producer always emits these counters. Missing telemetry
+    # cannot qualify this exact candidate; an older capture needs its own gate.
+    journal_index_rebuild_delta = (
+        sample_journal_index_full_rebuilds[-1]
+        - sample_journal_index_full_rebuilds[0]
+    )
+    journal_index_append_delta = (
+        sample_journal_index_append_refreshes[-1]
+        - sample_journal_index_append_refreshes[0]
+    )
+    if journal_index_rebuild_delta < 0 or journal_index_append_delta < 0:
+        fail("event journal index refresh/rebuild counters moved backwards")
+    if journal_index_rebuild_delta > EVENT_JOURNAL_INDEX_FULL_REBUILD_ALLOWANCE \
+            and journal_index_append_delta > 0:
+        fail(
+            "event journal index full_rebuilds_total increased by "
+            f"{journal_index_rebuild_delta} while append_refreshes_total "
+            f"also increased by {journal_index_append_delta} -- this is "
+            "the dashboard-starves-expiry recurrence signature (v1.22.0)"
         )
     probe_evidence = object_value(
         report.get("recorder_probe_evidence"), "runtime.recorder_probe_evidence"
@@ -2544,6 +2731,8 @@ def validate_runtime_report(
     recorded_cores = number_value(cpu.get("engine_average_cores"), "runtime.measurements.cpu.engine_average_cores", minimum=0)
     if abs(recorded_cores - average_cores) > 0.001 or average_cores > MAX_ENGINE_AVERAGE_CORES:
         fail("engine CPU average does not reconcile or exceeds 0.50 core")
+    if cpu.get("gui_cpu_statistic") != GUI_CPU_STATISTIC:
+        fail("GUI CPU evidence must identify the ps-pcpu snapshot statistic")
     gui_samples = [
         number_value(value, f"runtime.measurements.cpu.gui_background_percent_samples[{index}]", minimum=0)
         for index, value in enumerate(list_value(cpu.get("gui_background_percent_samples"), "runtime.measurements.cpu.gui_background_percent_samples", nonempty=True))
@@ -2563,13 +2752,13 @@ def validate_runtime_report(
     minute5 = int_value(memory.get("engine_memory_footprint_minute_5_bytes"), "runtime.measurements.memory.engine_memory_footprint_minute_5_bytes")
     minute15 = int_value(memory.get("engine_memory_footprint_minute_15_bytes"), "runtime.measurements.memory.engine_memory_footprint_minute_15_bytes")
     if max_rss != max(sample_rss_values):
-        fail("maximum RSS does not reconcile with the embedded full-interval samples")
+        fail("maximum physical footprint does not reconcile with the embedded full-interval samples")
     if rss_by_offset.get(300) != minute5 or rss_by_offset.get(900) != minute15:
-        fail("runtime samples must include and reconcile exact minute-5/minute-15 RSS")
+        fail("runtime samples must include and reconcile exact minute-5/minute-15 physical footprint")
     if max_rss > MAX_ENGINE_MEMORY_FOOTPRINT_BYTES:
-        fail("engine RSS exceeds 450 MiB")
+        fail("engine physical footprint exceeds 450 MiB")
     if minute15 - minute5 > MAX_ENGINE_MEMORY_FOOTPRINT_GROWTH_BYTES:
-        fail("engine RSS growth from minute 5 to minute 15 exceeds 64 MiB")
+        fail("engine physical-footprint growth from minute 5 to minute 15 exceeds 64 MiB")
 
     disk_safety = object_value(metrics.get("disk_safety"), "runtime.measurements.disk_safety")
     require_true(disk_safety.get("inventory_complete"), "runtime.measurements.disk_safety.inventory_complete")
@@ -2650,6 +2839,65 @@ def validate_runtime_report(
     if any(value != configured_values[0] for value in configured_values[1:]):
         fail("LLM configuration changed during the runtime epoch")
     configured = configured_values[0]
+    workload_probe = object_value(
+        probe_evidence.get("workload"), "runtime recorder workload evidence"
+    )
+    causal_proof = object_value(
+        workload_probe.get("alert_investigation"),
+        "runtime recorder workload alert investigation",
+    )
+    validate_alert_investigation_proof(
+        causal_proof, "runtime recorder workload alert investigation"
+    )
+    sample_by_offset = {
+        int(round(number_value(sample.get("offset_seconds"), "runtime sample offset"))):
+        object_value(sample, "runtime sample")
+        for sample in samples
+    }
+    if causal_proof.get("telemetry_before") != object_value(
+        sample_by_offset[BURST_START_OFFSET_SECONDS].get("llm_quality"),
+        "minute-five LLM sample",
+    ):
+        fail("causal alert proof baseline is not the minute-five raw LLM sample")
+    if causal_proof.get("telemetry_after") not in llm_rows:
+        fail("causal alert proof completion is not a later raw LLM sample")
+    trigger_at = parse_time(
+        causal_proof.get("trigger_started_at"), "causal alert trigger_started_at"
+    )
+    workload_started = parse_time(
+        workload_probe.get("started_at"), "workload evidence.started_at"
+    )
+    workload_completed = parse_time(
+        workload_probe.get("completed_at"), "workload evidence.completed_at"
+    )
+    if abs((trigger_at - workload_started).total_seconds()) > 1.0:
+        fail("causal alert boundary does not match workload start")
+    if trigger_at < started + dt.timedelta(seconds=BURST_START_OFFSET_SECONDS - 1) \
+            or trigger_at > started + dt.timedelta(seconds=BURST_START_OFFSET_SECONDS + 5):
+        fail("causal alert trigger was not launched at the minute-five boundary")
+    if workload_completed > started + dt.timedelta(
+        seconds=BURST_END_OFFSET_SECONDS + 5
+    ):
+        fail("fixed workload completed after its declared deadline")
+    if parse_time(causal_proof.get("observed_at"), "causal alert observed_at") \
+            > started + dt.timedelta(seconds=BURST_DRAIN_OFFSET_SECONDS + 5):
+        fail("causal alert investigation missed the fixed drain boundary")
+
+    prewarm_probe = object_value(
+        probe_evidence.get("llm_prewarm"), "runtime recorder LLM prewarm"
+    )
+    prewarm_proof = object_value(
+        prewarm_probe.get("alert_investigation"),
+        "runtime recorder LLM prewarm alert investigation",
+    )
+    validate_alert_investigation_proof(
+        prewarm_proof, "runtime recorder LLM prewarm alert investigation"
+    )
+    if parse_time(prewarm_probe.get("completed_at"), "LLM prewarm completed_at") \
+            >= started:
+        fail("LLM prewarm did not complete before the qualification epoch")
+    if object_value(prewarm_proof.get("telemetry_after"), "prewarm telemetry").get("configured") != configured:
+        fail("prewarm LLM configuration does not match the runtime epoch")
     if configured:
         if bool_value(ai.get("configured"), "runtime.measurements.ai_quality.configured") != configured:
             fail("AI-quality configuration aggregate does not match raw samples")
@@ -2698,63 +2946,6 @@ def validate_runtime_report(
         if unspecified_delta != 0 or rejected_delta != 0 or accepted_delta != started_delta:
             fail("configured LLM accrued unattributed, unfinished, or final-rejected work")
 
-        workload_probe = object_value(
-            probe_evidence.get("workload"), "runtime recorder workload evidence"
-        )
-        causal_proof = object_value(
-            workload_probe.get("alert_investigation"),
-            "runtime recorder workload alert investigation",
-        )
-        validate_alert_investigation_proof(
-            causal_proof, "runtime recorder workload alert investigation"
-        )
-        sample_by_offset = {
-            int(round(number_value(sample.get("offset_seconds"), "runtime sample offset"))):
-            object_value(sample, "runtime sample")
-            for sample in samples
-        }
-        if causal_proof.get("telemetry_before") != object_value(
-            sample_by_offset[BURST_START_OFFSET_SECONDS].get("llm_quality"),
-            "minute-five LLM sample",
-        ):
-            fail("causal alert proof baseline is not the minute-five raw LLM sample")
-        if causal_proof.get("telemetry_after") not in llm_rows:
-            fail("causal alert proof completion is not a later raw LLM sample")
-        trigger_at = parse_time(
-            causal_proof.get("trigger_started_at"), "causal alert trigger_started_at"
-        )
-        workload_started = parse_time(
-            workload_probe.get("started_at"), "workload evidence.started_at"
-        )
-        workload_completed = parse_time(
-            workload_probe.get("completed_at"), "workload evidence.completed_at"
-        )
-        if abs((trigger_at - workload_started).total_seconds()) > 1.0:
-            fail("causal alert boundary does not match workload start")
-        if trigger_at < started + dt.timedelta(seconds=BURST_START_OFFSET_SECONDS - 1) \
-                or trigger_at > started + dt.timedelta(seconds=BURST_START_OFFSET_SECONDS + 5):
-            fail("causal alert trigger was not launched at the minute-five boundary")
-        if workload_completed > started + dt.timedelta(
-            seconds=BURST_END_OFFSET_SECONDS + 5
-        ):
-            fail("fixed workload completed after its declared deadline")
-        if parse_time(causal_proof.get("observed_at"), "causal alert observed_at") \
-                > started + dt.timedelta(seconds=BURST_DRAIN_OFFSET_SECONDS + 5):
-            fail("causal alert investigation missed the fixed drain boundary")
-
-        prewarm_probe = object_value(
-            probe_evidence.get("llm_prewarm"), "runtime recorder LLM prewarm"
-        )
-        prewarm_proof = object_value(
-            prewarm_probe.get("alert_investigation"),
-            "runtime recorder LLM prewarm alert investigation",
-        )
-        validate_alert_investigation_proof(
-            prewarm_proof, "runtime recorder LLM prewarm alert investigation"
-        )
-        if parse_time(prewarm_probe.get("completed_at"), "LLM prewarm completed_at") \
-                >= started:
-            fail("LLM prewarm did not complete before the qualification epoch")
         causal_alert = object_value(causal_proof.get("alert"), "causal alert")
         expected_ai = {
             "configured": configured,
@@ -3206,22 +3397,14 @@ def event_journal_recovery_sample(
 def event_journal_index_sample(
     heartbeat: Mapping[str, Any], path: str = "heartbeat"
 ) -> Dict[str, Any]:
-    """Normalize the journal-index refresh/rebuild counters (v1.22.0).
+    """Require the journal-index counters published by this source revision.
 
-    Unlike every other heartbeat section in this file, absence here is not a
-    schema violation: `event_journal_index` is new wiring that may not yet be
-    present on a candidate's heartbeat. Callers must treat `present: False`
-    as "not sampled" and skip with a NOTE -- never as a passing zero, which
-    would silently hide the dashboard-starves-expiry recurrence gate.
+    Qualification binds the gate and engine to exact source/artifact identities.
+    Current captures must include this telemetry at every sample; historical
+    captures without it cannot attest the current recurrence check.
     """
-    index = heartbeat.get("event_journal_index")
-    if not isinstance(index, dict):
-        return {
-            "present": False,
-            "full_rebuilds_total": None,
-            "append_refreshes_total": None,
-        }
     index_path = f"{path}.event_journal_index"
+    index = object_value(heartbeat.get("event_journal_index"), index_path)
     return {
         "present": True,
         "full_rebuilds_total": heartbeat_counter(
@@ -3737,10 +3920,16 @@ def normalized_runtime_sample(
     engine_cpu_seconds_total: float,
     engine_disk_write_bytes_total: int,
     engine_memory_footprint_bytes: int,
+    engine_process: Mapping[str, Any],
     gui_background_cpu_percent: float,
+    gui_process: Mapping[str, Any],
 ) -> Dict[str, Any]:
     """Turn one rich heartbeat plus Darwin process counters into gate input."""
     pid = heartbeat_counter(heartbeat, "engine_pid", "heartbeat")
+    engine_started_at = number_value(heartbeat.get("engine_started_at_unix"),
+                                    "heartbeat.engine_started_at_unix", minimum=1)
+    engine_uptime = number_value(heartbeat.get("engine_uptime_seconds"),
+                                "heartbeat.engine_uptime_seconds", minimum=0)
     pipeline = object_value(heartbeat.get("event_pipeline"), "heartbeat.event_pipeline")
     offered = heartbeat_counter_map(pipeline, "offered_by_lane", "heartbeat.event_pipeline")
     completed = heartbeat_counter_map(pipeline, "completed_by_lane", "heartbeat.event_pipeline")
@@ -3994,10 +4183,14 @@ def normalized_runtime_sample(
         "captured_at": captured_at,
         "heartbeat_written_at_unix": heartbeat_written_at_unix,
         "engine_pid": pid,
+        "engine_started_at_unix": engine_started_at,
+        "engine_uptime_seconds": engine_uptime,
         "engine_cpu_seconds_total": engine_cpu_seconds_total,
         "engine_disk_write_bytes_total": engine_disk_write_bytes_total,
         "engine_memory_footprint_bytes": engine_memory_footprint_bytes,
+        "engine_process": dict(engine_process),
         "gui_background_cpu_percent": gui_background_cpu_percent,
+        "gui_process": dict(gui_process),
         "sequence_pending_steps_evicted_total": pending_evictions,
         "sequence_state_continuity_maintained": bool_value(
             heartbeat.get("sequence_state_continuity_maintained"),
@@ -4133,6 +4326,9 @@ def sample_from_recorder_observation(raw: Any, path: str) -> Dict[str, Any]:
             is not expected_budget_fault:
         fail(f"{path}.event_budget_fault does not match the heartbeat")
     process = object_value(observation.get("process"), f"{path}.process")
+    engine_process = normalized_engine_process(process, f"{path}.process")
+    if engine_process["pid"] != heartbeat_counter(heartbeat, "engine_pid", f"{path}.heartbeat"):
+        fail(f"{path} native engine PID does not match the heartbeat")
     return normalized_runtime_sample(
         heartbeat,
         offset_seconds=offset,
@@ -4153,6 +4349,8 @@ def sample_from_recorder_observation(raw: Any, path: str) -> Dict[str, Any]:
         engine_memory_footprint_bytes=int_value(
             process.get("engine_memory_footprint_bytes"), f"{path}.process.engine_memory_footprint_bytes"
         ),
+        engine_process=engine_process,
+        gui_process=normalized_gui_process(observation.get("gui_process"), f"{path}.gui_process"),
         gui_background_cpu_percent=number_value(
             observation.get("gui_background_cpu_percent"),
             f"{path}.gui_background_cpu_percent",
@@ -4166,16 +4364,12 @@ def forgive_flowing_boundary_lanes(
     boundaries: Any,
     previous_boundaries: Any,
 ) -> List[str]:
-    """Drop pending rows for lanes that are provably FLOWING, not stuck.
+    """Apply one bounded-flow rule to recording, validation and workload drain.
 
-    The same rc.42 rule `wait_for_runtime_drain` applies, expressed against the
-    previous epoch sample instead of a poll loop: a lane is forgiven only when
-    its backlog is small (<= RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT), nothing is
-    mid-transaction, its backlog is not growing, and its cumulative `completed`
-    advanced since the previous boundary sample -- the one thing a stuck writer
-    cannot fake. A boundary check is single-shot with no retry, so this is
-    strictly tighter than the poll-loop form: it additionally requires `queued`
-    to be non-increasing.
+    A nonempty lane must have no in-flight transaction, a bounded non-growing
+    queue, and completions advancing since the preceding distinct snapshot.
+    Missing prior evidence (including t0) requires an empty queue. Loss and
+    corruption faults are checked separately and are never forgiven here.
     """
     if not pending or not isinstance(boundaries, Mapping):
         return pending
@@ -4252,6 +4446,8 @@ def runtime_readiness_failures(
     pid = int_value(sample.get("engine_pid"), f"{path}.engine_pid", minimum=1)
     if expected_pid is not None and pid != expected_pid:
         fatal.append(f"engine PID changed from {expected_pid} to {pid}")
+    if sample["engine_uptime_seconds"] < MIN_ENGINE_UPTIME_AT_EPOCH_SECONDS:
+        pending.append("engine warmup has not reached 250 seconds")
 
     losses = object_value(sample.get("losses"), f"{path}.losses")
     for key, value in losses.items():
@@ -4578,6 +4774,7 @@ def runtime_readiness_failures(
 def validate_runtime_readiness(
     raw: Any, path: str, *, phase: str, require_drained: bool,
     expected_pid: int | None = None, require_llm_ready: bool = True,
+    previous_sample: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     fatal, pending = runtime_readiness_failures(
         raw, path, expected_pid=expected_pid,
@@ -4585,9 +4782,15 @@ def validate_runtime_readiness(
     )
     if fatal:
         fail(f"{phase} runtime readiness failed: " + "; ".join(fatal))
+    sample = sample_from_recorder_observation(raw, path)
+    if require_drained:
+        pending = forgive_flowing_boundary_lanes(
+            pending, sample.get("conservation"),
+            previous_sample.get("conservation") if previous_sample else None,
+        )
     if require_drained and pending:
         fail(f"{phase} runtime queues are not drained: " + "; ".join(pending))
-    return sample_from_recorder_observation(raw, path)
+    return sample
 
 
 def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -4609,6 +4812,15 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
         boundaries = object_value(sample.get("conservation"), "workload conservation")
         row = object_value(boundaries.get(boundary), f"workload conservation.{boundary}")
         return int_value(row.get(key), f"workload conservation.{boundary}.{key}")
+
+    # Account for every sample, including work still queued at either window
+    # endpoint. Offered/completed deltas differ exactly by those gauge changes;
+    # requiring equal deltas would incorrectly discard a conserving ambient queue.
+    for sample in samples:
+        boundaries = object_value(sample.get("conservation"), "workload conservation")
+        for name in sorted(REQUIRED_CONSERVATION_BOUNDARIES):
+            row = object_value(boundaries.get(name), f"workload conservation.{name}")
+            require_counter_equation(row, f"workload conservation.{name}")
 
     # Cumulative producer counters may never move backwards. Queue and
     # in-flight values are gauges, so they are intentionally excluded here.
@@ -4768,19 +4980,11 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
         if result[f"{lane}_ingress_offered_delta"] <= 0 \
                 or result[f"{lane}_ingress_completed_delta"] <= 0:
             fail(f"fixed workload produced no measured {lane}-lane ingress/completion")
-        if result[f"{lane}_ingress_offered_delta"] \
-                != result[f"{lane}_ingress_completed_delta"]:
-            fail(f"{lane} ingress did not drain by the workload window boundary")
         if result[f"{lane}_persistence_offered_delta"] <= 0 \
                 or result[f"{lane}_persistence_completed_delta"] <= 0:
             fail(
                 f"fixed workload produced no measured {lane}-lane "
                 "persistence/completion"
-            )
-        if result[f"{lane}_persistence_offered_delta"] \
-                != result[f"{lane}_persistence_completed_delta"]:
-            fail(
-                f"{lane} persistence did not drain by the workload window boundary"
             )
         if result[f"{lane}_persistence_explicitly_shed_delta"] != 0:
             fail(f"{lane} persistence shed fixed-workload events")
@@ -4789,12 +4993,6 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
             fail(
                 f"fixed workload produced no measured {lane}-lane terminal "
                 "persistence/completion"
-            )
-        if result[f"{lane}_terminal_persistence_offered_delta"] \
-                != result[f"{lane}_terminal_persistence_completed_delta"]:
-            fail(
-                f"{lane} terminal persistence did not drain by the workload "
-                "window boundary"
             )
         if result[f"{lane}_terminal_persistence_explicitly_shed_delta"] != 0:
             fail(f"{lane} terminal persistence shed fixed-workload revisions")
@@ -4807,8 +5005,6 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
     if result["trace_store_offered_delta"] < MIN_TRACE_STORE_INGEST_DELTA \
             or result["trace_store_completed_delta"] < MIN_TRACE_STORE_INGEST_DELTA:
         fail("fixed workload did not prove a real TraceStore ingest/write")
-    if result["trace_store_offered_delta"] != result["trace_store_completed_delta"]:
-        fail("TraceStore did not drain the fixed workload by the window boundary")
     if result["trace_store_explicitly_shed_delta"] != 0:
         fail("TraceStore shed workload input during the qualification window")
     if result["sequence_journal_offered_delta"] < 1 \
@@ -4851,24 +5047,26 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
             "fixed workload violated the one-row-per-event physical-write "
             "suppression contract"
         )
-    # Every writer must be empty at the fixed drain boundary.  `sequence-journal`
-    # is exempt from `queued` alone, for the reason readiness already exempts it
-    # by name: that gauge is the durable set of out-of-order partial sequence
-    # steps, each parked for an earlier step that may never be offered during
-    # this window, so it is ambient host state rather than an unfinished write.
-    # Requiring it to be exactly empty at t+drain requires no sequence rule
-    # anywhere on the host to hold a partial match at that instant.  It is NOT
-    # exempt from `in_flight`, which is the actor-synchronous producer contract
-    # the exemption depends on and which is checked at both endpoints above.
-    for boundary in sorted(REQUIRED_CONSERVATION_BOUNDARIES):
-        for key in ("queued", "in_flight"):
-            if boundary == "sequence-journal" and key == "queued":
-                continue
-            value = counter(drain_end, boundary, key)
-            if value != 0:
-                fail(
-                    f"{boundary} {key}={value} at the fixed workload drain boundary"
-                )
+    preceding = [
+        sample for sample in samples
+        if number_value(sample.get("offset_seconds"), "workload offset")
+        < BURST_DRAIN_OFFSET_SECONDS
+    ]
+    previous = max(
+        preceding,
+        key=lambda sample: number_value(sample.get("offset_seconds"), "workload offset"),
+    )
+    pending = []
+    for name in sorted(REQUIRED_CONSERVATION_BOUNDARIES):
+        queued = counter(drain_end, name, "queued")
+        in_flight = counter(drain_end, name, "in_flight")
+        if in_flight or (queued and name != "sequence-journal"):
+            pending.append(f"{name} queued={queued} in_flight={in_flight}")
+    pending = forgive_flowing_boundary_lanes(
+        pending, drain_end.get("conservation"), previous.get("conservation"),
+    )
+    if pending:
+        fail("workload queues are not drained at the fixed boundary: " + "; ".join(pending))
     return result
 
 
@@ -4973,10 +5171,13 @@ def build_runtime_report_from_observations(
     captured_duration = (captured_times[-1] - captured_times[0]).total_seconds()
     if captured_duration + 0.001 < MIN_EPOCH_SECONDS:
         fail("runtime captured sample duration is below 900 seconds")
+    process_epoch = runtime_process_epoch(samples)
     samples_sha = sha256_bytes(canonical_json_bytes(samples))
     candidate = copy.deepcopy(object_value(candidate_manifest.get("candidate"), "candidate"))
     verification = object_value(candidate_manifest.get("artifact_verification"), "artifact_verification")
     inventory = object_value(verification.get("payload_inventory"), "artifact_verification.payload_inventory")
+    validate_gui_epoch(samples, candidate_verification=verification)
+    validate_engine_epoch(samples, candidate_verification=verification)
     candidate_rule_corpus = rule_corpus_artifact_evidence(
         verification.get("rule_corpus"),
         "artifact_verification.rule_corpus",
@@ -5248,6 +5449,19 @@ def build_runtime_report_from_observations(
     # the epoch) instead of failing. The "config changed during the epoch" check
     # above still applies to both. Full alert-investigation coverage is verified
     # separately on a host WITH an LLM.
+    recorder_evidence = object_value(probes.get("evidence"), "probes.evidence")
+    workload_evidence = object_value(
+        recorder_evidence.get("workload"), "probes.evidence.workload"
+    )
+    causal_proof = object_value(
+        workload_evidence.get("alert_investigation"),
+        "probes.evidence.workload.alert_investigation",
+    )
+    validate_alert_investigation_proof(
+        causal_proof, "probes.evidence.workload.alert_investigation"
+    )
+    if object_value(causal_proof.get("telemetry_before"), "causal baseline").get("configured") != llm_configured[0]:
+        fail("causal alert proof LLM configuration does not match raw samples")
     if llm_configured[0]:
         if any(
             row.get("schema_version") != 2
@@ -5273,17 +5487,6 @@ def build_runtime_report_from_observations(
                 "qualification requires at least one accepted alert investigation "
                 "and zero unattributed or final-rejected work"
             )
-        recorder_evidence = object_value(probes.get("evidence"), "probes.evidence")
-        workload_evidence = object_value(
-            recorder_evidence.get("workload"), "probes.evidence.workload"
-        )
-        causal_proof = object_value(
-            workload_evidence.get("alert_investigation"),
-            "probes.evidence.workload.alert_investigation",
-        )
-        validate_alert_investigation_proof(
-            causal_proof, "probes.evidence.workload.alert_investigation"
-        )
         causal_alert = object_value(causal_proof.get("alert"), "causal alert proof")
     else:
         for row in llm_rows:
@@ -5308,12 +5511,17 @@ def build_runtime_report_from_observations(
 
     report = {
         "schema": RUNTIME_SCHEMA,
+        "counter_scope_policy": copy.deepcopy(RUNTIME_COUNTER_SCOPE_POLICY),
         "result": "pass",
         "candidate_manifest_sha256": candidate_manifest_sha256,
         "candidate": candidate,
         "installed_engine": {
             "start": copy.deepcopy(probes.get("installed_engine_start")),
             "end": copy.deepcopy(probes.get("installed_engine_end")),
+        },
+        "installed_gui": {
+            "start": copy.deepcopy(probes.get("installed_gui_start")),
+            "end": copy.deepcopy(probes.get("installed_gui_end")),
         },
         "host": copy.deepcopy(host),
         "workload": workload_record,
@@ -5332,6 +5540,7 @@ def build_runtime_report_from_observations(
         "samples": samples,
         "measurements": {
             "process": {
+                **process_epoch,
                 "engine_pids": sorted({sample["engine_pid"] for sample in samples}),
                 "crash_count": int_value(probes.get("crash_count"), "probes.crash_count"),
                 "watchdog_exit_count": int_value(probes.get("watchdog_exit_count"), "probes.watchdog_exit_count"),
@@ -5474,6 +5683,7 @@ def build_runtime_report_from_observations(
             "cpu": {
                 "engine_cpu_seconds": cpu_seconds,
                 "engine_average_cores": cpu_seconds / captured_duration,
+                "gui_cpu_statistic": GUI_CPU_STATISTIC,
                 "gui_background_percent_samples": gui_values,
                 "gui_background_p95_percent": percentile_nearest_rank(gui_values, 0.95),
             },
@@ -5615,9 +5825,8 @@ def darwin_process_path(pid: int) -> pathlib.Path:
     return pathlib.Path(value)
 
 
-def darwin_process_metrics(pid: int) -> Dict[str, Any]:
-    """Read cumulative CPU/write counters and RSS from proc_pid_rusage v4."""
-    path = darwin_process_path(pid)
+def darwin_process_rusage(pid: int) -> DarwinRUsageInfoV4:
+    """Use the shared native structure for counters and process-start identity."""
     try:
         libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     except OSError as exc:
@@ -5626,19 +5835,55 @@ def darwin_process_metrics(pid: int) -> Dict[str, Any]:
     libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
     libproc.proc_pid_rusage.restype = ctypes.c_int
     if libproc.proc_pid_rusage(pid, 4, ctypes.byref(usage)) != 0:
-        fail(f"cannot read rusage for engine PID {pid}")
+        fail(f"cannot read rusage for PID {pid}")
+    return usage
 
+
+def darwin_process_metrics(pid: int) -> Dict[str, Any]:
+    """Read cumulative CPU/write counters and physical footprint from rusage v4."""
+    path = darwin_process_path(pid)
+    usage = darwin_process_rusage(pid)
     if path.is_symlink() or not path.is_file():
         fail("installed engine executable is missing, non-regular, or redirected")
     return {
+        "pid": pid,
         "engine_cpu_seconds_total": (
             int(usage.ri_user_time) + int(usage.ri_system_time)
         ) / 1_000_000_000.0,
+        "process_start_abstime": int(usage.ri_proc_start_abstime),
         "engine_memory_footprint_bytes": int(usage.ri_phys_footprint),
         "engine_disk_write_bytes_total": int(usage.ri_diskio_byteswritten),
         "executable_path": str(path),
         "executable_sha256": sha256_file(path),
     }
+
+
+def darwin_process_cdhash(pid: int) -> str:
+    """Read the running image, using xnu codesign.h operation 5 and 20 bytes."""
+    int_value(pid, "CDHash process PID", minimum=1)
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    except OSError as exc:
+        fail(f"libSystem is unavailable: {exc}")
+    cdhash = (ctypes.c_ubyte * CDHASH_BYTES)()
+    libc.csops.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_size_t]
+    libc.csops.restype = ctypes.c_int
+    if libc.csops(pid, CS_OPS_CDHASH, ctypes.byref(cdhash), ctypes.sizeof(cdhash)) != 0:
+        fail(f"cannot inspect running process CodeDirectory hash for PID {pid}")
+    return require_cdhash(bytes(cdhash).hex(), "running process CDHash")
+
+
+def engine_process_observation(pid: int) -> Dict[str, Any]:
+    """Bind sampled counters to the native running image at this observation."""
+    metrics = darwin_process_metrics(pid)
+    metrics["running_cdhash"] = darwin_process_cdhash(pid)
+    process = normalized_engine_process(metrics, "live engine process")
+    after = darwin_process_rusage(pid)
+    if int(after.ri_proc_start_abstime) != process["process_start_abstime"] \
+            or str(darwin_process_path(pid)) != process["executable_path"] \
+            or darwin_process_cdhash(pid) != process["running_cdhash"]:
+        fail("engine process changed while its observation was captured")
+    return metrics
 
 
 def darwin_engine_amfi_flags(pid: int) -> int:
@@ -5714,34 +5959,41 @@ def installed_runtime_host(pid: int) -> Dict[str, Any]:
     }
 
 
-def installed_engine_identity(pid: int, recorded_at: str) -> Dict[str, Any]:
-    path = darwin_process_path(pid)
-    if not str(path).startswith("/Library/SystemExtensions/") \
-            or not str(path).endswith(
-                "/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
-            ):
-        fail("running engine is not the installed MacCrab system extension")
+def installed_engine_identity(pid: int) -> Dict[str, Any]:
+    inspection_started_at = dt.datetime.now(dt.timezone.utc)
+    process = normalized_engine_process(engine_process_observation(pid), "installed engine")
+    path = pathlib.Path(process["executable_path"])
     run_checked(
         [fixed_tool("/usr/bin/codesign"), "--verify", "--strict", str(path)],
         "installed system-extension signature verification",
     )
-    identity = codesign_identity(path, label="installed engine signing identity")
-    require_maccrab_signing_identity(
-        identity, expected_identifier=EXPECTED_AGENT_IDENTIFIER,
-        path="installed engine signing identity",
+    slices = slice_signing_identities(
+        path, expected_identifier=EXPECTED_AGENT_IDENTIFIER, label_prefix="installed engine",
     )
+    matching = [(architecture, identity) for architecture, identity in slices.items()
+                if identity["cdhash"] == process["running_cdhash"]]
+    if len(matching) != 1:
+        fail("installed engine disk signature does not identify one running architecture slice")
+    architecture, identity = matching[0]
     plist_path = path.parent.parent / "Info.plist"
     try:
         with plist_path.open("rb") as handle:
             info = plistlib.load(handle)
     except (OSError, plistlib.InvalidFileException) as exc:
         fail(f"installed system-extension Info.plist is unreadable: {exc}")
+    after = darwin_process_rusage(pid)
+    if int(after.ri_proc_start_abstime) != process["process_start_abstime"] \
+            or str(darwin_process_path(pid)) != process["executable_path"] \
+            or darwin_process_cdhash(pid) != process["running_cdhash"]:
+        fail("engine process changed during endpoint signing inspection")
+    recorded_at = dt.datetime.now(dt.timezone.utc)
+    if (recorded_at - inspection_started_at).total_seconds() > MAX_SAMPLE_GAP_SECONDS:
+        fail("engine endpoint signing inspection exceeded its bounded interval")
     return {
-        **identity,
+        **identity, **process, "architecture": architecture,
         "engine_pid": pid,
-        "recorded_at": recorded_at,
-        "executable_path": str(path),
-        "executable_sha256": sha256_file(path),
+        "inspection_started_at": inspection_started_at.isoformat(),
+        "recorded_at": recorded_at.isoformat(),
         "system_extension_bundle_identifier": string_value(
             info.get("CFBundleIdentifier"), "installed system-extension bundle identifier"
         ),
@@ -5754,23 +6006,90 @@ def installed_engine_identity(pid: int, recorded_at: str) -> Dict[str, Any]:
     }
 
 
-def gui_background_cpu_percent() -> float:
-    output = command_text(
-        ["/bin/ps", "-axo", "pid=,pcpu=,comm="], "GUI CPU probe"
-    )
-    total = 0.0
+def gui_process_observation() -> Dict[str, Any]:
+    """One present GUI and its ps pcpu snapshot; absence is not measured zero."""
+    output = command_text(["/bin/ps", "-axo", "pid=,pcpu=,comm="], "GUI CPU probe")
+    rows = []
     for line in output.splitlines():
         parts = line.strip().split(None, 2)
-        if len(parts) != 3:
-            continue
-        command = parts[2]
-        if command.endswith("/MacCrab") or command == "MacCrab":
-            try:
-                total += float(parts[1])
-            except ValueError:
-                fail("GUI CPU probe returned a non-numeric percentage")
-    return total
+        if len(parts) == 3 and (parts[2].endswith("/MacCrab") or parts[2] == "MacCrab"):
+            rows.append(parts)
+    if len(rows) != 1:
+        fail(f"qualification requires exactly one running MacCrab GUI; observed {len(rows)}")
+    try:
+        pid = int(rows[0][0])
+    except ValueError:
+        fail("GUI process probe returned an invalid PID")
+    int_value(pid, "GUI PID", minimum=1)
+    metrics = darwin_process_metrics(pid)
+    process = normalized_gui_process({
+        "pid": pid,
+        "process_start_abstime": metrics["process_start_abstime"],
+        "executable_path": metrics["executable_path"],
+        "executable_sha256": metrics["executable_sha256"],
+        "running_cdhash": darwin_process_cdhash(pid),
+    }, "live GUI process")
+    # Take the CPU value between native process-start observations. The first
+    # ps listing discovers the unique GUI; it is not itself the measured value.
+    measured = command_text(
+        ["/bin/ps", "-p", str(pid), "-o", "pid=,pcpu=,comm="], "GUI CPU snapshot"
+    ).strip().split(None, 2)
+    if len(measured) != 3 or measured[0] != str(pid) \
+            or not (measured[2].endswith("/MacCrab") or measured[2] == "MacCrab"):
+        fail("GUI disappeared before its CPU snapshot")
+    try:
+        cpu_percent = float(measured[1])
+    except ValueError:
+        fail("GUI process probe returned an invalid CPU percentage")
+    number_value(cpu_percent, "GUI ps CPU percentage", minimum=0)
+    after = darwin_process_rusage(pid)
+    if int(after.ri_proc_start_abstime) != process["process_start_abstime"] \
+            or str(darwin_process_path(pid)) != process["executable_path"] \
+            or darwin_process_cdhash(pid) != process["running_cdhash"]:
+        fail("GUI process changed while its CPU snapshot was captured")
+    return {"process": process, "cpu_percent": cpu_percent}
 
+
+def installed_gui_identity(pid: int) -> Dict[str, Any]:
+    """Full app signing check at epoch endpoints, matching engine cadence."""
+    inspection_started_at = dt.datetime.now(dt.timezone.utc)
+    metrics = darwin_process_metrics(pid)
+    process = normalized_gui_process({
+        "pid": pid, "process_start_abstime": metrics["process_start_abstime"],
+        "executable_path": metrics["executable_path"],
+        "executable_sha256": metrics["executable_sha256"],
+        "running_cdhash": darwin_process_cdhash(pid),
+    }, "installed GUI")
+    path = pathlib.Path(process["executable_path"])
+    run_checked([fixed_tool("/usr/bin/codesign"), "--verify", "--strict", str(path)],
+                "installed GUI signature verification")
+    slices = gui_slice_signing_identities(path)
+    matching = [(architecture, identity) for architecture, identity in slices.items()
+                if identity["cdhash"] == process["running_cdhash"]]
+    if len(matching) != 1:
+        fail("installed GUI disk signature does not identify one running architecture slice")
+    architecture, identity = matching[0]
+    try:
+        with (path.parent.parent / "Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException) as exc:
+        fail(f"installed GUI Info.plist is unreadable: {exc}")
+    after = darwin_process_rusage(pid)
+    if int(after.ri_proc_start_abstime) != process["process_start_abstime"] \
+            or str(darwin_process_path(pid)) != process["executable_path"] \
+            or darwin_process_cdhash(pid) != process["running_cdhash"]:
+        fail("GUI process changed during endpoint signing inspection")
+    recorded_at = dt.datetime.now(dt.timezone.utc)
+    if (recorded_at - inspection_started_at).total_seconds() > MAX_SAMPLE_GAP_SECONDS:
+        fail("GUI endpoint signing inspection exceeded its bounded interval")
+    return {
+        **identity, **process, "architecture": architecture,
+        "inspection_started_at": inspection_started_at.isoformat(),
+        "recorded_at": recorded_at.isoformat(),
+        "bundle_identifier": string_value(info.get("CFBundleIdentifier"), "GUI bundle identifier"),
+        "bundle_version": string_value(info.get("CFBundleShortVersionString"), "GUI version"),
+        "build_version": string_value(info.get("CFBundleVersion"), "GUI build"),
+    }
 
 def read_live_heartbeat(
     path: pathlib.Path, candidate: Mapping[str, Any]
@@ -6259,6 +6578,18 @@ def validate_causal_llm_transition(
 ) -> Dict[str, int]:
     before = object_value(before_raw, f"{path}.before")
     after = object_value(after_raw, f"{path}.after")
+    configured = bool_value(before.get("configured"), f"{path}.before.configured")
+    if bool_value(after.get("configured"), f"{path}.after.configured") != configured:
+        fail(f"{path} LLM configuration changed during the causal alert proof")
+    if not configured:
+        # This is the normalized telemetry contract of an unconfigured engine.
+        # The alert remains mandatory; an investigation must not be invented.
+        if before != {"configured": False} or after != {"configured": False}:
+            fail(f"{path} unconfigured LLM snapshot has unexpected activity or fields")
+        return {
+            "started_delta": 0, "accepted_delta": 0,
+            "final_rejection_delta": 0, "unspecified_delta": 0,
+        }
     for label, row in (("before", before), ("after", after)):
         if row.get("configured") is not True or row.get("schema_version") != 2 \
                 or row.get("accounting_conserved") is not True:
@@ -6398,6 +6729,15 @@ def validate_alert_investigation_proof(raw: Any, path: str) -> Dict[str, int]:
         string_value(row.get("id"), f"{path}.observed_alerts id") for row in observed_alerts
     }:
         fail(f"{path}.alert is not among the alerts the trigger was observed to produce")
+    before = object_value(proof.get("telemetry_before"), f"{path}.telemetry_before")
+    if before.get("configured") is False:
+        if proof.get("investigation_json") is not None \
+                or proof.get("investigation_sha256") is not None:
+            fail(f"{path} unconfigured LLM must not claim a persisted investigation")
+        return validate_causal_llm_transition(
+            before, proof.get("telemetry_after"), f"{path}.telemetry",
+            allow_uninitialized_before=proof.get("phase") == "prewarm",
+        )
     investigation = validate_investigation_json(
         proof.get("investigation_json"), alert_id, f"{path}.investigation_json"
     )
@@ -6600,7 +6940,8 @@ def capture_runtime_observation(
     captured_at = dt.datetime.now(dt.timezone.utc)
     heartbeat, heartbeat_file = read_live_heartbeat(heartbeat_path, candidate)
     pid = heartbeat_counter(heartbeat, "engine_pid", "heartbeat")
-    process = darwin_process_metrics(pid)
+    process = engine_process_observation(pid)
+    gui = gui_process_observation()
     graph = object_value(
         heartbeat.get("tracegraph_storage_admission"),
         "heartbeat.tracegraph_storage_admission",
@@ -6619,7 +6960,8 @@ def capture_runtime_observation(
         "heartbeat": heartbeat,
         "heartbeat_file": heartbeat_file,
         "process": process,
-        "gui_background_cpu_percent": gui_background_cpu_percent(),
+        "gui_background_cpu_percent": gui["cpu_percent"],
+        "gui_process": gui["process"],
         "sqlite_families": sqlite_family_observation(
             heartbeat=heartbeat, data_dirs=data_dirs, overrides=sqlite_overrides
         ),
@@ -6688,7 +7030,7 @@ def terminate_process_group(process: subprocess.Popen[str]) -> Tuple[str, str]:
 #
 # Binding anything else — including the first row of a timestamp-ordered query —
 # selects an alert that will never carry an investigation, so the proof can
-# never land and the run fails at the offset-450 boundary having proved nothing.
+# never land and the run fails at the drain boundary having proved nothing.
 # It also risks binding a non-UUID id (campaign alerts are `CAMP-<hex>`), which
 # hard-fails UUID_RE.
 #
@@ -6779,8 +7121,15 @@ def causal_alert_proof_if_ready(
     if row.get("process_path") != process_path:
         fail("causal alert query returned a different process path")
     investigation = row.get("llm_investigation_json")
-    if not isinstance(investigation, str) or not investigation.strip():
+    configured = bool_value(
+        telemetry_before.get("configured"), f"{phase} causal baseline.configured"
+    )
+    if configured and (not isinstance(investigation, str) or not investigation.strip()):
         return None, alert_id
+    if not configured:
+        if isinstance(investigation, str) and investigation.strip():
+            fail("unconfigured LLM unexpectedly persisted a causal alert investigation")
+        investigation = None
     sample = sample_from_recorder_observation(
         observation, f"{phase} causal alert observation"
     )
@@ -6794,6 +7143,8 @@ def causal_alert_proof_if_ready(
     pending = object_value(
         sample.get("llm_quality"), f"{phase} causal LLM telemetry result"
     )
+    if pending.get("configured") != configured:
+        fail("LLM configuration changed while awaiting the causal alert proof")
     if pending.get("configured") is True and pending.get("healthy") is not True:
         return None, alert_id
     # Same lag, second field. `healthy` is already true by the epoch (the
@@ -6859,12 +7210,14 @@ def causal_alert_proof_if_ready(
             for other in rows
         ],
         "investigation_json": investigation,
-        "investigation_sha256": sha256_bytes(investigation.encode("utf-8")),
+        "investigation_sha256": (
+            sha256_bytes(investigation.encode("utf-8")) if investigation is not None else None
+        ),
         "telemetry_before": copy.deepcopy(
             object_value(telemetry_before, "causal LLM telemetry baseline")
         ),
-        # NOTE: the caller must not reach here until `sample.llm_quality`
-        # reports healthy -- see the readiness gate above this return.
+        # Configured backends must report healthy with completed investigation
+        # counters before their database evidence can be accepted.
         "telemetry_after": copy.deepcopy(
             object_value(sample.get("llm_quality"), "causal LLM telemetry result")
         ),
@@ -6881,12 +7234,12 @@ def wait_for_runtime_drain(
     candidate: Mapping[str, Any], data_dirs: Sequence[pathlib.Path],
     sqlite_overrides: Mapping[str, int], expected_pid: int,
     timeout_seconds: int = RUNTIME_DRAIN_TIMEOUT_SECONDS,
-    require_llm_ready: bool = True,
+    require_llm_ready: bool = True, allow_flowing: bool = True,
 ) -> Dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     observation = dict(initial)
-    last_completed: Dict[str, int] = {}
-    proven_flowing: set = set()
+    latest_sample: Dict[str, Any] | None = None
+    previous_sample: Dict[str, Any] | None = None
     while True:
         fatal, pending = runtime_readiness_failures(
             observation, f"{phase} observation", expected_pid=expected_pid,
@@ -6894,45 +7247,23 @@ def wait_for_runtime_drain(
         )
         if fatal:
             fail(f"{phase} runtime readiness failed: " + "; ".join(fatal))
-        # rc.42: forgive lanes that are provably FLOWING (see
-        # RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT). A lane qualifies only when its
-        # backlog is small, nothing is mid-transaction, and its cumulative
-        # `completed` advanced across distinct telemetry snapshots — the one
-        # thing a stuck writer cannot fake.
-        boundaries = observation.get("conservation")
-        if pending and isinstance(boundaries, Mapping):
-            still_pending = []
-            for entry in pending:
-                name = entry.split(" ", 1)[0]
-                row = boundaries.get(name)
-                if not isinstance(row, Mapping):
-                    still_pending.append(entry)
-                    continue
-                completed = row.get("completed")
-                queued = row.get("queued")
-                in_flight = row.get("in_flight")
-                previous = last_completed.get(name)
-                if isinstance(completed, int) and previous is not None \
-                        and completed > previous:
-                    proven_flowing.add(name)
-                if name in proven_flowing and in_flight == 0 \
-                        and isinstance(queued, int) \
-                        and 0 <= queued <= RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT:
-                    continue
-                still_pending.append(entry)
-            pending = still_pending
-        if isinstance(boundaries, Mapping):
-            for name, row in boundaries.items():
-                if isinstance(row, Mapping) and isinstance(row.get("completed"), int):
-                    previous = last_completed.get(name)
-                    if previous is None or row["completed"] != previous:
-                        last_completed[name] = row["completed"]
+        sample = sample_from_recorder_observation(observation, f"{phase} observation")
+        # Polls can read the same heartbeat more than once. Compare with the
+        # preceding distinct snapshot, without latching progress for future ones.
+        if latest_sample is None or sample.get("heartbeat_written_at_unix") != \
+                latest_sample.get("heartbeat_written_at_unix"):
+            previous_sample = latest_sample
+            latest_sample = sample
+        if allow_flowing:
+            pending = forgive_flowing_boundary_lanes(
+                pending, sample.get("conservation"),
+                previous_sample.get("conservation") if previous_sample else None,
+            )
         if not pending:
             return observation
         if time.monotonic() >= deadline:
             fail(
                 f"{phase} runtime queues did not drain: " + "; ".join(pending)
-                + f" (flow-proven lanes this window: {sorted(proven_flowing) or 'none'})"
             )
         time.sleep(READINESS_POLL_SECONDS)
         scheduled_at = dt.datetime.now(dt.timezone.utc)
@@ -7015,13 +7346,14 @@ def prewarm_alert_investigation(
         time.sleep(READINESS_POLL_SECONDS)
     if proof is None:
         fail(
-            "LLM prewarm timed out without one exact committed alert and "
-            "persisted accepted investigation"
+            "alert prewarm timed out without one exact committed alert and "
+            "an accepted investigation when LLM is configured"
         )
     drained = wait_for_runtime_drain(
         initial=latest, phase="post-prewarm", heartbeat_path=heartbeat_path,
         candidate=candidate, data_dirs=data_dirs,
         sqlite_overrides=sqlite_overrides, expected_pid=expected_pid,
+        allow_flowing=False,
     )
     probe.update({
         "run_id": run_id,
@@ -7058,6 +7390,7 @@ def live_runtime_recording(
     if platform.system() != "Darwin" or os.geteuid() != 0:
         fail("record-runtime must run with sudo on the installed reference Mac")
     candidate = object_value(candidate_manifest.get("candidate"), "candidate")
+    verification = object_value(candidate_manifest.get("artifact_verification"), "artifact_verification")
     observations: List[Dict[str, Any]] = []
     readiness_observations: List[Dict[str, Any]] = []
     workload_process: subprocess.Popen[str] | None = None
@@ -7122,6 +7455,10 @@ def live_runtime_recording(
             heartbeat_path=heartbeat_path, candidate=candidate,
             data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
         )
+        validate_gui_candidate_process(initial.get("gui_process"),
+                                       candidate_verification=verification, path="initial GUI")
+        validate_engine_candidate_process(initial.get("process"),
+                                          candidate_verification=verification, path="initial engine")
         readiness_observations.append(initial)
         # A never-used configured backend is expected to be healthy=false until
         # the exact alert prewarm below. Storage, loss, accounting, circuit and
@@ -7150,6 +7487,7 @@ def live_runtime_recording(
             heartbeat_path=heartbeat_path, candidate=candidate,
             data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
             expected_pid=preflight_pid, require_llm_ready=False,
+            allow_flowing=False,
         )
         readiness_observations.append(drained_before_prewarm)
 
@@ -7170,12 +7508,18 @@ def live_runtime_recording(
         # Capture signed identity only after all unmeasured probes and before
         # t0. Re-reading endpoints later cannot substitute for this boundary.
         phase = "epoch"
-        identity_started_at = dt.datetime.now(dt.timezone.utc).replace(
-            microsecond=0
+        installed_start = installed_engine_identity(preflight_pid)
+        engine_epoch_identity = validate_engine_candidate_process(
+            installed_start, candidate_verification=verification, path="epoch engine start",
         )
-        installed_start = installed_engine_identity(
-            preflight_pid,
-            identity_started_at.isoformat().replace("+00:00", "Z"),
+        validate_installed_engine_identity(
+            installed_start, path="epoch engine start", candidate=candidate,
+            candidate_verification=verification,
+        )
+        installed_gui_start = installed_gui_identity(post_prewarm["gui_process"]["pid"])
+        gui_epoch_identity, _ = validate_installed_gui_identity(
+            installed_gui_start, path="epoch GUI start",
+            candidate=candidate, candidate_verification=verification,
         )
         start_wall = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
         start_monotonic = time.monotonic()
@@ -7188,6 +7532,10 @@ def live_runtime_recording(
             first, "epoch t0", phase="epoch t0", require_drained=True,
             expected_pid=preflight_pid,
         )
+        if first["gui_process"] != gui_epoch_identity:
+            fail("GUI process changed before epoch t0")
+        if normalized_engine_process(first["process"], "epoch t0 engine") != engine_epoch_identity:
+            fail("engine process changed before epoch t0")
         observations.append(first)
         persist_capture("capturing")
 
@@ -7209,7 +7557,16 @@ def live_runtime_recording(
                     BURST_DRAIN_OFFSET_SECONDS, int(MIN_EPOCH_SECONDS)
                 ),
                 expected_pid=preflight_pid,
+                previous_sample=sample_from_recorder_observation(
+                    observations[-1], "previous epoch sample"
+                ),
             )
+            validate_gui_candidate_process(observation.get("gui_process"),
+                                           candidate_verification=verification, path=f"GUI offset {offset}")
+            if observation["gui_process"] != gui_epoch_identity:
+                fail("GUI process identity changed during the epoch")
+            if normalized_engine_process(observation["process"], f"engine offset {offset}") != engine_epoch_identity:
+                fail("native engine process identity changed during the epoch")
             observations.append(observation)
 
             if offset == BURST_START_OFFSET_SECONDS:
@@ -7293,20 +7650,15 @@ def live_runtime_recording(
                     fail("fixed workload has no completed bounded transcript")
                 if workload_alert_proof is None:
                     fail(
-                        "fixed workload did not produce its exact persisted "
-                        "accepted alert investigation by the drain boundary"
+                        "fixed workload did not produce its exact committed alert "
+                        "and configured investigation by the drain boundary"
                     )
                 target_pid = heartbeat_counter(
                     observation["heartbeat"], "engine_pid", "heartbeat"
                 )
-                sent_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
-                os.kill(target_pid, signal.SIGHUP)
-                reload_evidence = {
-                    "signal": "SIGHUP",
-                    "target_pid": target_pid,
-                    "sample_offset_seconds": offset,
-                    "sent_at": sent_at.isoformat().replace("+00:00", "Z"),
-                }
+                reload_evidence = send_live_rule_reload_probe(
+                    target_pid=target_pid, offset=offset,
+                )
             persist_capture(
                 "capturing" if offset < MIN_EPOCH_SECONDS else "captured"
             )
@@ -7334,7 +7686,19 @@ def live_runtime_recording(
         fail("engine PID changed or the live SIGHUP rule-reload probe was not sent")
     start_text = observations[0]["recorded_at"]
     end_text = observations[-1]["recorded_at"]
-    installed_end = installed_engine_identity(last_pid, end_text)
+    installed_end = installed_engine_identity(last_pid)
+    validate_installed_engine_identity(
+        installed_end, path="epoch engine end", candidate=candidate, candidate_verification=verification,
+    )
+    if normalized_engine_process(installed_end, "epoch engine end") != engine_epoch_identity:
+        fail("engine process changed before the end identity check")
+    installed_gui_end = installed_gui_identity(observations[-1]["gui_process"]["pid"])
+    gui_end_identity, _ = validate_installed_gui_identity(
+        installed_gui_end, path="epoch GUI end", candidate=candidate,
+        candidate_verification=verification,
+    )
+    if gui_end_identity != gui_epoch_identity:
+        fail("GUI process changed before the end identity check")
     disk_diagnostics, disk_log = log_diagnostic_count(
         started_at=start_text, ended_at=end_text,
         predicate=(
@@ -7426,6 +7790,8 @@ def live_runtime_recording(
     probes = {
         "installed_engine_start": installed_start,
         "installed_engine_end": installed_end,
+        "installed_gui_start": installed_gui_start,
+        "installed_gui_end": installed_gui_end,
         "crash_count": 0,
         "watchdog_exit_count": 0,
         "complete_rule_corpus_evaluated": True,
@@ -7457,8 +7823,9 @@ def live_runtime_recording(
             "one bounded loopback OTLP span",
             "one harmless /dev/tcp command-line alert trigger (no network access)",
             "one non-networking shell sequence pending/expiry probe",
-            "workload exit by 390 seconds and full drain by 450 seconds",
-            "SIGHUP rule reload at minute 7.5",
+            f"workload exit by {BURST_END_OFFSET_SECONDS} seconds and "
+            f"bounded drain by {BURST_DRAIN_OFFSET_SECONDS} seconds",
+            f"SIGHUP rule reload at {BURST_DRAIN_OFFSET_SECONDS} seconds",
         ],
         "executors": [
             {"path": relative, "sha256": sha256_file(root / relative)}
@@ -8284,6 +8651,7 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
     return {
         "schema": RUNTIME_SCHEMA,
         "result": "INCOMPLETE",
+        "counter_scope_policy": copy.deepcopy(RUNTIME_COUNTER_SCOPE_POLICY),
         "candidate_manifest_sha256": manifest_sha,
         "candidate": candidate,
         "host": {
@@ -8308,6 +8676,7 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
             "executors": [],
         },
         "installed_engine": {"start": {}, "end": {}},
+        "installed_gui": {"start": {}, "end": {}},
         "epoch": {
             "started_at": "REPLACE",
             "ended_at": "REPLACE",
@@ -8324,7 +8693,9 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
         "recorder_observations": [],
         "recorder_probe_evidence": {},
         "measurements": {
-            "process": {"engine_pids": [], "crash_count": 0, "watchdog_exit_count": 0, "relaunch_count": 0},
+            "process": {"engine_pids": [], "engine_started_at_unix": 0,
+                        "engine_uptime_seconds_at_t0": 0, "engine_uptime_seconds_at_end": 0,
+                        "crash_count": 0, "watchdog_exit_count": 0, "relaunch_count": 0},
             "conservation": {"all_samples_reconciled": False, "boundaries": []},
             "priority_fidelity": {"priority_lane_loss": 0, "kernel_loss": 0, "callback_copy_loss": 0, "upstream_collector_loss": 0},
             "file_fidelity": {"unclassified_queue_loss": 0, "complete_rule_corpus_evaluated": False, "rule_corpus_sha256": "REPLACE", "semantic_reasons": []},
@@ -8384,7 +8755,7 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
                 "trace_graph_physical_write_suppressed_rows_delta": 0,
             },
             "disk_writes": {"engine_bytes": 0, "average_bytes_per_second": 0, "windows": [], "macos_disk_writes_diagnostic_count": 0},
-            "cpu": {"engine_cpu_seconds": 0, "engine_average_cores": 0, "gui_background_percent_samples": [], "gui_background_p95_percent": 0},
+            "cpu": {"engine_cpu_seconds": 0, "engine_average_cores": 0, "gui_cpu_statistic": GUI_CPU_STATISTIC, "gui_background_percent_samples": [], "gui_background_p95_percent": 0},
             "memory": {"engine_max_memory_footprint_bytes": 0, "engine_memory_footprint_minute_5_bytes": 0, "engine_memory_footprint_minute_15_bytes": 0},
             "disk_safety": {"inventory_complete": False, "sqlite_families": []},
             "ai_quality": {

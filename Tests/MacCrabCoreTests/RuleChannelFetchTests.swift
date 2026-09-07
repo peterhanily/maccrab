@@ -51,8 +51,8 @@ struct RuleChannelFetchTests {
     /// channel uses — higher fidelity than a hand-built fixture. (Skips any
     /// non-rule top-level json such as a manifest/index file.)
     private func firstRealRuleObject() throws -> [String: Any] {
-        ensureRulesCompiled()
-        let dir = URL(fileURLWithPath: "/tmp/maccrab_v3")
+        try ensureRulesCompiled()
+        let dir = compiledRulesDirectory
         let files = try FileManager.default
             .contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }

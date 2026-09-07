@@ -51,6 +51,7 @@ public enum SecretKey: String, CaseIterable, Sendable {
     case ollamaAPIKey  = "llm.ollama"       // optional — hosted Ollama endpoints
 
     // Threat intelligence
+    case abuseCHAuthKey = "threatintel.abusech"
     case virusTotalKey = "threatintel.virustotal"
     case abuseIPDBKey  = "threatintel.abuseipdb"
     case alienVaultKey = "threatintel.alienvault"
@@ -74,6 +75,7 @@ public enum SecretKey: String, CaseIterable, Sendable {
         case .geminiAPIKey:       return "Google Gemini"
         case .mistralAPIKey:      return "Mistral"
         case .ollamaAPIKey:       return "Ollama (hosted)"
+        case .abuseCHAuthKey:     return "abuse.ch"
         case .virusTotalKey:      return "VirusTotal"
         case .abuseIPDBKey:       return "AbuseIPDB"
         case .alienVaultKey:      return "AlienVault OTX"

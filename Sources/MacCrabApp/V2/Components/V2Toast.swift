@@ -30,12 +30,12 @@ public struct V2Toast: Identifiable, Equatable, Sendable {
     /// the common informational toast.
     public let action: V2ToastAction?
 
-    /// `displayFor` defaults per KIND rather than to a flat 3 s: the toast
-    /// surface is single-slot with no history, so an error's 3-second life is
-    /// the ONLY copy of a failure reason ("Export failed", "Couldn't delete",
-    /// "Couldn't unsuppress"). Errors and warnings get 10 s; success/info keep
-    /// 3 s. Explicit values (the deliberate `displayFor: 6` sites in
-    /// V2AlertsWorkspace) still win.
+    /// Actions and failures remain reachable until the user acts or dismisses.
+    public var requiresDismissal: Bool { action != nil || kind == .error || kind == .warning }
+
+    /// Informational notices expire after this interval. Actions, warnings and
+    /// failures ignore the interval and stay in the session notice history
+    /// until dismissed; replacing a toast never destroys an outstanding Undo.
     public init(kind: Kind, title: String, detail: String? = nil, displayFor: TimeInterval? = nil, action: V2ToastAction? = nil) {
         self.kind = kind
         self.title = title
@@ -100,8 +100,8 @@ public struct V2ToastView: View {
                     // Run the action, then dismiss so the toast (and its now-
                     // spent Undo) clears; the handler typically shows its own
                     // follow-up toast.
-                    action.handler()
                     onDismiss()
+                    action.handler()
                 } label: {
                     Text(action.title)
                         .scaledSystem(12, weight: .semibold)
@@ -129,7 +129,7 @@ public struct V2ToastView: View {
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss notification")
+            .accessibilityLabel(String(localized: "ui.V2Toast.dismiss.notification", defaultValue: "Dismiss notification"))
         }
         .padding(12)
         .frame(width: 360, alignment: .leading)
@@ -156,8 +156,6 @@ public struct V2ToastView: View {
                 ]
             )
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(toast.detail.map { "\(toast.title), \($0)" } ?? toast.title)
-        .accessibilityAddTraits(.isStaticText)
+        .accessibilityElement(children: .contain)
     }
 }

@@ -51,16 +51,9 @@ let package = Package(
         .executable(name: "maccrab-tierb-corpus-probe-swift", targets: ["maccrab-tierb-corpus-probe-swift"]),
     ],
     dependencies: [
-        // Test-only dep. Pinned to an exact tagged release rather than a
-        // branch or bare revision so CI can't be broken by an upstream push
-        // to release/6.2 — and so the manifest names a verifiable release.
-        // 6.2.4 is the swift-6.2.4-RELEASE tag, == revision
-        // 5ee435b15ad40ec1f644b5eb9d247f263ccd2170 (recorded in
-        // Package.resolved). Bump deliberately, not implicitly.
-        .package(
-            url: "https://github.com/swiftlang/swift-testing.git",
-            exact: "6.2.4"
-        ),
+        // Test targets import Testing from the qualified Swift toolchain.
+        // Keeping its macros with the compiler avoids an independently
+        // versioned source-package compiler-plugin transport.
         // Sparkle 2: auto-update framework for MacCrabApp only. Release
         // builds poll https://maccrab.com/appcast.xml and install signed
         // updates via SUPublicEDKey verification. Sysext updates cascade
@@ -71,17 +64,17 @@ let package = Package(
         // update installs, so a compromised upstream release could push
         // code to every MacCrab user. Bump deliberately, not implicitly.
         //
-        // 2.9.2 (2026-05-17) fixes two medium advisories present in <= 2.9.1:
-        //   - GHSA-g3hp-f6mg-559v: AppInstaller post-stage-1 XPC listener
-        //     accepted unvalidated connections (spoofed appcast item data).
-        //   - GHSA-hg88-v3cw-3qrh: binary-delta intermediate-symlink traversal
-        //     in a malicious .delta (we ship full DMGs only, so unreachable
-        //     for our users, but closed regardless).
-        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.2"),
+        // 2.9.6 (2026-08-17) includes installer hardening plus fixes since
+        // 2.9.2 for first updates of bundle IDs ending in .app and update-window
+        // activation in dockless apps. Both compatibility fixes apply to
+        // MacCrab's app shape. The exact tag commit and binary/tool hashes are
+        // recorded in scripts/release-dependencies.lock; installed update and
+        // relaunch qualification is still required for each release candidate.
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6"),
     ],
     targets: [
-        // SQLCipher amalgamation, vendored from sqlcipher/sqlcipher v4.16.0
-        // (SQLite 3.53.1). The only SQLite implementation in the codebase —
+        // SQLCipher amalgamation, vendored from sqlcipher/sqlcipher v4.18.0
+        // (SQLite 3.53.4). The only SQLite implementation in the codebase —
         // no target links the macOS-bundled libsqlite3 anymore. SQLCipher in
         // non-codec mode (no PRAGMA key issued) behaves identically to
         // upstream SQLite, so existing un-encrypted stores (events.db,
@@ -152,6 +145,7 @@ let package = Package(
                 .linkedLibrary("bsm"),
                 .linkedFramework("Security"),
                 .linkedFramework("OSLog"),
+                .linkedFramework("SystemConfiguration"),
             ]
         ),
         .executableTarget(
@@ -262,7 +256,6 @@ let package = Package(
             dependencies: [
                 "MacCrabCore",
                 "MacCrabAgentKit",
-                .product(name: "Testing", package: "swift-testing"),
             ],
             // LLMEvalTests reads these fixtures via `#filePath` (source-tree
             // path), but SPM still needs them declared so it stops emitting
@@ -279,7 +272,6 @@ let package = Package(
             dependencies: [
                 "MacCrabApp",
                 "MacCrabCore",
-                .product(name: "Testing", package: "swift-testing"),
             ]
         ),
         .testTarget(
@@ -288,7 +280,6 @@ let package = Package(
                 "MacCrabForensics",
                 "CTierBBroker",   // the broker round-trip test uses the recv-fd side
                 "MacCrabPluginKit",   // the plugin-side broker client (SDK) tests
-                .product(name: "Testing", package: "swift-testing"),
             ]
         ),
         // CI-14: maccrabctl (10.2k LOC) and maccrab-mcp (4.3k LOC) are shipped,
@@ -308,7 +299,6 @@ let package = Package(
                 "maccrab-mcp",
                 "MacCrabCore",
                 "MacCrabForensics",
-                .product(name: "Testing", package: "swift-testing"),
             ]
         ),
     ]

@@ -177,8 +177,8 @@ sign_hash=$(/usr/bin/shasum -a 256 "$FIXTURE/.build/artifacts/sparkle/Sparkle/bi
 keys_hash=$(/usr/bin/shasum -a 256 "$FIXTURE/.build/artifacts/sparkle/Sparkle/bin/generate_keys" | /usr/bin/awk '{print $1}')
 cat > "$FIXTURE/scripts/release-dependencies.lock" <<LOCK
 format_version=1
-sparkle_version=2.9.2
-sparkle_revision=6276ba2b404829d139c45ff98427cf90e2efc59b
+sparkle_version=2.9.6
+sparkle_revision=ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a
 sparkle_binary_artifact_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 sparkle_sign_update_sha256=$sign_hash
 sparkle_generate_keys_sha256=$keys_hash
@@ -189,15 +189,15 @@ cat > "$FIXTURE/Package.swift" <<'SWIFT'
 let packages = [
     .package(
         url: "https://github.com/sparkle-project/Sparkle",
-        exact: "2.9.2"
+        exact: "2.9.6"
     )
 ]
 SWIFT
 cat > "$FIXTURE/Package.resolved" <<'JSON'
-{"pins":[{"identity":"sparkle","kind":"remoteSourceControl","location":"https://github.com/sparkle-project/Sparkle","state":{"revision":"6276ba2b404829d139c45ff98427cf90e2efc59b","version":"2.9.2"}}],"version":2}
+{"pins":[{"identity":"sparkle","kind":"remoteSourceControl","location":"https://github.com/sparkle-project/Sparkle","state":{"revision":"ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a","version":"2.9.6"}}],"version":2}
 JSON
 cat > "$FIXTURE/.build/checkouts/Sparkle/Package.swift" <<'SWIFT'
-let version = "2.9.2"
+let version = "2.9.6"
 let checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 SWIFT
 cat > "$FIXTURE/Xcode/project.yml" <<'YML'

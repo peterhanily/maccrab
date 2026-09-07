@@ -1698,6 +1698,20 @@ public actor AlertStore {
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
+    /// Read-only confirmation of the campaign action's complete retained
+    /// alert fan-out. An empty UI page is never evidence that this is true.
+    public func campaignSuppressionMatches(campaignId id: String, suppressed: Bool) throws -> Bool {
+        let sql = "SELECT NOT EXISTS(SELECT 1 FROM alerts WHERE (campaign_id = ?1 OR id = ?1) AND suppressed != ?2 LIMIT 1)"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: id)
+        sqlite3_bind_int(stmt, 2, suppressed ? 1 : 0)
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed("Failed to confirm campaign suppression")
+        }
+        return sqlite3_column_int(stmt, 0) == 1
+    }
+
     /// PERF-5: exact count of alerts since `since`, computed SQL-side (no row
     /// materialization). Replaces counting via `alerts(…, limit: 5000).count`,
     /// which silently UNDERCOUNTED once a busy host exceeded the 5000-row cap.

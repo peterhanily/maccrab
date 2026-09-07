@@ -26,19 +26,13 @@ struct V2AlertsWorkspace: View {
     // visible row.
     @State private var selectedAlertIds: Set<String> = []
     @State private var loaded = false
-    // v1.12.7 Wave 9R: pending-mutation reconciliation. After Wave 9Q
-    // flipped @State optimistically on click, the auto-refresh-tick
-    // reload() — reading directly from alerts.db before the daemon
-    // had processed the inbox file — was clobbering the optimistic
-    // flip and "flickering" the alert back to its pre-mutation state.
-    // These sets track in-flight mutations so reload() can overlay
-    // the optimistic value on top of the DB read until the daemon
-    // catches up (at which point the set entry is pruned).
-    @State private var pendingSuppressedAlertIds: Set<String> = []
-    @State private var pendingUnsuppressedAlertIds: Set<String> = []
-    @State private var pendingDeletedAlertIds: Set<String> = []
-    @State private var pendingSuppressedCampaignIds: Set<String> = []
-    @State private var pendingLiftedSuppressionKeys: Set<String> = []
+    // Requests are displayed separately from stored alert/campaign state.
+    // An accepted inbox request must never hide or rewrite a committed row.
+    @State private var mutations = V2MutationTracker()
+    @StateObject private var mutationConfirmation = V2MutationConfirmationLoop()
+    @State private var mutationProviderID: ObjectIdentifier?
+    @State private var lastUndoBatch: [V2MutationRequest] = []
+    @State private var showAllMutationDetails = false
     // Destructive/large-batch confirmations. A permanent delete and a bulk
     // suppress that can hit the full visible set (fetch cap 1000) both warrant
     // a confirm step — matching the Forensics bulk-delete precedent.
@@ -85,10 +79,14 @@ struct V2AlertsWorkspace: View {
                     set: { if let v = $0 { state.selectTab(v) } }
                 )
             )
+            if !mutations.entries.isEmpty { mutationStatusBanner }
             tabBody
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .task(id: "\(state.provider.mode):\(state.refreshTick):\(state.alertTimeRange):\(windowTaskKey)") { await reload() }
+        // Table refresh cancellation must not starve saved-state confirmation.
+        // SwiftUI cancels this task when its provider changes or the view leaves.
+        .task(id: ObjectIdentifier(state.provider)) { await confirmMutations() }
         // Permanent-delete confirmation (History tab). The delete is a hard
         // DELETE FROM alerts with no undo — including the snapshotted
         // triggering-event evidence — so it must not fire on a single mis-click.
@@ -136,7 +134,130 @@ struct V2AlertsWorkspace: View {
         }
     }
 
+    private var mutationStatusBanner: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(String(localized: "mutation.statusTitle", defaultValue: "Requested changes"))
+                    .font(V2Theme.cardTitle())
+                Spacer()
+                if mutations.entries.count > 3 {
+                    Button(showAllMutationDetails
+                           ? String(localized: "mutation.showLess", defaultValue: "Show less")
+                           : String(localized: "mutation.showAll", defaultValue: "Show all requests")) {
+                        showAllMutationDetails.toggle()
+                    }
+                    .buttonStyle(.plain)
+                }
+                if mutations.allApplied(lastUndoBatch) {
+                    Button(String(localized: "mutation.undoBulk", defaultValue: "Undo bulk suppression")) {
+                        let requests = lastUndoBatch.map {
+                            V2MutationRequest(operation: .unsuppressAlert, targetID: $0.targetID, title: $0.title)
+                        }
+                        lastUndoBatch = []
+                        Task { await submitMutations(requests) }
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button(String(localized: "mutation.dismissCompleted", defaultValue: "Dismiss completed")) {
+                    mutations.dismissCompleted()
+                    lastUndoBatch = []
+                }
+                .buttonStyle(.plain)
+            }
+            Text(String(localized: "mutation.pendingDetail", defaultValue: "\(mutations.pending.count) requests pending. Rows show saved state until the engine confirms each change."))
+                .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+            if showAllMutationDetails {
+                ScrollView {
+                    LazyVStack(spacing: 7) {
+                        ForEach(Array(mutations.entries.reversed())) { entry in mutationStatusRow(entry) }
+                    }
+                }
+                .frame(maxHeight: 180)
+            } else {
+                ForEach(Array(mutations.entries.suffix(3))) { entry in mutationStatusRow(entry) }
+            }
+        }
+        .foregroundStyle(V2Theme.primaryText)
+        .padding(12)
+        .background(V2Theme.panelBackground)
+    }
+
+    private func mutationStatusRow(_ entry: V2MutationTracker.Entry) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(entry.request.operation.label): \(entry.request.title)")
+                    .font(V2Theme.meta()).lineLimit(2)
+                if case .failed(let detail) = entry.status {
+                    Text(detail).font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
+                        .lineLimit(2).help(detail)
+                }
+            }
+            Spacer()
+            V2StatusChip(entry.status.label, kind: entry.status.chipKind)
+        }
+    }
+
+    @MainActor
+    private func syncMutationProvider() {
+        let current = ObjectIdentifier(state.provider)
+        if let mutationProviderID, mutationProviderID != current {
+            mutations.invalidatePending()
+            lastUndoBatch = []
+        }
+        mutationProviderID = current
+    }
+
+    @MainActor
+    private func submitMutations(_ requests: [V2MutationRequest]) async {
+        guard !requests.isEmpty else { return }
+        syncMutationProvider()
+        let provider = state.provider
+        var sent = 0
+        for request in requests {
+            guard ObjectIdentifier(state.provider) == ObjectIdentifier(provider) else {
+                syncMutationProvider()
+                break
+            }
+            guard mutations.begin(request) else { continue }
+            let result = await provider.submitMutation(request)
+            mutations.submitted(request, result: result)
+            if result == .queued || result == .applied { sent += 1 }
+        }
+        state.showToast(V2Toast(
+            kind: sent == requests.count ? .info : .warning,
+            title: sent > 0
+                ? String(localized: "mutation.requestedTitle", defaultValue: "Changes requested")
+                : String(localized: "mutation.notSentTitle", defaultValue: "No new requests sent"),
+            detail: String(localized: "mutation.requestedDetail", defaultValue: "\(sent) of \(requests.count) requests accepted. Review Requested changes for confirmation; saved rows remain visible.")))
+        // The independent confirmation loop observes saved state. Table rows
+        // refresh on their normal cadence; submission starts no trailing reads.
+    }
+
+    @MainActor
+    private func confirmMutations() async {
+        syncMutationProvider()
+        let provider = state.provider
+        await mutationConfirmation.run(nextBatch: {
+            syncMutationProvider()
+            mutations.expire()
+            guard ObjectIdentifier(state.provider) == ObjectIdentifier(provider) else { return [] }
+            return mutations.confirmationBatch.map(\.request)
+        }, confirm: { request in
+            await provider.confirmMutation(request)
+        }, observed: { request, confirmation in
+            guard ObjectIdentifier(state.provider) == ObjectIdentifier(provider) else {
+                syncMutationProvider()
+                return
+            }
+            mutations.observed(request, confirmation: confirmation)
+        })
+    }
+
     private func reload() async {
+        await MainActor.run {
+            syncMutationProvider()
+            mutations.expire()
+        }
         // v1.12.6 Wave 9P: write each piece of @State as soon as it
         // resolves, rather than batching all three into one trailing
         // MainActor.run. Pre-9P, on a host with a big alerts.db /
@@ -173,43 +294,7 @@ struct V2AlertsWorkspace: View {
         let fetchLimit = (window != nil || state.alertTimeRange == "24h" || state.alertTimeRange == "7d") ? 200 : 1000
         let a = await state.provider.alerts(since: lowerBound, limit: fetchLimit)
         await MainActor.run {
-            // v1.12.7 Wave 9R: overlay pending optimistic mutations
-            // on top of the DB read. The daemon's inbox poller has
-            // a 5 s cadence so reload() runs at the next refresh tick
-            // can race the daemon's apply — without this overlay the
-            // pre-mutation DB value would clobber the user's just-
-            // clicked optimistic state for one tick (visible flicker).
-            // Prune entries whose DB value has caught up to the
-            // optimistic value (daemon has applied).
-            let merged: [V2MockAlert] = a.compactMap { dbAlert in
-                if pendingDeletedAlertIds.contains(dbAlert.id) {
-                    // Optimistic delete — hide row until DB drops it.
-                    return nil
-                }
-                var copy = dbAlert
-                if pendingSuppressedAlertIds.contains(dbAlert.id) {
-                    copy.suppressed = true
-                } else if pendingUnsuppressedAlertIds.contains(dbAlert.id) {
-                    copy.suppressed = false
-                }
-                return copy
-            }
-            // Prune `pendingSuppressedAlertIds` for IDs the DB now
-            // reflects as suppressed (daemon caught up).
-            pendingSuppressedAlertIds = pendingSuppressedAlertIds.filter { id in
-                guard let dbAlert = a.first(where: { $0.id == id }) else { return true }
-                return !dbAlert.suppressed
-            }
-            pendingUnsuppressedAlertIds = pendingUnsuppressedAlertIds.filter { id in
-                guard let dbAlert = a.first(where: { $0.id == id }) else { return true }
-                return dbAlert.suppressed
-            }
-            // Pending delete is pruned only when the DB no longer
-            // returns the row.
-            let dbIds = Set(a.map(\.id))
-            pendingDeletedAlertIds = pendingDeletedAlertIds.intersection(dbIds)
-
-            self.alerts = merged.filter { alert in
+            self.alerts = a.filter { alert in
                 // D7: bound below by the range cutoff (or window start) and,
                 // when a histogram window is active, above by its end.
                 alert.timestamp >= lowerBound
@@ -219,9 +304,7 @@ struct V2AlertsWorkspace: View {
             // drop the selection if its row is gone (deleted, or aged
             // past the time-range cutoff), otherwise refresh it to the
             // new snapshot so the inspector never shows a stale,
-            // pre-mutation copy. (suppress() clears `selected` outright;
-            // bulkSuppress / time-range changes previously left it
-            // pointing at an orphaned snapshot.)
+            // pre-mutation copy.
             if let sel = self.selected {
                 self.selected = self.alerts.first(where: { $0.id == sel.id })
             }
@@ -230,16 +313,7 @@ struct V2AlertsWorkspace: View {
 
         let c = await state.provider.campaigns(since: cutoff, limit: 50)
         await MainActor.run {
-            // Same overlay pattern for campaigns: hide optimistically-
-            // suppressed campaigns until the DB-side suppress lands.
-            let merged = c.filter { !pendingSuppressedCampaignIds.contains($0.id) }
-            // Prune: if a campaign no longer appears in c, the daemon
-            // has applied (suppressed campaigns drop from the active
-            // list returned by `campaigns(limit:)`).
-            let dbCampaignIds = Set(c.map(\.id))
-            pendingSuppressedCampaignIds = pendingSuppressedCampaignIds.intersection(dbCampaignIds)
-
-            self.campaigns = merged.filter { $0.lastSeen >= cutoff }
+            self.campaigns = c.filter { $0.lastSeen >= cutoff }
         }
 
         // Suppressed campaigns — powers the in-UI restore surface.
@@ -248,16 +322,7 @@ struct V2AlertsWorkspace: View {
 
         let s = await state.provider.suppressions()
         await MainActor.run {
-            // Suppression lifts: hide entries we've optimistically
-            // lifted until the DB drops them. Key format matches
-            // pendingLiftedSuppressionKeys: "ruleId|scope".
-            let merged = s.filter { entry in
-                !pendingLiftedSuppressionKeys.contains("\(entry.ruleId)|\(entry.scope)")
-            }
-            // Prune: a lifted entry whose key no longer appears in s.
-            let dbKeys = Set(s.map { "\($0.ruleId)|\($0.scope)" })
-            pendingLiftedSuppressionKeys = pendingLiftedSuppressionKeys.intersection(dbKeys)
-            self.suppressionEntries = merged
+            self.suppressionEntries = s
             // If the navigation destination requested a specific alert
             // (notification "View" button or palette entity link), select
             // it now that we have the data. entityKey format matches
@@ -278,49 +343,7 @@ struct V2AlertsWorkspace: View {
     // MARK: - Mutations
 
     private func suppress(_ alert: V2MockAlert) async {
-        // v1.12.7 Wave 9Q+9R: flip the local suppressed flag and
-        // register the pending mutation so subsequent reload()s
-        // overlay the optimistic value on top of the DB read until
-        // the daemon catches up. Pre-9R the optimistic flip flickered
-        // back to un-suppressed on the next reload because the DB
-        // still had the old value (daemon hadn't processed inbox).
-        await MainActor.run {
-            pendingSuppressedAlertIds.insert(alert.id)
-            pendingUnsuppressedAlertIds.remove(alert.id)
-            if let idx = self.alerts.firstIndex(where: { $0.id == alert.id }) {
-                self.alerts[idx].suppressed = true
-            }
-            selected = nil
-        }
-
-        let ok = await state.provider.suppressAlert(id: alert.id)
-        await MainActor.run {
-            if ok {
-                state.showToast(V2Toast(
-                    kind: .success,
-                    title: "Alert suppressed",
-                    detail: alert.ruleId
-                ))
-            } else {
-                // Rollback the optimistic state.
-                pendingSuppressedAlertIds.remove(alert.id)
-                if let idx = self.alerts.firstIndex(where: { $0.id == alert.id }) {
-                    self.alerts[idx].suppressed = false
-                }
-                let detail = state.provider.lastErrorDescription ?? "unknown error"
-                let isReadOnly = detail.lowercased().contains("read-only")
-                state.showToast(V2Toast(
-                    kind: isReadOnly ? .warning : .error,
-                    title: isReadOnly ? "Cannot mutate from dashboard"
-                                      : "Suppress failed",
-                    detail: detail,
-                    displayFor: 6
-                ))
-            }
-        }
-        // No trailing reload nor refreshTick bump — the natural
-        // 5 s auto-tick will reconcile, and our pending-mutation
-        // overlay shields us from the daemon-lag flicker.
+        await submitMutations([.init(operation: .suppressAlert, targetID: alert.id, title: alert.title)])
     }
 
     private var campaignsToolbar: some View {
@@ -341,16 +364,16 @@ struct V2AlertsWorkspace: View {
             .help(selectedCampaignIds.count == campaigns.count ? "Deselect all" : "Select all campaigns")
 
             if selectedCampaignIds.isEmpty {
-                Text("\(campaigns.count) campaign\(campaigns.count == 1 ? "" : "s") · click to select for bulk-suppress")
+                Text(String(localized: "ui.final.campaignCount", defaultValue: "Campaigns: \(campaigns.count) · click to select for bulk suppression"))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
             } else {
-                Text("\(selectedCampaignIds.count) of \(campaigns.count) selected")
+                Text(String(localized: "ui.final.selectedCampaignCount", defaultValue: "\(selectedCampaignIds.count) of \(campaigns.count) selected"))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.primaryText)
             }
             Spacer()
-            V2ActionButton("Bulk suppress (\(selectedCampaignIds.count))",
+            V2ActionButton(String(localized: "ui.V2AlertsWorkspace.bulk.suppress", defaultValue: "Bulk suppress (\(selectedCampaignIds.count))"),
                            icon: "bell.slash",
                            style: selectedCampaignIds.isEmpty ? .ghost : .primary,
                            disabled: selectedCampaignIds.isEmpty,
@@ -367,66 +390,10 @@ struct V2AlertsWorkspace: View {
     }
 
     private func bulkSuppressCampaigns(_ targets: [V2MockCampaign]) async {
-        // v1.12.7 Wave 9Q+9R: optimistic removal + pending registration.
-        let targetIds = Set(targets.map(\.id))
-        await MainActor.run {
-            pendingSuppressedCampaignIds.formUnion(targetIds)
-            self.campaigns.removeAll { targetIds.contains($0.id) }
-            self.selectedCampaignIds.removeAll()
-        }
-
-        var totalSuppressed = 0
-        var failedCount = 0
-        for c in targets {
-            let count = await state.provider.suppressCampaign(id: c.id)
-            if count > 0 {
-                totalSuppressed += count
-            } else {
-                failedCount += 1
-                // Read-only DB — abort early; subsequent calls will
-                // hit the same error.
-                let detail = state.provider.lastErrorDescription ?? ""
-                if detail.lowercased().contains("read-only") { break }
-            }
-        }
-        await MainActor.run {
-            if failedCount == 0 {
-                state.showToast(V2Toast(
-                    kind: .success,
-                    title: "Bulk suppress",
-                    detail: "\(targets.count) campaign\(targets.count == 1 ? "" : "s") · \(totalSuppressed) total item\(totalSuppressed == 1 ? "" : "s")"
-                ))
-            } else if totalSuppressed > 0 {
-                state.showToast(V2Toast(
-                    kind: .warning,
-                    title: "Partial bulk suppress",
-                    detail: "\(targets.count - failedCount) of \(targets.count) campaigns; \(state.provider.lastErrorDescription ?? "see logs")",
-                    displayFor: 6
-                ))
-                // C1: drop the pending registrations for the whole batch
-                // (we don't track which campaign ids failed). The next
-                // reload restores DB truth — successfully-suppressed
-                // campaigns drop from the active list, the failed ones
-                // reappear. Leaving a failed id pending would hide a
-                // still-active campaign forever: it keeps showing up in
-                // the active list, so the intersection-prune never
-                // clears it and the overlay filters it out every tick.
-                pendingSuppressedCampaignIds.subtract(targetIds)
-            } else {
-                // Total failure — drop pending registrations so the
-                // next reload restores the campaigns.
-                pendingSuppressedCampaignIds.subtract(targetIds)
-                let detail = state.provider.lastErrorDescription ?? "unknown error"
-                let isReadOnly = detail.lowercased().contains("read-only")
-                state.showToast(V2Toast(
-                    kind: isReadOnly ? .warning : .error,
-                    title: isReadOnly ? "Cannot mutate from dashboard"
-                                      : "Bulk suppress failed",
-                    detail: detail,
-                    displayFor: 6
-                ))
-            }
-        }
+        await MainActor.run { selectedCampaignIds.removeAll() }
+        await submitMutations(targets.map {
+            .init(operation: .suppressCampaign, targetID: $0.id, title: $0.name)
+        })
     }
 
     /// Layout helper: render a list of strings as wrapped chips. Each
@@ -444,7 +411,7 @@ struct V2AlertsWorkspace: View {
                         V2StatusChip(tech, kind: kind, icon: "arrow.up.forward")
                     }
                     .buttonStyle(.plain)
-                    .help("Open MITRE D3FEND reference for \(tech)")
+                    .help(String(localized: "ui.V2AlertsWorkspace.open.mitre.d3fend.reference.for", defaultValue: "Open MITRE D3FEND reference for \(tech)"))
                 }
             }
         }
@@ -505,188 +472,25 @@ struct V2AlertsWorkspace: View {
         return ("Open", .info)
     }
 
-    /// Shell out to `maccrabctl unsuppress` and refresh the list.
-    /// Uses scope when present so partial suppressions (per-process)
-    /// don't accidentally lift the entire rule.
     private func liftSuppression(_ entry: V2SuppressionEntry) async {
-        // v1.12.7 Wave 9Q+9R: optimistic removal + pending registration.
-        let key = "\(entry.ruleId)|\(entry.scope)"
-        await MainActor.run {
-            pendingLiftedSuppressionKeys.insert(key)
-            self.suppressionEntries.removeAll {
-                $0.ruleId == entry.ruleId && $0.scope == entry.scope
-            }
-        }
-        let ok = await state.provider.liftSuppression(ruleId: entry.ruleId, scope: entry.scope)
-        await MainActor.run {
-            if ok {
-                state.showToast(V2Toast(
-                    kind: .success,
-                    title: "Suppression lifted",
-                    detail: "\(entry.ruleId) (\(entry.scope))"
-                ))
-            } else {
-                // Drop pending registration; next reload restores.
-                pendingLiftedSuppressionKeys.remove(key)
-                state.showToast(V2Toast(
-                    kind: .error,
-                    title: "Lift failed",
-                    detail: state.provider.lastErrorDescription
-                        ?? "maccrabctl returned non-zero",
-                    displayFor: 6
-                ))
-            }
-        }
+        await submitMutations([.init(operation: .liftSuppression, targetID: entry.id,
+                                     title: entry.ruleId, scope: entry.scope)])
     }
 
-    private func suppressCampaign(_ c: V2MockCampaign) async {
-        // v1.12.7 Wave 9Q+9R: optimistically remove + register pending.
-        await MainActor.run {
-            pendingSuppressedCampaignIds.insert(c.id)
-            self.campaigns.removeAll { $0.id == c.id }
-            self.selectedCampaignIds.remove(c.id)
-        }
-
-        let count = await state.provider.suppressCampaign(id: c.id)
-        await MainActor.run {
-            if count > 0 {
-                state.showToast(V2Toast(
-                    kind: .success,
-                    title: "Campaign suppressed",
-                    detail: "\(count) item\(count == 1 ? "" : "s") (campaign + contributors)"
-                ))
-            } else {
-                // Rollback the pending registration so the next reload
-                // brings the campaign back. The visible list will
-                // restore on the next reload — minor delay acceptable
-                // on an error path that's already showing a toast.
-                pendingSuppressedCampaignIds.remove(c.id)
-                let detail = state.provider.lastErrorDescription ?? "no rows updated"
-                let isReadOnly = detail.lowercased().contains("read-only")
-                state.showToast(V2Toast(
-                    kind: isReadOnly ? .warning : .error,
-                    title: isReadOnly ? "Cannot mutate from dashboard"
-                                      : "Suppress campaign failed",
-                    detail: detail,
-                    displayFor: 6
-                ))
-            }
-        }
+    private func suppressCampaign(_ campaign: V2MockCampaign) async {
+        await submitMutations([.init(operation: .suppressCampaign, targetID: campaign.id,
+                                     title: campaign.name)])
     }
 
     private func bulkSuppress(_ targets: [V2MockAlert]) async {
-        let ids = targets.filter { !$0.suppressed }.map(\.id)
-        guard !ids.isEmpty else { return }
-
-        // v1.12.7 Wave 9Q+9R: optimistic flip + pending registration.
-        let idSet = Set(ids)
+        let requests: [V2MutationRequest] = targets.filter { !$0.suppressed }.map {
+            .init(operation: .suppressAlert, targetID: $0.id, title: $0.title)
+        }
         await MainActor.run {
-            pendingSuppressedAlertIds.formUnion(idSet)
-            pendingUnsuppressedAlertIds.subtract(idSet)
-            for idx in self.alerts.indices where idSet.contains(self.alerts[idx].id) {
-                self.alerts[idx].suppressed = true
-            }
-            // The batch is consumed — clear its checkboxes.
-            selectedAlertIds.subtract(idSet)
+            selectedAlertIds.subtract(Set(requests.map(\.targetID)))
+            lastUndoBatch = requests
         }
-
-        let count = await state.provider.suppressAlerts(ids: ids)
-        await MainActor.run {
-            if count > 0 && count == ids.count {
-                // Offer an Undo that reverses the whole batch via the existing
-                // unsuppress path. Longer display so it's actually clickable.
-                state.showToast(V2Toast(
-                    kind: .success,
-                    title: "Bulk suppress",
-                    detail: "\(count) alert\(count == 1 ? "" : "s") suppressed",
-                    displayFor: 6,
-                    action: V2ToastAction(title: "Undo") {
-                        Task { await undoBulkSuppress(ids: ids) }
-                    }
-                ))
-            } else if count > 0 {
-                state.showToast(V2Toast(
-                    kind: .warning,
-                    title: "Partial bulk suppress",
-                    detail: "\(count) of \(ids.count) suppressed; \(state.provider.lastErrorDescription ?? "see logs")",
-                    displayFor: 6
-                ))
-                // C1: the provider returns only a count, not which ids
-                // failed — so we can't tell the suppressed rows from the
-                // still-firing ones. Revert ALL optimistic flips and let
-                // the next reload restore DB truth (rows the daemon
-                // actually suppressed come back suppressed; the failed
-                // ones stay visible). Leaving the failed ids pending
-                // would overlay suppressed=true on a still-firing alert
-                // forever — its DB row never flips, so the prune at the
-                // top of reload() never drops it, hiding a live alert.
-                pendingSuppressedAlertIds.subtract(idSet)
-                for idx in self.alerts.indices where idSet.contains(self.alerts[idx].id) {
-                    self.alerts[idx].suppressed = false
-                }
-            } else {
-                // Total failure — drop the pending registrations
-                // and flip the flags back.
-                pendingSuppressedAlertIds.subtract(idSet)
-                for idx in self.alerts.indices where idSet.contains(self.alerts[idx].id) {
-                    self.alerts[idx].suppressed = false
-                }
-                let detail = state.provider.lastErrorDescription ?? "no rows updated"
-                let isReadOnly = detail.lowercased().contains("read-only")
-                state.showToast(V2Toast(
-                    kind: isReadOnly ? .warning : .error,
-                    title: isReadOnly ? "Cannot mutate from dashboard"
-                                      : "Bulk suppress failed",
-                    detail: detail,
-                    displayFor: 6
-                ))
-            }
-        }
-    }
-
-    /// Reverse a bulk suppress (the "Undo" toast action). There is no
-    /// bulk-unsuppress provider method, so this loops the existing single-alert
-    /// `unsuppressAlert(id:)` path — mirroring `unsuppressAlert(_:)`'s optimistic
-    /// flip + pending-registration bookkeeping across the whole batch.
-    private func undoBulkSuppress(ids: [String]) async {
-        guard !ids.isEmpty else { return }
-        let idSet = Set(ids)
-        await MainActor.run {
-            pendingUnsuppressedAlertIds.formUnion(idSet)
-            pendingSuppressedAlertIds.subtract(idSet)
-            for idx in self.alerts.indices where idSet.contains(self.alerts[idx].id) {
-                self.alerts[idx].suppressed = false
-            }
-        }
-
-        var restored = 0
-        for id in ids {
-            if await state.provider.unsuppressAlert(id: id) { restored += 1 }
-        }
-
-        await MainActor.run {
-            if restored == ids.count {
-                state.showToast(V2Toast(
-                    kind: .success,
-                    title: "Suppression undone",
-                    detail: "\(restored) alert\(restored == 1 ? "" : "s") restored"
-                ))
-            } else {
-                // Partial/total failure — we don't know which ids failed, so
-                // drop the optimistic un-suppress for the whole batch and let
-                // the next reload reconcile to DB truth (restored ids come back
-                // un-suppressed; failed ones stay suppressed).
-                pendingUnsuppressedAlertIds.subtract(idSet)
-                let detail = state.provider.lastErrorDescription ?? "unknown error"
-                let isReadOnly = detail.lowercased().contains("read-only")
-                state.showToast(V2Toast(
-                    kind: isReadOnly ? .warning : .error,
-                    title: isReadOnly ? "Cannot mutate from dashboard" : "Undo failed",
-                    detail: restored > 0 ? "Restored \(restored) of \(ids.count); \(detail)" : detail,
-                    displayFor: 6
-                ))
-            }
-        }
+        await submitMutations(requests)
     }
 
     private func exportAlerts(_ targets: [V2MockAlert]) {
@@ -765,7 +569,9 @@ struct V2AlertsWorkspace: View {
     /// when the daemon dies, so we cross-check the heartbeat instead.
     private var daemonReporting: Bool {
         Self.isDaemonReporting(mode: state.provider.mode,
-                               heartbeatStale: appState.heartbeat?.isStale)
+                               heartbeatStale: appState.heartbeat?.isStale,
+                               heartbeatReady: appState.heartbeat?.isReady,
+                               protectionDegraded: appState.isProtectionDegraded)
     }
 
     /// Pure decision seam for the B6 daemon-liveness gate. A live provider
@@ -775,8 +581,9 @@ struct V2AlertsWorkspace: View {
     /// read as not-reporting, so the empty state is withheld and the stale
     /// banner shows instead. Extracted so the gate is unit-testable without
     /// standing up a SwiftUI view.
-    static func isDaemonReporting(mode: V2DataSourceMode, heartbeatStale: Bool?) -> Bool {
-        mode == .live && !(heartbeatStale ?? true)
+    static func isDaemonReporting(mode: V2DataSourceMode, heartbeatStale: Bool?,
+                                  heartbeatReady: Bool?, protectionDegraded: Bool = false) -> Bool {
+        mode == .live && heartbeatStale == false && heartbeatReady == true && !protectionDegraded
     }
 
     /// Warning banner for the Open/History tabs when we can't trust the
@@ -796,10 +603,10 @@ struct V2AlertsWorkspace: View {
                 }
                 .frame(width: 38, height: 38)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "alerts.daemonStaleTitle", defaultValue: "Daemon not reporting — data may be stale"))
+                    Text(String(localized: "alerts.daemonStaleTitle", defaultValue: "Protection is not confirmed — alert data may be incomplete"))
                         .scaledSystem(13, weight: .semibold)
                         .foregroundStyle(V2Theme.primaryText)
-                    Text(String(localized: "alerts.daemonStaleDetail", defaultValue: "MacCrab hasn't received a fresh heartbeat in over two minutes. The counts below may be out of date — an empty list does not mean the system is clear."))
+                    Text(String(localized: "alerts.daemonStaleDetail", defaultValue: "The engine is starting, not reporting, or needs attention. Review System health; an empty list does not confirm that no threats are present."))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -872,7 +679,7 @@ struct V2AlertsWorkspace: View {
                 } else if daemonReporting && loaded && !hasOpenAlerts {
                     V2EmptyState(
                         title: String(localized: "alerts.emptyOpenTitle", defaultValue: "No open alerts"),
-                        body: String(localized: "alerts.emptyOpenBody", defaultValue: "MacCrab hasn't raised any un-suppressed alerts in the selected time range, and the engine is reporting live — you're clear."),
+                        body: String(localized: "alerts.emptyOpenBody", defaultValue: "No unsuppressed alerts appear in the selected time range. The engine is reporting active monitoring."),
                         icon: "checkmark.shield"
                     )
                     .frame(minHeight: 280)
@@ -950,7 +757,7 @@ struct V2AlertsWorkspace: View {
             Image(systemName: "chart.bar.xaxis")
                 .foregroundStyle(V2Theme.brand)
                 .scaledSystem(12, weight: .semibold)
-            Text("Filtered to the tapped window")
+            Text(String(localized: "ui.V2AlertsWorkspace.filtered.to.the.tapped.window", defaultValue: "Filtered to the tapped window"))
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)
             // WCAG 1.4.3: `brand` as body text is 3.90:1 light / 3.65:1 on a
@@ -966,7 +773,7 @@ struct V2AlertsWorkspace: View {
                 HStack(spacing: 4) {
                     Image(systemName: "xmark")
                         .scaledSystem(9, weight: .semibold)
-                    Text("Clear window")
+                    Text(String(localized: "ui.V2AlertsWorkspace.clear.window", defaultValue: "Clear window"))
                         .font(V2Theme.meta())
                 }
                 .foregroundStyle(V2Theme.mutedText)
@@ -977,7 +784,7 @@ struct V2AlertsWorkspace: View {
                 .clipShape(RoundedRectangle(cornerRadius: 4))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Clear histogram time window")
+            .accessibilityLabel(String(localized: "ui.V2AlertsWorkspace.clear.histogram.time.window", defaultValue: "Clear histogram time window"))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -1073,13 +880,13 @@ struct V2AlertsWorkspace: View {
             .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
 
             if severityFilter.wrappedValue != nil {
-                V2ActionButton("Clear filter", icon: "xmark", style: .ghost) {
+                V2ActionButton(String(localized: "ax.clearFilter", defaultValue: "Clear filter"), icon: "xmark", style: .ghost) {
                     severityFilter.wrappedValue = nil
                 }
             }
             Spacer()
             let bulkTargets = bulkSuppressTargets(visible: visible)
-            V2ActionButton("Bulk suppress (\(bulkTargets.count))",
+            V2ActionButton(String(localized: "ui.V2AlertsWorkspace.bulk.suppress.8bd14f77", defaultValue: "Bulk suppress (\(bulkTargets.count))"),
                            icon: "bell.slash", style: .secondary,
                            disabled: bulkTargets.isEmpty,
                            tooltip: selectedAlertIds.isEmpty
@@ -1093,7 +900,7 @@ struct V2AlertsWorkspace: View {
                     Task { await bulkSuppress(bulkTargets) }
                 }
             }
-            V2ActionButton("Export (\(visible.count))",
+            V2ActionButton(String(localized: "ui.V2AlertsWorkspace.export", defaultValue: "Export (\(visible.count))"),
                            icon: "square.and.arrow.up", style: .secondary,
                            disabled: visible.isEmpty,
                            tooltip: "Export visible alerts as JSON Lines") {
@@ -1336,7 +1143,7 @@ struct V2AlertsWorkspace: View {
                                              kind: verdictChipKind(v))
                             }
                             if let c = alert.llmConfidence {
-                                Text("\(Int(c * 100))% confidence")
+                                Text(String(localized: "ui.final.confidence", defaultValue: "Confidence: \(Int(c * 100))%"))
                                     .font(V2Theme.meta())
                                     .foregroundStyle(V2Theme.mutedText)
                             }
@@ -1353,7 +1160,7 @@ struct V2AlertsWorkspace: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                         if !alert.llmSuggestedActions.isEmpty {
-                            Text("Suggested actions:")
+                            Text(String(localized: "ui.V2AlertsWorkspace.suggested.actions", defaultValue: "Suggested actions:"))
                                 .font(V2Theme.meta())
                                 .foregroundStyle(V2Theme.mutedText)
                                 .padding(.top, 4)
@@ -1417,7 +1224,7 @@ struct V2AlertsWorkspace: View {
                         ForEach(Array(triggers.enumerated()), id: \.offset) { _, ev in
                             triggerEventCard(ev)
                         }
-                        Text("Captured at alert time — preserved even after the live event is pruned.")
+                        Text(String(localized: "ui.V2AlertsWorkspace.captured.at.alert.time.preserved.even.after", defaultValue: "Captured at alert time — preserved even after the live event is pruned."))
                             .font(V2Theme.meta())
                             .foregroundStyle(V2Theme.mutedText)
                     }
@@ -1428,18 +1235,18 @@ struct V2AlertsWorkspace: View {
             }
             V2InspectorSection(String(localized: "inspector.traceContext", defaultValue: "Trace context")) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Inspect this alert's full causal trace via the CLI:")
+                    Text(String(localized: "ui.V2AlertsWorkspace.inspect.this.alert.s.full.causal.trace", defaultValue: "Inspect this alert's full causal trace via the CLI:"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                     HStack(spacing: 6) {
-                        Text("maccrabctl trace from-alert \(alert.id)")
+                        Text(verbatim: "maccrabctl trace from-alert \(alert.id)")
                             .font(V2Theme.mono())
                             .foregroundStyle(V2Theme.primaryText)
                             .textSelection(.enabled)
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Spacer()
-                        V2ActionButton("Copy", icon: "doc.on.doc", style: .ghost) {
+                        V2ActionButton(String(localized: "ui.V2AlertsWorkspace.copy", defaultValue: "Copy"), icon: "doc.on.doc", style: .ghost) {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString("maccrabctl trace from-alert \(alert.id)", forType: .string)
                             state.showToast(V2Toast(kind: .success, title: "Command copied", detail: nil))
@@ -1452,7 +1259,7 @@ struct V2AlertsWorkspace: View {
                 // full row; the two secondary verbs share one row at equal
                 // width (the old layout stacked all three full-width).
                 VStack(alignment: .leading, spacing: 8) {
-                    V2ActionButton("Investigate in Events", icon: "magnifyingglass", style: .primary, fullWidth: true) {
+                    V2ActionButton(String(localized: "ui.V2AlertsWorkspace.investigate.in.events", defaultValue: "Investigate in Events"), icon: "magnifyingglass", style: .primary, fullWidth: true) {
                         let filter = !alert.processPath.isEmpty
                             ? alert.processPath
                             : (alert.process != "—" ? alert.process : alert.ruleId)
@@ -1478,7 +1285,7 @@ struct V2AlertsWorkspace: View {
                             // Route to the Campaigns tab, where the correlation
                             // actually lives. (The alert carries no campaign id,
                             // so we open the list rather than a specific one.)
-                            V2ActionButton("Campaigns", icon: "square.stack.3d.up", style: .secondary, fullWidth: true,
+                            V2ActionButton(String(localized: "workspaceTab.alerts.campaigns", defaultValue: "Campaigns"), icon: "square.stack.3d.up", style: .secondary, fullWidth: true,
                                            tooltip: "This alert is a campaign correlation — open the Campaigns tab") {
                                 state.goto(V2NavigationDestination(
                                     workspace: .alerts,
@@ -1487,7 +1294,7 @@ struct V2AlertsWorkspace: View {
                             }
                             .frame(maxWidth: .infinity)
                         } else {
-                            V2ActionButton("Open rule", icon: "shield.lefthalf.filled", style: .secondary, fullWidth: true,
+                            V2ActionButton(String(localized: "ui.V2AlertsWorkspace.open.rule", defaultValue: "Open rule"), icon: "shield.lefthalf.filled", style: .secondary, fullWidth: true,
                                            tooltip: "Jump to this rule in Detection › Rules") {
                                 // Pre-fill the rule search query so the rules
                                 // table filters down to this rule, plus carry
@@ -1502,7 +1309,7 @@ struct V2AlertsWorkspace: View {
                             }
                             .frame(maxWidth: .infinity)
                         }
-                        V2ActionButton("Suppress", icon: "bell.slash", style: .secondary, fullWidth: true,
+                        V2ActionButton(String(localized: "components.suppress", defaultValue: "Suppress"), icon: "bell.slash", style: .secondary, fullWidth: true,
                                        disabled: alert.suppressed,
                                        tooltip: alert.suppressed
                                             ? "Already suppressed"
@@ -1652,18 +1459,18 @@ struct V2AlertsWorkspace: View {
                         row(time: ev.timestamp, name: ev.processName, cat: ev.category.rawValue)
                     }
                 } else if !evidence.isEmpty {
-                    Text("From the snapshot captured when the alert fired — the live events have since been pruned:")
+                    Text(String(localized: "ui.V2AlertsWorkspace.from.the.snapshot.captured.when.the.alert", defaultValue: "From the snapshot captured when the alert fired — the live events have since been pruned:"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                     ForEach(Array(evidence.prefix(8)), id: \.id) { ev in
                         row(time: ev.timestamp, name: ev.process.name, cat: ev.eventCategory.rawValue)
                     }
                 } else if loaded {
-                    Text("No surrounding events were captured for this alert.")
+                    Text(String(localized: "ui.V2AlertsWorkspace.no.surrounding.events.were.captured.for.this", defaultValue: "No surrounding events were captured for this alert."))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                 } else {
-                    Text("Loading captured events…")
+                    Text(String(localized: "ui.V2AlertsWorkspace.loading.captured.events", defaultValue: "Loading captured events…"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                 }
@@ -1739,7 +1546,7 @@ struct V2AlertsWorkspace: View {
     /// provider.unsuppressCampaign + brings it back into the active list.
     private var suppressedCampaignsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Suppressed campaigns (\(suppressedCampaigns.count))")
+            Text(String(localized: "ui.V2AlertsWorkspace.suppressed.campaigns", defaultValue: "Suppressed campaigns (\(suppressedCampaigns.count))"))
                 .scaledSystem(12, weight: .semibold)
                 .foregroundStyle(V2Theme.tertiaryText)
                 .textCase(.uppercase)
@@ -1751,11 +1558,11 @@ struct V2AlertsWorkspace: View {
                         .scaledSystem(14)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(c.name).scaledSystem(13, weight: .medium)
-                        Text("\(c.alertCount) alerts · suppressed")
+                        Text(String(localized: "ui.final.suppressedAlerts", defaultValue: "Alerts: \(c.alertCount) · suppressed"))
                             .scaledSystem(11).foregroundStyle(V2Theme.mutedText)
                     }
                     Spacer()
-                    V2ActionButton("Restore", icon: "bell", style: .secondary,
+                    V2ActionButton(String(localized: "ui.V2AlertsWorkspace.restore", defaultValue: "Restore"), icon: "bell", style: .secondary,
                                    tooltip: "Unsuppress this campaign and its contributing alerts.") {
                         Task { await restoreCampaign(c) }
                     }
@@ -1766,26 +1573,9 @@ struct V2AlertsWorkspace: View {
         }
     }
 
-    private func restoreCampaign(_ c: V2MockCampaign) async {
-        // Optimistic: drop from the suppressed list immediately.
-        await MainActor.run { suppressedCampaigns.removeAll { $0.id == c.id } }
-        let ok = await state.provider.unsuppressCampaign(id: c.id)
-        await MainActor.run {
-            if ok {
-                pendingSuppressedCampaignIds.remove(c.id)
-                state.showToast(V2Toast(kind: .success, title: "Campaign restored", detail: c.name))
-            } else {
-                // Roll back the optimistic removal on failure.
-                suppressedCampaigns.append(c)
-                let detail = state.provider.lastErrorDescription ?? "unknown error"
-                let isReadOnly = detail.lowercased().contains("read-only")
-                state.showToast(V2Toast(
-                    kind: isReadOnly ? .warning : .error,
-                    title: isReadOnly ? "Cannot mutate from dashboard" : "Restore failed",
-                    detail: detail))
-            }
-        }
-        await reload()
+    private func restoreCampaign(_ campaign: V2MockCampaign) async {
+        await submitMutations([.init(operation: .unsuppressCampaign, targetID: campaign.id,
+                                     title: campaign.name)])
     }
 
     private func campaignCard(_ c: V2MockCampaign) -> some View {
@@ -1844,7 +1634,7 @@ struct V2AlertsWorkspace: View {
                 }
                 Spacer()
                 V2StatusChip(c.severity.label, kind: c.severity.chipKind)
-                V2ActionButton("Investigate", icon: "magnifyingglass", style: .secondary) {
+                V2ActionButton(String(localized: "sidebar.group.investigate", defaultValue: "Investigate"), icon: "magnifyingglass", style: .secondary) {
                     // Filter the Alerts Open list to the alerts that
                     // built this campaign. Pre-fix this set the query to
                     // `c.name`, but the alert search only matches
@@ -1867,7 +1657,7 @@ struct V2AlertsWorkspace: View {
                         workspace: .alerts, tab: .alertsOpen
                     ))
                 }
-                V2ActionButton("Suppress", icon: "bell.slash", style: .secondary,
+                V2ActionButton(String(localized: "components.suppress", defaultValue: "Suppress"), icon: "bell.slash", style: .secondary,
                                tooltip: "Suppress this campaign and every contributing alert. Restore it any time from the Suppressed campaigns section below.") {
                     Task { await suppressCampaign(c) }
                 }
@@ -1877,7 +1667,7 @@ struct V2AlertsWorkspace: View {
                 .foregroundStyle(V2Theme.neutral)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {
-                Text("Tactics:").font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
+                Text(String(localized: "ui.V2AlertsWorkspace.tactics", defaultValue: "Tactics:")).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
                 ForEach(c.tactics, id: \.self) { t in
                     V2StatusChip(t, kind: .neutral)
                 }
@@ -1947,7 +1737,7 @@ struct V2AlertsWorkspace: View {
                             .lineLimit(1)
                     }
                     if values.count > cap {
-                        Text("+\(values.count - cap) more")
+                        Text(String(localized: "ui.finalPrefix.V2AlertsWorkspace.more", defaultValue: "+\(values.count - cap) more"))
                             .font(V2Theme.meta())
                             .foregroundStyle(V2Theme.tertiaryText)
                     }
@@ -1969,7 +1759,7 @@ struct V2AlertsWorkspace: View {
                 if let window = state.pendingAlertsWindow {
                     histogramWindowBanner(window)
                 }
-                Text("Resolved + suppressed alerts from the recent retention window. Right-click a row for Unsuppress and Delete actions, or use the inspector buttons.")
+                Text(String(localized: "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention", defaultValue: "Resolved + suppressed alerts from the recent retention window. Right-click a row for Unsuppress and Delete actions, or use the inspector buttons."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                 // v1.18.1: dedupe — a suppressed alert inside the last 4
@@ -2026,13 +1816,13 @@ struct V2AlertsWorkspace: View {
                             // predate the .tinted/.compact variants).
                             HStack(spacing: 4) {
                                 if a.suppressed {
-                                    V2ActionButton("Unsuppress", icon: "bell",
+                                    V2ActionButton(String(localized: "suppression.unsuppress", defaultValue: "Unsuppress"), icon: "bell",
                                                    style: .tinted(V2Theme.brand), size: .compact,
                                                    tooltip: "Lift suppression on this alert") {
                                         Task { await unsuppressAlert(a) }
                                     }
                                 }
-                                V2ActionButton("Delete", icon: "trash",
+                                V2ActionButton(String(localized: "alerts.confirmDeleteButton", defaultValue: "Delete"), icon: "trash",
                                                style: .tinted(V2Theme.critical), size: .compact,
                                                tooltip: "Permanently delete this alert from alerts.db") {
                                     // Route through a confirmation — the delete is
@@ -2053,78 +1843,18 @@ struct V2AlertsWorkspace: View {
     }
 
     private func unsuppressAlert(_ alert: V2MockAlert) async {
-        // v1.12.7 Wave 9Q+9R: flip + pending registration.
-        await MainActor.run {
-            pendingUnsuppressedAlertIds.insert(alert.id)
-            pendingSuppressedAlertIds.remove(alert.id)
-            if let idx = self.alerts.firstIndex(where: { $0.id == alert.id }) {
-                self.alerts[idx].suppressed = false
-            }
-        }
-        let ok = await state.provider.unsuppressAlert(id: alert.id)
-        // Mirror the 5 sibling mutations: touch @Published / main-actor
-        // state (toast + rollback) inside a single MainActor.run. This
-        // method is nonisolated (only `body` is @MainActor on a View),
-        // so the post-await continuation is NOT guaranteed on the main
-        // actor.
-        await MainActor.run {
-            if ok {
-                state.showToast(V2Toast(
-                    kind: .success,
-                    title: "Unsuppressed",
-                    detail: alert.title
-                ))
-            } else {
-                // Rollback the pending registration and flag.
-                pendingUnsuppressedAlertIds.remove(alert.id)
-                if let idx = self.alerts.firstIndex(where: { $0.id == alert.id }) {
-                    self.alerts[idx].suppressed = true
-                }
-                state.showToast(V2Toast(
-                    kind: .error,
-                    title: "Couldn't unsuppress",
-                    detail: state.provider.lastErrorDescription
-                ))
-            }
-        }
+        await submitMutations([.init(operation: .unsuppressAlert, targetID: alert.id, title: alert.title)])
     }
 
     private func deleteAlert(_ alert: V2MockAlert) async {
-        // v1.12.7 Wave 9Q+9R: remove + pending registration.
-        await MainActor.run {
-            pendingDeletedAlertIds.insert(alert.id)
-            self.alerts.removeAll { $0.id == alert.id }
-            if self.selected?.id == alert.id { self.selected = nil }
-        }
-        let ok = await state.provider.deleteAlert(id: alert.id)
-        // Mirror the sibling mutations: all @Published / main-actor
-        // writes (toast + rollback) go through one MainActor.run —
-        // this method is nonisolated, so the continuation isn't
-        // guaranteed to resume on the main actor.
-        await MainActor.run {
-            if ok {
-                state.showToast(V2Toast(
-                    kind: .success,
-                    title: "Deleted",
-                    detail: alert.title
-                ))
-            } else {
-                // Drop the pending delete; next reload restores the row.
-                pendingDeletedAlertIds.remove(alert.id)
-                state.showToast(V2Toast(
-                    kind: .error,
-                    title: "Couldn't delete",
-                    detail: state.provider.lastErrorDescription
-                ))
-            }
-        }
+        await submitMutations([.init(operation: .deleteAlert, targetID: alert.id, title: alert.title)])
     }
 
     private var suppressionsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 daemonStaleBanner
-                Text("Active suppressions silence specific (rule, scope) pairs until expiry. Lift a suppression with the per-row button — the daemon's SuppressionManager re-evaluates immediately.")
+                Text(String(localized: "ui.V2AlertsWorkspace.active.suppressions.silence.specific.rule.scope.pairs", defaultValue: "Active suppressions apply to the scopes shown until expiry. Lift requests remove one saved entry; the list changes after the engine confirms removal."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                 // B6: only assert "no active suppressions" when the engine is
@@ -2132,10 +1862,16 @@ struct V2AlertsWorkspace: View {
                 // a read failure, not a fact. Gate the empty state on
                 // daemonReporting (the stale banner above already explains the
                 // gap), mirroring the Open + Campaigns tabs.
-                if suppressionEntries.isEmpty && loaded && daemonReporting {
+                if let error = state.provider.suppressionReadError {
                     V2EmptyState(
-                        title: "No active suppressions",
-                        body: "When you suppress an alert from the Open tab (Actions → Suppress), it appears here as an entry. The list is read from the daemon's `suppressions.json` on every refresh.",
+                        title: String(localized: "alerts.suppressionsUnavailableTitle", defaultValue: "Suppression state unavailable"),
+                        body: error, icon: "exclamationmark.triangle"
+                    )
+                    .v2Panel()
+                } else if suppressionEntries.isEmpty && loaded && daemonReporting {
+                    V2EmptyState(
+                        title: String(localized: "alerts.noActiveSuppressions", defaultValue: "No active suppressions"),
+                        body: String(localized: "alerts.noActiveSuppressionsBody", defaultValue: "The engine’s saved snapshot contains no active suppression entries. Alert dispositions are shown separately in the alert lists."),
                         icon: "bell.slash"
                     )
                     .v2Panel()
@@ -2164,14 +1900,14 @@ struct V2AlertsWorkspace: View {
                                 if let exp = e.expiresAt {
                                     V2StatusChip(V2TimeFormat.relative(exp), kind: .neutral)
                                 } else {
-                                    V2StatusChip("indefinite", kind: .warning)
+                                    V2StatusChip(String(localized: "ui.V2AlertsWorkspace.indefinite", defaultValue: "indefinite"), kind: .warning)
                                 }
                             },
                             V2DataColumn(id: "lift", title: "", width: .fixed(72)) { e in
                                 Button {
                                     Task { await liftSuppression(e) }
                                 } label: {
-                                    Text("Lift")
+                                    Text(String(localized: "ui.V2AlertsWorkspace.lift", defaultValue: "Lift"))
                                         .font(V2Theme.meta())
                                         .foregroundStyle(V2Theme.dataAccent)
                                         .padding(.horizontal, 10).padding(.vertical, 4)
@@ -2181,7 +1917,7 @@ struct V2AlertsWorkspace: View {
                                         )
                                 }
                                 .buttonStyle(.plain)
-                                .help("Remove this suppression — the rule will fire again the next time it matches")
+                                .help(String(localized: "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire", defaultValue: "Remove this suppression — the rule will fire again the next time it matches"))
                             },
                         ],
                         items: suppressionEntries,

@@ -13,6 +13,7 @@
 // array, occasionally the mock fallback for that surface.
 
 import Foundation
+import MacCrabCore
 
 public enum V2DataSourceMode: String, Sendable, Equatable {
     /// Fabricated fixtures (V2MockRepository). DEBUG/preview/dev builds ONLY —
@@ -70,6 +71,7 @@ public protocol V2DataProvider: AnyObject {
     /// Result metadata from the most recent `extensions()` call. Nil means this
     /// provider has not performed a live browser inventory.
     var browserInventoryCoverage: V2BrowserInventoryCoverage? { get }
+    var ruleTelemetryContext: RuleTelemetryContext? { get }
 
     func alerts(since: Date, limit: Int) async -> [V2MockAlert]
     func events(limit: Int) async -> [V2MockEvent]
@@ -117,26 +119,31 @@ public protocol V2DataProvider: AnyObject {
 
     // MARK: - Mutations
 
-    /// Suppress a single alert. Returns true on success.
+    /// A legacy Bool/count success only acknowledges submission. Presentation
+    /// waits for saved-state confirmation before describing a change as applied.
+    func submitMutation(_ request: V2MutationRequest) async -> V2MutationSubmission
+    func confirmMutation(_ request: V2MutationRequest) async -> V2MutationConfirmation
+
+    /// Legacy submission result; true may mean queued. Prefer submitMutation/confirmMutation.
     func suppressAlert(id: String) async -> Bool
 
     /// Lift a previously-applied suppression on a single alert by id.
     /// Used by the History tab's "Unsuppress" row action. Returns
-    /// true on success.
+    /// true when applied or queued. Confirm saved state before reporting success.
     func unsuppressAlert(id: String) async -> Bool
 
     /// Permanently delete a single alert by id. Used by the History
-    /// tab's "Delete" row action. Returns true on success.
+    /// tab's "Delete" row action. True may acknowledge an inbox request only.
     func deleteAlert(id: String) async -> Bool
 
-    /// Bulk-suppress alerts. Returns the number of rows actually
-    /// updated (could be less than `ids.count` if some IDs don't
-    /// exist in the live store).
+    /// Legacy bulk-submission count: includes queued requests and does not
+    /// identify individual failures. UI actions use per-target submission and
+    /// point-read confirmation instead.
     func suppressAlerts(ids: [String]) async -> Int
 
     /// Suppress a campaign and every contributing alert. Returns the
-    /// number of items suppressed (the campaign itself + contributors).
-    /// Returns 0 on read-only DB / missing campaign.
+    /// legacy acceptance count, which may be 1 for one queued campaign request
+    /// regardless of its fan-out. It is not proof of saved suppression.
     func suppressCampaign(id: String) async -> Int
 
     /// Restore (unsuppress) a campaign + lift suppression on its contributing
@@ -152,15 +159,13 @@ public protocol V2DataProvider: AnyObject {
     /// true on success, false on missing CLI or non-zero exit.
     func refreshThreatIntel() async -> Bool
 
-    /// Read live suppression entries from the daemon's
-    /// `suppressions.json`. Empty when none exist or no daemon.
+    /// Read the daemon's saved public suppression snapshot.
     func suppressions() async -> [V2SuppressionEntry]
+    var suppressionReadError: String? { get }
 
-    /// Lift (remove) a single suppression entry. Pass the ruleId; if
-    /// `scope` is non-empty and not "any", the CLI removes the
-    /// (rule, scope) pair specifically; otherwise all suppressions
-    /// for the rule are lifted. Returns true on success.
-    func liftSuppression(ruleId: String, scope: String) async -> Bool
+    /// Queue removal of precisely one suppression UUID. Saved disappearance
+    /// must be observed separately before reporting application.
+    func liftSuppression(id: String) async -> Bool
 
     /// Resolve a trace's member entities for the in-dashboard graph
     /// view. Empty when the trace has no members or the causal graph
@@ -230,6 +235,15 @@ public struct V2SuppressionEntry: Identifiable, Sendable, Hashable {
     public let addedBy: String
     public let createdAt: Date
     public let expiresAt: Date?
+    init(_ entry: Suppression) {
+        let rule: String
+        switch entry.scope {
+        case .rule(let value), .rulePath(let value, _), .ruleHash(let value, _): rule = value
+        case .path, .host: rule = "—"
+        }
+        self.init(id: entry.id, ruleId: rule, scope: entry.scope.summary,
+                  addedBy: entry.source.rawValue, createdAt: entry.createdAt, expiresAt: entry.expiresAt)
+    }
     public init(id: String, ruleId: String, scope: String,
                 addedBy: String, createdAt: Date, expiresAt: Date?) {
         self.id = id
@@ -288,6 +302,26 @@ public struct V2OverviewKPIs: Sendable, Equatable {
 // MARK: - Convenience defaults
 
 extension V2DataProvider {
+    public var ruleTelemetryContext: RuleTelemetryContext? { nil }
+    public var suppressionReadError: String? { nil }
+    public func submitMutation(_ request: V2MutationRequest) async -> V2MutationSubmission {
+        let accepted: Bool
+        switch request.operation {
+        case .suppressAlert: accepted = await suppressAlert(id: request.targetID)
+        case .unsuppressAlert: accepted = await unsuppressAlert(id: request.targetID)
+        case .deleteAlert: accepted = await deleteAlert(id: request.targetID)
+        case .suppressCampaign: accepted = await suppressCampaign(id: request.targetID) > 0
+        case .unsuppressCampaign: accepted = await unsuppressCampaign(id: request.targetID)
+        case .liftSuppression: accepted = await liftSuppression(id: request.targetID)
+        }
+        return accepted ? .queued : .failed(lastErrorDescription ?? String(
+            localized: "mutation.requestFailedDetail", defaultValue: "The request could not be sent."))
+    }
+
+    public func confirmMutation(_ request: V2MutationRequest) async -> V2MutationConfirmation {
+        .unavailable("This data source does not report saved mutation state")
+    }
+
     // Default time window for the limit-only convenience calls (recent-activity
     // widgets that don't drive the Alerts time-range chips). The chips call the
     // since: form directly.

@@ -1,0 +1,1463 @@
+{
+  "format_version": 1,
+  "contracts": {
+    "agentTraces.statusRunning": [
+      {
+        "expression": "Int(status.port)",
+        "type": "lld"
+      }
+    ],
+    "alerts.confirmBulkSuppressButton": [
+      {
+        "expression": "targets.count",
+        "type": "lld"
+      }
+    ],
+    "alerts.confirmBulkSuppressMessage": [
+      {
+        "expression": "targets.count",
+        "type": "lld"
+      }
+    ],
+    "alerts.confirmDeleteMessage": [
+      {
+        "expression": "alert.title",
+        "type": "@"
+      }
+    ],
+    "alerts.readFailedBody": [
+      {
+        "expression": "readError",
+        "type": "@"
+      }
+    ],
+    "ax.appearance.tooltip": [
+      {
+        "expression": "schemeName",
+        "type": "@"
+      }
+    ],
+    "events.filterByProcess": [
+      {
+        "expression": "first.processName",
+        "type": "@"
+      }
+    ],
+    "findings.findingCount": [
+      {
+        "expression": "g.findings.count",
+        "type": "lld"
+      }
+    ],
+    "findings.loadErrorBody": [
+      {
+        "expression": "error.localizedDescription",
+        "type": "@"
+      }
+    ],
+    "findings.moreOverflow": [
+      {
+        "expression": "g.findings.count - 25",
+        "type": "lld"
+      }
+    ],
+    "findings.severityA11y": [
+      {
+        "expression": "sev.displayName",
+        "type": "@"
+      }
+    ],
+    "findings.shownCount": [
+      {
+        "expression": "totalCount",
+        "type": "lld"
+      }
+    ],
+    "findings.skippedNote": [
+      {
+        "expression": "skippedScanCount",
+        "type": "lld"
+      }
+    ],
+    "forensics.barchart.ax.summary": [
+      {
+        "expression": "artifacts.count",
+        "type": "lld"
+      },
+      {
+        "expression": "humanField",
+        "type": "@"
+      },
+      {
+        "expression": "top.label",
+        "type": "@"
+      },
+      {
+        "expression": "top.count",
+        "type": "lld"
+      }
+    ],
+    "forensics.histogram.ax.summary": [
+      {
+        "expression": "artifacts.count",
+        "type": "lld"
+      },
+      {
+        "expression": "bucketLabel",
+        "type": "@"
+      },
+      {
+        "expression": "peak.count",
+        "type": "lld"
+      },
+      {
+        "expression": "peakTime",
+        "type": "@"
+      }
+    ],
+    "forensicsSettings.revocation.fresh": [
+      {
+        "expression": "Int(age / 3600)",
+        "type": "lld"
+      }
+    ],
+    "forensicsSettings.revocation.stale": [
+      {
+        "expression": "Int(age / 86_400)",
+        "type": "lld"
+      }
+    ],
+    "histogram.ax.summary": [
+      {
+        "expression": "total",
+        "type": "lld"
+      },
+      {
+        "expression": "bins.count",
+        "type": "lld"
+      },
+      {
+        "expression": "unitLabel.lowercased()",
+        "type": "@"
+      },
+      {
+        "expression": "peak.count",
+        "type": "lld"
+      },
+      {
+        "expression": "peakTime",
+        "type": "@"
+      }
+    ],
+    "inspector.permissionsExtPermissionsCount": [
+      {
+        "expression": "ext.permissions.count",
+        "type": "lld"
+      }
+    ],
+    "kit.footerSummary": [
+      {
+        "expression": "kit.plugins.count",
+        "type": "lld"
+      },
+      {
+        "expression": "kit.version",
+        "type": "@"
+      },
+      {
+        "expression": "kit.maintainer",
+        "type": "@"
+      }
+    ],
+    "kit.scannersHeader": [
+      {
+        "expression": "kit.plugins.count",
+        "type": "lld"
+      }
+    ],
+    "mutation.pendingDetail": [
+      {
+        "expression": "mutations.pending.count",
+        "type": "lld"
+      }
+    ],
+    "mutation.requestedDetail": [
+      {
+        "expression": "sent",
+        "type": "lld"
+      },
+      {
+        "expression": "requests.count",
+        "type": "lld"
+      }
+    ],
+    "notices.earlier": [
+      {
+        "expression": "state.noticeHistory.count",
+        "type": "lld"
+      }
+    ],
+    "overview.alertVolumeTitle": [
+      {
+        "expression": "rangeKey",
+        "type": "@"
+      }
+    ],
+    "overview.alertVolumeTotal": [
+      {
+        "expression": "total",
+        "type": "lld"
+      }
+    ],
+    "overview.bannerBodyActive": [
+      {
+        "expression": "collectors",
+        "type": "lld"
+      }
+    ],
+    "overview.campaignsCritical": [
+      {
+        "expression": "kpis.activeCampaignsCritical",
+        "type": "lld"
+      }
+    ],
+    "overview.campaignsHigh": [
+      {
+        "expression": "kpis.activeCampaignsHigh",
+        "type": "lld"
+      }
+    ],
+    "overview.campaignsMedium": [
+      {
+        "expression": "kpis.activeCampaignsMedium",
+        "type": "lld"
+      }
+    ],
+    "overview.coverageStale": [
+      {
+        "expression": "healthy",
+        "type": "lld"
+      },
+      {
+        "expression": "summary.enabledCount",
+        "type": "lld"
+      }
+    ],
+    "overview.coverageSummary": [
+      {
+        "expression": "healthy",
+        "type": "lld"
+      },
+      {
+        "expression": "summary.enabledCount",
+        "type": "lld"
+      }
+    ],
+    "overview.crab.quipCritical": [
+      {
+        "expression": "criticalCampaigns",
+        "type": "lld"
+      }
+    ],
+    "overview.customize.a11yMoveEarlier": [
+      {
+        "expression": "widget.displayName",
+        "type": "@"
+      }
+    ],
+    "overview.customize.a11yMoveLater": [
+      {
+        "expression": "widget.displayName",
+        "type": "@"
+      }
+    ],
+    "overview.forensicsLastScan": [
+      {
+        "expression": "s.name",
+        "type": "@"
+      }
+    ],
+    "overview.hist.bar": [
+      {
+        "expression": "total",
+        "type": "lld"
+      },
+      {
+        "expression": "bucket.critical",
+        "type": "lld"
+      },
+      {
+        "expression": "bucket.high",
+        "type": "lld"
+      },
+      {
+        "expression": "bucket.medium",
+        "type": "lld"
+      },
+      {
+        "expression": "bucket.low",
+        "type": "lld"
+      }
+    ],
+    "overview.intelUpdated": [
+      {
+        "expression": "rel.localizedString(for: updated, relativeTo: Date())",
+        "type": "@"
+      }
+    ],
+    "overview.kpiChecksPass": [
+      {
+        "expression": "appState.securityFactors.filter { $0.status == \"pass\" }.count",
+        "type": "lld"
+      },
+      {
+        "expression": "appState.securityFactors.count",
+        "type": "lld"
+      }
+    ],
+    "overview.openAlertsDown": [
+      {
+        "expression": "d",
+        "type": "lld"
+      }
+    ],
+    "overview.openAlertsUp": [
+      {
+        "expression": "d",
+        "type": "lld"
+      }
+    ],
+    "overview.rangeChipA11y": [
+      {
+        "expression": "label",
+        "type": "@"
+      }
+    ],
+    "overview.sheetScoreAcrossChecks": [
+      {
+        "expression": "appState.securityScore",
+        "type": "lld"
+      },
+      {
+        "expression": "appState.securityFactors.count",
+        "type": "lld"
+      }
+    ],
+    "palette.ax.results": [
+      {
+        "expression": "count",
+        "type": "lld"
+      }
+    ],
+    "pastScans.bulkDeleteConfirm": [
+      {
+        "expression": "selectedIDs.count",
+        "type": "lld"
+      }
+    ],
+    "pastScans.bulkDeleteMessage": [
+      {
+        "expression": "formattedBytes(total)",
+        "type": "@"
+      }
+    ],
+    "pastScans.bulkDeleteTitle": [
+      {
+        "expression": "selectedIDs.count",
+        "type": "lld"
+      }
+    ],
+    "pastScans.bulkDeletedPartialToast": [
+      {
+        "expression": "ok",
+        "type": "lld"
+      },
+      {
+        "expression": "failed",
+        "type": "lld"
+      },
+      {
+        "expression": "bcf.string(fromByteCount: freed)",
+        "type": "@"
+      }
+    ],
+    "pastScans.bulkDeletedToast": [
+      {
+        "expression": "ok",
+        "type": "lld"
+      },
+      {
+        "expression": "bcf.string(fromByteCount: freed)",
+        "type": "@"
+      }
+    ],
+    "pastScans.deleteFailedToast": [
+      {
+        "expression": "error.localizedDescription",
+        "type": "@"
+      }
+    ],
+    "pastScans.deleteMessage": [
+      {
+        "expression": "sizeStr",
+        "type": "@"
+      }
+    ],
+    "pastScans.deleteNamed": [
+      {
+        "expression": "scan.name",
+        "type": "@"
+      }
+    ],
+    "pastScans.deletedToast": [
+      {
+        "expression": "scan.name",
+        "type": "@"
+      },
+      {
+        "expression": "bcf.string(fromByteCount: freed)",
+        "type": "@"
+      }
+    ],
+    "pastScans.loadErrorBody": [
+      {
+        "expression": "error.localizedDescription",
+        "type": "@"
+      }
+    ],
+    "pastScans.selectedCount": [
+      {
+        "expression": "selectedIDs.count",
+        "type": "lld"
+      }
+    ],
+    "pastScans.started": [
+      {
+        "expression": "fmt.localizedString(for: d, relativeTo: Date())",
+        "type": "@"
+      }
+    ],
+    "pastScans.totalCount": [
+      {
+        "expression": "scans.count",
+        "type": "lld"
+      }
+    ],
+    "prevention.actionRowMeta": [
+      {
+        "expression": "alert.process",
+        "type": "@"
+      },
+      {
+        "expression": "alert.actionsTaken.joined(separator: \", \")",
+        "type": "@"
+      },
+      {
+        "expression": "V2TimeFormat.relative(alert.timestamp)",
+        "type": "@"
+      }
+    ],
+    "prevention.chip.networkBlocker.on": [
+      {
+        "expression": "p.networkBlocker.count",
+        "type": "lld"
+      }
+    ],
+    "prevention.chip.persistenceGuard.on": [
+      {
+        "expression": "p.persistenceGuard.count",
+        "type": "lld"
+      }
+    ],
+    "prevention.chip.sinkhole.on": [
+      {
+        "expression": "p.sinkhole.count",
+        "type": "lld"
+      }
+    ],
+    "prevention.chip.stale": [
+      {
+        "expression": "h.ageSeconds",
+        "type": "lld"
+      }
+    ],
+    "prevention.module.countOnly": [
+      {
+        "expression": "module.count",
+        "type": "lld"
+      }
+    ],
+    "prevention.module.moreEntries": [
+      {
+        "expression": "module.entries.count - 20",
+        "type": "lld"
+      }
+    ],
+    "rave.consent.introInstall": [
+      {
+        "expression": "f.kind.rawValue",
+        "type": "@"
+      }
+    ],
+    "rave.consent.introUpdate": [
+      {
+        "expression": "f.kind.rawValue",
+        "type": "@"
+      }
+    ],
+    "rave.consent.thirdPartyAck": [
+      {
+        "expression": "f.signerIdentity.isEmpty ? f.trustTier : f.signerIdentity",
+        "type": "@"
+      }
+    ],
+    "rave.install.updateTo": [
+      {
+        "expression": "e.currentVersion",
+        "type": "@"
+      }
+    ],
+    "raveStore.installed.upToDate": [
+      {
+        "expression": "installedVer",
+        "type": "@"
+      }
+    ],
+    "raveStore.installed.updateAvailable": [
+      {
+        "expression": "installedVer",
+        "type": "@"
+      }
+    ],
+    "raveStore.noMatches.detail": [
+      {
+        "expression": "searchText",
+        "type": "@"
+      }
+    ],
+    "raveStore.nonOfficial.body": [
+      {
+        "expression": "baseURL.isEmpty ? \"(unknown)\" : baseURL",
+        "type": "@"
+      }
+    ],
+    "raveStore.remove.confirmTitle": [
+      {
+        "expression": "$0.displayName",
+        "type": "@"
+      }
+    ],
+    "scanDetail.couldNotLoad": [
+      {
+        "expression": "error",
+        "type": "@"
+      }
+    ],
+    "scanDetail.exportTypeSection": [
+      {
+        "expression": "ScannerDisplay.name(forContentType: ct)",
+        "type": "@"
+      }
+    ],
+    "scanDetail.loadingContentType": [
+      {
+        "expression": "ScannerDisplay.name(forContentType: ct)",
+        "type": "@"
+      }
+    ],
+    "scanDetail.savedTo": [
+      {
+        "expression": "url.lastPathComponent",
+        "type": "@"
+      }
+    ],
+    "scanDetail.savedToTruncated": [
+      {
+        "expression": "url.lastPathComponent",
+        "type": "@"
+      },
+      {
+        "expression": "exportRowCap",
+        "type": "lld"
+      }
+    ],
+    "scanDetail.truncatedType": [
+      {
+        "expression": "perTypeLoadLimit",
+        "type": "lld"
+      },
+      {
+        "expression": "trueCount",
+        "type": "lld"
+      }
+    ],
+    "scans.addedDate": [
+      {
+        "expression": "f.string(from: d)",
+        "type": "@"
+      }
+    ],
+    "scans.kitFailed": [
+      {
+        "expression": "kitName",
+        "type": "@"
+      }
+    ],
+    "scans.kitFinished": [
+      {
+        "expression": "kitName",
+        "type": "@"
+      }
+    ],
+    "scans.loadErrorBody": [
+      {
+        "expression": "error.localizedDescription",
+        "type": "@"
+      }
+    ],
+    "scans.reading": [
+      {
+        "expression": "sources.first ?? \"\"",
+        "type": "@"
+      }
+    ],
+    "scans.rowsCollected": [
+      {
+        "expression": "rows",
+        "type": "lld"
+      }
+    ],
+    "scans.runningKit": [
+      {
+        "expression": "kitName",
+        "type": "@"
+      }
+    ],
+    "scans.scannerProgress": [
+      {
+        "expression": "completed + 1",
+        "type": "lld"
+      },
+      {
+        "expression": "total",
+        "type": "lld"
+      }
+    ],
+    "scans.scannersDidntRun": [
+      {
+        "expression": "skipped.count",
+        "type": "lld"
+      }
+    ],
+    "scans.sectionCount": [
+      {
+        "expression": "count",
+        "type": "lld"
+      }
+    ],
+    "scans.seeAllPastScans": [
+      {
+        "expression": "scans.count",
+        "type": "lld"
+      }
+    ],
+    "scans.showAllBuiltins": [
+      {
+        "expression": "builtinScanners.count",
+        "type": "lld"
+      }
+    ],
+    "scans.skippedReason": [
+      {
+        "expression": "s.reason",
+        "type": "@"
+      }
+    ],
+    "scans.startingKit": [
+      {
+        "expression": "n",
+        "type": "lld"
+      }
+    ],
+    "scans.uninstall.message": [
+      {
+        "expression": "id",
+        "type": "@"
+      }
+    ],
+    "scans.updateBadge": [
+      {
+        "expression": "availableVersions[p.pluginID] ?? \"\"",
+        "type": "@"
+      }
+    ],
+    "settings.agentControlLoadError": [
+      {
+        "expression": "error",
+        "type": "@"
+      }
+    ],
+    "settings.agentTier.rootGrantBody": [
+      {
+        "expression": "agentCapabilityGrantCommand ?? \"\"",
+        "type": "@"
+      }
+    ],
+    "settings.evidence.cap": [
+      {
+        "expression": "effectiveEvidenceMaxSizeMB",
+        "type": "lld"
+      }
+    ],
+    "settings.flushCurrentSize": [
+      {
+        "expression": "currentSize(databaseFile: \"events.db\")",
+        "type": "@"
+      }
+    ],
+    "settings.flushDelta": [
+      {
+        "expression": "before",
+        "type": "@"
+      },
+      {
+        "expression": "after",
+        "type": "@"
+      }
+    ],
+    "settings.flushLastRun": [
+      {
+        "expression": "last.formatted(.relative(presentation: .numeric))",
+        "type": "@"
+      }
+    ],
+    "settings.flushPath": [
+      {
+        "expression": "(databasePathForFile(\"events.db\") as NSString).deletingLastPathComponent",
+        "type": "@"
+      }
+    ],
+    "settings.llmEngineApplied": [
+      {
+        "expression": "llmConfigurationSummary(reported)",
+        "type": "@"
+      }
+    ],
+    "settings.llmEngineDifferent": [
+      {
+        "expression": "llmConfigurationSummary(reported)",
+        "type": "@"
+      }
+    ],
+    "settings.llmOllamaHelp": [
+      {
+        "expression": "llmOllamaModel",
+        "type": "@"
+      }
+    ],
+    "settings.llmRemoteEndpointWarning": [
+      {
+        "expression": "endpoint",
+        "type": "@"
+      }
+    ],
+    "settings.retention.confirmTitle": [
+      {
+        "expression": "retentionWindowDays",
+        "type": "lld"
+      }
+    ],
+    "settings.storageFamilyCapsDisclosure": [
+      {
+        "expression": "effectiveEventsFamilyMaxSizeMB",
+        "type": "lld"
+      },
+      {
+        "expression": "effectiveAlertsFamilyMaxSizeMB",
+        "type": "lld"
+      },
+      {
+        "expression": "eventsMaxSizeMB + alertsMaxSizeMB",
+        "type": "lld"
+      },
+      {
+        "expression": "effectiveEvidenceMaxSizeMB",
+        "type": "lld"
+      }
+    ],
+    "settings.sysextStateFailed": [
+      {
+        "expression": "msg",
+        "type": "@"
+      }
+    ],
+    "settings.sysextStateFailedDetail": [
+      {
+        "expression": "msg",
+        "type": "@"
+      }
+    ],
+    "settings.webhooksActive": [
+      {
+        "expression": "configured.joined(separator: \", \")",
+        "type": "@"
+      }
+    ],
+    "sidebar.ax.moreWorkspaces": [
+      {
+        "expression": "hiddenWorkspaceCount",
+        "type": "lld"
+      }
+    ],
+    "sidebar.ax.workspace": [
+      {
+        "expression": "workspace.title",
+        "type": "@"
+      }
+    ],
+    "sidebar.ax.workspaceHint": [
+      {
+        "expression": "workspace.keyboardIndex",
+        "type": "lld"
+      }
+    ],
+    "sidebar.moreWorkspaces": [
+      {
+        "expression": "hiddenWorkspaceCount",
+        "type": "lld"
+      }
+    ],
+    "startup.failure.store": [
+      {
+        "expression": "report.database",
+        "type": "@"
+      }
+    ],
+    "system.alertEvidenceTransitionDetail": [
+      {
+        "expression": "liveEvents",
+        "type": "@"
+      },
+      {
+        "expression": "liveTotal",
+        "type": "@"
+      },
+      {
+        "expression": "steadyEvents",
+        "type": "@"
+      },
+      {
+        "expression": "steadyTotal",
+        "type": "@"
+      },
+      {
+        "expression": "reserve",
+        "type": "@"
+      },
+      {
+        "expression": "maximumReserve",
+        "type": "@"
+      },
+      {
+        "expression": "legacyRows",
+        "type": "@"
+      },
+      {
+        "expression": "legacyCharged",
+        "type": "@"
+      },
+      {
+        "expression": "capture",
+        "type": "@"
+      }
+    ],
+    "system.daemonStale": [
+      {
+        "expression": "staleAgeMin",
+        "type": "lld"
+      }
+    ],
+    "system.daemonUptime": [
+      {
+        "expression": "$0.uptimeDisplay",
+        "type": "@"
+      }
+    ],
+    "system.dataSourceLive": [
+      {
+        "expression": "dirNote",
+        "type": "@"
+      }
+    ],
+    "system.dns.interface": [
+      {
+        "expression": "capture.interface ?? \"—\"",
+        "type": "@"
+      }
+    ],
+    "system.dns.kernel": [
+      {
+        "expression": "capture.kernelReceived",
+        "type": "llu"
+      },
+      {
+        "expression": "capture.kernelDropped",
+        "type": "llu"
+      }
+    ],
+    "system.dns.stream": [
+      {
+        "expression": "capture.streamOffered",
+        "type": "llu"
+      },
+      {
+        "expression": "capture.streamDropped",
+        "type": "llu"
+      },
+      {
+        "expression": "capture.streamTerminated",
+        "type": "llu"
+      }
+    ],
+    "system.lastError": [
+      {
+        "expression": "err",
+        "type": "@"
+      }
+    ],
+    "system.otlpLifecycleDegradedDetail": [
+      {
+        "expression": "lifecycle.listenersAcceptedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.listenersCompletedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.activeListeners ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "lifecycle.readyListeners ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "lifecycle.listenersRejectedAfterSealTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.listenersConserved.map { String($0) } ?? \"unknown\"",
+        "type": "@"
+      },
+      {
+        "expression": "lifecycle.connectionsAcceptedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.connectionsCompletedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.activeConnections ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "lifecycle.connectionsRejectedAfterSealTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.connectionsRejectedAtCapacityTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.connectionsConserved.map { String($0) } ?? \"unknown\"",
+        "type": "@"
+      },
+      {
+        "expression": "lifecycle.bodyTasksAcceptedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.bodyTasksCompletedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.bodyTasksCancelledTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.bodyTasksRejectedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.bodyTasksInFlight ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "lifecycle.maximumBodyTasks ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "lifecycle.bodyTasksConserved.map { String($0) } ?? \"unknown\"",
+        "type": "@"
+      },
+      {
+        "expression": "lifecycle.callbackTasksAcceptedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.callbackTasksCompletedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.callbackTasksCancelledTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.callbackTasksRejectedTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "lifecycle.callbackTasksInFlight ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "lifecycle.maximumCallbackTasks ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "lifecycle.callbackTasksConserved.map { String($0) } ?? \"unknown\"",
+        "type": "@"
+      },
+      {
+        "expression": "lifecycle.lifecycleOperationsInProgress ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "lifecycle.cleanlyStopped.map { String($0) } ?? \"unknown\"",
+        "type": "@"
+      },
+      {
+        "expression": "lifecycle.lastShutdownClean.map { String($0) } ?? \"not attempted\"",
+        "type": "@"
+      },
+      {
+        "expression": "lifecycle.shutdownTimeoutsTotal ?? 0",
+        "type": "llu"
+      }
+    ],
+    "system.permRequiredCount": [
+      {
+        "expression": "required",
+        "type": "lld"
+      }
+    ],
+    "table.noMatches": [
+      {
+        "expression": "filterQuery",
+        "type": "@"
+      }
+    ],
+    "ui.ArtifactBarChartView.top.by": [
+      {
+        "expression": "min(buckets.count, Self.topN)",
+        "type": "lld"
+      },
+      {
+        "expression": "humanField",
+        "type": "@"
+      }
+    ],
+    "ui.ArtifactKeyValueView.showing.first.200.of": [
+      {
+        "expression": "artifacts.count",
+        "type": "lld"
+      }
+    ],
+    "ui.ArtifactTableView.showing.first.500.of.use.search.to": [
+      {
+        "expression": "filtered.count",
+        "type": "lld"
+      }
+    ],
+    "ui.ArtifactTranscriptView.showing.the.most.recent.300.of.older": [
+      {
+        "expression": "artifacts.count",
+        "type": "lld"
+      }
+    ],
+    "ui.Components.signed.by": [
+      {
+        "expression": "signerType",
+        "type": "@"
+      }
+    ],
+    "ui.EventStream.triggered.alerts": [
+      {
+        "expression": "triggeredAlerts.count",
+        "type": "lld"
+      }
+    ],
+    "ui.JSONTreeView.showing.first.200.of.artifacts": [
+      {
+        "expression": "artifacts.count",
+        "type": "lld"
+      }
+    ],
+    "ui.V2AlertsWorkspace.bulk.suppress": [
+      {
+        "expression": "selectedCampaignIds.count",
+        "type": "lld"
+      }
+    ],
+    "ui.V2AlertsWorkspace.bulk.suppress.8bd14f77": [
+      {
+        "expression": "bulkTargets.count",
+        "type": "lld"
+      }
+    ],
+    "ui.V2AlertsWorkspace.export": [
+      {
+        "expression": "visible.count",
+        "type": "lld"
+      }
+    ],
+    "ui.V2AlertsWorkspace.open.mitre.d3fend.reference.for": [
+      {
+        "expression": "tech",
+        "type": "@"
+      }
+    ],
+    "ui.V2AlertsWorkspace.suppressed.campaigns": [
+      {
+        "expression": "suppressedCampaigns.count",
+        "type": "lld"
+      }
+    ],
+    "ui.V2DataTable.sort.by": [
+      {
+        "expression": "col.title",
+        "type": "@"
+      }
+    ],
+    "ui.V2DetectionWorkspace.edit.yaml.2b9cb736": [
+      {
+        "expression": "rule.title",
+        "type": "@"
+      }
+    ],
+    "ui.V2DetectionWorkspace.no.editable.rule.matches": [
+      {
+        "expression": "debouncedRuleQuery",
+        "type": "@"
+      }
+    ],
+    "ui.V2DetectionWorkspace.saves.to.yml.json.survives.sparkle.updates": [
+      {
+        "expression": "userRulesDir",
+        "type": "@"
+      },
+      {
+        "expression": "rule.id",
+        "type": "@"
+      }
+    ],
+    "ui.V2DetectionWorkspace.severity.activate.to.change": [
+      {
+        "expression": "r.severity.label",
+        "type": "@"
+      }
+    ],
+    "ui.V2DetectionWorkspace.source": [
+      {
+        "expression": "sourcePath",
+        "type": "@"
+      }
+    ],
+    "ui.V2DetectionWorkspace.your.yaml.edits.to.haven.t.been": [
+      {
+        "expression": "rule.title",
+        "type": "@"
+      }
+    ],
+    "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo": [
+      {
+        "expression": "feedFetchPhrase",
+        "type": "@"
+      }
+    ],
+    "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools": [
+      {
+        "expression": "integrations.count",
+        "type": "lld"
+      }
+    ],
+    "ui.V2IntelligenceWorkspace.maccrab.s.built.in.feeds.are.abuse": [
+      {
+        "expression": "feedFetchPhrase",
+        "type": "@"
+      }
+    ],
+    "ui.V2InvestigationWorkspace.engine.llm": [
+      {
+        "expression": "llm.summary",
+        "type": "@"
+      }
+    ],
+    "ui.V2InvestigationWorkspace.trace.graph.with.entities.layout": [
+      {
+        "expression": "members.count",
+        "type": "lld"
+      },
+      {
+        "expression": "graphLayout.label",
+        "type": "@"
+      }
+    ],
+    "ui.V2InvestigationWorkspace.updated": [
+      {
+        "expression": "V2TimeFormat.relative(trace.lastUpdated)",
+        "type": "@"
+      }
+    ],
+    "welcome.step": [
+      {
+        "expression": "currentStep + 1",
+        "type": "lld"
+      }
+    ],
+    "ui.final.severity": [
+      {
+        "expression": "alert.severity.rawValue",
+        "type": "@"
+      }
+    ],
+    "ui.final.eventsPerSecond": [
+      {
+        "expression": "appState.eventsPerSecond",
+        "type": "lld"
+      }
+    ],
+    "ui.final.paletteResults": [
+      {
+        "expression": "flatten(groupedItems).count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.totalEvents": [
+      {
+        "expression": "artifacts.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.networkCounts": [
+      {
+        "expression": "graph.sources.count",
+        "type": "lld"
+      },
+      {
+        "expression": "graph.targets.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.networkEdges": [
+      {
+        "expression": "graph.edges.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.histogramCount": [
+      {
+        "expression": "artifacts.count",
+        "type": "lld"
+      },
+      {
+        "expression": "bucketLabel",
+        "type": "@"
+      }
+    ],
+    "ui.final.tableRows": [
+      {
+        "expression": "filtered.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.sessionEvents": [
+      {
+        "expression": "s.eventCount",
+        "type": "lld"
+      }
+    ],
+    "ui.final.campaignCount": [
+      {
+        "expression": "campaigns.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.selectedCampaignCount": [
+      {
+        "expression": "selectedCampaignIds.count",
+        "type": "lld"
+      },
+      {
+        "expression": "campaigns.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.confidence": [
+      {
+        "expression": "Int(c * 100)",
+        "type": "lld"
+      }
+    ],
+    "ui.final.suppressedAlerts": [
+      {
+        "expression": "c.alertCount",
+        "type": "lld"
+      }
+    ],
+    "ui.final.traceMemberCount": [
+      {
+        "expression": "matchCount",
+        "type": "lld"
+      },
+      {
+        "expression": "members.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.traceEntities": [
+      {
+        "expression": "members.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.tracePosition": [
+      {
+        "expression": "currentTraceIndex + 1",
+        "type": "lld"
+      },
+      {
+        "expression": "traces.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.traceResultCount": [
+      {
+        "expression": "filtered.count",
+        "type": "lld"
+      },
+      {
+        "expression": "traces.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.analyzedAlerts": [
+      {
+        "expression": "analyzed.count",
+        "type": "lld"
+      }
+    ],
+    "ui.final.lifecycleDetail": [
+      {
+        "expression": "impact",
+        "type": "@"
+      },
+      {
+        "expression": "timers.offeredHandlersTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "timers.acceptedHandlersTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "timers.completedHandlersTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "timers.inFlightHandlers ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "timers.maximumInFlightHandlers ?? 0",
+        "type": "lld"
+      },
+      {
+        "expression": "timers.rejectedHandlersTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "timers.closedRejectedHandlersTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "timers.overloadShedHandlersTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "timers.coalescedHandlersTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "timers.inlineFallbackHandlersTotal ?? 0",
+        "type": "llu"
+      },
+      {
+        "expression": "timers.conservesAcceptedHandlers.map { String($0) } ?? \"unknown\"",
+        "type": "@"
+      },
+      {
+        "expression": "timers.conservesOfferedHandlers.map { String($0) } ?? \"unknown\"",
+        "type": "@"
+      },
+      {
+        "expression": "workLabel",
+        "type": "@"
+      }
+    ],
+    "ui.final.overviewAlertCount": [
+      {
+        "expression": "bucket.total",
+        "type": "lld"
+      }
+    ],
+    "ui.finalPrefix.ArtifactKeyValueView.more": [
+      {
+        "expression": "arr.count - 20",
+        "type": "lld"
+      }
+    ],
+    "ui.finalPrefix.ArtifactTimelineView.more.on.this.day": [
+      {
+        "expression": "items.count - 200",
+        "type": "lld"
+      }
+    ],
+    "ui.finalPrefix.JSONTreeView.items.max.depth": [
+      {
+        "expression": "arr.count",
+        "type": "lld"
+      }
+    ],
+    "ui.finalPrefix.JSONTreeView.keys.max.depth": [
+      {
+        "expression": "obj.count",
+        "type": "lld"
+      }
+    ],
+    "ui.finalPrefix.V2AlertsWorkspace.more": [
+      {
+        "expression": "values.count - cap",
+        "type": "lld"
+      }
+    ],
+    "ui.finalPrefix.V2InvestigationWorkspace.more.entities": [
+      {
+        "expression": "steps.count - 12",
+        "type": "lld"
+      }
+    ]
+  }
+}

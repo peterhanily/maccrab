@@ -116,11 +116,11 @@ private func tccEvent(
 }
 
 /// Load all compiled rules into a fresh engine.
-/// Compilation is serialized by the shared NSLock in RuleTestHelpers.swift.
+/// Compilation is serialized by static initialization in RuleTestHelpers.swift.
 private func loadAllRules() async throws -> RuleEngine {
-    ensureRulesCompiled()
+    try ensureRulesCompiled()
     let engine = RuleEngine()
-    let count = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+    let count = try await engine.loadRules(from: compiledRulesDirectory)
     #expect(count > 150, "Expected 150+ rules, got \(count)")
     return engine
 }

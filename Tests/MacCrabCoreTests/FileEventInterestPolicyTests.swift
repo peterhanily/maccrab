@@ -992,8 +992,8 @@ struct FileEventInterestPolicyTests {
         includeBuiltins: Bool = true,
         includeGraph: Bool = true
     ) async throws -> FileEventInterestDescriptorSnapshot {
-        ensureRulesCompiled()
-        let compiled = URL(fileURLWithPath: "/tmp/maccrab_v3")
+        try ensureRulesCompiled()
+        let compiled = compiledRulesDirectory
 
         let ruleEngine = RuleEngine()
         _ = try await ruleEngine.loadRules(from: compiled)
@@ -1113,7 +1113,7 @@ struct FileEventInterestPolicyTests {
         let descriptors = try await realSnapshot(includeBuiltins: false, includeGraph: false)
         let compiled = FileEventInterestPolicyCompiler.compile(descriptors)
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
 
         let fixtureURL = projectRoot
             .appendingPathComponent("Tests/MacCrabCoreTests/fixtures/rule_corpus.json")

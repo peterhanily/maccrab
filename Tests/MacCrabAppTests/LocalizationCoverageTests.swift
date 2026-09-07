@@ -1,17 +1,11 @@
 // LocalizationCoverageTests.swift
 // MacCrabAppTests
 //
-// UX-2 grep-lint: NO file under Sources/MacCrabApp may carry a bare
-// user-facing string literal — every operator-visible string goes through
-// String(localized:defaultValue:). Dynamic interpolation (Text("\(x)")),
-// explicit Text(verbatim:), and non-literal Text(expr) are allowed.
-//
-// This used to guard a hardcoded list of 9 files out of 108, and the claim
-// that "the localization floor can't erode" was only ever true for those 9:
-// 268 bare literals accumulated across 33 unguarded files, including all of
-// V2DocsWorkspace. The walk is now the default and the debt is recorded per
-// file in bareLiteralBudget, so an unlisted (or brand new) file must sit at
-// zero and the listed ones can only improve.
+// UX-2 source lint covers explicit UI constructors and accessibility labels
+// throughout Sources/MacCrabApp. Ordinary literal copy uses stable localization
+// keys; exact technical values use Text(verbatim:). Dynamic expressions and
+// leading-interpolation literals still need semantic review, so this syntactic
+// check does not certify every rendered string. Both debt budgets are zero.
 
 import Testing
 import Foundation
@@ -19,22 +13,10 @@ import Foundation
 @Suite("Localization coverage (UX-2)")
 struct LocalizationCoverageTests {
 
-    /// L10N-01 ratchet. Every `String(localized: "k", defaultValue: …)` key
-    /// should have a row in en.lproj/Localizable.strings. That table — not the
-    /// call sites — is what the 13 translation bundles are generated from, so a
-    /// key that exists only at a call site is invisible to translators and
-    /// renders English in every locale, permanently. 557 of the 1005 referenced
-    /// keys are in that state today (the table defines 699).
-    ///
-    /// prerelease-check.sh:294 has printed this same diff as a *warning* ever
-    /// since the count drifted off zero after v1.18.1 — but prerelease-check.sh
-    /// is not invoked by ci-local.sh, so it only ran at release time and never
-    /// blocked anything, which is how 557 accreted unnoticed. This check runs
-    /// under `swift test`, which the pre-push hook does gate on.
-    ///
-    /// The budget only ratchets DOWN: lower it as keys are backfilled. Never
-    /// raise it to make a build pass.
-    static let missingEnKeyBudget = 552
+    /// Every source localization key must have an English catalog row.
+    /// The companion Python gate checks all locale keys, printf arguments,
+    /// live plural resources, and source-default agreement. Keep this at zero.
+    static let missingEnKeyBudget = 0
 
     @Test("no new String(localized:) key without an en.lproj row")
     func localizedKeysHaveEnglishTableRows() throws {
@@ -71,71 +53,20 @@ struct LocalizationCoverageTests {
                 \(missing.count) String(localized:) key(s) have no en.lproj row \
                 (budget \(Self.missingEnKeyBudget)). Add the key and its call-site \
                 defaultValue copy to Sources/MacCrabApp/Resources/en.lproj/Localizable.strings, \
-                then LOWER missingEnKeyBudget. First 10: \(missing.prefix(10).joined(separator: ", "))
+                keep missingEnKeyBudget at zero. First 10: \(missing.prefix(10).joined(separator: ", "))
                 """)
     }
 
-    /// Pre-existing bare-literal debt, keyed on path relative to
-    /// Sources/MacCrabApp. Any file NOT listed here must sit at zero — that is
-    /// the point of inverting the old allowlist: a file added tomorrow is
-    /// guarded without anyone remembering to enrol it.
-    ///
-    /// These budgets only ratchet DOWN. Wrap literals, then lower the number
-    /// (delete the entry when it reaches zero). Never raise one to go green.
-    /// The 9 formerly-enrolled surfaces are absent from this map on purpose:
-    /// they are clean, and they stay gated at zero.
-    ///
-    /// V2/Mock/V2MockData.swift is deliberately NOT exempted — it scores zero
-    /// under this regex, so it needs no carve-out.
-    static let bareLiteralBudget: [String: Int] = [
-        "MacCrabApp.swift": 7,
-        "V2/CommandBar/V2CommandBar.swift": 2,
-        "V2/CommandBar/V2CommandPalette.swift": 1,
-        "V2/Components/V2DataTable.swift": 3,
-        "V2/Components/V2Inspector.swift": 1,
-        "V2/Components/V2StateViews.swift": 1,
-        "V2/Components/V2Toast.swift": 1,
-        "V2/Forensics/PluginDetailInspector.swift": 6,
-        "V2/Forensics/Viewers/ArtifactBarChartView.swift": 1,
-        "V2/Forensics/Viewers/ArtifactHistogramView.swift": 1,
-        "V2/Forensics/Viewers/ArtifactKeyValueView.swift": 4,
-        "V2/Forensics/Viewers/ArtifactLayoutView.swift": 1,
-        "V2/Forensics/Viewers/ArtifactTableView.swift": 1,
-        "V2/Forensics/Viewers/ArtifactTimelineView.swift": 1,
-        "V2/Forensics/Viewers/ArtifactTranscriptView.swift": 1,
-        "V2/Forensics/Viewers/JSONTreeView.swift": 3,
-        "V2/Sidebar/V2Sidebar.swift": 3,
-        "V2/Workspaces/V2AlertsWorkspace.swift": 33,
-        "V2/Workspaces/V2CrabWidget.swift": 4,
-        "V2/Workspaces/V2DetectionWorkspace.swift": 62,
-        "V2/Workspaces/V2DocsWorkspace.swift": 2,
-        "V2/Workspaces/V2EventsWorkspace.swift": 4,
-        "V2/Workspaces/V2ForensicsSettingsSheet.swift": 6,
-        "V2/Workspaces/V2ForensicsWorkspace.swift": 1,
-        "V2/Workspaces/V2IntelligenceWorkspace.swift": 26,
-        "V2/Workspaces/V2InvestigationWorkspace.swift": 51,
-        "Views/AgentTracesView.swift": 3,
-        "Views/Components.swift": 3,
-        "Views/EventStream.swift": 7,
-        "Views/ResponseActionsView.swift": 7,
-        "Views/RuleWizard.swift": 14,
-        "Views/SettingsView.swift": 3,
-        "Views/WelcomeView.swift": 2,
-    ]
+    /// Ordinary user-facing literals must use explicit localization keys.
+    /// Exact commands, identifiers, brands and versions use Text(verbatim:).
+    /// Dynamic Text(expression) still requires semantic review; this syntax
+    /// check alone does not certify that every rendered value is localized.
+    static let bareLiteralBudget: [String: Int] = [:]
 
-    /// A bare user-facing literal: Text / Button / Label / .help /
-    /// .navigationTitle / V2StatusChip / V2ActionButton opening with a
-    /// double-quote whose first character is a letter (actual copy). This
-    /// deliberately does NOT match `("\(` (dynamic interpolation),
-    /// `(verbatim:` , or `(String(localized:` (already wrapped).
-    ///
-    /// `.accessibilityLabel("…")` was already caught — accidentally — because
-    /// the `Label` alternative is unanchored and `Label(` is a substring of
-    /// `accessibilityLabel(`. `accessibilityHint` / `accessibilityValue` were
-    /// not, so VoiceOver-only copy could go in unwrapped; they are named
-    /// explicitly here (3 sites at the time of writing).
+    /// Constructor boundaries avoid treating SF Symbol arguments to helper
+    /// functions such as deviceButton as user-visible Button titles.
     static let bareLiteral = try! NSRegularExpression(
-        pattern: #"(Text|Button|Label|V2StatusChip|V2ActionButton)\("[A-Za-z]|\.(help|navigationTitle|accessibilityHint|accessibilityValue)\("[A-Za-z]"#
+        pattern: #"(?<![A-Za-z0-9_])(Text|Button|Label|V2StatusChip|V2ActionButton)\("[A-Za-z]|\.(help|navigationTitle|accessibilityLabel|accessibilityHint|accessibilityValue)\("[A-Za-z]"#
     )
 
     static func packageRoot() -> URL {
@@ -178,7 +109,7 @@ struct LocalizationCoverageTests {
         #expect(regressions.isEmpty,
                 """
                 bare user-facing literal(s) — wrap in String(localized:defaultValue:). \
-                If you FIXED some, LOWER that file's bareLiteralBudget entry to the new count:
+                Keep every file at zero bare literals:
                 \(regressions.joined(separator: "\n"))
                 """)
     }

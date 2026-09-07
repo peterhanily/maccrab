@@ -22,6 +22,8 @@ fail() {
 RELEASE_CRITICAL_EXECUTORS=(
     .githooks/pre-push
     scripts/ci-local.sh
+    scripts/run-ci-phase.py
+    scripts/check-swift-toolchain.py
     scripts/release.sh
     scripts/build-release.sh
     scripts/prepare-dmg-payload.sh
@@ -52,7 +54,13 @@ install_missing_critical_executor_fixtures() {
     for path in "${RELEASE_CRITICAL_EXECUTORS[@]}"; do
         /bin/mkdir -p "$fixture/$(dirname "$path")"
         if [ ! -e "$fixture/$path" ]; then
-            printf '#!/bin/bash\nexit 0\n' > "$fixture/$path"
+            if [ "$path" = "scripts/check-swift-toolchain.py" ]; then
+                # Artifact lifecycle fixtures never query the real toolchain;
+                # the checker has separate canned identity contract tests.
+                printf 'raise SystemExit(0)\n' > "$fixture/$path"
+            else
+                printf '#!/bin/bash\nexit 0\n' > "$fixture/$path"
+            fi
             /bin/chmod 0755 "$fixture/$path"
         fi
     done
@@ -79,6 +87,7 @@ make_ci_fixture() {
         "$fixture/Sources" "$fixture/Tools/AssessmentHarness/scripts" "$fixture/tmp"
     cp "$PROJECT_DIR/.githooks/pre-push" "$fixture/.githooks/pre-push"
     cp "$SCRIPT_DIR/ci-local.sh" "$fixture/scripts/ci-local.sh"
+    cp "$SCRIPT_DIR/run-ci-phase.py" "$fixture/scripts/run-ci-phase.py"
 
     # The artifact lifecycle fixtures do not need a real repository, but the
     # release hook must still see a coherent, stateful object graph: one
@@ -176,6 +185,10 @@ make_ci_fixture() {
         write_executable "$fixture/scripts/$stub" '#!/bin/bash' 'exit 0'
     done
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-candidate-qualification.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-ci-phase.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-swift-toolchain.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/check-localizations.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-localizations.py"
     write_executable "$fixture/scripts/pre-release-audit.sh" \
         '#!/bin/bash' \
         'if [ "${MACCRAB_TEST_LATE_DELETE:-0}" = "1" ]; then rm -f .build/MacCrab-v*.dmg; fi' \
@@ -261,8 +274,8 @@ assert_artifact() {
 # with identical bytes.
 ci_ok="$TEST_ROOT/ci-success"
 make_ci_fixture "$ci_ok"
-grep -q 'CI_LOCAL_OUTPUT=$(mktemp ' "$ci_ok/scripts/ci-local.sh" \
-    || fail "local CI output is not allocated with mktemp"
+grep -q 'CI_EVIDENCE_DIR=$(mktemp -d ' "$ci_ok/scripts/ci-local.sh" \
+    || fail "local CI evidence is not allocated in a private mktemp directory"
 grep -q 'CI_COMPILED_RULES=$(mktemp -d ' "$ci_ok/scripts/ci-local.sh" \
     || fail "compiled-rule scratch is not allocated with mktemp"
 if grep -q '/tmp/ci_local_output.txt\|--output-dir /tmp/ci_compiled_rules' \

@@ -5,12 +5,12 @@ This directory holds the vendored SQLCipher amalgamation that MacCrab links agai
 ## Why vendor?
 
 - **Symbol collision avoidance.** Linking both system libsqlite3 and CSQLCipher into the same binary produces duplicate-symbol errors. Vendoring + migrating everything is cleaner than per-call-site renames.
-- **Version control.** macOS bundles a moving target (currently ~3.43 on macOS 15.x). CSQLCipher 4.16.0 ships SQLite 3.53.1; bumps are deliberate.
+- **Version control.** macOS bundles a moving target (currently ~3.43 on macOS 15.x). CSQLCipher 4.18.0 ships SQLite 3.53.4; bumps are deliberate.
 - **Encryption availability.** Any store can opt into SQLCipher encryption by issuing `PRAGMA key` at open time; the API is already linked.
 
 ## How to bump SQLCipher
 
-When upgrading to a newer SQLCipher release (e.g. v4.17.0):
+When upgrading SQLCipher:
 
 1. **Clone, authenticate, and detach at the exact release commit.** Never
    build from a mutable branch or from a tag name whose peeled commit has not
@@ -20,7 +20,7 @@ When upgrading to a newer SQLCipher release (e.g. v4.17.0):
    cd /private/tmp
    git clone https://github.com/sqlcipher/sqlcipher.git
    cd sqlcipher
-   expected_tag=v4.17.0       # whatever the new release tag is
+   expected_tag=v4.18.0       # replace with the reviewed release tag
    expected_commit=<40-hex peeled commit reviewed from the upstream release>
    test "$(git rev-parse "${expected_tag}^{commit}")" = "$expected_commit"
    git checkout --detach "$expected_commit"
@@ -30,21 +30,29 @@ When upgrading to a newer SQLCipher release (e.g. v4.17.0):
 
    Record the exact repository, tag, peeled commit, SQLCipher version, bundled
    SQLite version/source id, and final file digests in `PROVENANCE`. The
-   currently blessed `v4.16.0` tag peels to
-   `e2a6040f2ae5cfff2b3e08eb3320007d93cdf3fc`.
+   currently blessed `v4.18.0` tag peels to
+   `63697beb0fafcb61faa7a3e6fd267036548ab11b`.
 
 2. **Verify the upstream checkout before building, then build the amalgamation
    with CommonCrypto:**
 
    ```bash
-   make verify-source
+   git diff --exit-code HEAD --
    ./configure CFLAGS="-DSQLITE_HAS_CODEC -DSQLCIPHER_CRYPTO_CC -DSQLITE_TEMP_STORE=2" \
                LDFLAGS="-framework Security -framework Foundation"
    make sqlite3.c
    make sqlite3.h
+   git diff --exit-code HEAD --
    ```
 
    The `configure` script uses SQLCipher's bundled autosetup (pure tcl) — no autoconf needed.
+
+   `make verify-source` compares with the embedded upstream **SQLite Fossil**
+   manifest, not the SQLCipher Git release. On the clean v4.18.0 Git checkout it
+   reports SQLCipher's 29 modified files and exits nonzero. Preserve that output
+   as a base-source comparison; do not describe it as SQLCipher authentication
+   or rewrite the manifest to make it green. The independently reviewed exact
+   tag commit and clean tracked Git objects bind the SQLCipher input.
 
 3. **Copy the resulting files into the repo:**
    ```bash
@@ -70,7 +78,7 @@ When upgrading to a newer SQLCipher release (e.g. v4.17.0):
    ```bash
    ./scripts/check-sqlcipher-provenance.sh
    ./scripts/test-sqlcipher-provenance.sh
-   swift test
+   SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1 timeout 1800 swift test --no-parallel
    ```
 
    The guard fails when either vendored file, its version/source macros, the

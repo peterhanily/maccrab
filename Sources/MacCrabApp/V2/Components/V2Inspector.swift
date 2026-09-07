@@ -47,7 +47,7 @@ public struct V2Inspector<Content: View>: View {
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Close inspector")
+                    .accessibilityLabel(String(localized: "ui.V2Inspector.close.inspector", defaultValue: "Close inspector"))
                 }
             }
             .padding(14)

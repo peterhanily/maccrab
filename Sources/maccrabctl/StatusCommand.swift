@@ -2,7 +2,14 @@ import Foundation
 import MacCrabCore
 
 extension MacCrabCtl {
+    static func showJSONStatus() async {
+        do { try printCLIJSON(await RuntimeStatusDocument.read(directory: maccrabDataDir())) }
+        catch { cliFailure("status: \(error.localizedDescription)") }
+    }
+
     static func showStatus() async {
+        var readFailed = false
+        defer { if readFailed { exit(1) } }
         let supportDir = maccrabDataDir()
         let dbPath = supportDir + "/events.db"
 
@@ -95,20 +102,21 @@ extension MacCrabCtl {
             print("Events:          \(eventCount) retained")
             print("Last Event:      See Events dashboard or `maccrabctl events tail 1`")
         } catch {
-            print("Events:          (error reading: \(error))")
+            FileHandle.standardError.write(Data("Events: error reading: \(error)\n".utf8))
+            readFailed = true
         }
 
         // ── Alerts ────────────────────────────────────────────────────────
         do {
             let alertStore = try openAlertStoreForReading(directory: supportDir)
-            let alertCount = (try? await alertStore.count()) ?? 0
+            let alertCount = try await alertStore.count()
 
             // Campaign count: alerts whose rule_id starts with "maccrab.campaign."
             // FF-04: counted SQL-side. Deriving it from the newest-500 sample
             // below reported "0 campaign(s)" on any host whose most recent 500
             // alerts hold no campaign row, while hundreds sat in the table.
-            let recentAlerts = (try? await alertStore.alerts(since: Date.distantPast, limit: 500)) ?? []
-            let campaignCount = (try? await alertStore.campaignCount()) ?? 0
+            let recentAlerts = try await alertStore.alerts(since: Date.distantPast, limit: 500)
+            let campaignCount = try await alertStore.campaignCount()
 
             // Unsuppressed critical/high in last 24h
             let cutoff = Date().addingTimeInterval(-86400)
@@ -127,7 +135,8 @@ extension MacCrabCtl {
                 print("Last Alert:      \(formatDate(latestAlert.timestamp))  \(latestAlert.ruleTitle)")
             }
         } catch {
-            print("Alerts:          (error reading: \(error))")
+            FileHandle.standardError.write(Data("Alerts: error reading: \(error)\n".utf8))
+            readFailed = true
         }
 
         // ── Rules ─────────────────────────────────────────────────────────
@@ -194,13 +203,14 @@ extension MacCrabCtl {
                     path: tracesPath,
                     forceReadOnly: true
                 )
-                let spanCount = (try? await traceStore.count()) ?? 0
+                let spanCount = try await traceStore.count()
                 if spanCount > 0 {
                     print("Agent Traces:    \(spanCount) unauthenticated/self-reported span(s) ingested  (\(tracesPath))")
                     anyTraceLine = true
                 }
             } catch {
-                print("Agent Traces:    (error reading \(tracesPath): \(error))")
+                FileHandle.standardError.write(Data("Agent Traces: error reading: \(error)\n".utf8))
+                readFailed = true
                 anyTraceLine = true
             }
         }

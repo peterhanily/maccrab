@@ -117,6 +117,19 @@ public struct V2DetectionWorkspace: View {
             )
             tabBody
         }
+        .task(id: ObjectIdentifier(state.provider)) {
+            let source = state.engineSource
+            while !Task.isCancelled {
+                let pending = state.ruleChanges.pending
+                let observations = await Task.detached(priority: .utility) {
+                    pending.map { ($0.id, $0.savedStateMatches(directory: source.directory)) }
+                }.value
+                guard !Task.isCancelled else { return }
+                for (id, saved) in observations { state.ruleChanges.observe(id: id, saved: saved) }
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { return }
+            }
+        }
         // Debounce + filter task. Drives both:
         //   - debouncedRuleQuery (delayed mirror of ruleQuery)
         //   - filteredRules (precomputed filter result cached off-main)
@@ -261,8 +274,7 @@ public struct V2DetectionWorkspace: View {
     /// alongside the bundled `compiled_rules/` tree but is NEVER touched
     /// by signed-corpus self-sync on Sparkle updates — so user overrides
     /// persist across version bumps.
-    private static let userRulesDir = "/Library/Application Support/MacCrab/user_rules"
-    private static let reloadTickPath = userRulesDir + "/.reload_tick"
+    private var userRulesDir: String { state.engineSource.directory + "/user_rules" }
 
     /// Refresh `userDisabledRuleIDs` from on-disk overrides so the
     /// Disable / Enable button shows the right label after a fresh
@@ -271,7 +283,7 @@ public struct V2DetectionWorkspace: View {
     private func refreshUserDisabledRuleIDs() {
         var ids: Set<String> = []
         if let urls = try? FileManager.default.contentsOfDirectory(
-            at: URL(fileURLWithPath: Self.userRulesDir),
+            at: URL(fileURLWithPath: userRulesDir),
             includingPropertiesForKeys: nil
         ) {
             for url in urls where url.pathExtension == "json" {
@@ -303,6 +315,7 @@ public struct V2DetectionWorkspace: View {
     /// The dashboard queues an owner-bound inbox request; the root engine owns
     /// and updates the secure override directory without a password dialog.
     private func toggleRuleDisabled(_ rule: V2MockRule) async {
+        guard state.ruleChanges.canSubmit(ruleID: rule.id) else { return }
         // C6: re-sync the inspector snapshot on every exit path so its labels
         // don't lag the action the user just took.
         defer { resyncSelectedRule(from: rules) }
@@ -310,12 +323,8 @@ public struct V2DetectionWorkspace: View {
         // the root daemon owns builtin_rules_settings.json. Detection + any
         // protective action still run; only the alert is muted.
         if rule.id.hasPrefix("maccrab.") {
-            appState.setBuiltinRuleEnabled(ruleId: rule.id, enabled: !rule.isEnabled)
-            state.showToast(V2Toast(
-                kind: .info,
-                title: rule.isEnabled ? "Built-in rule muted" : "Built-in rule enabled",
-                detail: rule.title + " — applies in ~5 s (detection still runs)"
-            ))
+            let accepted = appState.setBuiltinRuleEnabled(ruleId: rule.id, enabled: !rule.isEnabled)
+            recordRuleChange(rule, expected: .enabled(!rule.isEnabled), accepted: accepted)
             return
         }
         // v1.18: sequence + graph (composite) rules are loaded by the
@@ -371,23 +380,10 @@ public struct V2DetectionWorkspace: View {
     /// override patches the raw dict (CompiledRule.level is a `let`, and
     /// raw patching keeps MacCrabCore untouched for a UI feature).
     private func bundledCompiledRuleData(id: String) -> Data? {
-        // Fast path: UUID-named file (works if build-release.sh has
-        // started shipping UUID copies in a later release).
-        let direct: [String?] = [
-            Bundle.main.path(forResource: id, ofType: "json", inDirectory: "compiled_rules"),
-            Bundle.main.path(forResource: id, ofType: "json"),
-        ]
-        for path in direct.compactMap({ $0 }) {
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-               (try? JSONDecoder().decode(CompiledRule.self, from: data)) != nil {
-                return data
-            }
-        }
-        // Slow path: scan compiled_rules/ and match by internal `id`.
-        guard let dir = Bundle.main.resourcePath.map({ $0 + "/compiled_rules" }),
-              let entries = try? FileManager.default.contentsOfDirectory(atPath: dir) else {
-            return nil
-        }
+        // Read the selected engine's installed corpus. A newer app bundle is
+        // not evidence that the same definition is running in that engine.
+        let dir = state.engineSource.directory + "/compiled_rules"
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return nil }
         for entry in entries where entry.hasSuffix(".json") && entry != "manifest.json" {
             let path = dir + "/" + entry
             guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
@@ -405,7 +401,7 @@ public struct V2DetectionWorkspace: View {
     /// override, and a severity change keeps the disabled flag. Also the
     /// only source for rules the USER installed (no bundled copy exists).
     private func existingUserOverrideData(id: String) -> Data? {
-        try? Data(contentsOf: URL(fileURLWithPath: Self.userRulesDir + "/\(id).json"))
+        try? Data(contentsOf: URL(fileURLWithPath: userRulesDir + "/\(id).json"))
     }
 
     /// Ensure the override directory exists and is writable. Returns
@@ -438,8 +434,7 @@ public struct V2DetectionWorkspace: View {
             verb: "install-rule", payload: ["ruleId": rule.id, "json": json])
         switch result {
         case .success:
-            state.showToast(V2Toast(kind: .info, title: "Rule disabled",
-                                    detail: rule.title + " — applies in ~5 s"))
+            recordRuleChange(rule, expected: .enabled(false), accepted: true)
         case .failure(let msg):
             state.showToast(V2Toast(kind: .error, title: "Couldn't disable rule", detail: msg))
         }
@@ -452,8 +447,7 @@ public struct V2DetectionWorkspace: View {
             verb: "remove-rule", payload: ["ruleId": rule.id])
         switch result {
         case .success:
-            state.showToast(V2Toast(kind: .info, title: "Rule re-enabled",
-                                    detail: rule.title + " — applies in ~5 s"))
+            recordRuleChange(rule, expected: .overrideRemoved, accepted: true)
         case .failure(let msg):
             state.showToast(V2Toast(kind: .error, title: "Couldn't re-enable rule", detail: msg))
         }
@@ -466,15 +460,12 @@ public struct V2DetectionWorkspace: View {
     /// sequence/graph rules are read-only (their engines don't read the
     /// user_rules overlay).
     private func setSeverityOverride(_ rule: V2MockRule, severityRaw: String?) async {
+        guard state.ruleChanges.canSubmit(ruleID: rule.id) else { return }
         // C6: keep the inspector snapshot in step with the severity change.
         defer { resyncSelectedRule(from: rules) }
         if rule.id.hasPrefix("maccrab.") {
-            appState.setBuiltinRuleSeverity(ruleId: rule.id, severityRaw: severityRaw)
-            state.showToast(V2Toast(
-                kind: .info,
-                title: severityRaw == nil ? "Severity reverted to default" : "Severity override sent",
-                detail: rule.title + " — applies in ~5 s"
-            ))
+            let accepted = appState.setBuiltinRuleSeverity(ruleId: rule.id, severityRaw: severityRaw)
+            recordRuleChange(rule, expected: .severity(severityRaw), accepted: accepted)
             return
         }
         if rule.category == "Sequence" || rule.category == "Graph" {
@@ -515,8 +506,7 @@ public struct V2DetectionWorkspace: View {
                     verb: "remove-rule", payload: ["ruleId": rule.id])
                 switch result {
                 case .success:
-                    state.showToast(V2Toast(kind: .info, title: "Severity reverted to default",
-                                            detail: rule.title + " — applies in ~5 s"))
+                    recordRuleChange(rule, expected: .overrideRemoved, accepted: true)
                 case .failure(let msg):
                     state.showToast(V2Toast(kind: .error, title: "Couldn't revert severity", detail: msg))
                 }
@@ -534,14 +524,49 @@ public struct V2DetectionWorkspace: View {
             verb: "install-rule", payload: ["ruleId": rule.id, "json": json])
         switch result {
         case .success:
-            state.showToast(V2Toast(
-                kind: .info,
-                title: severityRaw == nil ? "Severity reverted to default" : "Severity set to \(severityRaw!)",
-                detail: rule.title + " — applies in ~5 s"
-            ))
+            recordRuleChange(rule, expected: .severity(obj["level"] as? String), accepted: true)
         case .failure(let msg):
             state.showToast(V2Toast(kind: .error, title: "Couldn't set severity", detail: msg))
         }
+    }
+
+    private func recordRuleChange(_ rule: V2MockRule, expected: V2RuleChange.Expected, accepted: Bool) {
+        if accepted {
+            state.ruleChanges.queued(ruleID: rule.id, title: rule.title,
+                                     builtin: rule.id.hasPrefix("maccrab."), expected: expected)
+            state.showToast(V2Toast(kind: .info,
+                title: String(localized: "rules.change.requested", defaultValue: "Rule change requested"),
+                detail: String(localized: "rules.change.followStatus", defaultValue: "Follow the saved-state confirmation in Requested rule changes.")))
+        } else {
+            state.showToast(V2Toast(kind: .error,
+                title: String(localized: "rules.change.failed", defaultValue: "Rule change could not be queued"),
+                detail: String(localized: "rules.change.inboxUnavailable", defaultValue: "The selected engine's inbox is unavailable. Review System health before retrying.")))
+        }
+    }
+
+    private var requestedRuleChanges: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(String(localized: "rules.change.title", defaultValue: "Requested rule changes")).font(V2Theme.sectionTitle())
+                Spacer()
+                Button(String(localized: "rules.change.dismissCompleted", defaultValue: "Dismiss completed notices")) {
+                    state.ruleChanges.dismissCompleted()
+                }
+                .buttonStyle(.borderless)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(state.ruleChanges.entries) { change in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(change.title).font(V2Theme.body())
+                            Text(change.statusText).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 140)
+        }.v2Panel()
     }
 
     /// Severity chip that opens an override menu (v1.18.1 — inline severity
@@ -552,13 +577,13 @@ public struct V2DetectionWorkspace: View {
             V2StatusChip(r.severity.label, kind: r.severity.chipKind)
         } else {
             Menu {
-                Button("Critical") { Task { await setSeverityOverride(r, severityRaw: "critical") } }
-                Button("High")     { Task { await setSeverityOverride(r, severityRaw: "high") } }
-                Button("Medium")   { Task { await setSeverityOverride(r, severityRaw: "medium") } }
-                Button("Low")      { Task { await setSeverityOverride(r, severityRaw: "low") } }
-                Button("Info")     { Task { await setSeverityOverride(r, severityRaw: "informational") } }
+                Button(String(localized: "ax.chip.critical", defaultValue: "Critical")) { Task { await setSeverityOverride(r, severityRaw: "critical") } }
+                Button(String(localized: "settings.high", defaultValue: "High"))     { Task { await setSeverityOverride(r, severityRaw: "high") } }
+                Button(String(localized: "settings.medium", defaultValue: "Medium"))   { Task { await setSeverityOverride(r, severityRaw: "medium") } }
+                Button(String(localized: "settings.low", defaultValue: "Low"))      { Task { await setSeverityOverride(r, severityRaw: "low") } }
+                Button(String(localized: "severity.info", defaultValue: "Info"))     { Task { await setSeverityOverride(r, severityRaw: "informational") } }
                 Divider()
-                Button("Default")  { Task { await setSeverityOverride(r, severityRaw: nil) } }
+                Button(String(localized: "ui.V2DetectionWorkspace.default", defaultValue: "Default"))  { Task { await setSeverityOverride(r, severityRaw: nil) } }
             } label: {
                 HStack(spacing: 3) {
                     V2StatusChip(r.severity.label, kind: r.severity.chipKind)
@@ -570,8 +595,8 @@ public struct V2DetectionWorkspace: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("Change this rule's effective severity")
-            .accessibilityLabel("Severity \(r.severity.label). Activate to change.")
+            .help(String(localized: "ui.V2DetectionWorkspace.change.this.rule.s.effective.severity", defaultValue: "Change this rule's effective severity"))
+            .accessibilityLabel(String(localized: "ui.V2DetectionWorkspace.severity.activate.to.change", defaultValue: "Severity \(r.severity.label). Activate to change."))
         }
     }
 
@@ -583,6 +608,7 @@ public struct V2DetectionWorkspace: View {
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 16) {
                 rulesStatsRow
+                if !state.ruleChanges.entries.isEmpty { requestedRuleChanges }
                 rulesSearchBar
                 if builtInDetectionSearchUnmatched {
                     builtInDetectionNote
@@ -609,13 +635,14 @@ public struct V2DetectionWorkspace: View {
             RuleYAMLEditorSheet(
                 rule: rule,
                 onClose: { yamlEditorRule = nil },
-                onSaved: {
+                onSaved: { yaml in
                     yamlEditorRule = nil
+                    state.ruleChanges.queued(ruleID: rule.id, title: rule.title, builtin: false, expected: .yaml(yaml))
                     refreshUserDisabledRuleIDs()
                     state.showToast(V2Toast(
                         kind: .info,
-                        title: "Rule saved",
-                        detail: rule.title + " — daemon will reload in ~5 s"
+                        title: String(localized: "rules.change.installRequested", defaultValue: "Rule installation requested"),
+                        detail: String(localized: "rules.change.followStatus", defaultValue: "Follow the saved-state confirmation in Requested rule changes.")
                     ))
                 },
                 onError: { detail in
@@ -641,6 +668,7 @@ public struct V2DetectionWorkspace: View {
         let enabled = rules.filter { $0.isEnabled }.count
         let custom = rules.filter { $0.isCustom }.count
         let firedRecently = rules.reduce(0) { $0 + $1.firesLastWeek }
+        let currentTelemetry = state.provider.ruleTelemetryContext?.current == true
         return HStack(spacing: 12) {
             metricCard(title: "Rules loaded", value: "\(sigmaCount)",
                        trend: rules.isEmpty ? "no rules"
@@ -651,10 +679,13 @@ public struct V2DetectionWorkspace: View {
                        trend: custom == 0 ? "none yet" : "user-authored",
                        trendKind: .neutral,
                        icon: "wrench.and.screwdriver.fill", iconColor: V2Theme.aiAccent)
-            metricCard(title: "Fired (7d)", value: "\(firedRecently)",
-                       trend: firedRecently == 0 ? "quiet" : "review alerts",
-                       trendKind: firedRecently == 0 ? .healthy : .warning,
-                       icon: "bolt.fill", iconColor: firedRecently == 0 ? V2Theme.healthy : V2Theme.high)
+            metricCard(title: String(localized: "rules.matches.boot", defaultValue: "Recorded matches (boot)"),
+                       value: currentTelemetry ? "\(firedRecently)" : "—",
+                       trend: currentTelemetry
+                            ? String(localized: "rules.matches.scope", defaultValue: "Single-event rule telemetry")
+                            : String(localized: "rules.coverage.unknown", defaultValue: "Coverage unknown"),
+                       trendKind: .neutral,
+                       icon: "bolt.fill", iconColor: V2Theme.dataAccent)
         }
     }
 
@@ -687,8 +718,8 @@ public struct V2DetectionWorkspace: View {
                             .foregroundStyle(V2Theme.mutedText).scaledSystem(12)
                     }
                     .buttonStyle(.plain)
-                    .help("Clear filter")
-                    .accessibilityLabel("Clear rule filter")
+                    .help(String(localized: "ax.clearFilter", defaultValue: "Clear filter"))
+                    .accessibilityLabel(String(localized: "ui.V2DetectionWorkspace.clear.rule.filter", defaultValue: "Clear rule filter"))
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
@@ -699,11 +730,11 @@ public struct V2DetectionWorkspace: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
             Spacer()
-            V2ActionButton("New rule", icon: "plus", style: .primary,
+            V2ActionButton(String(localized: "ui.V2DetectionWorkspace.new.rule", defaultValue: "New rule"), icon: "plus", style: .primary,
                            tooltip: "Open the rule wizard") {
                 presentingNewRule = true
             }
-            V2ActionButton("Reload", icon: "arrow.clockwise", style: .secondary,
+            V2ActionButton(String(localized: "ui.V2DetectionWorkspace.reload", defaultValue: "Reload"), icon: "arrow.clockwise", style: .secondary,
                            tooltip: "Send SIGHUP to the detection engine") {
                 let ok = V2DaemonControl.reloadDetectionRules()
                 state.showToast(V2Toast(
@@ -745,7 +776,7 @@ public struct V2DetectionWorkspace: View {
             Image(systemName: "info.circle")
                 .foregroundStyle(V2Theme.mutedText)
             VStack(alignment: .leading, spacing: 3) {
-                Text("No editable rule matches “\(debouncedRuleQuery)”.")
+                Text(String(localized: "ui.V2DetectionWorkspace.no.editable.rule.matches", defaultValue: "No editable rule matches “\(debouncedRuleQuery)”."))
                     .scaledSystem(12, weight: .medium)
                 Text(compositeTitle.map {
                     "“\($0)” is a multi-step correlation detection — a sequence or trace-graph rule evaluated across several events, not a single-event Sigma rule. There's nothing to edit or tune for it on this screen."
@@ -812,7 +843,7 @@ public struct V2DetectionWorkspace: View {
                             .foregroundStyle(r.isEnabled ? V2Theme.healthy : V2Theme.tertiaryText)
                             .scaledSystem(8)
                             .frame(width: 22, height: 22)
-                            .help("Read-only — multi-step rules are managed in their rule files")
+                            .help(String(localized: "ui.V2DetectionWorkspace.read.only.multi.step.rules.are.managed", defaultValue: "Read-only — multi-step rules are managed in their rule files"))
                             .accessibilityLabel(r.isEnabled
                                 ? "Rule enabled (read-only)."
                                 : "Rule disabled (read-only).")
@@ -847,7 +878,7 @@ public struct V2DetectionWorkspace: View {
                         HStack(spacing: 6) {
                             V2TableCellText(r.title)
                             if r.isDeprecated {
-                                V2StatusChip("Deprecated", kind: .warning)
+                                V2StatusChip(String(localized: "ui.V2DetectionWorkspace.deprecated", defaultValue: "Deprecated"), kind: .warning)
                             }
                         }
                         V2TableCellText(r.id, primary: false, mono: true)
@@ -866,9 +897,12 @@ public struct V2DetectionWorkspace: View {
                     Text(r.mitre.first ?? "—")
                         .font(V2Theme.mono()).foregroundStyle(V2Theme.mutedText)
                 },
-                V2DataColumn(id: "fires", title: "Fires (7d)", width: .fixed(90),
+                V2DataColumn(id: "fires", title: String(localized: "rules.matches.boot", defaultValue: "Recorded matches (boot)"), width: .fixed(145),
                              sortKey: { .number(Double($0.firesLastWeek)) }) { r in
-                    V2TableCellText("\(r.firesLastWeek)", primary: false, mono: true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        V2TableCellText(r.recordedMatchesDisplay, primary: false, mono: true)
+                        Text(r.telemetryCoverage.label).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                    }
                 },
                 V2DataColumn(id: "custom", title: "Source", width: .fixed(80),
                              sortKey: { .text($0.isCustom ? "Custom" : "Builtin") }) { r in
@@ -888,11 +922,11 @@ public struct V2DetectionWorkspace: View {
                 V2StatusChip(r.severity.label, kind: r.severity.chipKind)
                 V2StatusChip(r.isEnabled ? "Enabled" : "Disabled",
                              kind: r.isEnabled ? .healthy : .neutral)
-                if r.isDeprecated { V2StatusChip("Deprecated", kind: .warning) }
-                if r.isCustom { V2StatusChip("Custom", kind: .ai) }
+                if r.isDeprecated { V2StatusChip(String(localized: "ui.V2DetectionWorkspace.deprecated", defaultValue: "Deprecated"), kind: .warning) }
+                if r.isCustom { V2StatusChip(String(localized: "ax.chip.custom", defaultValue: "Custom"), kind: .ai) }
             }
             if r.isDeprecated {
-                Text("This detection is deprecated — retained so its history and existing suppressions stay valid, but it ships disabled and does not fire.")
+                Text(String(localized: "ui.V2DetectionWorkspace.this.detection.is.deprecated.retained.so.its", defaultValue: "This detection is deprecated — retained so its history and existing suppressions stay valid, but it ships disabled and does not fire."))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -923,14 +957,21 @@ public struct V2DetectionWorkspace: View {
             V2InspectorSection(String(localized: "inspector.activity", defaultValue: "Activity")) {
                 V2InspectorKeyValue("Last fired",
                                     r.lastFired.map(V2TimeFormat.relative) ?? "—")
-                V2InspectorKeyValue("Fires (7d)", "\(r.firesLastWeek)")
+                V2InspectorKeyValue(String(localized: "rules.matches.boot", defaultValue: "Recorded matches (boot)"), r.recordedMatchesDisplay)
+                V2InspectorKeyValue(String(localized: "rules.coverage.title", defaultValue: "Coverage"), r.telemetryCoverage.label)
+                if let writtenAt = r.telemetryWrittenAt {
+                    V2InspectorKeyValue(String(localized: "rules.coverage.snapshot", defaultValue: "Snapshot recorded"),
+                                        writtenAt.formatted(date: .abbreviated, time: .shortened))
+                }
                 V2InspectorKeyValue("Category", r.category)
             }
             if r.id.hasPrefix("maccrab.") {
                 // Built-in detection: logic isn't editable, but it can be muted
                 // or have its severity overridden (applied at the daemon's
                 // AlertSink chokepoint via the inbox IPC).
-                BuiltinRuleSettingsSection(rule: r, appState: appState, state: state)
+                BuiltinRuleSettingsSection(rule: r, pending: !state.ruleChanges.canSubmit(ruleID: r.id)) { severity in
+                    Task { await setSeverityOverride(r, severityRaw: severity) }
+                }
                 V2InspectorSection(String(localized: "inspector.actions", defaultValue: "Actions")) {
                     // v1.18.1: compact action bar (paired equal-width row)
                     // instead of intrinsic-width buttons stacked vertically.
@@ -944,7 +985,7 @@ public struct V2DetectionWorkspace: View {
                         ) {
                             Task { await toggleRuleDisabled(r) }
                         }
-                        V2ActionButton("View fires", icon: "list.bullet", style: .secondary, fullWidth: true,
+                        V2ActionButton(String(localized: "ui.V2DetectionWorkspace.view.fires", defaultValue: "View fires"), icon: "list.bullet", style: .secondary, fullWidth: true,
                                        tooltip: "Show this rule's alerts in Alerts › Open") {
                             // Pre-fill the alert search so Open filters to this
                             // rule's fires (History ignores the query filter).
@@ -958,12 +999,12 @@ public struct V2DetectionWorkspace: View {
                 // v1.18.1: severity is editable here too — no YAML round-trip.
                 V2InspectorSection(String(localized: "inspector.settings", defaultValue: "Settings")) {
                     HStack {
-                        Text("Effective severity")
+                        Text(String(localized: "ui.V2DetectionWorkspace.effective.severity", defaultValue: "Effective severity"))
                             .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
                         Spacer()
                         severityControl(for: r)
                     }
-                    Text("Changing severity writes a user-rule override (survives updates). \"Default\" reverts to the bundled value.")
+                    Text(String(localized: "ui.V2DetectionWorkspace.changing.severity.writes.a.user.rule.override", defaultValue: "Changing severity writes a user-rule override (survives updates). \"Default\" reverts to the bundled value."))
                         .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -972,11 +1013,11 @@ public struct V2DetectionWorkspace: View {
                     // rows) instead of four stacked intrinsic-width buttons.
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
-                            V2ActionButton("View YAML", icon: "doc.text", style: .secondary, fullWidth: true,
+                            V2ActionButton(String(localized: "ui.V2DetectionWorkspace.view.yaml", defaultValue: "View YAML"), icon: "doc.text", style: .secondary, fullWidth: true,
                                            tooltip: "Show the rule's source YAML in-app") {
                                 yamlViewerRule = r
                             }
-                            V2ActionButton("Edit YAML", icon: "pencil", style: .secondary, fullWidth: true,
+                            V2ActionButton(String(localized: "ui.V2DetectionWorkspace.edit.yaml", defaultValue: "Edit YAML"), icon: "pencil", style: .secondary, fullWidth: true,
                                            tooltip: "Open the YAML in an in-app editor. Save writes a user-rule override that survives Sparkle updates.") {
                                 yamlEditorRule = r
                             }
@@ -994,7 +1035,7 @@ public struct V2DetectionWorkspace: View {
                             ) {
                                 Task { await toggleRuleDisabled(r) }
                             }
-                            V2ActionButton("View fires", icon: "list.bullet", style: .secondary, fullWidth: true,
+                            V2ActionButton(String(localized: "ui.V2DetectionWorkspace.view.fires", defaultValue: "View fires"), icon: "list.bullet", style: .secondary, fullWidth: true,
                                            tooltip: "Show this rule's alerts in Alerts › Open") {
                                 // Pre-fill the alert search so Open filters to
                                 // this rule's fires (History ignores the query
@@ -1014,60 +1055,27 @@ public struct V2DetectionWorkspace: View {
     /// above already shows the current EFFECTIVE severity.
     private struct BuiltinRuleSettingsSection: View {
         let rule: V2MockRule
-        @ObservedObject var appState: AppState
-        @ObservedObject var state: V2DashboardState
-        @State private var severitySel = "default"
-        /// C7: the last value actually pushed to the daemon. Seeded in
-        /// `.onAppear` alongside `severitySel` so the programmatic seed (which
-        /// flips "default" → the stored override) doesn't trip `.onChange` into
-        /// re-sending the override + a false "Severity override sent" toast with
-        /// no user action. Genuine picker selections still differ from this and
-        /// commit normally.
-        @State private var lastCommitted = "default"
+        let pending: Bool
+        let onSeverityChange: (String?) -> Void
 
         var body: some View {
             V2InspectorSection(String(localized: "inspector.builtInSettings", defaultValue: "Built-in settings")) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("This detection's logic isn't editable. You can override its severity or mute it; the detection still runs.")
+                    Text(String(localized: "ui.V2DetectionWorkspace.this.detection.s.logic.isn.t.editable", defaultValue: "This detection's logic isn't editable. You can override its severity or mute it; the detection still runs."))
                         .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
-                    HStack {
-                        Text("Override severity").font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
-                        Spacer()
-                        Picker("", selection: $severitySel) {
-                            Text("Default").tag("default")
-                            Text("Critical").tag("critical")
-                            Text("High").tag("high")
-                            Text("Medium").tag("medium")
-                            Text("Low").tag("low")
-                            Text("Info").tag("informational")
-                        }
-                        .labelsHidden()
-                        .frame(width: 140)
-                        .onChange(of: severitySel) { new in
-                            // C7: skip the .onAppear seed (and any redundant
-                            // re-pick of the already-committed value) — only a
-                            // real change should write an override + toast.
-                            guard new != lastCommitted else { return }
-                            lastCommitted = new
-                            appState.setBuiltinRuleSeverity(ruleId: rule.id, severityRaw: new == "default" ? nil : new)
-                            state.showToast(V2Toast(
-                                kind: .info,
-                                title: new == "default" ? "Severity reverted to default" : "Severity override sent",
-                                detail: rule.title + " — applies in ~5 s"
-                            ))
-                        }
+                    Picker("Override severity", selection: Binding(
+                        get: { rule.severityOverrideRaw ?? "default" },
+                        set: { onSeverityChange($0 == "default" ? nil : $0) })) {
+                        Text(String(localized: "ui.V2DetectionWorkspace.default", defaultValue: "Default")).tag("default")
+                        Text(String(localized: "ax.chip.critical", defaultValue: "Critical")).tag("critical")
+                        Text(String(localized: "settings.high", defaultValue: "High")).tag("high")
+                        Text(String(localized: "settings.medium", defaultValue: "Medium")).tag("medium")
+                        Text(String(localized: "settings.low", defaultValue: "Low")).tag("low")
+                        Text(String(localized: "severity.info", defaultValue: "Info")).tag("informational")
                     }
+                    .disabled(pending)
                 }
-            }
-            // Seed the Picker from the live override so an already-overridden
-            // built-in shows its real severity instead of "Default". Without
-            // this the @State default ("default") always wins on first render
-            // even when rule.severityOverrideRaw is set.
-            .onAppear {
-                let stored = rule.severityOverrideRaw ?? "default"
-                severitySel = stored
-                lastCommitted = stored
             }
         }
     }
@@ -1130,11 +1138,11 @@ public struct V2DetectionWorkspace: View {
     private var aiGuardToolsTable: some View {
         let rows = aiToolRollup(appState.aiSessions)
         return VStack(alignment: .leading, spacing: 8) {
-            Text("AI tools observed").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+            Text(String(localized: "ui.V2DetectionWorkspace.ai.tools.observed", defaultValue: "AI tools observed")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
             if rows.isEmpty {
                 HStack(spacing: 8) {
                     Image(systemName: "wand.and.stars").foregroundStyle(V2Theme.aiAccent)
-                    Text("No AI tools observed yet. Tools appear here once the engine sees a coding agent (Claude Code, Cursor, …) and its activity.")
+                    Text(String(localized: "ui.V2DetectionWorkspace.no.ai.tools.observed.yet.tools.appear", defaultValue: "No AI tools observed yet. Tools appear here once the engine sees a coding agent (Claude Code, Cursor, …) and its activity."))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(16)
@@ -1143,11 +1151,11 @@ public struct V2DetectionWorkspace: View {
             } else {
                 VStack(spacing: 0) {
                     HStack {
-                        Text("Tool").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Sessions").frame(width: 80, alignment: .trailing)
-                        Text("Events").frame(width: 80, alignment: .trailing)
-                        Text("LLM calls").frame(width: 70, alignment: .trailing)
-                        Text("Last seen").frame(width: 110, alignment: .trailing)
+                        Text(String(localized: "ui.V2DetectionWorkspace.tool", defaultValue: "Tool")).frame(maxWidth: .infinity, alignment: .leading)
+                        Text(String(localized: "ui.V2DetectionWorkspace.sessions", defaultValue: "Sessions")).frame(width: 80, alignment: .trailing)
+                        Text(String(localized: "tabs.events", defaultValue: "Events")).frame(width: 80, alignment: .trailing)
+                        Text(String(localized: "ui.V2DetectionWorkspace.llm.calls", defaultValue: "LLM calls")).frame(width: 70, alignment: .trailing)
+                        Text(String(localized: "ui.V2DetectionWorkspace.last.seen", defaultValue: "Last seen")).frame(width: 110, alignment: .trailing)
                     }
                     .font(V2Theme.meta()).foregroundStyle(V2Theme.tertiaryText)
                     .padding(.horizontal, 12).padding(.vertical, 6)
@@ -1176,7 +1184,7 @@ public struct V2DetectionWorkspace: View {
     private var aiGuardLineageCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Agent sessions").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Text(String(localized: "ui.V2DetectionWorkspace.agent.sessions", defaultValue: "Agent sessions")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
                 if !agentSessions.isEmpty {
                     Text("\(agentSessions.count)").font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
@@ -1185,7 +1193,7 @@ public struct V2DetectionWorkspace: View {
             if agentSessions.isEmpty {
                 HStack(spacing: 8) {
                     Image(systemName: "wand.and.stars").foregroundStyle(V2Theme.aiAccent)
-                    Text("No AI-agent sessions recorded yet. Sessions appear once the engine observes a coding agent (Claude Code, Cursor, …) and its descendant activity.")
+                    Text(String(localized: "ui.V2DetectionWorkspace.no.ai.agent.sessions.recorded.yet.sessions", defaultValue: "No AI-agent sessions recorded yet. Sessions appear once the engine observes a coding agent (Claude Code, Cursor, …) and its descendant activity."))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(12)
@@ -1204,12 +1212,12 @@ public struct V2DetectionWorkspace: View {
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 4) {
-                                Text("\(s.eventCount) events").font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                                Text(String(localized: "ui.final.sessionEvents", defaultValue: "Events: \(s.eventCount)")).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                                 Text(s.lastSeen, style: .relative).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                                 // PARITY-06: per-row signed-bundle export. Shells the
                                 // bundled maccrabctl (single source of export truth;
                                 // forces .filesystemDegraded signing, CLI is unentitled).
-                                V2ActionButton("Export signed", icon: "square.and.arrow.up", style: .secondary, size: .compact,
+                                V2ActionButton(String(localized: "ui.V2DetectionWorkspace.export.signed", defaultValue: "Export signed"), icon: "square.and.arrow.up", style: .secondary, size: .compact,
                                                tooltip: "Export a Merkle-rooted, ECDSA-P256-signed .maccrabsession bundle (events + alerts) for this session.") {
                                     let sessionID = s.id
                                     // Deep-audit fix: capture the CLI's exit status + stdout so the
@@ -1302,7 +1310,7 @@ public struct V2DetectionWorkspace: View {
     private var browserTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Browser extensions across Chrome, Firefox, Brave, Edge, and Arc. Risk score factors permission breadth, dangerous APIs, and dev-mode/unpacked status. Click a row for the full permission set and a risk-score breakdown.")
+                Text(String(localized: "ui.V2DetectionWorkspace.browser.extensions.across.chrome.firefox.brave.edge", defaultValue: "Browser extensions across Chrome, Firefox, Brave, Edge, and Arc. Risk score factors permission breadth, dangerous APIs, and dev-mode/unpacked status. Click a row for the full permission set and a risk-score breakdown."))
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 if let coverage = state.provider.browserInventoryCoverage,
                    !coverage.complete {
@@ -1434,15 +1442,15 @@ public struct V2DetectionWorkspace: View {
             HStack(spacing: 8) {
                 V2StatusChip(ext.browser, kind: .data)
                 if ext.signed {
-                    V2StatusChip("Signed", kind: .healthy, icon: "checkmark.seal")
+                    V2StatusChip(String(localized: "ui.V2DetectionWorkspace.signed", defaultValue: "Signed"), kind: .healthy, icon: "checkmark.seal")
                 } else {
-                    V2StatusChip("Unsigned / dev mode", kind: .warning, icon: "exclamationmark.shield")
+                    V2StatusChip(String(localized: "ui.V2DetectionWorkspace.unsigned.dev.mode", defaultValue: "Unsigned / dev mode"), kind: .warning, icon: "exclamationmark.shield")
                 }
                 riskPill(ext.riskScore)
             }
             V2InspectorSection(String(localized: "inspector.permissionsExtPermissionsCount", defaultValue: "Permissions (\(ext.permissions.count))")) {
                 if ext.permissions.isEmpty {
-                    Text("No declared permissions (or manifest unreadable, e.g. Firefox .xpi).")
+                    Text(String(localized: "ui.V2DetectionWorkspace.no.declared.permissions.or.manifest.unreadable.e", defaultValue: "No declared permissions (or manifest unreadable, e.g. Firefox .xpi)."))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                 } else {
@@ -1484,12 +1492,12 @@ public struct V2DetectionWorkspace: View {
                         .truncationMode(.middle)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 8) {
-                        V2ActionButton("Reveal in Finder", icon: "folder", style: .secondary, size: .compact) {
+                        V2ActionButton(String(localized: "ui.V2DetectionWorkspace.reveal.in.finder", defaultValue: "Reveal in Finder"), icon: "folder", style: .secondary, size: .compact) {
                             let manifest = ext.path + "/manifest.json"
                             let target = FileManager.default.fileExists(atPath: manifest) ? manifest : ext.path
                             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: target)])
                         }
-                        V2ActionButton("Copy path", icon: "doc.on.doc", style: .ghost, size: .compact) {
+                        V2ActionButton(String(localized: "ui.V2DetectionWorkspace.copy.path", defaultValue: "Copy path"), icon: "doc.on.doc", style: .ghost, size: .compact) {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(ext.path, forType: .string)
                             state.showToast(V2Toast(kind: .success, title: "Path copied", detail: nil))
@@ -1549,7 +1557,7 @@ public struct V2DetectionWorkspace: View {
                 // that isn't implemented (trust is a simple heuristic:
                 // /tmp-launched servers are flagged, everything else is Known).
                 // Describe what's actually shown instead of promising a feature.
-                Text("MCP servers configured for the AI coding tools on this device (Claude Code, Cursor, Continue, VS Code, Windsurf). A server launched from a temp directory is flagged for review; click a row for details.")
+                Text(String(localized: "ui.V2DetectionWorkspace.mcp.servers.configured.for.the.ai.coding", defaultValue: "MCP servers configured for the AI coding tools on this device (Claude Code, Cursor, Continue, VS Code, Windsurf). A server launched from a temp directory is flagged for review; click a row for details."))
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 HStack(alignment: .top, spacing: 0) {
                     // Deep-audit fix: every column is now click-to-sort (sortKey),
@@ -1623,7 +1631,7 @@ public struct V2DetectionWorkspace: View {
             }
             V2InspectorSection(String(localized: "inspector.referencedBy", defaultValue: "Referenced by")) {
                 if mcp.knownTo.isEmpty {
-                    Text("No AI tool config references this server.")
+                    Text(String(localized: "ui.V2DetectionWorkspace.no.ai.tool.config.references.this.server", defaultValue: "No AI tool config references this server."))
                         .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                 } else {
                     ForEach(mcp.knownTo, id: \.self) { tool in
@@ -1675,11 +1683,11 @@ private struct RuleYAMLViewerSheet: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(content, forType: .string)
                 } label: {
-                    Label("Copy YAML", systemImage: "doc.on.doc")
+                    Label(String(localized: "ui.V2DetectionWorkspace.copy.yaml", defaultValue: "Copy YAML"), systemImage: "doc.on.doc")
                 }
                 .buttonStyle(.borderless)
                 .disabled(content.isEmpty)
-                Button("Close", action: onClose)
+                Button(String(localized: "ax.close", defaultValue: "Close"), action: onClose)
                     .keyboardShortcut(.cancelAction)
             }
             .padding(16)
@@ -1695,7 +1703,7 @@ private struct RuleYAMLViewerSheet: View {
             .background(V2Theme.sidebarBackground.opacity(0.4))
             if !sourcePath.isEmpty {
                 HStack {
-                    Text("Source: \(sourcePath)")
+                    Text(String(localized: "ui.V2DetectionWorkspace.source", defaultValue: "Source: \(sourcePath)"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                         .textSelection(.enabled)
@@ -1739,7 +1747,7 @@ private struct RuleYAMLViewerSheet: View {
 private struct RuleYAMLEditorSheet: View {
     let rule: V2MockRule
     let onClose: () -> Void
-    let onSaved: () -> Void
+    let onSaved: (String) -> Void
     let onError: (String) -> Void
 
     @State private var content: String = ""
@@ -1754,7 +1762,7 @@ private struct RuleYAMLEditorSheet: View {
     @State private var originalContent: String = ""
     @State private var showDiscardConfirm: Bool = false
 
-    private static let userRulesDir = "/Library/Application Support/MacCrab/user_rules"
+    private var userRulesDir: String { V2EngineSource.session.directory + "/user_rules" }
 
     /// True when the user has typed edits that aren't yet saved.
     /// `originalContent` is populated by `load()`; if save() succeeds
@@ -1767,7 +1775,7 @@ private struct RuleYAMLEditorSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Edit YAML — \(rule.title)")
+                    Text(String(localized: "ui.V2DetectionWorkspace.edit.yaml.2b9cb736", defaultValue: "Edit YAML — \(rule.title)"))
                         .font(V2Theme.sectionTitle())
                         .foregroundStyle(V2Theme.primaryText)
                     Text(rule.id)
@@ -1787,8 +1795,8 @@ private struct RuleYAMLEditorSheet: View {
                         .scaledSystem(14)
                 }
                 .buttonStyle(.borderless)
-                .help("Open Sigma rule reference (sigmahq.io)")
-                Button("Cancel") {
+                .help(String(localized: "ui.V2DetectionWorkspace.open.sigma.rule.reference.sigmahq.io", defaultValue: "Open Sigma rule reference (sigmahq.io)"))
+                Button(String(localized: "common.cancel", defaultValue: "Cancel")) {
                     if hasUnsavedChanges {
                         showDiscardConfirm = true
                     } else {
@@ -1802,7 +1810,7 @@ private struct RuleYAMLEditorSheet: View {
                     if saving {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text("Save")
+                        Text(String(localized: "ui.V2DetectionWorkspace.save", defaultValue: "Save"))
                     }
                 }
                 .keyboardShortcut(.defaultAction)
@@ -1823,11 +1831,11 @@ private struct RuleYAMLEditorSheet: View {
                 // feedback the user can't tell saved vs. hung.
                 if saving {
                     ProgressView().controlSize(.small)
-                    Text("Compiling rule…")
+                    Text(String(localized: "ui.V2DetectionWorkspace.compiling.rule", defaultValue: "Compiling rule…"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                 } else {
-                    Text("Saves to \(Self.userRulesDir)/\(rule.id).{yml,json} — survives Sparkle updates.")
+                    Text(String(localized: "ui.V2DetectionWorkspace.saves.to.yml.json.survives.sparkle.updates", defaultValue: "Saves to \(userRulesDir)/\(rule.id).{yml,json} — survives Sparkle updates."))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                 }
@@ -1843,17 +1851,17 @@ private struct RuleYAMLEditorSheet: View {
             isPresented: $showDiscardConfirm,
             titleVisibility: .visible
         ) {
-            Button("Discard changes", role: .destructive) { onClose() }
-            Button("Keep editing", role: .cancel) {}
+            Button(String(localized: "ui.V2DetectionWorkspace.discard.changes", defaultValue: "Discard changes"), role: .destructive) { onClose() }
+            Button(String(localized: "ui.V2DetectionWorkspace.keep.editing", defaultValue: "Keep editing"), role: .cancel) {}
         } message: {
-            Text("Your YAML edits to \(rule.title) haven't been saved. Closing now will discard them.")
+            Text(String(localized: "ui.V2DetectionWorkspace.your.yaml.edits.to.haven.t.been", defaultValue: "Your YAML edits to \(rule.title) haven't been saved. Closing now will discard them."))
         }
     }
 
     private func load() {
         // Prefer an existing user override (so the user can iterate on
         // their own edits). Fall back to the bundled rule.
-        let userPath = Self.userRulesDir + "/\(rule.id).yml"
+        let userPath = userRulesDir + "/\(rule.id).yml"
         if FileManager.default.fileExists(atPath: userPath),
            let data = try? Data(contentsOf: URL(fileURLWithPath: userPath)),
            let text = String(data: data, encoding: .utf8) {
@@ -1875,7 +1883,7 @@ private struct RuleYAMLEditorSheet: View {
                 return
             }
         }
-        content = "# Couldn't find YAML for \(rule.id)\n# Edit + save will create a new user override at \(Self.userRulesDir)/\(rule.id).yml"
+        content = "# Couldn't find YAML for \(rule.id)\n# Edit + save will create a new user override at \(userRulesDir)/\(rule.id).yml"
         originalContent = content
     }
 
@@ -1891,7 +1899,7 @@ private struct RuleYAMLEditorSheet: View {
             // v1.12.0 RC27: re-baseline originalContent so a follow-up
             // Cancel doesn't warn about edits we just persisted.
             originalContent = content
-            onSaved()
+            onSaved(content)
         case .failure(let message):
             // Keep the YAML on disk so the user doesn't lose their work,
             // but warn that the daemon won't see it until they fix the

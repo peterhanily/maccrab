@@ -1327,6 +1327,9 @@ struct HeartbeatSnapshotTests {
         #expect(h.ageSeconds(now: 1700000010.5) == 10.0)
         #expect(h.isStale(now: 1700000010.5, maxAge: 300) == false)
         #expect(h.isStale(now: 1700000400.5, maxAge: 300) == true)
+        // A wall-clock rollback must not make a future heartbeat current.
+        #expect(h.isStale(now: 1699999990, maxAge: 300) == true)
+        #expect(h.isStale(now: .nan, maxAge: 300) == true)
         // A heartbeat with no write time: age unknown → reported stale, never fresh.
         let noTime = try decode("{ \"schema_version\": 5 }")
         #expect(noTime.ageSeconds(now: 1700000000) == nil)

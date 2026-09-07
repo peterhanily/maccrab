@@ -364,10 +364,10 @@ struct V2InvestigationWorkspace: View {
                 .foregroundStyle(V2Theme.dataAccent)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
-                Text("What is a trace?")
+                Text(String(localized: "ui.V2InvestigationWorkspace.what.is.a.trace", defaultValue: "What is a trace?"))
                     .font(V2Theme.sectionTitle())
                     .foregroundStyle(V2Theme.primaryText)
-                Text("A trace is the causal chain of process / file / network / persistence / AI-agent / TCC entities that participate in a high-severity event. The daemon anchors a trace when AnchorDetector decides an event is investigation-worthy (loader exec, persistence write, credential file access, etc.) and rolls forward every entity touched in the same lineage. Click any node for full identity + role; drag to rearrange; switch layout from the toolbar; right-click for copy / open-in-events shortcuts.")
+                Text(String(localized: "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of", defaultValue: "A trace is the causal chain of process / file / network / persistence / AI-agent / TCC entities that participate in a high-severity event. The daemon anchors a trace when AnchorDetector decides an event is investigation-worthy (loader exec, persistence write, credential file access, etc.) and rolls forward every entity touched in the same lineage. Click any node for full identity + role; drag to rearrange; switch layout from the toolbar; right-click for copy / open-in-events shortcuts."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -539,7 +539,7 @@ struct V2InvestigationWorkspace: View {
                             .scaledSystem(11).foregroundStyle(V2Theme.mutedText)
                     }
                     .buttonStyle(.plain)
-                    .help("Clear node search")
+                    .help(String(localized: "ui.V2InvestigationWorkspace.clear.node.search", defaultValue: "Clear node search"))
                 }
             }
             .padding(.horizontal, 8).padding(.vertical, 4)
@@ -574,7 +574,7 @@ struct V2InvestigationWorkspace: View {
 
             if nodeFilterActive {
                 let matchCount = members.filter(memberMatchesFilter).count
-                Text("\(matchCount) of \(members.count)")
+                Text(String(localized: "ui.final.traceMemberCount", defaultValue: "\(matchCount) of \(members.count)"))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.tertiaryText)
                     .monospacedDigit()
@@ -582,11 +582,11 @@ struct V2InvestigationWorkspace: View {
                     nodeSearchQuery = ""
                     entityTypeFilter.removeAll()
                 } label: {
-                    Text("Clear").scaledSystem(10, weight: .medium)
+                    Text(String(localized: "ui.V2InvestigationWorkspace.clear", defaultValue: "Clear")).scaledSystem(10, weight: .medium)
                         .foregroundStyle(V2Theme.mutedText)
                 }
                 .buttonStyle(.plain)
-                .help("Clear all node filters")
+                .help(String(localized: "ui.V2InvestigationWorkspace.clear.all.node.filters", defaultValue: "Clear all node filters"))
             }
         }
     }
@@ -635,13 +635,13 @@ struct V2InvestigationWorkspace: View {
                 // materialised). Show a single CLI hint — not three.
                 HStack(spacing: 8) {
                     Image(systemName: "terminal").foregroundStyle(V2Theme.mutedText)
-                    Text("maccrabctl trace show \(trace.id)")
+                    Text(verbatim: "maccrabctl trace show \(trace.id)")
                         .font(V2Theme.mono()).foregroundStyle(V2Theme.primaryText)
                         .textSelection(.enabled)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    V2ActionButton("Copy", icon: "doc.on.doc", style: .ghost) {
+                    V2ActionButton(String(localized: "ui.V2AlertsWorkspace.copy", defaultValue: "Copy"), icon: "doc.on.doc", style: .ghost) {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString("maccrabctl trace show \(trace.id)", forType: .string)
                         state.showToast(V2Toast(kind: .success, title: "Command copied", detail: nil))
@@ -650,7 +650,7 @@ struct V2InvestigationWorkspace: View {
                 .padding(12)
                 .background(V2Theme.panelBackground)
                 .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
-                Text("Trace members couldn't be resolved from the causal graph store. Either the daemon hasn't materialised this trace yet, or the local tracegraph.db is empty.")
+                Text(String(localized: "ui.V2InvestigationWorkspace.trace.members.couldn.t.be.resolved.from", defaultValue: "Trace members couldn't be resolved from the causal graph store. Either the daemon hasn't materialised this trace yet, or the local tracegraph.db is empty."))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
             } else {
@@ -679,7 +679,7 @@ struct V2InvestigationWorkspace: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 4) {
                 if shown.isEmpty {
-                    Text("No entities match the current node filter.")
+                    Text(String(localized: "ui.V2InvestigationWorkspace.no.entities.match.the.current.node.filter", defaultValue: "No entities match the current node filter."))
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                         .padding(12)
@@ -697,7 +697,7 @@ struct V2InvestigationWorkspace: View {
                                 .foregroundStyle(V2Theme.primaryText)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
-                            Text("\(m.entityType) · \(V2TimeFormat.relative(m.firstSeen))\(m.isAnchor ? " · anchor" : "")")
+                            Text("\(m.entityType) · \(V2TimeFormat.relative(m.firstSeen))\(m.isAnchor ? " · \(String(localized: "ui.V2InvestigationWorkspace.anchor", defaultValue: "anchor"))" : "")")
                                 .font(V2Theme.meta())
                                 .foregroundStyle(V2Theme.mutedText)
                         }
@@ -725,17 +725,17 @@ struct V2InvestigationWorkspace: View {
                     .contextMenu {
                         Button {
                             selectedMemberId = m.id
-                        } label: { Label("Show details", systemImage: "info.circle") }
+                        } label: { Label(String(localized: "ax.trace.node.showDetails", defaultValue: "Show details"), systemImage: "info.circle") }
                         Button {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(m.displayName, forType: .string)
                             state.showToast(V2Toast(kind: .success, title: "Copied", detail: m.displayName))
-                        } label: { Label("Copy label", systemImage: "doc.on.doc") }
+                        } label: { Label(String(localized: "ui.V2InvestigationWorkspace.copy.label", defaultValue: "Copy label"), systemImage: "doc.on.doc") }
                         Button {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(m.id, forType: .string)
                             state.showToast(V2Toast(kind: .success, title: "Copied entity ID", detail: m.id))
-                        } label: { Label("Copy entity ID", systemImage: "number") }
+                        } label: { Label(String(localized: "ui.V2InvestigationWorkspace.copy.entity.id", defaultValue: "Copy entity ID"), systemImage: "number") }
                         Divider()
                         Button {
                             // Land on events for THIS entity, scoped to
@@ -743,7 +743,7 @@ struct V2InvestigationWorkspace: View {
                             // displayName (e.g. .npmrc) doesn't return an
                             // over-broad cross-trace firehose.
                             openMemberInEvents(m)
-                        } label: { Label("Open in Events", systemImage: "list.bullet.rectangle") }
+                        } label: { Label(String(localized: "ui.V2InvestigationWorkspace.open.in.events", defaultValue: "Open in Events"), systemImage: "list.bullet.rectangle") }
                     }
                     .popover(isPresented: Binding(
                         get: { selectedMemberId == m.id },
@@ -888,21 +888,21 @@ struct V2InvestigationWorkspace: View {
                                         AnyView(VStack {
                                             Button {
                                                 selectedMemberId = m.id
-                                            } label: { Label("Show details", systemImage: "info.circle") }
+                                            } label: { Label(String(localized: "ax.trace.node.showDetails", defaultValue: "Show details"), systemImage: "info.circle") }
                                             Button {
                                                 NSPasteboard.general.clearContents()
                                                 NSPasteboard.general.setString(m.displayName, forType: .string)
                                                 state.showToast(V2Toast(kind: .success, title: "Copied", detail: m.displayName))
-                                            } label: { Label("Copy label", systemImage: "doc.on.doc") }
+                                            } label: { Label(String(localized: "ui.V2InvestigationWorkspace.copy.label", defaultValue: "Copy label"), systemImage: "doc.on.doc") }
                                             Button {
                                                 NSPasteboard.general.clearContents()
                                                 NSPasteboard.general.setString(m.id, forType: .string)
                                                 state.showToast(V2Toast(kind: .success, title: "Copied entity ID", detail: m.id))
-                                            } label: { Label("Copy entity ID", systemImage: "number") }
+                                            } label: { Label(String(localized: "ui.V2InvestigationWorkspace.copy.entity.id", defaultValue: "Copy entity ID"), systemImage: "number") }
                                             Divider()
                                             Button {
                                                 openMemberInEvents(m)
-                                            } label: { Label("Open in Events", systemImage: "list.bullet.rectangle") }
+                                            } label: { Label(String(localized: "ui.V2InvestigationWorkspace.open.in.events", defaultValue: "Open in Events"), systemImage: "list.bullet.rectangle") }
                                         })
                                     },
                                     detailPopoverIsPresented: Binding(
@@ -939,7 +939,7 @@ struct V2InvestigationWorkspace: View {
                         VStack {
                             Spacer()
                             HStack {
-                                Text("\(members.count) entities — switch to List for full detail")
+                                Text(String(localized: "ui.final.traceEntities", defaultValue: "Entities: \(members.count) — switch to List for full detail"))
                                     .font(V2Theme.meta())
                                     .foregroundStyle(V2Theme.mutedText)
                                     .padding(.horizontal, 8).padding(.vertical, 4)
@@ -955,7 +955,7 @@ struct V2InvestigationWorkspace: View {
                 .background(V2Theme.panelBackground.opacity(0.5))
                 .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
                 .accessibilityElement(children: .contain)
-                .accessibilityLabel("Trace graph with \(members.count) entities. Layout: \(graphLayout.label).")
+                .accessibilityLabel(String(localized: "ui.V2InvestigationWorkspace.trace.graph.with.entities.layout", defaultValue: "Trace graph with \(members.count) entities. Layout: \(graphLayout.label)."))
             }
         }
         .frame(minHeight: 360, maxHeight: .infinity)
@@ -1015,7 +1015,7 @@ struct V2InvestigationWorkspace: View {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.counterclockwise")
                             .scaledSystem(10, weight: .semibold)
-                        Text("Reset positions")
+                        Text(String(localized: "ui.V2InvestigationWorkspace.reset.positions", defaultValue: "Reset positions"))
                             .scaledSystem(11, weight: .medium)
                     }
                     .foregroundStyle(V2Theme.mutedText)
@@ -1026,7 +1026,7 @@ struct V2InvestigationWorkspace: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
                 .buttonStyle(.plain)
-                .help("Discard manual node positions and re-run the chosen layout")
+                .help(String(localized: "ui.V2InvestigationWorkspace.discard.manual.node.positions.and.re.run", defaultValue: "Discard manual node positions and re-run the chosen layout"))
             }
         }
     }
@@ -1051,7 +1051,7 @@ struct V2InvestigationWorkspace: View {
                     .background(V2Theme.panelBackground)
             }
             .buttonStyle(.plain)
-            .help("Zoom out")
+            .help(String(localized: "ui.V2InvestigationWorkspace.zoom.out", defaultValue: "Zoom out"))
             .disabled(graphZoom <= zoomMin)
 
             Text("\(Int(graphZoom * 100))%")
@@ -1065,7 +1065,7 @@ struct V2InvestigationWorkspace: View {
                     graphZoom = 1.0
                     pinchBaseline = 1.0
                 }
-                .help("Double-click to reset to 100%")
+                .help(String(localized: "ui.V2InvestigationWorkspace.double.click.to.reset.to.100", defaultValue: "Double-click to reset to 100%"))
 
             Button {
                 graphZoom = min(zoomMax, graphZoom + 0.2)
@@ -1079,7 +1079,7 @@ struct V2InvestigationWorkspace: View {
                     .background(V2Theme.panelBackground)
             }
             .buttonStyle(.plain)
-            .help("Zoom in")
+            .help(String(localized: "ui.V2InvestigationWorkspace.zoom.in", defaultValue: "Zoom in"))
             .disabled(graphZoom >= zoomMax)
         }
         .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -1314,7 +1314,7 @@ struct V2InvestigationWorkspace: View {
                         V2StatusChip(m.entityType, kind: .data,
                                      icon: iconForEntityType(m.entityType))
                         if m.isAnchor {
-                            V2StatusChip("anchor", kind: .high, icon: "flame.fill")
+                            V2StatusChip(String(localized: "ui.V2InvestigationWorkspace.anchor", defaultValue: "anchor"), kind: .high, icon: "flame.fill")
                         }
                     }
                 }
@@ -1329,7 +1329,7 @@ struct V2InvestigationWorkspace: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Close")
+                .help(String(localized: "ax.close", defaultValue: "Close"))
             }
 
             Divider()
@@ -1360,12 +1360,12 @@ struct V2InvestigationWorkspace: View {
 
             // Actions
             VStack(alignment: .leading, spacing: 6) {
-                V2ActionButton("Copy label", icon: "doc.on.doc", style: .secondary) {
+                V2ActionButton(String(localized: "ui.V2InvestigationWorkspace.copy.label", defaultValue: "Copy label"), icon: "doc.on.doc", style: .secondary) {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(m.displayName, forType: .string)
                     state.showToast(V2Toast(kind: .success, title: "Copied", detail: m.displayName))
                 }
-                V2ActionButton("Open in Events", icon: "list.bullet.rectangle", style: .secondary) {
+                V2ActionButton(String(localized: "ui.V2InvestigationWorkspace.open.in.events", defaultValue: "Open in Events"), icon: "list.bullet.rectangle", style: .secondary) {
                     openMemberInEvents(m)
                 }
             }
@@ -1400,7 +1400,7 @@ struct V2InvestigationWorkspace: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
-                .help("Click to copy")
+                .help(String(localized: "ui.V2InvestigationWorkspace.click.to.copy", defaultValue: "Click to copy"))
             } else {
                 Text(value)
                     .font(mono ? V2Theme.mono() : V2Theme.body())
@@ -1545,7 +1545,7 @@ struct V2InvestigationWorkspace: View {
                 VStack(spacing: 6) {
                     Image(systemName: "sidebar.right")
                         .scaledSystem(14, weight: .semibold)
-                    Text("Show details")
+                    Text(String(localized: "ax.trace.node.showDetails", defaultValue: "Show details"))
                         .scaledSystem(10, weight: .semibold)
                         .rotationEffect(.degrees(-90))
                         .fixedSize()
@@ -1562,15 +1562,15 @@ struct V2InvestigationWorkspace: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Show trace inspector")
+            .help(String(localized: "ui.V2InvestigationWorkspace.show.trace.inspector", defaultValue: "Show trace inspector"))
         }
     }
 
     private var tracePickerRow: some View {
         HStack(spacing: 12) {
-            Text("Trace").font(V2Theme.cardTitle()).foregroundStyle(V2Theme.mutedText)
+            Text(String(localized: "ui.V2InvestigationWorkspace.trace", defaultValue: "Trace")).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.mutedText)
             tracePickerButton
-            Text("\(currentTraceIndex + 1) of \(traces.count)")
+            Text(String(localized: "ui.final.tracePosition", defaultValue: "\(currentTraceIndex + 1) of \(traces.count)"))
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.tertiaryText)
                 .monospacedDigit()
@@ -1579,14 +1579,14 @@ struct V2InvestigationWorkspace: View {
                 navTraceButton(direction: +1, icon: "chevron.forward", tooltip: "Next trace  ⌥ →")
             }
             Spacer()
-            V2ActionButton("Export bundle", icon: "square.and.arrow.up", style: .secondary,
+            V2ActionButton(String(localized: "ui.V2InvestigationWorkspace.export.bundle", defaultValue: "Export bundle"), icon: "square.and.arrow.up", style: .secondary,
                            disabled: (selectedTrace ?? traces.first) == nil,
                            tooltip: "Export this trace as a signed .maccrabtrace bundle") {
                 if let trace = selectedTrace ?? traces.first {
                     exportTrace(trace)
                 }
             }
-            V2ActionButton("Verify bundle…", icon: "checkmark.seal", style: .secondary,
+            V2ActionButton(String(localized: "ui.V2InvestigationWorkspace.verify.bundle", defaultValue: "Verify bundle…"), icon: "checkmark.seal", style: .secondary,
                            tooltip: "Pick a previously-exported .maccrabtrace bundle to verify schema, Merkle root, and signature") {
                 verifyBundle()
             }
@@ -1612,7 +1612,7 @@ struct V2InvestigationWorkspace: View {
                         .fill(trace.severityHint.chipKind.color)
                         .frame(width: 8, height: 8)
                     if trace.isDemo {
-                        V2StatusChip("DEMO", kind: .ai, icon: "theatermasks.fill")
+                        V2StatusChip(String(localized: "ui.V2InvestigationWorkspace.demo", defaultValue: "DEMO"), kind: .ai, icon: "theatermasks.fill")
                     }
                     Text(trace.title)
                         .scaledSystem(12, weight: .semibold)
@@ -1620,7 +1620,7 @@ struct V2InvestigationWorkspace: View {
                         .lineLimit(1)
                         .frame(maxWidth: 280, alignment: .leading)
                 } else {
-                    Text("No trace").font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                    Text(String(localized: "ui.V2InvestigationWorkspace.no.trace", defaultValue: "No trace")).font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 Image(systemName: "chevron.down")
                     .scaledSystem(9, weight: .semibold)
@@ -1636,7 +1636,7 @@ struct V2InvestigationWorkspace: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Switch trace")
+        .help(String(localized: "ui.V2InvestigationWorkspace.switch.trace", defaultValue: "Switch trace"))
         .popover(isPresented: $tracePickerOpen, arrowEdge: .bottom) {
             tracePickerPopover
         }
@@ -1678,9 +1678,9 @@ struct V2InvestigationWorkspace: View {
                             .foregroundStyle(V2Theme.mutedText)
                     }
                     .buttonStyle(.plain)
-                    .help("Clear filter")
+                    .help(String(localized: "ax.clearFilter", defaultValue: "Clear filter"))
                 }
-                Text("\(filtered.count) of \(traces.count)")
+                Text(String(localized: "ui.final.traceResultCount", defaultValue: "\(filtered.count) of \(traces.count)"))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.tertiaryText)
                     .monospacedDigit()
@@ -1757,7 +1757,7 @@ struct V2InvestigationWorkspace: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
                         if trace.isDemo {
-                            V2StatusChip("DEMO", kind: .ai)
+                            V2StatusChip(String(localized: "ui.V2InvestigationWorkspace.demo", defaultValue: "DEMO"), kind: .ai)
                         }
                         Text(trace.title)
                             .scaledSystem(13, weight: isOn ? .semibold : .medium)
@@ -1799,7 +1799,7 @@ struct V2InvestigationWorkspace: View {
                         if trace.nodeCount > 0 || trace.edgeCount > 0 {
                             Text("•").foregroundStyle(V2Theme.tertiaryText)
                         }
-                        Text("updated \(V2TimeFormat.relative(trace.lastUpdated))")
+                        Text(String(localized: "ui.V2InvestigationWorkspace.updated", defaultValue: "updated \(V2TimeFormat.relative(trace.lastUpdated))"))
                             .font(V2Theme.meta())
                             .foregroundStyle(V2Theme.mutedText)
                             .lineLimit(1)
@@ -1928,11 +1928,11 @@ struct V2InvestigationWorkspace: View {
                 if !recentAlerts.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("Recent high-severity alerts")
+                            Text(String(localized: "ui.V2InvestigationWorkspace.recent.high.severity.alerts", defaultValue: "Recent high-severity alerts"))
                                 .font(V2Theme.sectionTitle())
                                 .foregroundStyle(V2Theme.primaryText)
                             Spacer()
-                            Text("Likely candidates for trace anchoring")
+                            Text(String(localized: "ui.V2InvestigationWorkspace.likely.candidates.for.trace.anchoring", defaultValue: "Likely candidates for trace anchoring"))
                                 .font(V2Theme.meta())
                                 .foregroundStyle(V2Theme.mutedText)
                         }
@@ -1991,7 +1991,7 @@ struct V2InvestigationWorkspace: View {
                     }) {
             if trace.isDemo {
                 HStack {
-                    V2StatusChip("DEMO TRACE", kind: .ai, icon: "theatermasks.fill")
+                    V2StatusChip(String(localized: "ui.V2InvestigationWorkspace.demo.trace", defaultValue: "DEMO TRACE"), kind: .ai, icon: "theatermasks.fill")
                     Spacer()
                 }
             }
@@ -2045,23 +2045,23 @@ struct V2InvestigationWorkspace: View {
                     }
                 }
                 if steps.count > 12 {
-                    Text("+\(steps.count - 12) more entities")
+                    Text(String(localized: "ui.finalPrefix.V2InvestigationWorkspace.more.entities", defaultValue: "+\(steps.count - 12) more entities"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                 }
             }
             V2InspectorSection(String(localized: "inspector.actions", defaultValue: "Actions")) {
-                V2ActionButton("Open Agent Traces", icon: "wand.and.stars", style: .secondary) {
+                V2ActionButton(String(localized: "ui.V2InvestigationWorkspace.open.agent.traces", defaultValue: "Open Agent Traces"), icon: "wand.and.stars", style: .secondary) {
                     state.selectTab(.investigationAgentTraces)
                 }
                 // rc.3 deep-audit (ui-investigation): this button ran no
                 // analysis — it only navigated to the AI Analysis tab — so
                 // "Run" over-promised. Relabelled to match what it does;
                 // the tab itself now renders real LLM investigation data.
-                V2ActionButton("Open AI analysis", icon: "brain.head.profile", style: .secondary) {
+                V2ActionButton(String(localized: "ui.V2InvestigationWorkspace.open.ai.analysis", defaultValue: "Open AI analysis"), icon: "brain.head.profile", style: .secondary) {
                     state.selectTab(.investigationAIAnalysis)
                 }
-                V2ActionButton("View as events", icon: "list.bullet", style: .secondary) {
+                V2ActionButton(String(localized: "ui.V2InvestigationWorkspace.view.as.events", defaultValue: "View as events"), icon: "list.bullet", style: .secondary) {
                     // rc.3 deep-audit (ui-investigation): filter on a
                     // human-searchable term (resolved anchor process name),
                     // NOT trace.rootProcess — that's the opaque
@@ -2104,10 +2104,10 @@ struct V2InvestigationWorkspace: View {
                 .foregroundStyle(V2Theme.aiAccent)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
-                Text("What appears here?")
+                Text(String(localized: "ui.V2InvestigationWorkspace.what.appears.here", defaultValue: "What appears here?"))
                     .font(V2Theme.sectionTitle())
                     .foregroundStyle(V2Theme.primaryText)
-                Text("Agent Traces are W3C TRACEPARENT spans MacCrab ingested over its loopback OTLP receiver from AI coding tools (Claude Code, Cursor, Codex, Continue, Windsurf). Each row is one trace = one model-call lineage; expanding shows span timing + tool calls + the causal-graph events that fired during the span. Empty until you enable the receiver below and an OTel-emitting tool runs against it.")
+                Text(String(localized: "ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab", defaultValue: "Agent Traces are W3C TRACEPARENT spans MacCrab ingested over its loopback OTLP receiver from AI coding tools (Claude Code, Cursor, Codex, Continue, Windsurf). Each row is one trace = one model-call lineage; expanding shows span timing + tool calls + the causal-graph events that fired during the span. Empty until you enable the receiver below and an OTel-emitting tool runs against it."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2146,11 +2146,11 @@ struct V2InvestigationWorkspace: View {
                     .v2Panel()
                 } else {
                     HStack {
-                        Text("Recent AI investigations")
+                        Text(String(localized: "ui.V2InvestigationWorkspace.recent.ai.investigations", defaultValue: "Recent AI investigations"))
                             .font(V2Theme.sectionTitle())
                             .foregroundStyle(V2Theme.primaryText)
                         Spacer()
-                        Text("\(analyzed.count) analyzed alert\(analyzed.count == 1 ? "" : "s")")
+                        Text(String(localized: "ui.final.analyzedAlerts", defaultValue: "Analyzed alerts: \(analyzed.count)"))
                             .font(V2Theme.meta())
                             .foregroundStyle(V2Theme.mutedText)
                     }
@@ -2159,7 +2159,7 @@ struct V2InvestigationWorkspace: View {
                     }
                 }
                 if let llm = engineLLM {
-                    Label("Engine LLM: \(llm.summary)",
+                    Label(String(localized: "ui.V2InvestigationWorkspace.engine.llm", defaultValue: "Engine LLM: \(llm.summary)"),
                           systemImage: llm.healthy ? "checkmark.seal"
                             : (llm.configured ? "exclamationmark.triangle" : "minus.circle"))
                         .font(.caption)
@@ -2199,7 +2199,7 @@ struct V2InvestigationWorkspace: View {
                                  kind: verdictChipKind(v))
                 }
                 if let c = alert.llmConfidence {
-                    Text("\(Int(c * 100))% confidence")
+                    Text(String(localized: "ui.final.confidence", defaultValue: "Confidence: \(Int(c * 100))%"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                 }
@@ -2218,7 +2218,7 @@ struct V2InvestigationWorkspace: View {
                     .textSelection(.enabled)
             }
             if !alert.llmSuggestedActions.isEmpty {
-                Text("Suggested actions:")
+                Text(String(localized: "ui.V2AlertsWorkspace.suggested.actions", defaultValue: "Suggested actions:"))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .padding(.top, 2)
@@ -2236,7 +2236,7 @@ struct V2InvestigationWorkspace: View {
             }
             HStack {
                 Spacer()
-                V2ActionButton("View alert", icon: "arrow.up.forward.square",
+                V2ActionButton(String(localized: "ui.V2InvestigationWorkspace.view.alert", defaultValue: "View alert"), icon: "arrow.up.forward.square",
                                style: .secondary, size: .compact) {
                     state.goto(V2NavigationDestination(
                         workspace: .alerts, tab: .alertsOpen, entityId: alert.id
@@ -2484,7 +2484,7 @@ private struct DraggableMemberNode: View {
             // jitter as the spring chased the cursor instead of
             // tracking it directly.
             .animation(nil, value: dragTranslation)
-            .help("\(m.displayName)\n\(m.entityType) · first seen \(V2TimeFormat.relative(m.firstSeen))\(m.isAnchor ? " · anchor" : "")")
+            .help("\(m.displayName)\n\(m.entityType) · first seen \(V2TimeFormat.relative(m.firstSeen))\(m.isAnchor ? " · \(String(localized: "ui.V2InvestigationWorkspace.anchor", defaultValue: "anchor"))" : "")")
             .accessibilityLabel("\(m.isAnchor ? "Anchor: " : "")\(m.displayName), \(m.entityType)")
             // WCAG 2.1.1 / 4.1.2: the node is a plain View carrying an
             // `.onTapGesture`, so VoiceOver announced it as static text and

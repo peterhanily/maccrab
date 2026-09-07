@@ -31,9 +31,9 @@ struct SSHRuleWithEnricherTests {
             eventAction: "exec", process: proc
         )
 
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         let enricher = EventEnricher()
         let enriched = await enricher.enrich(event)
 
@@ -73,9 +73,9 @@ struct SSHRuleWithEnricherTests {
             eventAction: "exec", process: proc
         )
 
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         let enricher = EventEnricher()
         let enriched = await enricher.enrich(event)
 

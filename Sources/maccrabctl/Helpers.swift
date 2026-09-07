@@ -39,6 +39,9 @@ extension Severity {
 /// Prefers the system dir (root daemon) when its DB is newer, since the
 /// user dir may contain stale data from a previous non-root run.
 func maccrabDataDir() -> String {
+    if let explicit = ProcessInfo.processInfo.environment["MACCRAB_DATA_DIR"], !explicit.isEmpty {
+        return URL(fileURLWithPath: explicit).standardizedFileURL.path
+    }
     let fm = FileManager.default
     let userDir = fm.urls(
         for: .applicationSupportDirectory,
@@ -224,7 +227,8 @@ extension MacCrabCtl {
           intel <subcommand>      Threat-intel feeds (refresh / matches / status)
           evidence <subcommand>   Forensic evidence (list / search / show / export)
           rollup [--hours N]      Force the storage tier-rollup + prune sweep now
-          repair <subcommand>     Storage / index repair helpers
+          storage check          Explicit bounded read-only SQLite diagnostic (--directory PATH)
+          repair [--dry-run]      Installation diagnostics and limited maintenance
           fingerprint <subcommand>  MCFP v1 static process fingerprint
 
         Other:

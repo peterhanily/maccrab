@@ -50,7 +50,7 @@ Optional features that make outbound calls (only when you enable them):
 
 | Feature | What it sends | Sanitization |
 |---|---|---|
-| Threat intel feeds | Periodic pulls from abuse.ch for IOC lists | Read-only pull, nothing about you sent |
+| Threat intel feeds | Periodic pulls from abuse.ch for IOC lists | Download-only; receives IP, version and request metadata, plus Auth-Key for authenticated exports |
 | LLM reasoning backends (Claude/OpenAI/Gemini/Mistral) | Sanitized alert/event text for investigation summaries | Usernames, private IPs, hostnames, emails redacted before send |
 | Ollama backend | Same as above, but to a local process | N/A — never leaves the machine |
 | Webhook output (`MACCRAB_WEBHOOK_URL`) | Alert JSON payloads to your configured URL | URL policy rejects RFC1918 unless opt-in, blocks cloud metadata IPs unconditionally |
@@ -224,10 +224,14 @@ Splunk HEC, Elastic Bulk, Datadog Logs, and S3/SFTP can be configured via
 
 **Homebrew:** `brew uninstall --cask maccrab` removes the app bundle and
 binaries, but intentionally leaves the Endpoint Security System Extension
-registered. For full removal, either click **Disable Protection** in the
-app before uninstalling, or run `brew uninstall --zap --cask maccrab`.
+registered. Before uninstalling, use **Remove System Extension** in the app's
+Settings and approve the macOS request. Wait for removal to complete, rebooting
+first if required; check `systemextensionsctl list` for the final state.
+Quitting the dashboard alone does not stop the extension. `--zap` removes
+configured data directories as well; it does not replace this deactivation step.
 
-**Manual data wipe (if desired):**
+**Manual data wipe (if desired):** only after extension removal completes and
+any development daemon, dashboard, and MCP clients have stopped:
 
 ```bash
 sudo rm -rf /Library/Application\ Support/MacCrab/    # system data

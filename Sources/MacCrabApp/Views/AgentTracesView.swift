@@ -523,11 +523,11 @@ struct AgentTracesView: View {
                         .clipShape(Capsule())
                 }
                 HStack(spacing: 12) {
-                    Text("span_id: \(span.spanId)")
+                    Text(verbatim: "span_id: \(span.spanId)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     if let parent = span.parentSpanId {
-                        Text("parent: \(parent)")
+                        Text(verbatim: "parent: \(parent)")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -536,7 +536,7 @@ struct AgentTracesView: View {
                         .foregroundStyle(.secondary)
                 }
                 if let svc = span.serviceName {
-                    Text("service.name: \(svc)")
+                    Text(verbatim: "service.name: \(svc)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }

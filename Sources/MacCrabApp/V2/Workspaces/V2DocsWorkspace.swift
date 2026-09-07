@@ -34,7 +34,7 @@ public struct V2DocsWorkspace: View {
 
     private var docNav: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Reference").font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
+            Text(String(localized: "ui.V2DocsWorkspace.reference", defaultValue: "Reference")).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
                 .padding(.bottom, 4)
             ForEach(V2DocEntry.allCases, id: \.self) { entry in
                 let isOn = selectedDoc == entry
@@ -104,7 +104,7 @@ public struct V2DocsWorkspace: View {
 
                 if !selectedDoc.related.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Related").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                        Text(String(localized: "ui.V2DocsWorkspace.related", defaultValue: "Related")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                         HStack(spacing: 8) {
                             ForEach(selectedDoc.related, id: \.self) { rel in
                                 if let entry = V2DocEntry.allCases.first(where: { $0.title == rel }) {

@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-4421%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-4512%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
 [![Version](https://img.shields.io/badge/version-1.22.0-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
@@ -119,18 +119,25 @@ Read the full [Security Policy](SECURITY.md).
 
 ## Storage Footprint and Performance
 
-MacCrab stores everything locally in SQLite, and on an actively-used machine that adds up. Be aware of the on-disk footprint before you run it on a space-constrained Mac.
+MacCrab keeps detection data locally, and on an actively-used machine that adds up. Be aware of the on-disk footprint before you run it on a space-constrained Mac.
 
-**Disk (steady-state caps, active machine):**
+**Disk (default steady-state database-family budgets):**
 
 | Store | Cap | Notes |
 |-------|----:|-------|
-| `events.db` | ~350 MB | The event working set is bounded by `events_hot_tier_minutes` (default 30 min), but the **file** also carries `alert_evidence` (~100 MB sub-cap) and the FTS5 search index (~60 MB on a busy host), so the file floor is ~300–350 MB regardless. |
-| `alerts.db` | 100 MB | Alerts + analyst metadata. |
-| `campaigns.db` | 50 MB | Detected attack campaigns. |
-| `tracegraph.db` | 250 MB | Causal-graph entity/edge substrate. |
+| `events.db` | 340 MiB | Event journal and search projection. The default hot tier is 30 minutes; recent process events have a soft 60-minute retention floor. |
+| `alerts.db` | 200 MiB | Alerts, analyst metadata, and new trigger evidence; includes the 100 MiB evidence allocation. |
+| `campaigns.db` | 50 MiB | Detected attack campaigns. |
+| `tracegraph.db` | 250 MiB | Causal-graph entity/edge substrate. |
+| `traces.db` | 100 MiB | Agent/OTLP spans when enabled. |
 
-That's roughly **~750 MB of disk allocation on an active machine** (it's much smaller on a lightly-used one). This is disk, not RAM — the daemon's resident memory is far smaller. All caps are tunable under the `storage` block in `daemon_config.json`.
+These budgets total **940 MiB**, with smaller actual use on light workloads.
+Database-family accounting includes SQLite sidecars. A v1.22.0 upgrade may retain
+up to another 100 MiB temporarily while legacy evidence remains in `events.db`.
+Forensic cases, exported bundles, reports, and logs are additional storage, so
+940 MiB is not a cap on the entire support directory. Budgets are tunable under
+the `storage` block in `daemon_config.json`; size pressure can shorten retention.
+See [KNOWN_LIMITS.md](KNOWN_LIMITS.md) for transition and admission behavior.
 
 > **History:** Before v1.18, `tracegraph.db` had no retention sweep and could grow without bound — it was **field-observed at 17 GB**. v1.18 added time-based retention, a size cap, and an orphan sweep; v1.19 made all caps configurable. If you ran a pre-v1.18 build, a one-time prune reclaims the space on first launch.
 
@@ -294,7 +301,12 @@ into your project; it points at the local `.build/debug/maccrab-mcp`.
 brew uninstall --cask maccrab
 ```
 
-The cask's uninstall block removes MacCrab.app, the CLI binaries, and any pre-1.3 LaunchDaemon artefacts, but it does not deactivate the System Extension — it stays registered. Before uninstalling, open MacCrab.app and click "Disable Protection" to fully deactivate it; otherwise deactivate it manually afterward with `systemextensionsctl`.
+Before uninstalling, use **Remove System Extension** in MacCrab's Settings and
+approve the macOS request. Wait for removal to complete; reboot first if macOS
+requires it. `systemextensionsctl list` should no longer show a MacCrab
+extension entry, including a pending-removal entry. Then run the Homebrew command above. The cask removes the app and CLI
+binaries but does not itself request extension deactivation, since the same
+uninstall steps also run during upgrades.
 
 ### Manual / source build
 
@@ -302,9 +314,15 @@ The cask's uninstall block removes MacCrab.app, the CLI binaries, and any pre-1.
 sudo ./scripts/uninstall.sh
 ```
 
-The uninstall script stops the daemon (if running from a dev build), removes binaries, deactivates the System Extension, and asks before deleting your data (events, rules, logs). Pass `-y` to skip the prompt.
+The script requests deactivation through the installed app and verifies that
+macOS has removed the extension before stopping development processes or
+removing binaries. Pending approval, cancellation, reboot, or an unverifiable
+status leaves the app and data intact; complete removal and rerun the script.
+It then asks before deleting support data. `-y` skips that data-deletion prompt,
+but cannot bypass extension-removal verification.
 
-To remove user-level data as well:
+Only after extension removal is complete and development daemons, the dashboard,
+and MCP clients have stopped, user-level data can also be removed:
 
 ```bash
 rm -rf ~/Library/Application\ Support/MacCrab
@@ -543,7 +561,7 @@ Rules can trigger configurable response actions ranging from passive to active:
 | `kill` | Terminate the process that triggered the alert |
 | `quarantine` | Move the triggering file to a quarantine vault |
 | `script` | Run a custom shell script with alert context as environment variables |
-| `blockNetwork` | Writes the destination IP into MacCrab's PF (packet-filter) anchor (requires the privileged engine / root). **Not enforcing by default** — macOS evaluates that anchor only when PF is enabled and the anchor is referenced from `/etc/pf.conf`. MacCrab configures neither, and reports the action as not in effect when it is not. See [PREVENTION_RESEARCH.md](PREVENTION_RESEARCH.md#macCrab-current-usage). |
+| `blockNetwork` | Writes a temporary destination rule into the dedicated `com.maccrab.response` PF anchor (requires the privileged engine / root). **Not enforcing by default** — PF must be enabled and the active main ruleset must reference that anchor. MacCrab configures neither. Failed or unverified actions report failure; expiry retries independently of new alerts. See [PREVENTION_RESEARCH.md](PREVENTION_RESEARCH.md#maccrab-current-usage), including the legacy shared-anchor migration requirement. |
 | `escalateNotification` | Send a high-priority macOS notification with the alert's action details |
 
 </details>
@@ -645,7 +663,8 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-The current release is **v1.22.0**. See [CHANGELOG.md](CHANGELOG.md) for the full
+This checkout targets **v1.22.0 (unreleased)**; the last published release is
+**v1.21.5**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 

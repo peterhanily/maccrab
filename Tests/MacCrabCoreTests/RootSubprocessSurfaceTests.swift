@@ -61,7 +61,6 @@ struct RootSubprocessSurfaceTests {
             "Sources/maccrab-mcp/AgentControl.swift": 1,
             "Sources/maccrab-mcp/main.swift": 1,
             "Sources/maccrabctl/MacCrabCtl.swift": 1,
-            "Sources/maccrabctl/RepairCommand.swift": 1,
             "Sources/maccrabctl/StatusCommand.swift": 1,
         ]
 
@@ -114,6 +113,7 @@ struct RootSubprocessSurfaceTests {
             "Sources/MacCrabCore/Prevention/TravelMode.swift",
             "Sources/MacCrabCore/Enrichment/PackageScanner.swift",
             "Sources/maccrabd/main.swift",
+            "Sources/maccrabctl/RepairCommand.swift",
         ]
         for path in migrated {
             let text = try source(path)
@@ -126,6 +126,8 @@ struct RootSubprocessSurfaceTests {
                     "unbounded pipe read returned in \(path)")
         }
         #expect(processCount(in: try source("Sources/maccrabd/main.swift")) == 0)
+        #expect(processCount(in: try source("Sources/maccrabctl/RepairCommand.swift")) == 0,
+                "repair diagnostics must retain the shared bounded runner")
     }
 
     @Test("long-lived and unprivileged exceptions stay narrow and explicit")

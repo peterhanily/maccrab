@@ -121,6 +121,117 @@ struct EventPipelineLiveMemoryBudgetTests {
         #expect(snapshot.leasesConserved)
     }
 
+    @Test("an expired deadline acquires no credit even when space is available")
+    func expiredAcquisitionDeadline() async {
+        let budget = EventPipelineLiveMemoryBudget(maximumBytes: 10)
+        let lease = await budget.acquire(
+            bytes: 10, owner: .journalPrepared,
+            deadline: ContinuousClock().now.advanced(by: .seconds(-1))
+        )
+        #expect(lease == nil)
+        let snapshot = budget.snapshot()
+        #expect(snapshot.acquisitionTotal == 0)
+        #expect(snapshot.waitingAcquisitions == 0)
+        #expect(snapshot.leasesConserved)
+    }
+
+    @Test("deadline expiry removes a queued acquisition without retaining credit")
+    func queuedAcquisitionDeadline() async throws {
+        let budget = EventPipelineLiveMemoryBudget(maximumBytes: 10)
+        var blocker: EventPipelineMemoryLease? = try #require(
+            budget.tryAcquire(bytes: 10, owner: .journalPrepared)
+        )
+        let waiting = Task {
+            await budget.acquire(
+                bytes: 10, owner: .journalPrepared,
+                deadline: ContinuousClock().now.advanced(by: .seconds(1))
+            )
+        }
+        await waitUntil { budget.snapshot().waitingAcquisitions == 1 }
+        #expect(budget.snapshot().waitingAcquisitions == 1)
+        #expect(await waiting.value == nil)
+        let held = budget.snapshot()
+        #expect(held.waitingAcquisitions == 0)
+        #expect(held.currentBytes == 10)
+        #expect(held.activeLeases == 1)
+        #expect(held.cancelledWaiterTotal == 1)
+        blocker = nil
+        let drained = budget.snapshot()
+        #expect(drained.currentBytes == 0)
+        #expect(drained.leasesConserved)
+    }
+
+    @Test("credit released before the deadline completes acquisition and joins its timer")
+    func deadlineAcquisitionSucceeds() async throws {
+        let budget = EventPipelineLiveMemoryBudget(maximumBytes: 10)
+        var blocker: EventPipelineMemoryLease? = try #require(
+            budget.tryAcquire(bytes: 10, owner: .journalPrepared)
+        )
+        let waiting = Task {
+            let lease = await budget.acquire(
+                bytes: 10, owner: .journalPrepared,
+                deadline: ContinuousClock().now.advanced(by: .seconds(30))
+            )
+            #expect(lease?.bytes == 10)
+        }
+        await waitUntil { budget.snapshot().waitingAcquisitions == 1 }
+        blocker = nil
+        await waiting.value
+        let snapshot = budget.snapshot()
+        #expect(snapshot.currentBytes == 0)
+        #expect(snapshot.waitingAcquisitions == 0)
+        #expect(snapshot.activeLeases == 0)
+        #expect(snapshot.leasesConserved)
+    }
+
+    @Test("caller cancellation removes the bounded waiter and cancels its timer")
+    func deadlineAcquisitionCancellation() async throws {
+        let budget = EventPipelineLiveMemoryBudget(maximumBytes: 10)
+        var blocker: EventPipelineMemoryLease? = try #require(
+            budget.tryAcquire(bytes: 10, owner: .journalPrepared)
+        )
+        let waiting = Task {
+            await budget.acquire(
+                bytes: 10, owner: .journalPrepared,
+                deadline: ContinuousClock().now.advanced(by: .seconds(30))
+            )
+        }
+        await waitUntil { budget.snapshot().waitingAcquisitions == 1 }
+        waiting.cancel()
+        #expect(await waiting.value == nil)
+        #expect(budget.snapshot().waitingAcquisitions == 0)
+        blocker = nil
+        let snapshot = budget.snapshot()
+        #expect(snapshot.currentBytes == 0)
+        #expect(snapshot.activeLeases == 0)
+        #expect(snapshot.leasesConserved)
+    }
+
+    @Test("deadline acquisition releases a lease assigned during cancellation")
+    func boundedAssignedWaiterCancellation() async throws {
+        let budget = EventPipelineLiveMemoryBudget(maximumBytes: 10)
+        let cancellation = CancellationBox()
+        budget.setWaiterAssignedHookForTesting { cancellation.cancel() }
+        var blocker: EventPipelineMemoryLease? = try #require(
+            budget.tryAcquire(bytes: 10, owner: .journalPrepared)
+        )
+        let waiting = Task {
+            await budget.acquire(
+                bytes: 10, owner: .journalPrepared,
+                deadline: ContinuousClock().now.advanced(by: .seconds(30))
+            )
+        }
+        cancellation.store(waiting)
+        await waitUntil { budget.snapshot().waitingAcquisitions == 1 }
+        blocker = nil
+        #expect(await waiting.value == nil)
+        let snapshot = budget.snapshot()
+        #expect(snapshot.currentBytes == 0)
+        #expect(snapshot.waitingAcquisitions == 0)
+        #expect(snapshot.activeLeases == 0)
+        #expect(snapshot.leasesConserved)
+    }
+
     @Test("noncritical requests above their owner ceiling fail immediately")
     func impossibleNoncriticalRequestIsOversized() async throws {
         let budget = EventPipelineLiveMemoryBudget(

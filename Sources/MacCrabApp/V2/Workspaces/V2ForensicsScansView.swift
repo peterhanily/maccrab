@@ -53,6 +53,8 @@ struct V2ForensicsScansView: View {
     // Unified inventory (v1.19.3): manage installed plugins here too (was the
     // separate "My Plugins" tab). Re-verify all + per-plugin uninstall + update.
     @State private var pendingUninstall: String? = nil
+    @State private var uninstallError: String?
+    @State private var failedUninstallID: String?
     @State private var reverifying = false
     // Update surfacing (v1.19.3): catalog current_version per installed id, so a
     // newer version shows an "Update" pill here, not only in the Catalog tab. The
@@ -78,6 +80,19 @@ struct V2ForensicsScansView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                if let uninstallError {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(String(localized: "scans.uninstall.failed", defaultValue: "Plugin removal failed"))
+                            .font(V2Theme.cardTitle()).foregroundStyle(V2Theme.warning)
+                        Text(uninstallError).font(V2Theme.body())
+                            .foregroundStyle(V2Theme.primaryText).textSelection(.enabled)
+                        Button(String(localized: "common.retry", defaultValue: "Retry")) {
+                            pendingUninstall = failedUninstallID
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .v2Panel()
+                }
                 if fdaStatus == .denied && !fdaBannerDismissed {
                     fdaBanner
                 }
@@ -465,9 +480,22 @@ struct V2ForensicsScansView: View {
         installLink = RaveInstallLink(kind: .plugin, id: pluginID)
     }
 
+    @MainActor
     private func remove(_ pluginID: String) async {
-        try? await PluginInstaller().uninstall(pluginID: pluginID)
-        await reload()
+        do {
+            try await PluginInstaller().uninstall(pluginID: pluginID)
+            uninstallError = nil
+            failedUninstallID = nil
+            await reload()
+            state.showToast(V2Toast(kind: .success,
+                                   title: String(localized: "scans.uninstall.removed", defaultValue: "Plugin removed"),
+                                   detail: pluginID))
+        } catch {
+            // Preserve the installed row and inspector. The error remains
+            // visible after the confirmation closes, with an explicit retry.
+            failedUninstallID = pluginID
+            uninstallError = error.localizedDescription
+        }
     }
 
     /// Build the third-party detail model (provenance from receipts, "added" date
@@ -653,7 +681,7 @@ struct V2ForensicsScansView: View {
                         Text(friendlyScannerName(currentPlugin))
                             .scaledSystem(11, weight: .medium)
                         if rows > 0 {
-                            Text(String(localized: "scans.rowsCollected", defaultValue: "· \(rows) row\(rows == 1 ? "" : "s") collected so far"))
+                            Text(String(localized: "scans.rowsCollected", defaultValue: "· \(rows) rows collected so far"))
                                 .scaledSystem(11)
                                 .foregroundStyle(.secondary)
                         } else {
@@ -745,7 +773,7 @@ struct V2ForensicsScansView: View {
 
     private func skippedList(_ skipped: [KitRunner.SkippedPlugin]) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(String(localized: "scans.scannersDidntRun", defaultValue: "\(skipped.count) scanner\(skipped.count == 1 ? "" : "s") didn't run:"))
+            Text(String(localized: "scans.scannersDidntRun", defaultValue: "\(skipped.count) scanners didn't run:"))
                 .scaledSystem(10, weight: .medium)
                 .foregroundStyle(.secondary)
             ForEach(skipped, id: \.pluginID) { s in

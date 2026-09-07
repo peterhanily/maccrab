@@ -10,6 +10,42 @@ import Foundation
 @Suite("CollectorRegistry: liveness of continuous-traffic collectors")
 struct CollectorRegistryLivenessTests {
 
+    @Test("intentionally disabled collectors remain distinct from a failed enabled start")
+    func disabledAndFailedStart() async {
+        let registry = CollectorRegistry()
+        await registry.register(name: "Optional", expectedIntervalSeconds: 30,
+                                started: false, enabled: false,
+                                disabledReason: "Turned off in settings")
+        await registry.register(name: "Required", expectedIntervalSeconds: 30, started: false)
+        let early = await registry.snapshot()
+        #expect(status(early, "Optional")?.state == .disabled)
+        #expect(status(early, "Optional")?.enabled == false)
+        #expect(status(early, "Optional")?.reason == "Turned off in settings")
+        #expect(status(early, "Required")?.state == .starting)
+        let late = await registry.snapshot(now: Date().addingTimeInterval(600))
+        #expect(status(late, "Optional")?.state == .disabled)
+        #expect(status(late, "Required")?.state == .failed)
+    }
+
+    @Test("polling startup, normal operation, error, and silence have distinct states")
+    func pollingTransitions() async {
+        let registry = CollectorRegistry()
+        await registry.register(name: "Polling", expectedIntervalSeconds: 10)
+        #expect(status(await registry.snapshot(), "Polling")?.state == .starting)
+        #expect(status(await registry.snapshot(now: Date().addingTimeInterval(60)), "Polling")?.state == .stalled)
+        await registry.recordTick(name: "Polling")
+        #expect(status(await registry.snapshot(), "Polling")?.state == .healthy)
+        await registry.recordError(name: "Polling", message: "Poll failed")
+        #expect(status(await registry.snapshot(), "Polling")?.state == .failed)
+    }
+
+    @Test("a real event lazily registers its source as started")
+    func lazyRegistrationIsStarted() async {
+        let registry = CollectorRegistry()
+        await registry.recordTick(name: "NewSource")
+        #expect(status(await registry.snapshot(), "NewSource")?.state == .healthy)
+    }
+
     private func status(_ snap: [CollectorRegistry.Status], _ name: String)
         -> CollectorRegistry.Status? {
         snap.first { $0.name == name }
@@ -71,5 +107,77 @@ struct CollectorRegistryLivenessTests {
         let snap = await reg.snapshot()
         #expect(status(snap, "TCCMonitor")?.healthy == false)
         #expect(status(snap, "TCCMonitor")?.lastError == "BIOCSETIF failed")
+    }
+
+    @Test("only verified capture recovery clears a fault and preserves its lifetime history")
+    func verifiedRecoveryPreservesHistory() async {
+        let registry = CollectorRegistry()
+        await registry.register(name: "DNSCollector", expectedIntervalSeconds: 30,
+                                eventDriven: true, expectsContinuousTraffic: true)
+        await registry.recordTick(name: "DNSCollector")
+        await registry.recordError(name: "DNSCollector", message: "BPF read failed")
+        // A buffered event can arrive after capture failed. It is not proof
+        // that the descriptor was reconfigured successfully.
+        await registry.recordTick(name: "DNSCollector")
+        let failed = status(await registry.snapshot(), "DNSCollector")
+        #expect(failed?.state == .failed)
+        #expect(failed?.errorCount == 1)
+
+        let recoveredAt = Date().addingTimeInterval(600)
+        await registry.recordRecovery(name: "DNSCollector", at: recoveredAt)
+        let recovered = status(await registry.snapshot(now: recoveredAt), "DNSCollector")
+        #expect(recovered?.state == .healthy)
+        #expect(recovered?.reason == "reconfigured, awaiting events")
+        #expect(recovered?.errorCount == 1)
+        #expect(recovered?.lastError == "BPF read failed")
+        #expect(recovered?.eventCount == failed?.eventCount)
+        #expect(recovered?.lastTick == failed?.lastTick)
+        let silent = status(await registry.snapshot(
+            now: recoveredAt.addingTimeInterval(600)
+        ), "DNSCollector")
+        #expect(silent?.state == .stalled)
+
+        await registry.recordError(name: "DNSCollector", message: "BPF bind failed")
+        let failedAgain = status(await registry.snapshot(now: recoveredAt), "DNSCollector")
+        #expect(failedAgain?.state == .failed)
+        #expect(failedAgain?.errorCount == 2)
+        #expect(failedAgain?.lastError == "BPF bind failed")
+    }
+
+    @Test("verified setup without traffic starts a bounded grace without inventing events")
+    func recoveryBeforeFirstEvent() async {
+        let registry = CollectorRegistry()
+        await registry.register(name: "DNSCollector", expectedIntervalSeconds: 30,
+                                eventDriven: true, expectsContinuousTraffic: true)
+        await registry.recordError(name: "DNSCollector", message: "BPF unavailable")
+        let recoveredAt = Date().addingTimeInterval(600)
+        await registry.recordRecovery(name: "DNSCollector", at: recoveredAt)
+        let recovered = status(await registry.snapshot(now: recoveredAt), "DNSCollector")
+        #expect(recovered?.state == .healthy)
+        #expect(recovered?.lastTick == nil)
+        #expect(recovered?.eventCount == 0)
+        #expect(recovered?.errorCount == 1)
+        let silent = status(await registry.snapshot(
+            now: recoveredAt.addingTimeInterval(600)
+        ), "DNSCollector")
+        #expect(silent?.state == .stalled)
+    }
+
+    @Test("verified setup cannot revive an ended stream or enable a disabled collector")
+    func recoveryDoesNotReviveTerminalStates() async {
+        let registry = CollectorRegistry()
+        await registry.register(name: "Ended", expectedIntervalSeconds: 30, eventDriven: true)
+        await registry.recordStreamEnded(name: "Ended")
+        await registry.recordRecovery(name: "Ended")
+        let ended = status(await registry.snapshot(), "Ended")
+        #expect(ended?.state == .failed)
+        #expect(ended?.reason == "stream ended")
+        #expect(ended?.errorCount == 1)
+        await registry.register(name: "Disabled", expectedIntervalSeconds: 30,
+                                started: false, enabled: false)
+        await registry.recordRecovery(name: "Disabled")
+        let disabled = status(await registry.snapshot(), "Disabled")
+        #expect(disabled?.state == .disabled)
+        #expect(disabled?.eventCount == 0)
     }
 }

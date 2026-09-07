@@ -10,6 +10,17 @@ its sharp edges.
 
 ---
 
+## Compatibility targets and candidate evidence
+
+The matrix below describes compatibility targets and historical development
+coverage, not qualification of every new candidate. As of the 2026-09-07
+v1.22.0 source review, ordinary automated tests have run on macOS 26.6.2
+Apple Silicon. The new candidate has no completed installed-host qualification
+on any OS or architecture. Ventura, Sonoma, Sequoia, Tahoe, and Intel install,
+upgrade, activation, relaunch, and recovery results must be recorded against
+the exact candidate before claiming that matrix is qualified. A deployment
+target or universal binary proves neither installation nor sensor behavior.
+
 ## Summary matrix
 
 | macOS | Marketing | Status | Notes |

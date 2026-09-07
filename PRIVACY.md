@@ -13,8 +13,18 @@ All data is collected and stored **locally** in `~/Library/Application Support/M
 | Network connections | Detect C2 callbacks, exfiltration | SQLite `events.db` |
 | DNS queries | Detect DGA, tunneling | SQLite `events.db` |
 | TCC permission changes | Detect privacy violations | SQLite `events.db` |
-| Detection alerts | Security findings | SQLite `events.db` |
+| Detection alerts and trigger evidence | Security findings | SQLite `alerts.db`; upgrades may retain older evidence in `events.db` |
+| Correlated campaigns | Multi-event investigations | SQLite `campaigns.db` |
+| Causal traces and agent spans | Process/session attribution | SQLite `tracegraph.db` and `traces.db` |
+| Forensic cases, when created | Operator-requested investigations | User support directory under `Cases/<case-id>/` |
 | Behavioral baselines | Anomaly detection | JSON files in the support dir — `baseline.json`, `process_tree_model.json`, `mcp_baselines.json` |
+
+In v1.22.0, `events.db` contains the checksummed event journal and a sparse
+search projection. Journal checksums detect damage; they do not encrypt its
+contents. The event and alert database families include their SQLite WAL and
+shared-memory sidecars. Case directories may also contain snapshots, blob
+vaults, manifests, and invocation logs. Exported reports and bundles remain
+where you choose to save them.
 
 ## What Leaves Your Machine
 
@@ -30,11 +40,11 @@ turn it off:
 
 | Destination | Trigger | Default | What is sent | What it reveals | Turn off |
 |---|---|---|---|---|---|
-| **abuse.ch** (URLhaus / MalwareBazaar / Feodo) | IOC feed refresh, every ~4h | **Off** | Nothing about your machine — **download only** | Nothing (GET of public IOC lists) | Settings → Network enrichment, or `threatIntelEnabled` |
+| **abuse.ch** (URLhaus / MalwareBazaar / Feodo) | IOC feed refresh, every ~4h | **Off** | Download request for IOC lists; no observed events uploaded | Your source IP, MacCrab version, ordinary request metadata, and Auth-Key for authenticated exports | Settings → Network enrichment, or `threatIntelEnabled` |
 | **osv.dev** | CVE lookup, hourly when enabled | **Off** | Your installed-software inventory (anonymous) | Your installed software list | `vulnScanEnabled` |
 | **npm / PyPI / Homebrew / crates** registries | Package-freshness check, on install — **and on demand** via the MCP tools `analyze_package_metadata` / `verify_package_attestation` | **Off** | The package name (and, for attestation, the version) being looked up | The package **name** you install or ask about | `packageFreshnessEnabled` for the automatic check. The two MCP tools are a separate path and require the `config` agent capability, which a human must turn on in Settings → Agent Control (off by default) |
 | **crt.sh** | Certificate-Transparency lookup, on an observed destination domain | **Off** | The domain being looked up | The **domain** you connect to | `certTransparencyEnabled` |
-| **maccrab.com** (Sparkle appcast) | Update check (standard auto-update) | **On** | Nothing but the request itself; the update is EdDSA-signed | Your IP address only | Disable auto-update |
+| **maccrab.com** (Sparkle appcast) | Update check (standard auto-update) | **On** | Feed request; the default user agent includes the app and Sparkle versions | Your source IP, app/version information, and ordinary request metadata; no detection data | Disable automatic update checks in Settings; manual checks still make a request |
 
 Toggle the four enrichment feeds in **Settings → Network enrichment**. That
 writes `~/Library/Application Support/MacCrab/user_overrides.json` — a file in
@@ -57,19 +67,17 @@ maccrabctl config set vuln_scan_enabled false
 maccrabctl config set package_freshness_enabled false
 ```
 
-No `sudo`, and the engine applies it immediately rather than at the next restart.
+No `sudo` is needed. The CLI queues a request; the running engine applies it
+when it drains the inbox, normally within about five seconds. A queued request
+is not confirmation that the change has taken effect.
 
 These four are the only keys the CLI accepts in one direction only: it will
-refuse `true`. That is deliberate, and worth understanding rather than working
-around. `config set` does not edit a file — it drops a request into a
-world-writable directory that the engine authorizes by the requesting account
-alone. Turning a feed **off** only ever reduces what leaves your machine, so it
-is safe for that path to carry. Turning one **on** would enable outbound calls
-that publish real information about your Mac — Certificate Transparency
-publishes every domain you resolve, osv.dev publishes your installed software
-inventory — so enabling stays a deliberate human action in **Settings → Network
-enrichment**, where it cannot be driven by something merely running under your
-account.
+refuse `true`. Use **Settings → Network enrichment** or the root configuration
+file to enable a feed after reviewing its payload above. Certificate
+Transparency lookups disclose queried domains to the service; OSV lookups
+disclose installed-software information. These settings and the user-owned
+override file are local configuration controls, not proof that each change was
+made by a person.
 
 The engine's own `daemon_config.json` (same four snake_case keys) works as well,
 but on a release install it is root-owned `0600`, so editing it requires `sudo`.
@@ -89,8 +97,8 @@ on-device and makes no network request.
 The following make **no** network calls unless you, the operator, explicitly
 configure a key or endpoint for them — there is no default destination:
 
-- **LLM reasoning backends** — Claude, OpenAI, Mistral, Gemini (Ollama is fully
-  local). See the section below.
+- **LLM reasoning backends** — Claude, OpenAI, Mistral, Gemini, and Ollama
+  (local when configured to use a server on this Mac). See the section below.
 - **VirusTotal**, **Shodan**, **MISP** — IOC enrichment; require an API
   key/endpoint.
 - **Fleet telemetry** — requires enrollment in a fleet server (see below).
@@ -104,10 +112,9 @@ explicitly enabled or configured:
 
 Cloud AI analysis is **off by default** and must be explicitly opted into by
 setting the `MACCRAB_LLM_PROVIDER` environment variable (or choosing a cloud
-provider in Settings → AI Backend). With no provider configured, **nothing is
-sent anywhere** and all LLM features degrade gracefully. For full privacy, use
-the local **Ollama** backend — it runs on your machine and no prompt data
-leaves it.
+provider in Settings → AI Backend). With no provider configured, no LLM request
+is sent. To keep prompts on this Mac, use **Ollama** with a local server;
+configuring a remote Ollama endpoint sends prompts to that endpoint.
 
 When a cloud backend is enabled, the data sent is **sanitized alert context**:
 rule titles, MITRE ATT&CK techniques, process trees, and redacted file paths.
@@ -120,14 +127,15 @@ rule titles, MITRE ATT&CK techniques, process trees, and redacted file paths.
 | Alert summaries | Email addresses → `[EMAIL]` |
 | | API keys, passwords, tokens, CDHashes (redacted) |
 
-Sanitization is performed by `LLMSanitizer.swift` before any data leaves the
-machine. See `Sources/MacCrabCore/LLM/LLMSanitizer.swift` for the full
+Cloud LLM prompt sanitization is performed by `LLMSanitizer.swift`. Other
+outbound integrations have their own payload policies and do not pass through
+this sanitizer. See `Sources/MacCrabCore/LLM/LLMSanitizer.swift` for the
 implementation.
 
 > **Best-effort, not a guarantee.** The sanitizer is a heuristic scrubber that
 > redacts the patterns above; it cannot guarantee that every sensitive token in
-> a free-form log line is caught. If you require an absolute no-leak boundary,
-> use the local Ollama backend instead of a cloud provider.
+> a free-form log line is caught. To avoid sending prompts off this Mac, leave
+> cloud analysis disabled and use a local Ollama server if desired.
 
 **Known gaps (best-effort mode).** The sanitizer can miss: custom / non-vendor
 API-key shapes not in its pattern set; secrets at line boundaries inside long
@@ -135,17 +143,14 @@ multi-paragraph context; base64 / certificate-chain blobs; and internationalized
 usernames. Past releases have fixed real misses here (e.g. bare usernames and
 public IPs in v1.6.7), which is exactly why it is documented as best-effort.
 
-**Strict mode (opt-in, hard no-leak boundary on a cloud provider).** Set
+**Strict mode (opt-in, additional heuristic screening).** Set
 `"strictSanitize": true` under the `llm` block in `daemon_config.json`. When on,
-MacCrab **refuses** to send a cloud LLM prompt if the sanitized text still
-contains residual high-entropy, secret-shaped content the patterns may have
-missed — it would rather skip the AI analysis for that one alert than risk
-leaking a novel secret shape. The tradeoff is coverage: some complex alerts won't
-be LLM-analyzed. A 95%-analyzed baseline with a hard boundary beats a
-100%-analyzed one that might leak. (Local Ollama remains the strongest option —
-nothing leaves the machine at all.)
+MacCrab refuses a cloud LLM prompt when its additional detector flags residual
+high-entropy, secret-shaped content after sanitization. This can skip analysis
+of some alerts and reduce disclosure risk. It remains a heuristic: passing the
+check does not establish that a prompt contains no sensitive information.
 
-**Supported providers:** Ollama (fully local — no data leaves machine), Claude
+**Supported providers:** Ollama (local or operator-configured remote), Claude
 (Anthropic), OpenAI, Mistral, Gemini (Google).
 
 #### Cloud sub-processors
@@ -170,8 +175,16 @@ third-party data processing.
 ### Threat Intelligence Feeds (opt-in, off by default)
 
 The bundled abuse.ch feeds (`threatIntelEnabled`, off by default) are
-**download-only** — MacCrab fetches public IOC lists; nothing about your machine
-is uploaded. When optional, key-gated reputation lookups (VirusTotal, Shodan,
+**download-only**: MacCrab fetches IOC lists and does not upload observed
+events or the software inventory. Requests disclose your IP address, the
+MacCrab version, and ordinary request metadata. URLhaus and MalwareBazaar
+require an abuse.ch Auth-Key, stored in the shared macOS Keychain; their
+export APIs receive that credential in the HTTPS URL path. Feodo uses a public
+export without that credential. Saving a key does not enable network refresh.
+A missing or unreadable key leaves those two feeds unavailable while retaining
+previously cached indicators. Manually launched engines also retain the legacy
+`MACCRAB_ABUSECH_AUTH_KEY` fallback when no Keychain item exists; environment
+variables are not encrypted storage. When optional, key-gated reputation lookups (VirusTotal, Shodan,
 MISP) are configured, they additionally:
 
 - **Query:** File hashes (SHA-256), IP addresses, domain names
@@ -243,8 +256,12 @@ still decode and are folded onto the `storage{}` block at load.)
   the macOS Keychain. The scope is narrow and worth stating plainly: it covers
   only specific JSON columns in `traces.db` / `tracegraph.db` (TraceStore /
   SQLiteCausalGraphStore). **`events.db` (including `alert_evidence`),
-  `alerts.db` and `campaigns.db` are stored in plaintext** — whole-database
-  encryption is scheduled, not shipped. `MACCRAB_ENCRYPT_DB=0` disables the
+  `alerts.db` and `campaigns.db` are stored in plaintext** — this includes the
+  event journal and new trigger evidence stored in `alerts.db`.
+  Whole-database encryption for those detection stores is not shipped.
+  Forensic cases have a separate encryption setting: encrypted cases use
+  SQLCipher for `case.sqlite` and a blob vault; case metadata and logs can remain
+  readable without unlocking. `MACCRAB_ENCRYPT_DB=0` disables the
   column encryption (an escape hatch for tests and bisects). There is no
   `MACCRAB_ENCRYPTION_DB` variable — an earlier version of this document named
   one, and setting it did nothing at all.
@@ -260,30 +277,44 @@ still decode and are folded onto the `storage{}` block at load.)
 
 ## Deleting Your Data
 
-There is no `maccrabctl` delete verb. On a release install every store is
-root-owned under `/Library/Application Support/MacCrab/`, so deletion is a
-manual `rm` (or a full uninstall). Quit MacCrab.app first so the engine is not
-re-writing the databases as you remove them.
+There is no single `maccrabctl` command that erases all product data. Release
+detection stores are root-owned under `/Library/Application Support/MacCrab/`,
+so deleting those stores requires administrator access. **Quitting MacCrab.app does not stop its
+System Extension.** Before removing data, use **Remove System Extension** in
+MacCrab's Settings, approve the macOS request, and wait for removal to complete.
+If macOS reports that removal requires a reboot, reboot first. Confirm the
+extension is no longer active with `systemextensionsctl list`, stop any
+separately launched development daemon, then quit the dashboard and MCP clients.
+Do not erase data while removal is pending or the engine is still running.
 
 ```bash
-# Delete all local data — events, alerts, campaigns, causal graph, traces,
-# reports and forensic cases. This is the whole support directory.
+# Only after the engine has stopped and extension removal has completed:
+# delete the support directories, including forensic cases saved there.
 sudo rm -rf "/Library/Application Support/MacCrab/"   # system data (release install)
 rm -rf "$HOME/Library/Application Support/MacCrab/"   # dev / non-root data
 rm -f  "$HOME/Library/Preferences/com.maccrab.app.plist"  # app preferences
 
-# Full uninstall (removes binaries; asks before deleting data)
+# Full uninstall from a source checkout (asks before deleting data).
+# Complete extension removal first using the steps above.
 sudo ./scripts/uninstall.sh
 
 # Or via Homebrew
 brew uninstall --cask maccrab
 ```
 
-The uninstall script will ask before deleting data and preserves it if you decline.
+The uninstall script asks before deleting data and preserves it if you decline.
+If extension removal is still pending, decline data deletion and finish removal
+first. Homebrew's ordinary uninstall preserves support data; `--zap` also removes
+the configured data directories, so use it only after the engine has stopped.
+Reports, bundles, or backups saved outside these directories are separate copies
+and are not removed by these commands.
 
 ## Third-Party Services
 
-MacCrab does **not** use any analytics, tracking, or advertising services. There are no cookies, no user accounts, and no cloud infrastructure.
+MacCrab does not send product analytics or advertising telemetry by default.
+The update service and optional destinations listed above receive requests when
+their corresponding features run. Their infrastructure and logging policies
+are separate from the local detection stores.
 
 ## Changes to This Policy
 

@@ -5,6 +5,10 @@ import os.log
 /// Daemon configuration loaded from `daemon_config.json` in the support directory.
 /// All values have sensible defaults — the config file is optional.
 struct DaemonConfig: Codable {
+    /// Non-secret provenance for the shared runtime-tunable status surface.
+    /// Rebuilt from validated input at each load; never trusted from disk.
+    var runtimeConfigSources: [String: String] = [:]
+    var runtimeConfiguredValues: [String: RuntimeConfigValue] = [:]
     /// `daemon_config.json` and the dashboard overlay are control records, not
     /// bulk data. Keeping a shared explicit ceiling prevents the boot and
     /// SIGHUP paths from drifting back to unbounded Foundation reads.
@@ -628,14 +632,33 @@ struct DaemonConfig: Codable {
     static func load(from directory: String, applyOverrides: Bool = true) -> DaemonConfig {
         let path = directory + "/daemon_config.json"
         var config: DaemonConfig
+        var fileObject: [String: Any] = [:]
+        var fallbackSource = "default"
         if let data = BoundedRegularFileReader.read(
             at: path,
             maximumBytes: maximumConfigurationBytes
         ) {
-            config = decode(data) ?? DaemonConfig()
+            if let decoded = decode(data) {
+                config = decoded
+                fileObject = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            } else {
+                config = DaemonConfig()
+                fallbackSource = "invalid_config_defaults"
+                logger.error("daemon_config.json could not be decoded; runtime tunables use defaults")
+            }
         } else {
             config = DaemonConfig()
+            if FileManager.default.fileExists(atPath: path) {
+                fallbackSource = "unreadable_config_defaults"
+                logger.error("daemon_config.json could not be read; runtime tunables use defaults")
+            }
         }
+        config.runtimeConfiguredValues = [:]
+        config.runtimeConfigSources = Dictionary(uniqueKeysWithValues:
+            RuntimeConfigurationContract.definitions.map { definition in
+                (definition.key, fileObject[definition.key] != nil || fileObject[definition.property] != nil
+                    ? "daemon_config" : fallbackSource)
+            })
 
         // v1.7.6: applyUserOverrides resolves each validated local user's
         // Application Support directory independently of `directory`. That is
@@ -645,7 +668,44 @@ struct DaemonConfig: Codable {
         if applyOverrides {
             applyUserOverrides(into: &config)
         }
+        config.normalizeRuntimeTunables()
         return config
+    }
+
+    /// Boot and inbox requests share finite numeric ranges. Keep the original
+    /// configured value alongside the value passed to runtime components.
+    private mutating func normalizeRuntimeTunables() {
+        guard let data = try? JSONEncoder().encode(self),
+              var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        let sources = runtimeConfigSources
+        var configured: [String: RuntimeConfigValue] = [:]
+        for definition in RuntimeConfigurationContract.definitions {
+            guard let raw = object[definition.property],
+                  let requested = try? definition.typed(raw),
+                  let value = try? definition.normalized(requested, forRequest: false) else { continue }
+            configured[definition.key] = requested
+            object[definition.property] = value.foundationValue
+        }
+        if let normalized = try? JSONSerialization.data(withJSONObject: object),
+           let decoded = Self.decode(normalized) { self = decoded }
+        runtimeConfigSources = sources
+        runtimeConfiguredValues = configured
+    }
+
+    func effectiveRuntimeEntries() -> [String: EffectiveRuntimeConfiguration.Entry] {
+        guard let data = try? JSONEncoder().encode(self),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return Dictionary(uniqueKeysWithValues: RuntimeConfigurationContract.definitions.compactMap { definition in
+            guard let raw = object[definition.property], let value = try? definition.typed(raw) else { return nil }
+            let configured = runtimeConfiguredValues[definition.key] ?? value
+            let unsupported = definition.application == .unsupported
+            return (definition.key, .init(
+                value: unsupported ? nil : value, configuredValue: configured,
+                source: runtimeConfigSources[definition.key] ?? "default",
+                adjustment: unsupported ? "No runtime consumer in this release"
+                    : (configured != value ? "Clamped to the documented runtime range" : nil)
+            ))
+        })
     }
 
     /// F-04: map the operator's `rule_profile` to the Sigma-status set the
@@ -985,6 +1045,11 @@ struct DaemonConfig: Codable {
         if let v = (obj["vulnScanEnabled"] ?? obj["vuln_scan_enabled"]) as? Bool { config.vulnScanEnabled = v }
         if let v = (obj["packageFreshnessEnabled"] ?? obj["package_freshness_enabled"]) as? Bool { config.packageFreshnessEnabled = v }
         if let v = (obj["certTransparencyEnabled"] ?? obj["cert_transparency_enabled"]) as? Bool { config.certTransparencyEnabled = v }
+        for definition in RuntimeConfigurationContract.definitions where definition.disableOnly {
+            if (obj[definition.property] ?? obj[definition.key]) is Bool {
+                config.runtimeConfigSources[definition.key] = "user_override"
+            }
+        }
 
         // DL-07: this merge used to be completely silent. A user_overrides.json
         // that Settings wrote months ago keeps pinning its values across every

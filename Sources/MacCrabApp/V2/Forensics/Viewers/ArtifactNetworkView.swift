@@ -49,10 +49,10 @@ struct ArtifactNetworkView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("\(graph.sources.count) source\(graph.sources.count == 1 ? "" : "s") → \(graph.targets.count) target\(graph.targets.count == 1 ? "" : "s")")
+            Text(String(localized: "ui.final.networkCounts", defaultValue: "Sources: \(graph.sources.count) → Targets: \(graph.targets.count)"))
                 .scaledSystem(12, weight: .semibold)
             Spacer()
-            Text("\(graph.edges.count) edge\(graph.edges.count == 1 ? "" : "s")")
+            Text(String(localized: "ui.final.networkEdges", defaultValue: "Edges: \(graph.edges.count)"))
                 .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }

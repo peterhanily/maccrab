@@ -116,9 +116,9 @@ struct NoiseFilterSuppressibleTests {
 
     @Test("compiled rules carry suppressible: the must-fire tranche resolves to false")
     func compiledRulesCarrySuppressible() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = RuleEngine()
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
+        _ = try await engine.loadRules(from: compiledRulesDirectory)
         let rules = await engine.listRules()
         // developer_cert_revoked — a must-fire IOC
         #expect(rules.first { $0.id == "d1a2b3c4-3007-4000-a000-000000003007" }?.suppressible == false)

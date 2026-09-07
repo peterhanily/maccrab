@@ -67,6 +67,7 @@ public enum SQLitePersistentStoreAdmissionError: Error, LocalizedError, Equatabl
         estimatedBytes: Int64,
         reserveBytes: Int64
     )
+    case schemaTransactionNotSerialized
     case pageLimitInstallationFailed(details: SQLiteFailureDetails)
     case pageLimitDeferred(currentPages: Int64, maximumPages: Int64)
     case sqliteStoragePressure(details: SQLiteFailureDetails)
@@ -89,6 +90,8 @@ public enum SQLitePersistentStoreAdmissionError: Error, LocalizedError, Equatabl
             return "SQLite writes paused: \(free) bytes free is below \(required) (\(floor) floor plus \(reserve) reserve)"
         case .transactionEstimateExceedsReserve(let estimated, let reserve):
             return "SQLite transaction refused: conservative \(estimated)-byte estimate exceeds \(reserve)-byte reserve"
+        case .schemaTransactionNotSerialized:
+            return "SQLite schema work requires an active serialized write transaction"
         case .pageLimitInstallationFailed(let details):
             return "SQLite max_page_count installation failed (rc=\(details.resultCode), extended=\(details.extendedResultCode), errno=\(details.systemErrno))"
         case .pageLimitDeferred(let current, let maximum):
@@ -600,6 +603,59 @@ public struct SQLitePersistentStoreAdmission {
             if !maintenance {
                 latchedFailure = nil
             }
+        } catch let error as SQLitePersistentStoreAdmissionError {
+            latchedFailure = error
+            throw error
+        }
+    }
+
+    /// Admit one explicitly sized schema transaction after BEGIN IMMEDIATE.
+    /// Index retirement can exceed the ordinary row-write reserve even though
+    /// the whole operation fits the store and volume budgets. Its estimate must
+    /// include all affected b-tree pages, their WAL image, and metadata/tree
+    /// overhead, measured while this connection holds the writer lock.
+    ///
+    /// This is intentionally separate from row/maintenance admission: it does
+    /// not enlarge their reserve, borrow the free-space floor, or allow an
+    /// over-cap schema transition. Call before the first schema mutation.
+    mutating func admitSerializedSchemaWrite(
+        estimatedTransactionBytes: Int64,
+        on db: OpaquePointer
+    ) throws {
+        guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else {
+            throw SQLitePersistentStoreAdmissionError.schemaTransactionNotSerialized
+        }
+        guard estimatedTransactionBytes >= 0 else {
+            throw SQLitePersistentStoreAdmissionError.transactionEstimateExceedsReserve(
+                estimatedBytes: Int64.max,
+                reserveBytes: policy.maxFootprintBytes
+            )
+        }
+        do {
+            let footprint = try footprintProbe(databasePath)
+            let free = try freeSpaceProbe(policy.storageVolumePath)
+            lastFootprintBytes = footprint
+            lastFreeSpaceBytes = free
+            let projected = footprint.addingReportingOverflow(estimatedTransactionBytes)
+            guard !projected.overflow,
+                  projected.partialValue <= policy.maxFootprintBytes else {
+                throw SQLitePersistentStoreAdmissionError.footprintLimit(
+                    footprintBytes: footprint,
+                    reserveBytes: estimatedTransactionBytes,
+                    maxFootprintBytes: policy.maxFootprintBytes
+                )
+            }
+            let requiredFree = policy.freeSpaceFloorBytes
+                .addingReportingOverflow(estimatedTransactionBytes)
+            guard !requiredFree.overflow, free >= requiredFree.partialValue else {
+                throw SQLitePersistentStoreAdmissionError.lowFreeSpace(
+                    freeBytes: free,
+                    floorBytes: policy.freeSpaceFloorBytes,
+                    reserveBytes: estimatedTransactionBytes,
+                    requiredFreeBytes: requiredFree.overflow ? Int64.max : requiredFree.partialValue
+                )
+            }
+            if pageLimitPending { try installPageLimit(on: db) }
         } catch let error as SQLitePersistentStoreAdmissionError {
             latchedFailure = error
             throw error

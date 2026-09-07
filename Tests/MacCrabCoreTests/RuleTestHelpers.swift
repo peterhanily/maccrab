@@ -1,114 +1,114 @@
 // RuleTestHelpers.swift
-// Shared rule compilation helper for all MacCrabCore test files.
-//
-// The NSLock serializes the one-time compilation step across all parallel
-// Swift Testing tests, which run concurrently in the same process.
-// Without this guard, multiple tests hitting an empty /tmp/maccrab_v3
-// simultaneously would write overlapping partial JSON files — producing
-// "Unexpected end of file" decode errors in whichever test reads first.
+// A test process compiles its own rule fixture once. It never reuses another
+// checkout's output or relies on source/generated-file modification times.
 
 import Foundation
+import Darwin
 @testable import MacCrabCore
 
-let _compileLock = NSLock()
+let compiledRulesDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("maccrab-test-rules-\(UUID().uuidString)", isDirectory: true)
 
-/// Compiles all rules from the project's Rules/ directory to /tmp/maccrab_v3.
-/// Idempotent and cache-aware: skips compilation when the compiled dir
-/// already exists AND nothing under Rules/ has been modified more recently.
-/// Deleting /tmp/maccrab_v3 is no longer required after adding a new rule.
-func ensureRulesCompiled() {
-    let compiledDir = "/tmp/maccrab_v3"
-    _compileLock.lock()
-    defer { _compileLock.unlock() }
+private enum RuleCompilationFixture {
+    // Swift initializes static stored properties once, even when parallel tests
+    // arrive together. Cache failure as well as success so every caller gets the
+    // original compiler diagnostic instead of reading partially generated JSON.
+    static let result: Result<URL, Error> = Result {
+        let projectDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try compileRuleFixture(
+            projectDirectory: projectDirectory,
+            outputDirectory: compiledRulesDirectory
+        )
+    }
+}
 
-    let projectDir = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()   // Tests/MacCrabCoreTests
-        .deletingLastPathComponent()   // Tests
-        .deletingLastPathComponent()   // project root
-    let rulesDir = projectDir.appendingPathComponent("Rules").path
-    let compilerPath = projectDir.appendingPathComponent("Compiler/compile_rules.py").path
+/// Returns this process's freshly compiled rules, or throws the compilation
+/// failure. Callers must not read the fixture until this succeeds.
+@discardableResult
+func ensureRulesCompiled() throws -> URL {
+    try RuleCompilationFixture.result.get()
+}
 
-    // Recompile when Rules/ changed OR the compiler itself changed — otherwise a
-    // compiler fix (e.g. the De Morgan negation fix) would silently test against
-    // stale compiled output and a regression could false-pass.
-    //
-    // The dir EXISTING is not enough: an interrupted compile (or a reaped /tmp)
-    // can leave it present-but-empty (e.g. only a `sequences/` subdir, zero
-    // top-level rule JSON). Its mtime still passes the freshness check, so the
-    // cache stays poisoned and every rule-driven test reads zero rules until the
-    // dir is manually deleted. Require it to actually hold compiled rules.
-    if FileManager.default.fileExists(atPath: compiledDir),
-       compiledDirHasRules(compiledDir),
-       !rulesDirNewerThan(compiledDir, rulesRoot: rulesDir),
-       !fileNewerThanCompiled(compilerPath, compiledDir: compiledDir) {
-        return
+struct RuleFixtureCompilationError: Error, CustomStringConvertible {
+    let description: String
+}
+
+/// Kept separate from the once-per-process wrapper so compiler launch, exit,
+/// timeout, and incomplete-output handling can be exercised without touching
+/// the shared fixture used by detection tests.
+func compileRuleFixture(
+    projectDirectory: URL,
+    outputDirectory: URL,
+    timeout: TimeInterval = 120,
+    pythonExecutableURL: URL = URL(fileURLWithPath: "/usr/bin/python3")
+) throws -> URL {
+    let fileManager = FileManager.default
+    // An existing directory is a caller error, never permission to reuse or
+    // remove someone else's generated data.
+    guard !fileManager.fileExists(atPath: outputDirectory.path) else {
+        throw RuleFixtureCompilationError(description: "Rule fixture output already exists: \(outputDirectory.path)")
+    }
+    try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: false)
+    var succeeded = false
+    defer {
+        if !succeeded { try? fileManager.removeItem(at: outputDirectory) }
     }
 
-    // Wipe any stale compiled output so the compiler can regenerate cleanly.
-    try? FileManager.default.removeItem(atPath: compiledDir)
+    let logURL = outputDirectory.appendingPathComponent("compiler.log")
+    guard fileManager.createFile(atPath: logURL.path, contents: nil) else {
+        throw RuleFixtureCompilationError(description: "Cannot create rule compiler log at \(logURL.path)")
+    }
+    let log = try FileHandle(forWritingTo: logURL)
+    defer {
+        try? log.close()
+        try? fileManager.removeItem(at: logURL)
+    }
 
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-    proc.arguments = [
-        projectDir.appendingPathComponent("Compiler/compile_rules.py").path,
-        "--input-dir", rulesDir,
-        "--output-dir", compiledDir,
+    let process = Process()
+    process.executableURL = pythonExecutableURL
+    process.arguments = [
+        projectDirectory.appendingPathComponent("Compiler/compile_rules.py").path,
+        "--input-dir", projectDirectory.appendingPathComponent("Rules").path,
+        "--output-dir", outputDirectory.path,
     ]
-    proc.standardOutput = FileHandle.nullDevice
-    proc.standardError = FileHandle.nullDevice
-    try? proc.run()
-    proc.waitUntilExit()
-}
-
-/// True when `compiledDir` actually holds at least one top-level compiled rule
-/// (`*.json`). A dir that exists but contains no rule JSON (interrupted compile,
-/// reaped /tmp output) must NOT be treated as a valid cache, or it poisons every
-/// rule-driven test.
-private func compiledDirHasRules(_ compiledDir: String) -> Bool {
-    guard let entries = try? FileManager.default.contentsOfDirectory(atPath: compiledDir) else {
-        return false
+    var environment = Foundation.ProcessInfo.processInfo.environment
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    process.environment = environment
+    process.standardOutput = log
+    process.standardError = log
+    let completion = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in completion.signal() }
+    do {
+        try process.run()
+    } catch {
+        throw RuleFixtureCompilationError(description: "Could not launch rule compiler: \(error)")
     }
-    return entries.contains { $0.hasSuffix(".json") }
-}
 
-/// True if `source` (e.g. the compiler script) is newer than the compiled
-/// output — forces a recompile when the compiler changes even though Rules/
-/// did not.
-private func fileNewerThanCompiled(_ source: String, compiledDir: String) -> Bool {
-    guard let compiledNewest = newestMTime(at: compiledDir),
-          let attrs = try? FileManager.default.attributesOfItem(atPath: source),
-          let srcMTime = attrs[.modificationDate] as? Date else {
-        return true
-    }
-    return srcMTime > compiledNewest
-}
-
-/// Return true if any .yml under `rulesRoot` has an mtime newer than the
-/// most-recently-modified file in `compiledDir`. Cheap walk — both trees
-/// are small (≤ a few hundred files).
-private func rulesDirNewerThan(_ compiledDir: String, rulesRoot: String) -> Bool {
-    let fm = FileManager.default
-    let compiledNewest = newestMTime(at: compiledDir)
-    let rulesNewest = newestMTime(at: rulesRoot, extension: "yml")
-    guard let compiledMTime = compiledNewest, let rulesMTime = rulesNewest else {
-        return true
-    }
-    _ = fm
-    return rulesMTime > compiledMTime
-}
-
-private func newestMTime(at path: String, extension ext: String? = nil) -> Date? {
-    guard let enumerator = FileManager.default.enumerator(atPath: path) else { return nil }
-    var newest: Date?
-    for case let rel as String in enumerator {
-        if let ext, !rel.hasSuffix(".\(ext)") { continue }
-        let full = (path as NSString).appendingPathComponent(rel)
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: full),
-           let mtime = attrs[.modificationDate] as? Date {
-            if newest == nil || mtime > newest! {
-                newest = mtime
-            }
+    guard completion.wait(timeout: .now() + timeout) == .success else {
+        if process.isRunning { process.terminate() }
+        if completion.wait(timeout: .now() + 2) != .success, process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            _ = completion.wait(timeout: .now() + 2)
         }
+        throw RuleFixtureCompilationError(description: "Rule compiler exceeded \(timeout) seconds")
     }
-    return newest
+    guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+        let diagnostic = (try? Data(contentsOf: logURL)).map {
+            String(decoding: $0.suffix(64 * 1024), as: UTF8.self)
+        } ?? "(compiler log unavailable)"
+        throw RuleFixtureCompilationError(
+            description: "Rule compiler failed (status \(process.terminationStatus)): \(diagnostic)"
+        )
+    }
+    let ruleFiles = try fileManager.contentsOfDirectory(
+        at: outputDirectory, includingPropertiesForKeys: nil
+    ).filter { $0.pathExtension == "json" }
+    guard !ruleFiles.isEmpty else {
+        throw RuleFixtureCompilationError(description: "Rule compiler exited successfully but produced no rule JSON")
+    }
+    succeeded = true
+    return outputDirectory
 }

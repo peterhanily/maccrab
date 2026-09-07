@@ -12,16 +12,10 @@
 // analysts asked for. Per-category caps + age-based eviction keep
 // the cache from growing unbounded across 4-hour refresh cycles.
 //
-// Endpoint choice (clarified in v1.9 Phase-5.4 audit):
-//   * URLhaus      → `csv_online/` — rolling window of currently-live
-//                    threats (~50K entries; goes stale fast, hence
-//                    the 4-hour refresh cadence).
-//   * Feodo        → `ipblocklist.csv` — currently-active C2 IPs.
-//   * MalwareBazaar → `export/csv/recent/` — last-N-days of samples.
-//                    The `csv/full/` historical export exists too
-//                    (multi-GB) but is overkill for live detection;
-//                    the `recent` window matches the analyst use
-//                    case (catch what's hot, age out via maxAge).
+// Endpoint contract (verified 2026-09-07):
+// URLhaus and MalwareBazaar use authenticated v2 recent.csv exports.
+// Feodo uses its public 30-day CSV IOC list. These are bounded download-only
+// datasets, not live queries about this Mac. No malware payload is downloaded.
 
 import Foundation
 import os.log
@@ -29,9 +23,9 @@ import os.log
 /// Manages threat intelligence feeds and IOC lookups.
 ///
 /// Supported feeds:
-/// - abuse.ch URLhaus (malicious URLs/domains; `csv_online/` rolling window)
-/// - abuse.ch MalwareBazaar (malicious file hashes; `csv/recent/` rolling window)
-/// - abuse.ch Feodo Tracker (C2 IP addresses; `ipblocklist.csv` active-only)
+/// - abuse.ch URLhaus (malicious URLs/domains; authenticated recent export)
+/// - abuse.ch MalwareBazaar (malicious file hashes; authenticated recent export)
+/// - abuse.ch Feodo Tracker (C2 IP addresses; `ipblocklist.csv` recent 30 days)
 /// - Custom IOC lists (user-provided)
 public actor ThreatIntelFeed {
 
@@ -830,17 +824,15 @@ public actor ThreatIntelFeed {
 
     /// Feodo Tracker — full CSV with first_seen + malware family.
     /// Switched from `ipblocklist_recommended.txt` (~30-300 entries)
-    /// to `ipblocklist.csv` (full active C2 set, typically 1k-5k entries).
+    /// to `ipblocklist.csv` (C2s observed in the recent 30-day window).
     /// CSV columns: first_seen,dst_ip,dst_port,c2_status,last_online,malware
     private func updateFeodoTracker(
         generation: UInt64
     ) async -> (added: Int, success: Bool) {
-        let url = "https://feodotracker.abuse.ch/downloads/ipblocklist.csv"
         // fetchLines records its own error (HTTP non-2xx / exception)
         // and returns nil — leave the prior good cache + marker intact.
         guard let lines = await fetchLines(
-            url: url,
-            feedName: "Feodo",
+            feed: .feodo,
             generation: generation
         ), networkMutationAllowed(generation: generation) else {
             return (0, false)
@@ -886,15 +878,13 @@ public actor ThreatIntelFeed {
         return (added, true)
     }
 
-    /// URLhaus — full CSV of online URLs with threat + malware family + tags.
+    /// URLhaus — authenticated recent CSV with threat + malware family + tags.
     /// CSV columns: id,dateadded,url,url_status,last_online,threat,tags,urlhaus_link,reporter
     private func updateURLhaus(
         generation: UInt64
     ) async -> (added: Int, success: Bool) {
-        let url = "https://urlhaus.abuse.ch/downloads/csv_online/"
         guard let lines = await fetchLines(
-            url: url,
-            feedName: "URLhaus",
+            feed: .urlhaus,
             generation: generation
         ), networkMutationAllowed(generation: generation) else {
             return (0, false)
@@ -966,10 +956,8 @@ public actor ThreatIntelFeed {
     private func updateMalwareBazaar(
         generation: UInt64
     ) async -> (added: Int, success: Bool) {
-        let url = "https://bazaar.abuse.ch/export/csv/recent/"
         guard let lines = await fetchLines(
-            url: url,
-            feedName: "MalwareBazaar",
+            feed: .malwareBazaar,
             generation: generation
         ), networkMutationAllowed(generation: generation) else {
             return (0, false)
@@ -1069,47 +1057,54 @@ public actor ThreatIntelFeed {
     // MARK: - Network
 
     private nonisolated func fetchLines(
-        url urlString: String,
-        feedName: String? = nil,
+        feed: ThreatIntelDownloadContract.Feed,
         generation: UInt64
     ) async -> [String]? {
-        guard let url = URL(string: urlString) else { return nil }
-
-        // v1.9 Phase-5.5 (TI-M4): abuse.ch Auth-Key support. When the
-        // operator sets MACCRAB_ABUSECH_AUTH_KEY in the daemon's env,
-        // forward it as the `Auth-Key` header on every feed fetch.
-        // This raises the rate-limit ceiling for fleet deployments
-        // sharing a single egress IP. Empty / unset env → no header.
-        var request = URLRequest(url: url)
-        if let authKey = Foundation.ProcessInfo.processInfo
-            .environment["MACCRAB_ABUSECH_AUTH_KEY"],
-            !authKey.isEmpty {
-            request.setValue(authKey, forHTTPHeaderField: "Auth-Key")
-        }
-        request.setValue("MacCrab/\(MacCrabVersion.current)", forHTTPHeaderField: "User-Agent")
-
         do {
-            let (data, response) = try await SecureURLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                if let feedName {
-                    await self.recordFeedError(
-                        feedName,
-                        reason: "HTTP \(http.statusCode)",
-                        generation: generation
-                    )
-                }
+            let authKey: String?
+            if feed == .feodo {
+                authKey = nil
+            } else {
+                do {
+                    // Shared Keychain is authoritative. Keep the existing
+                    // environment fallback for manually launched installations
+                    // only when no persistent item exists, never on read error.
+                    authKey = try SecretsStore().getNonInteractive(.abuseCHAuthKey)
+                        ?? Foundation.ProcessInfo.processInfo.environment["MACCRAB_ABUSECH_AUTH_KEY"]
+                } catch { throw ThreatIntelDownloadContract.Failure.credentialUnavailable }
+            }
+            let request = try ThreatIntelDownloadContract.request(feed: feed, authKey: authKey)
+            let (bytes, response) = try await ThreatIntelDownloadSession.shared.bytes(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                bytes.task.cancel()
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                await self.recordFeedError(feed.rawValue, reason: "HTTP \(status); cached indicators are retained.", generation: generation)
                 return nil
             }
-            let text = String(data: data, encoding: .utf8) ?? ""
+            guard response.expectedContentLength <= ThreatIntelDownloadContract.maximumResponseBytes else {
+                bytes.task.cancel()
+                throw ThreatIntelDownloadContract.Failure.oversizedResponse
+            }
+            var data = Data()
+            do {
+                for try await byte in bytes {
+                    guard data.count < ThreatIntelDownloadContract.maximumResponseBytes else {
+                        throw ThreatIntelDownloadContract.Failure.oversizedResponse
+                    }
+                    data.append(byte)
+                }
+            } catch {
+                bytes.task.cancel()
+                throw error
+            }
+            guard let text = String(data: data, encoding: .utf8) else {
+                await self.recordFeedError(feed.rawValue, reason: "Feed is not UTF-8; cached indicators are retained.", generation: generation)
+                return nil
+            }
             return Self.splitFeedLines(text)
         } catch {
-            if let feedName {
-                await self.recordFeedError(
-                    feedName,
-                    reason: error.localizedDescription,
-                    generation: generation
-                )
-            }
+            await self.recordFeedError(feed.rawValue,
+                reason: ThreatIntelDownloadContract.sanitizedFailure(error), generation: generation)
             return nil
         }
     }

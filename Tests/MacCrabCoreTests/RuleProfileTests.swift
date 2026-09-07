@@ -32,12 +32,12 @@ struct RuleProfileTests {
 
     /// An isolated dir holding exactly two real compiled rules — one whose Sigma
     /// `status` is "stable", one "experimental" — copied verbatim from the
-    /// project's compiled output (/tmp/maccrab_v3) so the real decoder runs
+    /// project's compiled output (this process’s compiled rule fixture) so the real decoder runs
     /// against real content. Both ship enabled=true in the compiled JSON, so a
     /// disabled experimental rule after load can only come from the F-04 filter.
     private func makeProfileDir() throws -> (dir: URL, stableID: String, experimentalID: String) {
-        ensureRulesCompiled()
-        let src = URL(fileURLWithPath: "/tmp/maccrab_v3")
+        try ensureRulesCompiled()
+        let src = compiledRulesDirectory
         let files = try FileManager.default
             .contentsOfDirectory(at: src, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }

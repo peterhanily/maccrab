@@ -21,7 +21,7 @@ import Foundation
 @Suite("Phase 3 (10): kill-chain sequence true-positive fire-tests")
 struct KillChainFireTests {
 
-    private let seqDir = "/tmp/maccrab_v3/sequences"
+    private let seqDir = compiledRulesDirectory.appendingPathComponent("sequences").path
     private let base = Date(timeIntervalSince1970: 1_700_000_000)
     private let rootPid: Int32 = 100      // initial step
     private let childPid: Int32 = 101     // descendant steps
@@ -77,7 +77,7 @@ struct KillChainFireTests {
     /// Loads the real compiled sequence rules against a lineage where pid 101 is a
     /// child of pid 100, then returns whether `ruleId` completes across the stream.
     private func fires(_ ruleId: String, _ events: [Event]) async throws -> Bool {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let lineage = ProcessLineage()
         await lineage.recordProcess(pid: rootPid, ppid: 1, path: "/bin/root", name: "root", startTime: base)
         await lineage.recordProcess(pid: childPid, ppid: rootPid, path: "/tmp/child", name: "child", startTime: base)
@@ -139,7 +139,7 @@ struct KillChainFireTests {
 
     @Test("npm RAT rule does not journal unrelated compiler temp traffic")
     func npmRatIgnoresCompilerTempTraffic() async throws {
-        ensureRulesCompiled()
+        try ensureRulesCompiled()
         let engine = SequenceEngine(lineage: ProcessLineage())
         _ = try await engine.loadRules(
             from: URL(fileURLWithPath: seqDir),

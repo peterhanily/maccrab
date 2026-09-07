@@ -33,7 +33,7 @@ struct ArtifactKeyValueView: View {
             if let a = selected {
                 detail(a)
             } else {
-                Text("No artifacts.")
+                Text(String(localized: "ui.ArtifactKeyValueView.no.artifacts", defaultValue: "No artifacts."))
                     .foregroundStyle(.tertiary)
                     .padding(20)
             }
@@ -67,7 +67,7 @@ struct ArtifactKeyValueView: View {
                     .buttonStyle(.plain)
                 }
                 if artifacts.count > 200 {
-                    Text("Showing first 200 of \(artifacts.count)")
+                    Text(String(localized: "ui.ArtifactKeyValueView.showing.first.200.of", defaultValue: "Showing first 200 of \(artifacts.count)"))
                         .scaledSystem(9)
                         .foregroundStyle(.tertiary)
                         .padding(8)
@@ -120,7 +120,7 @@ struct ArtifactKeyValueView: View {
             let mapped = Set(hint.fieldRoles.keys)
             let extras = a.record.data.keys.filter { !mapped.contains($0) }.sorted()
             if !extras.isEmpty {
-                Text("Other fields")
+                Text(String(localized: "ui.ArtifactKeyValueView.other.fields", defaultValue: "Other fields"))
                     .scaledSystem(9, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .textCase(.uppercase)
@@ -171,7 +171,7 @@ struct ArtifactKeyValueView: View {
                         .textSelection(.enabled)
                 }
                 if arr.count > 20 {
-                    Text("+ \(arr.count - 20) more")
+                    Text(String(localized: "ui.finalPrefix.ArtifactKeyValueView.more", defaultValue: "+ \(arr.count - 20) more"))
                         .scaledSystem(10)
                         .foregroundStyle(.tertiary)
                 }
@@ -240,7 +240,7 @@ private struct RawJSONDisclosure: View {
                         .scaledSystem(9, weight: .semibold)
                         .foregroundStyle(.secondary)
                         .frame(width: 10)
-                    Text("Raw data JSON")
+                    Text(String(localized: "ui.ArtifactKeyValueView.raw.data.json", defaultValue: "Raw data JSON"))
                         .scaledSystem(11, weight: .semibold)
                         .foregroundStyle(.secondary)
                     Spacer()

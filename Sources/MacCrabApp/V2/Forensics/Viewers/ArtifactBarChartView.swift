@@ -60,10 +60,10 @@ struct ArtifactBarChartView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("Top \(min(buckets.count, Self.topN)) by \(humanField)")
+            Text(String(localized: "ui.ArtifactBarChartView.top.by", defaultValue: "Top \(min(buckets.count, Self.topN)) by \(humanField)"))
                 .scaledSystem(12, weight: .semibold)
             Spacer()
-            Text("\(artifacts.count) total event\(artifacts.count == 1 ? "" : "s")")
+            Text(String(localized: "ui.final.totalEvents", defaultValue: "Total events: \(artifacts.count)"))
                 .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }
