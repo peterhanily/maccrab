@@ -244,15 +244,15 @@ enum SensorDegradationEvaluator {
     }
 }
 
-/// Exact events.db maintenance boundaries derived from the same binary-MiB cap
-/// and transaction reserve as the EventStore hard-admission policy.
+/// events.db boundaries for one maximum supported fresh producer transaction.
+/// The base estimate can consume one transaction reserve and must leave another
+/// complete reserve for terminal settlement. File writes additionally preserve
+/// the priority lane's reserve. Smaller transactions can fit above these bounds.
 ///
-/// Admission permits a write only while `footprint + reserve <= cap`. Waiting
-/// until the nominal cap to start maintenance therefore deadlocks recovery: the
-/// writer is already paused one reserve earlier. Maintenance starts one further
-/// reserve below that line, leaving room for the cleanup transaction itself.
-/// The sweep target retains the historical 80% target where it is lower, but
-/// never lands above the proactive boundary on smaller configured caps.
+/// Maintenance starts at the maximum-base file boundary and targets the lower
+/// of that boundary and the historical 80% target. Cleanup has its own bounded
+/// cap-plus-one-reserve admission path. These are instantaneous headroom bounds;
+/// they cannot guarantee admission for traffic between periodic sweep samples.
 struct EventsSizeCapBoundary: Sendable, Equatable {
     let nominalCapBytes: Int64
     let hardAdmissionBoundaryBytes: Int64
@@ -269,21 +269,14 @@ struct EventsSizeCapBoundary: Sendable, Equatable {
             maxSizeMiB: safeCapMiB
         )
         let reserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
-        let hardBoundary = max(0, cap - reserve)
+        let hardBoundary = max(0, cap - 2 * reserve)
         let fileLaneBoundary = max(
             0,
             hardBoundary - EventStore.priorityLaneReserveBytes(
                 maxFootprintBytes: cap
             )
         )
-        // Maintenance must arm before either full-reserve production lane can
-        // shed. Up to 320 MiB the transaction reserve is the tighter second
-        // margin; above it, the proportional priority-only reserve makes the
-        // file lane the tighter boundary.
-        let proactiveBoundary = min(
-            max(0, hardBoundary - reserve),
-            fileLaneBoundary
-        )
+        let proactiveBoundary = fileLaneBoundary
         // Overflow-safe exact 4/5 calculation (the historical 80% target).
         let eightyPercent = (cap / 5) * 4 + ((cap % 5) * 4) / 5
 

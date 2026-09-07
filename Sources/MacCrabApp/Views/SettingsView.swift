@@ -142,7 +142,7 @@ struct SettingsView: View {
     // A missing key adopts the new shipped default. The one-shot migration
     // below upgrades only the complete prior UI-generated default tuple; a
     // distinguishable operator override, including 420, remains authoritative.
-    @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 440  // match DaemonConfig default (v1.21.6-rc.12: 420 → 440)
+    @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 476  // factory fallback only; saved caps remain authoritative
     @AppStorage("storage.alertsRetentionDays")   private var alertsRetentionDays: Int = 365
     @AppStorage("storage.alertsMaxSizeMB")       private var alertsMaxSizeMB: Int = 100
     @AppStorage("storage.evidenceMaxSizeMB")     private var evidenceMaxSizeMB: Int = 100
@@ -154,10 +154,10 @@ struct SettingsView: View {
     // events.db evidence still present (bounded by the evidence allocation);
     // heartbeat/status surfaces report that live transition reserve.
     private var effectiveEvidenceMaxSizeMB: Int {
-        min(max(50, evidenceMaxSizeMB), max(50, eventsMaxSizeMB - 96))
+        min(max(50, evidenceMaxSizeMB), max(50, eventsMaxSizeMB - 112))
     }
     private var effectiveEventsFamilyMaxSizeMB: Int {
-        max(96, eventsMaxSizeMB - effectiveEvidenceMaxSizeMB)
+        max(112, eventsMaxSizeMB - effectiveEvidenceMaxSizeMB)
     }
     private var effectiveAlertsFamilyMaxSizeMB: Int {
         alertsMaxSizeMB + effectiveEvidenceMaxSizeMB
@@ -399,7 +399,7 @@ struct SettingsView: View {
                             stepperRange: 15...1440,
                             stepperStep: 15,
                             sizeBinding: $eventsMaxSizeMB,
-                            sizeRange: 150...2000,
+                            sizeRange: 162...2000,
                             sizeStep: 100,
                             currentSize: currentSize(databaseFile: "events.db"),
                             currentBytes: currentBytes(databaseFile: "events.db"),
@@ -429,7 +429,7 @@ struct SettingsView: View {
                         Stepper(
                             String(localized: "settings.evidence.cap", defaultValue: "Alert evidence allocation: \(effectiveEvidenceMaxSizeMB) MB"),
                             value: $evidenceMaxSizeMB,
-                            in: 50...min(500, max(50, eventsMaxSizeMB - 96)),
+                            in: 50...min(500, max(50, eventsMaxSizeMB - 112)),
                             step: 50
                         )
                         .font(.caption)
@@ -2488,7 +2488,7 @@ struct SettingsView: View {
         // v1.21.6-rc.12: Settings historically materialized its complete shipped
         // storage tuple into user_overrides.json on first appearance. Without
         // a one-shot rebaseline, an untouched generated 420 MB envelope would
-        // shadow the new 440 MB daemon default forever. Classify the full old
+        // shadow the then-current 440 MB daemon default forever. Classify the full old
         // tuple before applying older-key migrations; any companion deviation
         // is evidence of operator tuning and preserves the value.
         let oldGeneratedSnapshot = SettingsStorageDefaultsSnapshot(
@@ -2537,7 +2537,7 @@ struct SettingsView: View {
             // 350 and the legacy value was silently dropped. Gate on absence
             // of the key instead of a magic-number default.
             if defaults.object(forKey: "storage.eventsMaxSizeMB") == nil {
-                eventsMaxSizeMB = max(150, min(legacyCap, 2000))
+                eventsMaxSizeMB = max(162, min(legacyCap, 2000))
             }
         }
 
@@ -2563,10 +2563,10 @@ struct SettingsView: View {
     /// envelope could leave a stale larger evidence value in the Stepper while
     /// the daemon silently clamped a different effective allocation.
     private func normalizeStorageBudgetSplit() {
-        eventsMaxSizeMB = max(150, min(2_000, eventsMaxSizeMB))
+        eventsMaxSizeMB = max(162, min(2_000, eventsMaxSizeMB))
         evidenceMaxSizeMB = min(
             max(50, evidenceMaxSizeMB),
-            min(500, max(50, eventsMaxSizeMB - 96))
+            min(500, max(50, eventsMaxSizeMB - 112))
         )
     }
 

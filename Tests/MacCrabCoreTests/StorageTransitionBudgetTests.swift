@@ -9,25 +9,25 @@ struct StorageTransitionBudgetTests {
     @Test("steady-state total is unchanged and upgrade reserve is bounded")
     func configEnvelope() {
         let storage = DaemonConfig.StorageConfig().clampedToSafeFloors()
-        #expect(storage.effectiveEventsFamilyMaxSizeMB == 340)
+        #expect(storage.effectiveEventsFamilyMaxSizeMB == 376)
         #expect(storage.effectiveAlertsFamilyMaxSizeMB == 200)
-        #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB == 540)
+        #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB == 576)
 
         #expect(storage.effectiveEventsFamilyMaxSizeMB(
             legacyEvidenceTransitionReserveMiB: 0
-        ) == 340)
+        ) == 376)
         #expect(storage.effectiveEventsFamilyMaxSizeMB(
             legacyEvidenceTransitionReserveMiB: 37
-        ) == 377)
+        ) == 413)
         #expect(storage.effectiveEventsFamilyMaxSizeMB(
             legacyEvidenceTransitionReserveMiB: .max
-        ) == 440)
+        ) == 476)
         #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB(
             legacyEvidenceTransitionReserveMiB: .max
-        ) == 640)
+        ) == 676)
         #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB(
             appliedLegacyEvidenceTransitionReserveMiB: 137
-        ) == 677)
+        ) == 713)
         #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB(
             appliedLegacyEvidenceTransitionReserveMiB: .max
         ) == .max)
@@ -75,10 +75,10 @@ struct StorageTransitionBudgetTests {
         )
         #expect(measured.reserveMiB == 100)
         #expect(!measured.measurementFailed)
-        #expect(measured.pendingReserveMiB == 23)
+        #expect(measured.pendingReserveMiB == 18)
         #expect(measured.pendingReserveFitsHardBoundary == true)
-        let applied = budget.commitPendingReserve(23, ticket: ticket)
-        #expect(applied.reserveMiB == 23)
+        let applied = budget.commitPendingReserve(18, ticket: ticket)
+        #expect(applied.reserveMiB == 18)
         #expect(applied.pendingReserveMiB == nil)
 
         let empty = AlertEvidenceBudgetSnapshot(
@@ -88,30 +88,31 @@ struct StorageTransitionBudgetTests {
             chargedBytes: 4_096,
             maxBytes: 100 * SQLitePersistentStorePolicy.bytesPerMiB
         )
+        let steadyTarget = EventsSizeCapBoundary(
+            maxSizeMiB: storage.effectiveEventsFamilyMaxSizeMB
+        ).targetBytes
         let oneByteOver = budget.update(
             measurement: transitionMeasurement(
                 evidence: empty,
-                familyFootprintBytes: 272
-                    * SQLitePersistentStorePolicy.bytesPerMiB + 1,
+                familyFootprintBytes: steadyTarget + 1,
                 freelistCount: 1
             ),
             ticket: ticket
         )
-        #expect(oneByteOver.reserveMiB == 23)
+        #expect(oneByteOver.reserveMiB == 18)
         #expect(oneByteOver.pendingReserveMiB == 0)
         #expect(oneByteOver.pendingReserveFitsHardBoundary == false)
         #expect(oneByteOver.freelistBytes == 4_096)
-        #expect(budget.commitPendingReserve(0, ticket: ticket).reserveMiB == 23)
+        #expect(budget.commitPendingReserve(0, ticket: ticket).reserveMiB == 18)
 
         let exactSteadyBoundary = budget.update(
             measurement: transitionMeasurement(
                 evidence: empty,
-                familyFootprintBytes: 272
-                    * SQLitePersistentStorePolicy.bytesPerMiB
+                familyFootprintBytes: steadyTarget
             ),
             ticket: ticket
         )
-        #expect(exactSteadyBoundary.reserveMiB == 23)
+        #expect(exactSteadyBoundary.reserveMiB == 18)
         #expect(exactSteadyBoundary.pendingReserveMiB == 0)
         #expect(exactSteadyBoundary.pendingReserveFitsHardBoundary == true)
         #expect(budget.commitPendingReserve(0, ticket: ticket).reserveMiB == 0)
@@ -138,12 +139,11 @@ struct StorageTransitionBudgetTests {
             maxBytes: 100 * mib
         )
 
-        // Evidence ownership rounds to 33 MiB, but the installed family needs
-        // 82 MiB of bounded transition reserve to fit the startup-convergence
-        // target. Hard-write admission alone would incorrectly choose 34 MiB
-        // and leave boot trapped in destructive, impossible vacuum retries.
-        let family = (320 + 33) * mib
-            - SQLitePersistentStorePolicy.eventTransactionReserveBytes + 1
+        // The explicit 420 MiB envelope stays a 320 MiB family. Evidence
+        // ownership rounds to 33 MiB, but this family is one byte over the
+        // 400 MiB live cap's 296 MiB target, so it needs an 81 MiB reserve.
+        // Evidence ownership alone cannot authorize the smaller live cap.
+        let family = 296 * mib + 1
         let ticket = budget.measurementTicket()
         let measured = budget.update(
             measurement: transitionMeasurement(
@@ -153,10 +153,43 @@ struct StorageTransitionBudgetTests {
             ticket: ticket
         )
         #expect(measured.appliedReserveMiB == 100)
-        #expect(measured.pendingReserveMiB == 82)
+        #expect(measured.pendingReserveMiB == 81)
         #expect(measured.pendingReserveFitsHardBoundary == true)
-        #expect(measured.proposedHardAdmissionBoundaryBytes == 402 * mib)
-        #expect(budget.commitPendingReserve(82, ticket: ticket).reserveMiB == 82)
+        #expect(measured.proposedHardAdmissionBoundaryBytes == 401 * mib)
+        #expect(EventsSizeCapBoundary(maxSizeMiB: 400).targetBytes < family)
+        #expect(EventsSizeCapBoundary(maxSizeMiB: 401).targetBytes >= family)
+        #expect(budget.commitPendingReserve(81, ticket: ticket).reserveMiB == 81)
+    }
+
+    @Test("an explicit small envelope cannot invent extra transition reserve")
+    func insufficientCustomEnvelopeRemainsAuthoritative() {
+        var storage = DaemonConfig.StorageConfig()
+        storage.eventsMaxSizeMB = 420
+        let budget = LegacyEvidenceTransitionBudget(storageConfig: storage)
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
+        let family = 321 * mib + 1
+        let evidence = AlertEvidenceBudgetSnapshot(
+            rowCount: 11_651,
+            logicalBytes: 21_386_393,
+            allocatedBytes: 34_492_416,
+            chargedBytes: 34_492_416,
+            maxBytes: 100 * mib
+        )
+        let ticket = budget.measurementTicket()
+        let measured = budget.update(
+            measurement: transitionMeasurement(
+                evidence: evidence,
+                familyFootprintBytes: family
+            ),
+            ticket: ticket
+        )
+        #expect(budget.storageConfig().eventsMaxSizeMB == 420)
+        #expect(budget.storageConfig().effectiveEventsFamilyMaxSizeMB == 320)
+        #expect(measured.appliedReserveMiB == 100)
+        #expect(measured.maximumReserveMiB == 100)
+        #expect(measured.pendingReserveMiB == nil)
+        #expect(EventsSizeCapBoundary(maxSizeMiB: 420).targetBytes < family)
+        #expect(budget.commitPendingReserve(108, ticket: ticket).reserveMiB == 100)
     }
 
     @Test("installed retained family selects a startup-safe bounded reserve")
@@ -173,9 +206,9 @@ struct StorageTransitionBudgetTests {
             maxBytes: 100 * mib
         )
         // Exact compacted footprint from the disqualified rc.29 retained-store
-        // probe. It is healthy, but cannot fit the 34-MiB reserve's startup
-        // target. A 70-MiB reserve is the smallest bounded value whose 410-MiB
-        // live cap has a 328-MiB startup target.
+        // probe. It cannot fit the evidence-only reserve's startup target.
+        // A 60 MiB reserve is the smallest bounded value: the 436 MiB live cap
+        // has a 328.4 MiB target, while 435 MiB permits only 327.5 MiB.
         let family: Int64 = 343_535_616
         let ticket = budget.measurementTicket()
         let measured = budget.update(
@@ -187,11 +220,11 @@ struct StorageTransitionBudgetTests {
         )
 
         #expect(measured.appliedReserveMiB == 100)
-        #expect(measured.pendingReserveMiB == 70)
+        #expect(measured.pendingReserveMiB == 60)
         #expect(measured.pendingReserveFitsHardBoundary == true)
-        #expect(EventsSizeCapBoundary(maxSizeMiB: 409).targetBytes < family)
-        #expect(EventsSizeCapBoundary(maxSizeMiB: 410).targetBytes >= family)
-        #expect(budget.commitPendingReserve(70, ticket: ticket).reserveMiB == 70)
+        #expect(EventsSizeCapBoundary(maxSizeMiB: 435).targetBytes < family)
+        #expect(EventsSizeCapBoundary(maxSizeMiB: 436).targetBytes >= family)
+        #expect(budget.commitPendingReserve(60, ticket: ticket).reserveMiB == 60)
     }
 
     @Test("stale sweep cannot overwrite a newer storage config generation")

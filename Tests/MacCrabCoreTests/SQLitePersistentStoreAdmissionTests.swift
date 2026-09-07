@@ -1230,7 +1230,7 @@ struct SQLitePersistentStoreAdmissionTests {
         let alertSnapshot = try #require(await alerts?.storageAdmissionSnapshot())
         let campaignSnapshot = try #require(await campaigns?.storageAdmissionSnapshot())
         #expect(eventSnapshot.maxFootprintBytes
-            == Int64(340) * SQLitePersistentStorePolicy.bytesPerMiB)
+            == Int64(376) * SQLitePersistentStorePolicy.bytesPerMiB)
         #expect(alertSnapshot.maxFootprintBytes
             == Int64(200) * SQLitePersistentStorePolicy.bytesPerMiB)
         #expect(campaignSnapshot.maxFootprintBytes
@@ -1471,7 +1471,7 @@ struct SQLitePersistentStoreAdmissionTests {
         let eventPath = dir.appendingPathComponent("events-reprobe.db").path
         let alertPath = dir.appendingPathComponent("alerts-reprobe.db").path
         let mib = SQLitePersistentStorePolicy.bytesPerMiB
-        let eventReserve = 16 * mib
+        let eventReserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
         let alertReserve = 4 * mib
 
         let events = try EventStore(
@@ -1491,9 +1491,15 @@ struct SQLitePersistentStoreAdmissionTests {
             )
         )
 
+        // The lowered cap is paddedFootprint + R - 1. Reclaim enough padding
+        // to leave both producer reserves and the file-priority reserve after
+        // VACUUM, with one MiB for ordinary page/sidecar rounding.
+        let eventPadding = eventReserve
+            + EventStore.priorityLaneReserveBytes(maxFootprintBytes: 128 * mib)
+            + mib
         try addFreelistPadding(
             databasePath: eventPath,
-            bytes: 24 * Int(mib)
+            bytes: Int(eventPadding)
         )
         try addFreelistPadding(
             databasePath: alertPath,
@@ -1529,7 +1535,7 @@ struct SQLitePersistentStoreAdmissionTests {
         )
         #expect(
             compactedEvents
-                + eventReserve
+                + 2 * eventReserve
                 + EventStore.priorityLaneReserveBytes(
                     maxFootprintBytes: eventPolicy.maxFootprintBytes
                 )
@@ -1542,8 +1548,9 @@ struct SQLitePersistentStoreAdmissionTests {
             compactedAlerts + alertReserve <= alertPolicy.maxFootprintBytes
         )
 
-        // These probes must clear the maintenance-preserved latch, reopen the
-        // writer, and check the file-only reserve without BEGIN or INSERT.
+        // These probes clear the maintenance-preserved latch and reopen the
+        // writer. Event probes check both reserves plus file-priority space
+        // inside an empty BEGIN/ROLLBACK transaction, without sacrificial DML.
         let priority = try await events.reprobeStorageAdmissionForWrite(
             lane: .priority
         )
@@ -2469,11 +2476,11 @@ struct SQLitePersistentStoreAdmissionTests {
 
     @Test("the shipped events budget reserves headroom the file lane cannot take")
     func shippedBudgetReservesPriorityHeadroom() {
-        // The shipped default is events_max_size_mb 440 with a 100 MiB evidence
-        // subtraction, so the events family cap is 340 MiB.
-        let familyCap: Int64 = 340 * 1_048_576
+        // The shipped default is events_max_size_mb 476 with a 100 MiB evidence
+        // subtraction, so the events family cap is 376 MiB.
+        let familyCap: Int64 = 376 * 1_048_576
         let reserve = EventStore.priorityLaneReserveBytes(maxFootprintBytes: familyCap)
-        #expect(reserve == 35_651_584, "expected 34 MiB reserve at the shipped cap, got \(reserve)")
+        #expect(reserve == 39_426_457, "expected the 10% reserve at the shipped cap, got \(reserve)")
         // A file-lane write must additionally leave the reserve free; a priority
         // write is charged only its own cost and stays admissible below that
         // point.

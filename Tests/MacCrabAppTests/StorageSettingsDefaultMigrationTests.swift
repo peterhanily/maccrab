@@ -54,6 +54,26 @@ struct StorageSettingsDefaultMigrationTests {
         #expect(result == nil)
     }
 
+    @Test("saved 440 cap is not reclassified when the factory fallback changes")
+    func saved440CapIsPreserved() {
+        let saved = SettingsStorageDefaultsSnapshot(
+            eventsHotTierMinutes: 30,
+            eventsMaxSizeMB: 440,
+            alertsRetentionDays: 365,
+            alertsMaxSizeMB: 100,
+            evidenceMaxSizeMB: 100,
+            campaignsRetentionDays: 365,
+            campaignsMaxSizeMB: 50
+        )
+        let result = SettingsStorageDefaultMigration.upgradedEventsMaxSizeMB(
+            snapshot: saved,
+            eventsKeyWasPersisted: true,
+            legacyCapWasPresent: false,
+            completedGeneration: 0
+        )
+        #expect(result == nil)
+    }
+
     @Test("legacy explicit cap is never reclassified as a generated default")
     func legacyExplicitCapWins() {
         let result = SettingsStorageDefaultMigration.upgradedEventsMaxSizeMB(

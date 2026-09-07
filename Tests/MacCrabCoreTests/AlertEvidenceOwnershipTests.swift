@@ -960,7 +960,7 @@ struct AlertEvidenceOwnershipTests {
     func capConservation() {
         func assertConserved(_ storage: DaemonConfig.StorageConfig) {
             let clamped = storage.clampedToSafeFloors()
-            #expect(clamped.effectiveEventsFamilyMaxSizeMB >= 96)
+            #expect(clamped.effectiveEventsFamilyMaxSizeMB >= 112)
             #expect(
                 clamped.effectiveEventsFamilyMaxSizeMB
                     + clamped.effectiveAlertsFamilyMaxSizeMB
@@ -968,9 +968,9 @@ struct AlertEvidenceOwnershipTests {
             )
         }
         let defaults = DaemonConfig.StorageConfig().clampedToSafeFloors()
-        #expect(defaults.effectiveEventsFamilyMaxSizeMB == 340)
+        #expect(defaults.effectiveEventsFamilyMaxSizeMB == 376)
         #expect(defaults.effectiveAlertsFamilyMaxSizeMB == 200)
-        #expect(defaults.configuredEventsAndAlertsTotalMaxSizeMB == 540)
+        #expect(defaults.configuredEventsAndAlertsTotalMaxSizeMB == 576)
         assertConserved(defaults)
 
         var low = DaemonConfig.StorageConfig()
@@ -978,7 +978,7 @@ struct AlertEvidenceOwnershipTests {
         low.evidenceMaxSizeMB = .max
         assertConserved(low)
         let lowClamped = low.clampedToSafeFloors()
-        #expect(lowClamped.eventsMaxSizeMB == 146)
+        #expect(lowClamped.eventsMaxSizeMB == 162)
         #expect(lowClamped.evidenceMaxSizeMB == 50)
 
         var extreme = DaemonConfig.StorageConfig()
@@ -986,7 +986,7 @@ struct AlertEvidenceOwnershipTests {
         extreme.alertsMaxSizeMB = .max
         extreme.evidenceMaxSizeMB = .max
         assertConserved(extreme)
-        #expect(extreme.clampedToSafeFloors().effectiveEventsFamilyMaxSizeMB == 96)
+        #expect(extreme.clampedToSafeFloors().effectiveEventsFamilyMaxSizeMB == 112)
     }
 
     @Test("heartbeat decodes effective caps rather than relabeling the envelope")

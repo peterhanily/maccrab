@@ -1971,9 +1971,9 @@ public actor EventStore {
         for databasePath: String
     ) -> SQLitePersistentStorePolicy {
         SQLitePersistentStorePolicy(
-            // DaemonConfig's legacy 440 MiB envelope reserves 100 MiB for
+            // DaemonConfig's 476 MiB envelope reserves 100 MiB for
             // alert-owned evidence after the schema-v8 file split.
-            maxFootprintBytes: 340 * SQLitePersistentStorePolicy.bytesPerMiB,
+            maxFootprintBytes: 376 * SQLitePersistentStorePolicy.bytesPerMiB,
             freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
             transactionReserveBytes: SQLitePersistentStorePolicy
                 .eventTransactionReserveBytes,
@@ -7914,12 +7914,17 @@ public actor EventStore {
                 terminalPoisonSettlementHeadroomBytes
             )
             : postCommitHeadroomBytes
-        guard estimatedBytes >= 0, estimatedBytes <= reserve,
-              protectedHeadroom >= 0,
-              protectedHeadroom <= reserve else {
+        guard estimatedBytes >= 0, estimatedBytes <= reserve else {
             throw SQLitePersistentStoreAdmissionError
                 .transactionEstimateExceedsReserve(
                     estimatedBytes: estimatedBytes,
+                    reserveBytes: reserve
+                )
+        }
+        guard protectedHeadroom >= 0, protectedHeadroom <= reserve else {
+            throw SQLitePersistentStoreAdmissionError
+                .transactionEstimateExceedsReserve(
+                    estimatedBytes: protectedHeadroom,
                     reserveBytes: reserve
                 )
         }
@@ -19665,11 +19670,11 @@ public actor EventStore {
         return admission.snapshot()
     }
 
-    /// Proves that an ordinary event write in `lane` can enter its complete
-    /// reserve-bounded transaction without issuing BEGIN or INSERT. A size-cap
-    /// sweep uses maintenance admission, which deliberately cannot clear a
-    /// sticky pressure latch; startup recovery therefore runs this normal gate
-    /// for the priority and file lanes before enabling ingestion.
+    /// Proves capacity for a maximum supported fresh base in `lane`, including
+    /// the full post-commit terminal reserve, while holding SQLite's writer
+    /// lock. The empty transaction is rolled back without DML. Maintenance
+    /// cannot clear a sticky pressure latch, so recovery first runs the normal
+    /// reopening path, then proves the stronger serialized producer boundary.
     @discardableResult
     public func reprobeStorageAdmissionForWrite(
         lane: EventPipelineLane
@@ -19685,29 +19690,87 @@ public actor EventStore {
             )
         }
 
-        // Event batches charge the whole transaction reserve at BEGIN so no
-        // later row in that transaction can consume the file lane's protected
-        // priority headroom. Match that strongest production boundary here.
+        // Keep the ordinary gate: it reopens a recovered shed-only connection
+        // and prepares its writer. It can replace db, and proves only one
+        // reserve, so it cannot itself authorize a fresh journal base.
         try admitStorageWrite(
             estimatedTransactionBytes: storageTransactionReserveBytes,
             lane: lane
         )
 
-        guard insertStmt != nil else {
+        guard insertStmt != nil, let db else {
             throw EventStoreError.stepFailed(
                 "event storage admission recovered without a writer statement"
             )
         }
-        guard let snapshot = storageAdmissionSnapshot(),
-              snapshot.footprintBytes != nil,
-              snapshot.freeSpaceBytes != nil,
-              snapshot.latchedFailure == nil,
-              !snapshot.pageLimitPending else {
+        let reserve = storageTransactionReserveBytes
+        try beginSerializedWrite(
+            estimatedBytes: reserve,
+            postCommitHeadroomBytes: reserve,
+            lane: lane
+        )
+        do {
+            // Use the exact measurements admitted under this writer lock.
+            // The public status snapshot re-probes best-effort and could
+            // replace them with unvalidated values or suppress a probe error.
+            guard let admission = storageAdmission,
+                  let footprint = admission.lastFootprintBytes,
+                  let freeSpace = admission.lastFreeSpaceBytes,
+                  admission.latchedFailure == nil,
+                  !admission.pageLimitPending else {
+                throw EventStoreError.stepFailed(
+                    "event storage admission remained blocked after serialized reprobe"
+                )
+            }
+            let snapshot = SQLitePersistentStoreAdmissionSnapshot(
+                enabled: true,
+                footprintBytes: footprint,
+                freeSpaceBytes: freeSpace,
+                maxFootprintBytes: admission.policy.maxFootprintBytes,
+                freeSpaceFloorBytes: admission.policy.freeSpaceFloorBytes,
+                transactionReserveBytes: admission.transactionReserveBytes,
+                latchedFailure: nil,
+                pageLimitPending: false
+            )
+            // A rollback failure is a failed proof. Never return success while
+            // this connection might still own the empty writer transaction.
+            try Self.exec(db, "ROLLBACK")
+            return snapshot
+        } catch {
+            try? Self.exec(db, "ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Focused admission fixtures replace measurements, retaining the actual
+    /// private SQLite connection, policy and installed page ceiling.
+    internal func setStorageAdmissionProbesForTesting(
+        footprint: @escaping SQLitePersistentStoreAdmission.FootprintProbe,
+        freeSpace: @escaping SQLitePersistentStoreAdmission.FreeSpaceProbe
+    ) throws {
+        guard !isReadOnly, let db, let policy = storagePolicy,
+              sqlite3_get_autocommit(db) != 0 else {
             throw EventStoreError.stepFailed(
-                "event storage admission remained blocked after normal reprobe"
+                "admission fixture requires an idle writable connection"
             )
         }
-        return snapshot
+        var admission = try SQLitePersistentStoreAdmission(
+            databasePath: databasePath,
+            policy: policy,
+            footprintProbe: footprint,
+            freeSpaceProbe: freeSpace
+        )
+        try admission.installPageLimit(on: db)
+        storageAdmission = admission
+    }
+
+    internal func storageAdmissionConnectionStateForTesting() throws -> (
+        inTransaction: Bool, totalChanges: Int64
+    ) {
+        guard let db else {
+            throw EventStoreError.stepFailed("admission fixture has no database")
+        }
+        return (sqlite3_get_autocommit(db) == 0, sqlite3_total_changes64(db))
     }
 
     public func updateStorageAdmission(

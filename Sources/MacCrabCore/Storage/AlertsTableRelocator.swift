@@ -49,7 +49,7 @@ public enum AlertsTableRelocator {
         let eventsDB = directory + "/events.db"
         let alertsDB = directory + "/alerts.db"
         let eventPolicy = suppliedEventPolicy ?? SQLitePersistentStorePolicy(
-            maxFootprintBytes: 340 * SQLitePersistentStorePolicy.bytesPerMiB,
+            maxFootprintBytes: 376 * SQLitePersistentStorePolicy.bytesPerMiB,
             freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
             transactionReserveBytes: SQLitePersistentStorePolicy
                 .eventTransactionReserveBytes,

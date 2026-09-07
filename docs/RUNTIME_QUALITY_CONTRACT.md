@@ -93,6 +93,23 @@ loading rejects or safely clamps any combination whose fixed schema/index
 floor, evidence budget, transaction reserve, and required journal window
 cannot fit beneath its cap.
 
+Events maintenance targets include both the maximum supported base transaction
+and its separate terminal-settlement headroom: two 32-MiB reserves, plus the
+file lane's priority reserve. The no-DML startup reprobe proves those same terms
+under SQLite's writer lock. This is capacity for one transaction at that instant;
+it does not guarantee loss-free traffic between periodic maintenance samples.
+Maintenance retains its separately bounded cap-plus-one-reserve recovery path.
+
+The factory events/evidence envelope is 476 MiB: a 376-MiB event family and the
+existing 100-MiB evidence tier. 376 is the smallest whole-MiB family preserving
+the previous default's 274-MiB proactive allowance after the extra transaction
+reserve and proportional priority reserve are included. It also preserves the
+previous 272-MiB retention target. This arithmetic correction is not a measured
+sustainable-throughput claim. The minimum event family is 112 MiB, retaining
+32 MiB after both transaction reserves and the 16-MiB priority floor. Explicit
+larger custom budgets remain authoritative; an unmet retention target stays
+visible. The 15-minute forensic floor is unchanged.
+
 Alert-capture live status permits ordinary queueing while the oldest outstanding
 item is at most **90 seconds** old and the active operation is at most
 **45 seconds** old. The active target allows the existing 30 s exact-snapshot

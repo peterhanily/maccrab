@@ -159,7 +159,7 @@ struct EventsSizeCapIntervalTests {
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
         #expect(cfg.storage.eventsSizeCapIntervalMinutes == 10)
         // Sibling storage fields untouched
-        #expect(cfg.storage.eventsMaxSizeMB == 440)   // v1.21.6-rc.12 default
+        #expect(cfg.storage.eventsMaxSizeMB == 476)
         #expect(cfg.storage.eventsHotTierMinutes == 30)
         #expect(cfg.storage.alertsRetentionDays == 365)
         // Unrelated top-level field untouched
@@ -196,7 +196,7 @@ struct EventsSizeCapIntervalTests {
             #expect(cfg.storage.processEventsFloorMinutes == value,
                     "\(key) should decode to \(value)")
             // Sibling storage fields untouched by the partial decode.
-            #expect(cfg.storage.eventsMaxSizeMB == 440)
+            #expect(cfg.storage.eventsMaxSizeMB == 476)
             #expect(cfg.storage.eventsHotTierMinutes == 30)
         }
     }
@@ -208,12 +208,48 @@ struct EventsSizeCapIntervalTests {
         let boundary = EventsSizeCapBoundary(maxSizeMiB: 300)
 
         #expect(boundary.nominalCapBytes == 314_572_800)
-        #expect(boundary.hardAdmissionBoundaryBytes == 281_018_368)
-        #expect(boundary.fileLaneAdmissionBoundaryBytes == 249_561_088)
-        #expect(boundary.proactiveSweepBoundaryBytes == 247_463_936)
-        // 80% of 300 MiB is 240 MiB, which would land above the proactive
-        // 236 MiB watermark. The shared target must not immediately re-arm.
-        #expect(boundary.targetBytes == 247_463_936)
+        #expect(boundary.hardAdmissionBoundaryBytes == 247_463_936)
+        #expect(boundary.fileLaneAdmissionBoundaryBytes == 216_006_656)
+        #expect(boundary.proactiveSweepBoundaryBytes == 216_006_656)
+        // Two 32-MiB producer/settlement reserves plus the 30-MiB priority
+        // reserve leave 206 MiB, below the historical 240-MiB target.
+        #expect(boundary.targetBytes == 216_006_656)
+    }
+
+    @Test("convergence leaves both producer reserves and the file lane's priority headroom",
+          arguments: [112, 128, 300, 320, 376, 640, 700, Int.max])
+    func convergedFootprintSupportsMaximumProducer(capMiB: Int) {
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: capMiB)
+        let reserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
+        let priority = EventStore.priorityLaneReserveBytes(
+            maxFootprintBytes: boundary.nominalCapBytes
+        )
+        // The production journal validates the base estimate <= reserve, then
+        // charges a separate complete postcommit reserve for settlement.
+        for baseEstimate in [Int64(1), reserve / 2, reserve] {
+            #expect(boundary.targetBytes + baseEstimate + reserve + priority
+                <= boundary.nominalCapBytes)
+            #expect(boundary.proactiveSweepBoundaryBytes + baseEstimate + reserve + priority
+                <= boundary.nominalCapBytes)
+        }
+        #expect(boundary.targetBytes >= reserve)
+        #expect(boundary.fileLaneAdmissionBoundaryBytes + 1 + reserve + reserve + priority
+            > boundary.nominalCapBytes)
+        #expect(boundary.hardAdmissionBoundaryBytes + reserve + reserve
+            == boundary.nominalCapBytes)
+    }
+
+    @Test("factory budget preserves the prior retention allowance with the missing reserve included")
+    func factoryBudgetPreservesPriorAllowance() {
+        let capMiB = DaemonConfig.StorageConfig().effectiveEventsFamilyMaxSizeMB
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: capMiB)
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
+        // Prior 340-MiB policy: proactive = 340 - 32 - 34 = 274 MiB,
+        // target = 80% * 340 = 272 MiB. Preserve both existing allowances.
+        #expect(boundary.proactiveSweepBoundaryBytes >= 274 * mib)
+        #expect(boundary.targetBytes >= 272 * mib)
+        #expect(EventsSizeCapBoundary(maxSizeMiB: capMiB - 1)
+            .proactiveSweepBoundaryBytes < 274 * mib)
     }
 
     @Test("manual and watchdog decision covers the hard-boundary-to-cap gap")
@@ -245,7 +281,7 @@ struct EventsSizeCapIntervalTests {
 
     @Test("startup converges the writable interval above the retention target")
     func startupConvergesTargetToProactiveInterval() {
-        let boundary = EventsSizeCapBoundary(maxSizeMiB: 340)
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: 700)
         let stranded = boundary.targetBytes + 1
 
         #expect(stranded <= boundary.proactiveSweepBoundaryBytes)
@@ -278,39 +314,42 @@ struct EventsSizeCapIntervalTests {
         func fileLaneBoundary(capMiB: Int) -> Int64 {
             let cap = Int64(capMiB) * 1_048_576
             return cap
-                - SQLitePersistentStorePolicy.eventTransactionReserveBytes
+                - 2 * SQLitePersistentStorePolicy.eventTransactionReserveBytes
                 - EventStore.priorityLaneReserveBytes(
                     maxFootprintBytes: cap
                 )
         }
 
-        // Production uses the charged bytes, not physical DBSTAT ownership:
-        // 340 MiB steady + ceil(34,492,416 / 1 MiB) = 373 MiB live.
+        // Production uses charged bytes, not physical DBSTAT ownership. The
+        // factory budget preserves its prior retention allowance after adding
+        // the producer's separate base-transaction headroom.
         #expect(measuredTransitionReserveMiB == 33)
-        let upgradedCapMiB = 340 + measuredTransitionReserveMiB
-        #expect(upgradedCapMiB == 373)
+        let factoryCapMiB = DaemonConfig.StorageConfig().effectiveEventsFamilyMaxSizeMB
+        #expect(factoryCapMiB == 376)
+        let upgradedCapMiB = factoryCapMiB + measuredTransitionReserveMiB
+        #expect(upgradedCapMiB == 409)
         let upgraded = EventsSizeCapBoundary(maxSizeMiB: upgradedCapMiB)
         #expect(upgraded.targetBytes > installedFloorBytes)
         #expect(fileLaneBoundary(capMiB: upgradedCapMiB)
             > installedFloorBytes)
 
-        let fresh = EventsSizeCapBoundary(maxSizeMiB: 340)
+        let fresh = EventsSizeCapBoundary(maxSizeMiB: factoryCapMiB)
         #expect(fresh.targetBytes > freshFloorBytes)
-        #expect(fileLaneBoundary(capMiB: 340) > freshFloorBytes)
+        #expect(fileLaneBoundary(capMiB: factoryCapMiB) > freshFloorBytes)
         #expect(EventRetentionFloor.minutes == 15)
     }
 
     @Test("undersized and extreme event caps retain a positive safe maintenance window")
     func boundaryRejectsZeroTargetConfigurations() {
         let minimumMiB = DaemonConfig.StorageConfig.minimumEventsSizeMiB
-        #expect(minimumMiB == 96)
+        #expect(minimumMiB == 112)
 
         // These were all accepted as 50–65 MiB before the adversarial pass;
         // subtracting two fixed 32-MiB reserves yielded a 0–1 MiB target.
         for requested in [50, 64, 65, minimumMiB] {
             let boundary = EventsSizeCapBoundary(maxSizeMiB: requested)
-            #expect(boundary.nominalCapBytes == 96 * 1_048_576)
-            #expect(boundary.hardAdmissionBoundaryBytes == 64 * 1_048_576)
+            #expect(boundary.nominalCapBytes == 112 * 1_048_576)
+            #expect(boundary.hardAdmissionBoundaryBytes == 48 * 1_048_576)
             #expect(boundary.proactiveSweepBoundaryBytes == 32 * 1_048_576)
             #expect(boundary.targetBytes == 32 * 1_048_576)
             #expect(boundary.targetBytes > 0)
@@ -321,15 +360,17 @@ struct EventsSizeCapIntervalTests {
         config.eventsMaxSizeMB = 50
         let clamped = config.clampedToSafeFloors()
         // eventsMaxSizeMB is the historical event+evidence envelope. Its safe
-        // floor must preserve both the 96 MiB event-family operating window and
+        // floor must preserve both the 112 MiB event-family operating window and
         // the independently budgeted 50 MiB evidence tier.
         #expect(clamped.eventsMaxSizeMB == minimumMiB + 50)
         #expect(clamped.effectiveEventsFamilyMaxSizeMB == minimumMiB)
 
-        let defaultBoundary = EventsSizeCapBoundary(maxSizeMiB: 340)
-        #expect(defaultBoundary.nominalCapBytes == 340 * 1_048_576)
-        #expect(defaultBoundary.proactiveSweepBoundaryBytes > 0)
-        #expect(defaultBoundary.targetBytes > 0)
+        // Explicit prior settings remain authoritative; this is not the new
+        // factory default and is not inferred to be one during config loading.
+        let customBoundary = EventsSizeCapBoundary(maxSizeMiB: 340)
+        #expect(customBoundary.nominalCapBytes == 340 * 1_048_576)
+        #expect(customBoundary.proactiveSweepBoundaryBytes > 0)
+        #expect(customBoundary.targetBytes > 0)
 
         let extreme = EventsSizeCapBoundary(maxSizeMiB: .max)
         #expect(extreme.nominalCapBytes

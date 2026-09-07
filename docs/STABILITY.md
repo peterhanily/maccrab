@@ -77,7 +77,7 @@ all caps are tunable under the `storage` block in `daemon_config.json` (see
 
 | Store | Default cap | Notes |
 |-------|------------:|-------|
-| `events.db` | 340 MiB steady-state (`events_max_size_mb` 440 minus the 100 MiB evidence allocation) | Whole-family DB+WAL+SHM cap. Upgraded stores temporarily add only their measured legacy-evidence reserve. The default is sized to retain the 15-minute forensic floor above both maintenance and file-lane admission boundaries. |
+| `events.db` | 376 MiB steady-state (`events_max_size_mb` 476 minus the 100 MiB evidence allocation) | Whole-family DB+WAL+SHM cap. Upgraded stores temporarily add only their measured legacy-evidence reserve. The factory cap preserves the prior 274 MiB proactive allowance after charging both the maximum base transaction and its post-commit reserve; explicit saved caps remain authoritative. |
 | `alerts.db` | 200 MiB physical family (`alerts_max_size_mb` 100 + `evidence_max_size_mb` 100) | Combined DB+WAL+SHM admission covers alert rows and their evidence ownership; each owner also retains its independent 100 MiB sub-cap. Alerts are retained for `alerts_retention_days` (default 365). |
 | `campaigns.db` | 50 MB (`campaigns_max_size_mb`) | Retained `campaigns_retention_days` (default 365). |
 | `tracegraph.db` | 250 MB (`tracegraph_max_size_mb`) | Causal-graph entity/edge substrate; retained `tracegraph_retention_days` (default 90). Over cap, oldest graph is evicted; an orphan sweep also runs. |

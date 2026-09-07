@@ -179,13 +179,12 @@ struct DaemonConfig: Codable {
         static let maximumSweepIntervalMinutes = 10_080 // one week
         static let maximumRetentionDays = 3_650         // ten years
         static let maximumSizeMiB = 1_048_576            // one TiB
-        /// The events writer reserves 32 MiB for one bounded transaction. The
-        /// maintenance watermark needs a second reserve below hard admission,
-        /// and must still leave at least one reserve of retained store. Caps
-        /// below 3x the reserve cannot satisfy that invariant and previously
-        /// collapsed the maintenance target to zero.
+        /// Leave room for a maximum 32 MiB base transaction, its full 32 MiB
+        /// post-commit reserve, the 16 MiB file-lane priority floor, and at
+        /// least 32 MiB of retained store at the maintenance target: 112 MiB.
         static let minimumEventsSizeMiB = Int(
-            (SQLitePersistentStorePolicy.eventTransactionReserveBytes * 3)
+            (SQLitePersistentStorePolicy.eventTransactionReserveBytes * 3
+                + 16 * SQLitePersistentStorePolicy.bytesPerMiB)
                 / SQLitePersistentStorePolicy.bytesPerMiB
         )
         static let maximumStreamCap = 1_000_000
@@ -237,8 +236,8 @@ struct DaemonConfig: Codable {
         /// family cap is `eventsMaxSizeMB - evidenceMaxSizeMB`; the alerts.db
         /// family cap is `alertsMaxSizeMB + evidenceMaxSizeMB`. Their exact sum
         /// remains `eventsMaxSizeMB + alertsMaxSizeMB`, so the ownership move
-        /// neither raises the steady-state disk budget nor labels 440 MiB as an
-        /// event-only allowance.
+        /// neither raises the configured steady-state disk budget nor labels
+        /// the combined envelope as an event-only allowance.
         ///
         /// Upgrades are different: the preserved legacy
         /// `events.db.alert_evidence` table can still own as much as the full
@@ -299,7 +298,13 @@ struct DaemonConfig: Codable {
         /// 20 MiB correction leaves measured headroom above both boundaries
         /// without weakening the 15-minute forensic floor. Explicit operator
         /// values remain authoritative; this changes only the shipped default.
-        var eventsMaxSizeMB: Int = 440
+        /// v1.22.0: the maximum-base admission boundary charges both the base
+        /// estimate and post-commit reserve. Preserve the prior 340 MiB family's
+        /// 274 MiB proactive allowance: 0.9 * family - 64 >= 274, so 376 MiB is
+        /// the smallest whole-MiB family. Its 274.4 MiB target also preserves
+        /// the prior 272 MiB target. Add 100 MiB of evidence for a 476 MiB
+        /// factory envelope; explicitly configured or saved caps do not change.
+        var eventsMaxSizeMB: Int = 476
 
         /// Cadence (in minutes) for the events.db size-cap enforcer.
         ///
@@ -870,8 +875,8 @@ struct DaemonConfig: Codable {
     /// override and remains authoritative.
     ///
     /// The old generated events value inherits the already-decoded system
-    /// configuration instead of blindly becoming 440. With the shipped config
-    /// that inherited value is 440; if an administrator explicitly configured
+    /// configuration instead of blindly becoming a fixed cap. If an
+    /// administrator explicitly configured
     /// a different envelope in daemon_config.json, the stale generated UI
     /// default no longer shadows it.
     @discardableResult
@@ -1055,7 +1060,7 @@ struct DaemonConfig: Codable {
         // that Settings wrote months ago keeps pinning its values across every
         // upgrade, so shipped cap corrections could be inert with no diagnostic.
         // rc.12 explicitly recognizes only the complete prior UI-generated 420
-        // tuple above and inherits the current 440 default; partial, tuned,
+        // tuple above and inherits the decoded system cap; partial, tuned,
         // current-generation, and legacy-cap overrides remain authoritative.
         // Name every value this file shadows, with both numbers, so all other
         // config shadowing is visible in the log instead of only in behaviour.
