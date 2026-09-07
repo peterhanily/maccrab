@@ -57,6 +57,25 @@ public actor NetworkCollector {
         deliveryTelemetry.snapshot()
     }
 
+    public nonisolated let pollingHealth: NetworkPollingHealth
+    private let polling: PollingOperations
+
+    /// Internal dependencies keep ordinary progress/lifecycle tests off libproc.
+    struct PollingOperations: Sendable {
+        var enumerate: (@Sendable () async throws -> [ConnectionKey: SocketConnectionInfo])?
+        var makeEvent: (@Sendable (SocketConnectionInfo) -> Event)?
+        var sleep: @Sendable (TimeInterval) async throws -> Void = {
+            try await Task.sleep(for: .seconds($0))
+        }
+        var adjustedInterval: @Sendable (TimeInterval) -> TimeInterval = {
+            PowerGate.adjustedInterval(base: $0)
+        }
+        var now: @Sendable () -> Date = { Date() }
+        var monotonicNow: @Sendable () -> TimeInterval = {
+            Foundation.ProcessInfo.processInfo.systemUptime
+        }
+    }
+
     /// Poll interval in seconds between socket enumeration sweeps.
     private let pollInterval: TimeInterval
 
@@ -96,7 +115,15 @@ public actor NetworkCollector {
     ///   intervals are >30s anyway, and ES gives us real-time exec context for
     ///   the spawning process).
     public init(pollInterval: TimeInterval = 10.0) {
+        self.init(pollInterval: pollInterval, polling: PollingOperations())
+    }
+
+    init(pollInterval: TimeInterval = 10.0, polling: PollingOperations) {
         self.pollInterval = pollInterval
+        self.polling = polling
+        self.pollingHealth = NetworkPollingHealth(
+            now: polling.now, monotonicNow: polling.monotonicNow
+        )
 
         var capturedContinuation: AsyncStream<Event>.Continuation!
         self.events = AsyncStream<Event>(
@@ -119,23 +146,26 @@ public actor NetworkCollector {
             return
         }
         lifecyclePhase = .running
+        guard let generation = pollingHealth.begin() else { return }
 
         logger.info("NetworkCollector starting — poll interval \(self.pollInterval)s.")
 
         pollTask = Task { [weak self] in
             guard let self else { return }
             // Perform an initial sweep immediately.
-            await self.sweep()
+            await self.sweep(generation: generation)
 
             while !Task.isCancelled {
                 // Network sweep frequency matters for detection latency, but
                 // a moderate slowdown on battery is still a good trade — use
                 // the default aggressiveness (1.0).
-                let adjusted = PowerGate.adjustedInterval(base: self.pollInterval)
-                try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
+                let adjusted = self.polling.adjustedInterval(self.pollInterval)
+                do { try await self.polling.sleep(adjusted) }
+                catch { break }
                 guard !Task.isCancelled else { break }
-                await self.sweep()
+                await self.sweep(generation: generation)
             }
+            self.pollingHealth.stop()
         }
     }
 
@@ -167,6 +197,7 @@ public actor NetworkCollector {
     private func beginStop() -> Task<Void, Never>? {
         if lifecyclePhase == .stopped { return nil }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         let task = pollTask
         task?.cancel()
         continuation?.finish()
@@ -179,47 +210,82 @@ public actor NetworkCollector {
     /// Performs a single enumeration of all process sockets, emitting events
     /// for newly discovered connections and pruning stale entries from the
     /// known set.
-    private func sweep() async {
+    private func sweep(generation: UInt64) async {
         let priorKeys = knownConnections
         // libproc enumeration can issue thousands of syscalls. Keep it off the
         // actor so stopAndJoin can seal/cancel promptly instead of sitting
         // behind a long synchronous sweep before its deadline even begins.
-        let result = await Task.detached(priority: .utility) { [self] in
-            let current = enumerateAllConnections()
+        let operations = polling
+        let worker = Task.detached(priority: .utility) { [self] in
+            let current: [ConnectionKey: SocketConnectionInfo]
+            if let enumerate = operations.enumerate {
+                current = try await enumerate()
+            } else {
+                current = try enumerateAllConnections()
+            }
+            try Task.checkCancellation()
             let newEvents = current.compactMap { key, info -> Event? in
-                priorKeys.contains(key) ? nil : buildEvent(from: info)
+                guard !priorKeys.contains(key) else { return nil }
+                return operations.makeEvent?(info) ?? buildEvent(from: info)
             }
+            try Task.checkCancellation()
             return (keys: Set(current.keys), events: newEvents)
-        }.value
-
-        guard lifecyclePhase == .running, !Task.isCancelled else { return }
-        for event in result.events {
-            if let continuation {
-                let yieldResult = continuation.yield(event)
-                deliveryTelemetry.recordYield(offered: event, result: yieldResult)
-            }
         }
+        do {
+            let result = try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            guard lifecyclePhase == .running, !Task.isCancelled else { return }
+            for event in result.events {
+                if let continuation {
+                    let yieldResult = continuation.yield(event)
+                    deliveryTelemetry.recordYield(offered: event, result: yieldResult)
+                }
+            }
 
-        // Update known connections — stale entries are implicitly removed
-        // because we replace the entire set.
-        knownConnections = result.keys
+            // A successful empty or unchanged snapshot is still poll progress.
+            knownConnections = result.keys
+            pollingHealth.completed(generation: generation)
+        } catch {
+            guard lifecyclePhase == .running, !Task.isCancelled else { return }
+            // Preserve the previous snapshot on failure: a failed PID listing is
+            // not evidence that every previously observed connection disappeared.
+            pollingHealth.failed(generation: generation, message: String(describing: error))
+        }
     }
 
     // MARK: - PID Enumeration
 
     /// Returns an array of all active PIDs on the system.
-    private nonisolated func listAllPIDs() -> [Int32] {
-        var bufferSize = Self.initialPIDBufferCount
+    enum EnumerationFailure: Error, Equatable {
+        case processListUnavailable
+        case processListTruncated
+    }
+
+    private nonisolated func listAllPIDs() throws -> [Int32] {
+        try Self.enumeratePIDs(initialBufferCount: Self.initialPIDBufferCount) { pids in
+            let capacityBytes = Int32(pids.count * MemoryLayout<Int32>.size)
+            return proc_listpids(
+                UInt32(PROC_ALL_PIDS), 0, &pids,
+                capacityBytes
+            )
+        }
+    }
+
+    /// One bounded retry; failure and a still-full listing cannot certify a
+    /// complete poll. The injected reader also covers these ordinary outcomes
+    /// without asking libproc about the test host.
+    static func enumeratePIDs(
+        initialBufferCount: Int,
+        read: (inout [Int32]) -> Int32
+    ) throws -> [Int32] {
+        var bufferSize = initialBufferCount
         var pids = [Int32](repeating: 0, count: bufferSize)
+        let byteCount = read(&pids)
 
-        let byteCount = proc_listpids(
-            UInt32(PROC_ALL_PIDS),
-            0,
-            &pids,
-            Int32(bufferSize * MemoryLayout<Int32>.size)
-        )
-
-        guard byteCount > 0 else { return [] }
+        guard byteCount > 0 else { throw EnumerationFailure.processListUnavailable }
 
         let pidCount = Int(byteCount) / MemoryLayout<Int32>.size
         // If we filled the buffer, the system may have more PIDs.  Grow and
@@ -227,15 +293,10 @@ public actor NetworkCollector {
         if pidCount >= bufferSize {
             bufferSize = pidCount * 2
             pids = [Int32](repeating: 0, count: bufferSize)
-            let retryBytes = proc_listpids(
-                UInt32(PROC_ALL_PIDS),
-                0,
-                &pids,
-                Int32(bufferSize * MemoryLayout<Int32>.size)
-            )
-            let retryCount = retryBytes > 0
-                ? Int(retryBytes) / MemoryLayout<Int32>.size
-                : pidCount
+            let retryBytes = read(&pids)
+            guard retryBytes > 0 else { throw EnumerationFailure.processListUnavailable }
+            let retryCount = Int(retryBytes) / MemoryLayout<Int32>.size
+            guard retryCount < bufferSize else { throw EnumerationFailure.processListTruncated }
             return Array(pids.prefix(retryCount)).filter { $0 > 0 }
         }
 
@@ -245,7 +306,7 @@ public actor NetworkCollector {
     // MARK: - Socket Enumeration
 
     /// Information about a single observed socket, used to build an `Event`.
-    private struct SocketConnectionInfo: Sendable {
+    struct SocketConnectionInfo: Sendable {
         let key: ConnectionKey
         let pid: Int32
         let localIp: String
@@ -261,11 +322,12 @@ public actor NetworkCollector {
     /// process on the system.
     ///
     /// - Returns: Dictionary keyed by `ConnectionKey` for deduplication.
-    private nonisolated func enumerateAllConnections() -> [ConnectionKey: SocketConnectionInfo] {
-        let pids = listAllPIDs()
+    private nonisolated func enumerateAllConnections() throws -> [ConnectionKey: SocketConnectionInfo] {
+        let pids = try listAllPIDs()
         var results: [ConnectionKey: SocketConnectionInfo] = [:]
 
         for pid in pids {
+            try Task.checkCancellation()
             // Skip kernel (0) and launchd (1) unless you have a reason.
             if pid <= 1 { continue }
 

@@ -216,15 +216,22 @@ public final class V2DashboardState: ObservableObject {
     /// flips `provider` to a `V2LiveDataProvider`. Idempotent — safe
     /// to call repeatedly (e.g. after the user installs the daemon).
     public func connectLiveData() async {
+        guard !deferProviderDuringStartup() else { return }
+        providerDeferredForStartup = false
         providerProbeGeneration &+= 1
         let generation = providerProbeGeneration
         let probed = await V2LiveDataProvider(source: engineSource)
-        guard generation == providerProbeGeneration else { return }
+        guard generation == providerProbeGeneration,
+              !deferProviderDuringStartup() else {
+            probed?.retireEventReads()
+            return
+        }
         // Record that the probe ran BEFORE acting on its result, so any surface
         // gated on didProbeLiveData flips exactly once, in the same main-actor
         // step that swaps the provider.
         didProbeLiveData = true
         if let live = probed {
+            (provider as? V2LiveDataProvider)?.retireEventReads()
             self.provider = live
             let dir = live.dataDir.map { " (\($0))" } ?? ""
             showToast(V2Toast(
@@ -246,14 +253,21 @@ public final class V2DashboardState: ObservableObject {
     /// Automatic recovery cannot change source directories. A generation guard
     /// prevents an older asynchronous probe from replacing a newer provider.
     public func reconnectLiveDataIfStale(force: Bool = false) async {
+        guard !deferProviderDuringStartup() else { return }
+        providerDeferredForStartup = false
         providerProbeGeneration &+= 1
         let generation = providerProbeGeneration
         if force {
+            (provider as? V2LiveDataProvider)?.retireEventReads()
             provider = V2OfflineDataProvider()
             paletteAlerts = []; paletteRules = []; paletteTraces = []
         }
         let reprobed = await V2LiveDataProvider(source: engineSource)
-        guard generation == providerProbeGeneration else { return }
+        guard generation == providerProbeGeneration,
+              !deferProviderDuringStartup() else {
+            reprobed?.retireEventReads()
+            return
+        }
         didProbeLiveData = true
         guard let live = reprobed else { return }
         if Self.shouldAdoptReprobe(
@@ -263,7 +277,10 @@ public final class V2DashboardState: ObservableObject {
             reprobeDir: live.dataDir,
             reprobeDegraded: live.lastErrorDescription != nil
         ) {
+            (provider as? V2LiveDataProvider)?.retireEventReads()
             self.provider = live
+        } else {
+            live.retireEventReads()
         }
     }
 
@@ -281,7 +298,30 @@ public final class V2DashboardState: ObservableObject {
 
     public func onEngineIdentity(_ identity: EngineTelemetryIdentity?) async {
         let changed = Self.updateEngineIdentity(&lastEngineIdentity, next: identity)
+        guard !deferProviderDuringStartup() else { return }
         if changed { await reconnectLiveDataIfStale(force: true) }
+    }
+
+    private var providerDeferredForStartup = false
+
+    @discardableResult
+    private func deferProviderDuringStartup() -> Bool {
+        guard engineSource.defersEventReads() else { return false }
+        if !providerDeferredForStartup {
+            providerDeferredForStartup = true
+            providerProbeGeneration &+= 1
+            (provider as? V2LiveDataProvider)?.retireEventReads()
+            provider = V2OfflineDataProvider()
+            paletteAlerts = []; paletteRules = []; paletteTraces = []
+        }
+        return true
+    }
+
+    private func resumeProviderAfterStartup() async {
+        guard foregroundActive, providerDeferredForStartup,
+              !engineSource.defersEventReads() else { return }
+        providerDeferredForStartup = false
+        await reconnectLiveDataIfStale()
     }
 
     nonisolated static func updateEngineIdentity(_ previous: inout EngineTelemetryIdentity?, next: EngineTelemetryIdentity?) -> Bool {
@@ -307,7 +347,9 @@ public final class V2DashboardState: ObservableObject {
         // double-fire the same edge.
         let fire = Self.bootPhaseDidBecomeReady(previous: lastBootPhase, next: phase)
         lastBootPhase = phase
-        if fire { await reconnectLiveDataIfStale() }
+        guard !deferProviderDuringStartup() else { return }
+        if providerDeferredForStartup { await resumeProviderAfterStartup() }
+        else if fire { await reconnectLiveDataIfStale() }
     }
 
     /// Pure non-ready→ready edge detector for `onSysextBootPhase`, extracted
@@ -319,6 +361,9 @@ public final class V2DashboardState: ObservableObject {
     }
 
     public func disconnectLiveData() {
+        providerProbeGeneration &+= 1
+        providerDeferredForStartup = false
+        (provider as? V2LiveDataProvider)?.retireEventReads()
         #if DEBUG
         self.provider = V2MockDataProvider()
         showToast(V2Toast(kind: .info, title: "Switched to sample data"))
@@ -342,6 +387,7 @@ public final class V2DashboardState: ObservableObject {
                     guard let self, self.foregroundActive else { return }
                     self.refreshTick &+= 1
                 }
+                await self?.resumeProviderAfterStartup()
             }
         }
     }

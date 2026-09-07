@@ -356,53 +356,126 @@ let preIngestionStorageRecoveryMaximumPasses = 120
 let preIngestionStoragePinnedRetryPasses = 120
 let preIngestionStoragePinnedRetryDelayNanoseconds: UInt64 = 500_000_000
 
-/// v1.22.0 (item 2, boot <3s): a hard wall-clock ceiling across each of the two
-/// pre-producer storage-retry loops. Attempt counts alone let a persistently
-/// WAL-pinned boot (e.g. a stuck dashboard read that never releases its read
-/// snapshot) hang for up to ~60s per loop before the outer abort fires. That
-/// converts a slow success into a fast, loud failure so boot cannot silently
-/// blow the readiness budget; a genuinely transient pin still clears well inside
-/// it. This bounds the WORST case — it does not itself make a contended boot
-/// reach readiness in <3s (that remains a fail-fast, not a fail-slow).
+/// Retry grace policy, not a total startup-time guarantee. Verification and
+/// synchronous SQLite calls have their own measured cost. The EventStore
+/// operation helper below starts its monotonic grace at the first retryable
+/// failure; the separate bounded maintenance loop retains its policy below.
 let preIngestionStorageRetryWallClockBudgetSeconds: TimeInterval = 5
 
-/// Retry only EventStore's typed lock-contention signal during the
-/// pre-producer transaction. The operation must be crash-resumable or
-/// read/checkpoint-only; permanent storage/corruption errors escape
-/// immediately. The callback keeps the independent boot heartbeat fresh while
-/// an installed dashboard holds a legitimate read snapshot.
+struct EventStoreStartupRetryObservation: Sendable {
+    let attempt: Int
+    let outcome: String
+    let retryCause: String?
+    /// Includes initial verification and its first checkpoint call, rather
+    /// than claiming that all this time was spent in contention.
+    let initialAttemptDuration: Duration
+    let latestAttemptDuration: Duration
+    let retryElapsed: Duration
+    let totalElapsed: Duration
+
+    var diagnostic: String {
+        func seconds(_ value: Duration) -> Double {
+            let parts = value.components
+            return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+        }
+        return "attempt=\(attempt), outcome=\(outcome), retry_cause=\(retryCause ?? "none"), initial_attempt_seconds=\(seconds(initialAttemptDuration)), latest_attempt_seconds=\(seconds(latestAttemptDuration)), retry_seconds=\(seconds(retryElapsed)), total_seconds=\(seconds(totalElapsed))"
+    }
+}
+
+/// Retry typed contention or the existing bounded memory-credit shortage.
+/// Admission, integrity and other failures escape with their original type.
+/// The operation must be crash-resumable or read/checkpoint-only. Grace begins
+/// after the first retryable failure, so costly initial preparation cannot use
+/// it up. No later attempt starts after its deadline. An already-running
+/// synchronous SQLite call may finish later; its cost remains in diagnostics.
 func retryTransientEventStoreStartupOperation<T>(
     maximumAttempts: Int = preIngestionStoragePinnedRetryPasses,
     retryDelayNanoseconds: UInt64 =
         preIngestionStoragePinnedRetryDelayNanoseconds,
+    retryGrace: Duration = .seconds(preIngestionStorageRetryWallClockBudgetSeconds),
+    monotonicNow: () -> ContinuousClock.Instant = { .now },
+    sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
     onRetry: @Sendable (Int) -> Void = { _ in },
+    onObservation: (EventStoreStartupRetryObservation) -> Void = {
+        Logger(subsystem: "com.maccrab", category: "event-startup-retry")
+            .notice("EventStore startup operation: \($0.diagnostic, privacy: .public)")
+    },
     operation: () async throws -> T
 ) async throws -> T {
     let attemptLimit = max(1, maximumAttempts)
-    // v1.22.0 (item 2): also bound the loop by wall-clock time, not just by
-    // attempt count, so a persistently pinned reader fails boot fast instead of
-    // burning the full attempt budget of 500ms sleeps.
-    let retryStart = Date()
+    let started = monotonicNow()
+    let grace = max(.zero, retryGrace)
+    let delay = Duration.nanoseconds(Int64(clamping: retryDelayNanoseconds))
+    var retryStarted: ContinuousClock.Instant?
+    var initialAttemptDuration: Duration = .zero
+    var latestAttemptDuration: Duration = .zero
+    var lastRetryableError: EventStoreError?
+    var retryCause: String?
+    func report(_ outcome: String, attempt: Int) {
+        let now = monotonicNow()
+        onObservation(.init(attempt: attempt, outcome: outcome, retryCause: retryCause,
+            initialAttemptDuration: initialAttemptDuration,
+            latestAttemptDuration: latestAttemptDuration,
+            retryElapsed: retryStarted.map { $0.duration(to: now) } ?? .zero,
+            totalElapsed: started.duration(to: now)))
+    }
     for attempt in 1...attemptLimit {
+        do { try Task.checkCancellation() }
+        catch {
+            report("cancelled", attempt: attempt - 1)
+            throw error
+        }
+        if let retryStarted, let error = lastRetryableError,
+           monotonicNow() >= retryStarted.advanced(by: grace) {
+            report("grace_exhausted", attempt: attempt - 1)
+            throw error
+        }
+        let attemptStarted = monotonicNow()
         do {
-            return try await operation()
-        } catch let error as EventStoreError {
-            // Already attempt-bounded, so retrying in-process credit exhaustion
-            // here is safe and preserves the pre-rc.32 startup behaviour that
-            // `.busy` used to cover before the two conditions were split.
-            let retryable: Bool
-            switch error {
-            case .busy, .memoryLeaseUnavailable: retryable = true
-            default: retryable = false
+            let value = try await operation()
+            latestAttemptDuration = attemptStarted.duration(to: monotonicNow())
+            if attempt == 1 { initialAttemptDuration = latestAttemptDuration }
+            try Task.checkCancellation()
+            report("completed", attempt: attempt)
+            return value
+        } catch {
+            latestAttemptDuration = attemptStarted.duration(to: monotonicNow())
+            if attempt == 1 { initialAttemptDuration = latestAttemptDuration }
+            if Task.isCancelled || error is CancellationError {
+                report("cancelled", attempt: attempt)
+                throw CancellationError()
             }
-            guard retryable, attempt < attemptLimit,
-                  Date().timeIntervalSince(retryStart)
-                    < preIngestionStorageRetryWallClockBudgetSeconds else {
+            let eventError = error as? EventStoreError
+            switch eventError {
+            case .busy?: retryCause = "sqlite_contention"
+            case .memoryLeaseUnavailable?: retryCause = "memory_credit"
+            default:
+                retryCause = nil
+                report("nonretryable_failure", attempt: attempt)
                 throw error
             }
+            lastRetryableError = eventError
+            let now = monotonicNow()
+            if retryStarted == nil { retryStarted = now }
+            guard let retryStarted else { throw error }
+            guard attempt < attemptLimit else {
+                report("attempts_exhausted", attempt: attempt)
+                throw error
+            }
+            let deadline = retryStarted.advanced(by: grace)
+            guard now < deadline else {
+                report("grace_exhausted", attempt: attempt)
+                throw error
+            }
+            report("retrying", attempt: attempt)
             onRetry(attempt)
-            if retryDelayNanoseconds > 0 {
-                try await Task.sleep(nanoseconds: retryDelayNanoseconds)
+            let remaining = monotonicNow().duration(to: deadline)
+            if delay > .zero, remaining > .zero {
+                do { try await sleep(min(delay, remaining)) }
+                catch {
+                    report(error is CancellationError ? "cancelled" : "sleep_failed", attempt: attempt)
+                    throw error
+                }
             }
         }
     }
@@ -3049,6 +3122,8 @@ enum DaemonTimers {
                 "capture_shed_total": evidenceCaptureStats.shed,
                 "capture_pending": evidenceCaptureStats.pending,
                 "capture_in_flight": evidenceCaptureStats.inFlight,
+                "capture_oldest_outstanding_age_seconds": evidenceCaptureStats.oldestOutstandingAgeSeconds,
+                "capture_active_operation_age_seconds": evidenceCaptureStats.activeOperationAgeSeconds,
                 "capture_queue_capacity": evidenceCaptureStats.queueCapacity,
                 "capture_accepting": evidenceCaptureStats.accepting,
                 "capture_conserved": evidenceCaptureStats.conserved,
@@ -3182,6 +3257,15 @@ enum DaemonTimers {
                     "enabled": s.enabled,
                 ]
                 if let lt = s.lastTick { d["last_tick_unix"] = lt.timeIntervalSince1970 }
+                if let poll = s.lastPoll { d["last_poll_unix"] = poll.timeIntervalSince1970 }
+                if let count = s.completedPollCount { d["completed_poll_count"] = count }
+                if let native = s.nativeESHealth {
+                    d["native_canary_checks_total"] = native.canaryChecksTotal
+                    d["native_canary_failures_total"] = native.canaryFailuresTotal
+                    if let age = native.callbackAgeSeconds { d["native_callback_age_seconds"] = age }
+                    if let age = native.canaryAgeSeconds { d["native_canary_age_seconds"] = age }
+                    if let outcome = native.canaryOutcome { d["native_canary_outcome"] = outcome.rawValue }
+                }
                 if let le = s.lastError { d["last_error"] = le }
                 return d
             }
@@ -3709,6 +3793,7 @@ enum DaemonTimers {
                     d["coalesced_noop_rows_total"] = Int64(clamping: w.coalescedNoopRowsTotal)
                     d["pending_entity_rows"] = w.pendingEntityRows
                     d["pending_edge_rows"] = w.pendingEdgeRows
+                    d["oldest_outstanding_age_seconds"] = w.oldestOutstandingAgeSeconds
                 }
                 traceGraphStorageDict = d
             } else if let startupAdmission = state.causalStoreStartupAdmission {
@@ -4933,8 +5018,8 @@ enum DaemonTimers {
     // MARK: - v1.21.4 Phase-2 (D3) coverage-canary watchdog
 
     /// Jittered probe interval bounds (seconds): 5-15 min, like the sweep timers.
-    static let canaryMinIntervalSeconds: Double = 300
-    static let canaryMaxIntervalSeconds: Double = 900
+    static let canaryMinIntervalSeconds = ESDeliveryHealth.canaryMinimumIntervalSeconds
+    static let canaryMaxIntervalSeconds = ESDeliveryHealth.canaryMaximumIntervalSeconds
 
     /// A fresh random interval in [min, max]. The unpredictable cadence keeps the
     /// probe from phase-locking with other sweeps and from being trivially timed
@@ -4945,11 +5030,11 @@ enum DaemonTimers {
 
     /// Seconds to wait after the probe spawn before checking coverage — long
     /// enough for the ES callback to latch and the async DB insert to flush.
-    static let canarySettleSeconds: UInt64 = 20
+    static let canarySettleSeconds = ESDeliveryHealth.canarySettleSeconds
     /// Extra DB re-checks (spaced by canaryDBRecheckSeconds) before concluding a
     /// store/eviction gap — tolerates insert-batch latency without crying wolf.
-    static let canaryDBRecheckAttempts = 3
-    static let canaryDBRecheckSeconds: UInt64 = 5
+    static let canaryDBRecheckAttempts = ESDeliveryHealth.canaryDBRecheckAttempts
+    static let canaryDBRecheckSeconds = ESDeliveryHealth.canaryDBRecheckSeconds
 
     /// One coverage-canary cycle: spawn a benign probe exec, then verify it
     /// reached BOTH the ES callback and events.db, and on a gap emit a
@@ -4961,7 +5046,13 @@ enum DaemonTimers {
     /// happens HERE (the timer task), never in the ES callback.
     static func runCoverageCanary(state: DaemonState) async {
         // No ES client (dev non-root fallback) ⇒ nothing to probe.
-        guard let collector = state.collector else { return }
+        guard let collector = state.collector, !Task.isCancelled,
+              let healthToken = collector.deliveryHealth.beginCanary() else { return }
+        defer {
+            if Task.isCancelled {
+                collector.deliveryHealth.finishCanary(healthToken, outcome: .cancelled)
+            }
+        }
 
         let nonce = CoverageCanary.makeNonce()
         collector.armCanaryNonce(nonce)
@@ -4970,12 +5061,16 @@ enum DaemonTimers {
         let spawnedAt = Date()
         guard spawnCanaryProbe(nonce: nonce) else {
             // A failed spawn is a local error, not a coverage gap — don't alert.
-            print("[D3] coverage-canary spawn failed")
+            collector.deliveryHealth.finishCanary(healthToken,
+                outcome: Task.isCancelled ? .cancelled : .spawnFailed)
+            Logger(subsystem: "com.maccrab", category: "coverage-canary")
+                .error("Coverage canary could not start; native coverage verification is unknown")
             return
         }
 
         // Point 1: settle, then read the callback sighting.
         try? await Task.sleep(nanoseconds: canarySettleSeconds * 1_000_000_000)
+        guard !Task.isCancelled else { return }
         let seenAtCallback = collector.canarySeenAtCallback(nonce)
 
         // Point 2: look for the exec in events.db (command line carries the
@@ -4987,9 +5082,11 @@ enum DaemonTimers {
             nonce: nonce,
             since: since
         )
+        guard !Task.isCancelled else { return }
         var attempt = 0
         while storePresence != .present && attempt < canaryDBRecheckAttempts {
             try? await Task.sleep(nanoseconds: canaryDBRecheckSeconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
             storePresence = await canaryPresentInDB(
                 state: state,
                 nonce: nonce,
@@ -4997,6 +5094,8 @@ enum DaemonTimers {
             )
             attempt += 1
         }
+
+        guard !Task.isCancelled else { return }
 
         // Third point: was this probe's retained message refused at the
         // callback→worker hand-off? Read PER-NONCE, not from a
@@ -5010,6 +5109,16 @@ enum DaemonTimers {
             storePresence: storePresence,
             droppedAtHandoff: droppedAtHandoff
         )
+        let healthOutcome: ESDeliveryHealth.CanaryOutcome
+        switch verdict {
+        case .healthy: healthOutcome = .healthy
+        case .kernelGap: healthOutcome = .kernelGap
+        case .ingestHandoffGap: healthOutcome = .ingestHandoffGap
+        case .evictionGap: healthOutcome = .evictionGap
+        case .storeQueryUnknown: healthOutcome = .storeQueryUnknown
+        }
+        collector.deliveryHealth.finishCanary(healthToken,
+            outcome: Task.isCancelled ? .cancelled : healthOutcome)
         guard verdict != .healthy, let stage = verdict.stageLabel else { return }
 
         // A kernel/ingest gap and a hand-off drop are both ACTIVE telemetry loss

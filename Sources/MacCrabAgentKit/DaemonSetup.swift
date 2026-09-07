@@ -887,6 +887,10 @@ enum DaemonSetup {
         }
         logger.notice("EventStore journal migration and integrity proved before generic cap recovery: source=\(journalRecovery.sourceEvents), migrated=\(journalRecovery.migratedEvents), expired=\(journalRecovery.rolledExpiredEvents), corrupt_preserved=\(journalRecovery.corruptPreservedEvents)")
         Self.logBootStep(label: "after_journal_migration", startedAt: startedAt)
+        // Journal verification can consume much of the heartbeat freshness
+        // window. Keep the subsequent capacity-recovery phase explicitly
+        // starting so dashboard readers do not reopen between these stages.
+        Self.writeBootPhase(supportDir: supportDir, phase: "starting", startedAt: startedAt)
         do {
             var expired = 0
             var batches = 0
@@ -1646,11 +1650,14 @@ enum DaemonSetup {
         // collectors that can be quiet for hours during normal idle
         // (USB hotplug, browser extension install, etc.).
         let collectorRegistry = CollectorRegistry()
-        // ESCollector + NetworkCollector tick at fixed cadence so
-        // they're genuinely non-event-driven — a missed tick is real
-        // evidence of stall.
-        await collectorRegistry.register(name: "ESCollector", expectedIntervalSeconds: 5, eventDriven: false)
-        await collectorRegistry.register(name: "NetworkCollector", expectedIntervalSeconds: 10, eventDriven: false)
+        // ES uses event-silence policy. Network sweeps emit only new connections,
+        // so its liveness comes from completed polls independently of events.
+        let networkCollector = NetworkCollector()
+        await collectorRegistry.register(name: "ESCollector",
+                                         expectedIntervalSeconds: Int(ESDeliveryHealth.maximumProofAgeSeconds),
+                                         eventDriven: true, started: false)
+        await collectorRegistry.register(name: "NetworkCollector", expectedIntervalSeconds: 10,
+                                         eventDriven: false, pollingHealth: networkCollector.pollingHealth)
         // UnifiedLog / DNS (BPF) / FSEvents / SystemPolicy are real-
         // time event-driven streams that genuinely sit silent on a
         // quiet machine for minutes at a time. Pre-fix all four were
@@ -2406,9 +2413,6 @@ enum DaemonSetup {
             print("YARA enrichment: active (\(yaraRulesPath))")
         }
 
-        // Initialize network collector (Phase 3)
-        let networkCollector = NetworkCollector()
-
         Self.logBootStep(label: "before_load_rules", startedAt: startedAt)
         // Load compiled rules (single-event)
         // Check both the system dir and the binary-local dir; prefer whichever has more
@@ -2694,6 +2698,12 @@ enum DaemonSetup {
                                             subscribeIntrospection: config.subscribeIntrospectionEvents && esDemand.introspection,
                                             subscribeMemoryProtection: esDemand.memoryProtection,
                                             workerMaxInFlight: config.esWorkerMaxInFlight)
+                if let nativeCollector = collector {
+                    await collectorRegistry.register(name: "ESCollector",
+                        expectedIntervalSeconds: Int(ESDeliveryHealth.maximumProofAgeSeconds),
+                        eventDriven: true,
+                        nativeESHealth: { nativeCollector.deliveryHealthSnapshot() })
+                }
                 logger.info("ES collector started successfully (native client)")
                 esMode = "native client"
             } catch {
@@ -2738,6 +2748,10 @@ enum DaemonSetup {
                 await esloggerCollector!.start()
                 esMode = "eslogger proxy (may need root)"
             }
+        }
+        if collector == nil {
+            await collectorRegistry.recordError(name: "ESCollector",
+                message: "native ES client initialization or subscription unavailable")
         }
         print("Endpoint Security: \(esMode)")
 

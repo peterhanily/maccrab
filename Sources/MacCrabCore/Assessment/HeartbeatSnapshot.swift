@@ -575,6 +575,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let captureShedTotal: Int?
         public let capturePending: Int?
         public let captureInFlight: Int?
+        public let captureOldestOutstandingAgeSeconds: Double?
+        public let captureActiveOperationAgeSeconds: Double?
         public let captureQueueCapacity: Int?
         public let captureAccepting: Bool?
         public let captureConserved: Bool?
@@ -616,6 +618,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case captureShedTotal = "capture_shed_total"
             case capturePending = "capture_pending"
             case captureInFlight = "capture_in_flight"
+            case captureOldestOutstandingAgeSeconds = "capture_oldest_outstanding_age_seconds"
+            case captureActiveOperationAgeSeconds = "capture_active_operation_age_seconds"
             case captureQueueCapacity = "capture_queue_capacity"
             case captureAccepting = "capture_accepting"
             case captureConserved = "capture_conserved"
@@ -631,9 +635,9 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case alertsFamilyReason = "alerts_family_reason"
         }
 
-        /// A single in-flight post-commit capture is normal. Failures, shedding,
-        /// accounting drift, or pending work observed on a slow heartbeat are
-        /// fail-visible; repeated pending snapshots prove a stuck worker.
+        /// Queued and in-flight captures are normal while their measured ages
+        /// remain within the live responsiveness targets. Failures, shedding,
+        /// invalid timing, and accounting drift remain fail-visible.
         public var captureTelemetryPresent: Bool {
             [
                 captureOfferedTotal,
@@ -646,6 +650,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             ].contains { $0 != nil }
                 || captureAccepting != nil
                 || captureConserved != nil
+                || captureOldestOutstandingAgeSeconds != nil
+                || captureActiveOperationAgeSeconds != nil
         }
 
         /// Recompute the producer's exact equation instead of trusting its
@@ -675,12 +681,33 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             return producerVerdict && offered == terminalAndOutstanding
         }
 
+        /// A serial operation may take longer than one SQLite busy timeout.
+        /// Preserve enqueue age through handoff and evaluate the active request
+        /// independently so a stuck operation cannot hide behind an empty queue.
+        public var captureBacklogOverdue: Bool? {
+            guard let pending = capturePending, let inFlight = captureInFlight,
+                  let capacity = captureQueueCapacity,
+                  pending >= 0, pending <= capacity, (0...1).contains(inFlight)
+            else { return nil }
+            let outstanding = pending > 0 || inFlight > 0
+            let oldest = captureOldestOutstandingAgeSeconds
+            let active = captureActiveOperationAgeSeconds
+            if !outstanding, oldest == nil, active == nil { return false }
+            guard let oldest, let active,
+                  oldest.isFinite, active.isFinite,
+                  oldest >= 0, active >= 0, active <= oldest else { return nil }
+            guard outstanding else { return oldest == 0 && active == 0 ? false : nil }
+            guard inFlight > 0 || active == 0 else { return nil }
+            return oldest > AlertEvidenceCaptureResponsiveness.maximumOutstandingAgeSeconds
+                || active > AlertEvidenceCaptureResponsiveness.maximumActiveOperationAgeSeconds
+        }
+
         public var captureDegraded: Bool {
             guard captureTelemetryPresent else { return false }
             return captureConservationMaintained != true
                 || (captureFailuresTotal ?? 0) > 0
                 || (captureShedTotal ?? 0) > 0
-                || (capturePending ?? 0) > 0
+                || captureBacklogOverdue != false
         }
 
         public var transitionDegraded: Bool {
@@ -1538,6 +1565,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let coalescedNoopRowsTotal: Int64?
         public let pendingEntityRows: Int?
         public let pendingEdgeRows: Int?
+        public let oldestOutstandingAgeSeconds: Double?
 
         private enum CodingKeys: String, CodingKey {
             case enabled
@@ -1607,6 +1635,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case coalescedNoopRowsTotal = "coalesced_noop_rows_total"
             case pendingEntityRows = "pending_entity_rows"
             case pendingEdgeRows = "pending_edge_rows"
+            case oldestOutstandingAgeSeconds = "oldest_outstanding_age_seconds"
         }
 
         /// input = committed + failed + in-flight + pending.
@@ -1784,15 +1813,27 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             ])
         }
 
-        /// Coalescing normally drains within 250 ms. Pending work caught by the
-        /// much slower heartbeat remains fail-visible; repeated snapshots prove
-        /// it is stuck. In-flight work alone is an active write, not a backlog.
+        /// A queue is a normal part of coalescing. Only outstanding work older
+        /// than the fixed live responsiveness deadline is an overdue backlog.
+        /// Include in-flight work so starting a slow write cannot reset health.
+        /// Old producers without age metadata remain compatible when idle;
+        /// nonempty queues with unknown/invalid timing cannot report healthy.
         public var hasOutstandingBacklog: Bool? {
             guard let events = ingestEventsPending,
                   let entities = pendingEntityRows,
-                  let edges = pendingEdgeRows else { return nil }
-            return events < 0 || entities < 0 || edges < 0
-                || events > 0 || entities > 0 || edges > 0
+                  let edges = pendingEdgeRows,
+                  let inFlightEvents = ingestEventsInFlight,
+                  let inFlightBatches = writeBatchesInFlight,
+                  let inFlightRows = writeRowsInFlight else { return nil }
+            let counts = [events, entities, edges, inFlightEvents, inFlightBatches, inFlightRows]
+            guard counts.allSatisfy({ $0 >= 0 }) else { return nil }
+            let outstanding = counts.contains { $0 > 0 }
+            guard let age = oldestOutstandingAgeSeconds else {
+                return outstanding ? nil : false
+            }
+            guard age.isFinite, age >= 0 else { return nil }
+            guard outstanding else { return age == 0 ? false : nil }
+            return age > CausalGraphWriteResponsiveness.maximumOutstandingAgeSeconds
         }
 
         /// The SQLite admission block and the rolling writer are independent.
@@ -1827,6 +1868,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             ]
             return int64Values.contains { $0 != nil }
                 || intValues.contains { $0 != nil }
+                || oldestOutstandingAgeSeconds != nil
         }
 
         /// The running producer emits the whole fixed ledger atomically. If a
@@ -1866,7 +1908,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             guard writeTelemetryPresent else { return false }
             return !writeTelemetryComplete
                 || hasStickyWriteFailure != false
-                || hasOutstandingBacklog == true
+                || hasOutstandingBacklog != false
                 || writeConservationMaintained != true
         }
 

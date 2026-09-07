@@ -127,8 +127,8 @@ def validate_value(profile: str, key: str, value: str) -> None:
         semver = r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?"
         if key == "VERSION" and not re.fullmatch(semver, value):
             fail("VERSION is not an allowed MacCrab version")
-        if key == "BUILD_NUMBER" and not re.fullmatch(semver + r"(?:\.[0-9]+)?", value):
-            fail("BUILD_NUMBER is not an allowed Sparkle build identity")
+        if key == "BUILD_NUMBER" and not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.[1-9][0-9]*", value):
+            fail("BUILD_NUMBER must be a numeric base version and positive revision")
         if key == "SU_EDKEY" and not re.fullmatch(r"[A-Za-z0-9+/]{43}=", value):
             fail("SU_EDKEY is not a 32-byte base64 public key")
         if key == "SU_FEEDURL" and not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*", value):

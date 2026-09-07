@@ -23,6 +23,32 @@ expect_failure() {
 }
 
 echo "Release environment parser"
+VERSION_VALIDATOR="$TMP_ROOT/version-validation.sh"
+# Exercise only the ordinary data validator, never any build/sign stage.
+/usr/bin/sed -n '/^validate_build_number() {$/,/^}$/p' \
+    "$SCRIPT_DIR/build-release.sh" > "$VERSION_VALIDATOR"
+[[ -s "$VERSION_VALIDATOR" ]] || { echo "missing build identity validator" >&2; exit 1; }
+printf '\nvalidate_build_number\n' >> "$VERSION_VALIDATOR"
+VERSION=1.22.0-rc.2 BUILD_NUMBER=1.22.0.1121 /bin/bash "$VERSION_VALIDATOR"
+VERSION=1.22.0 BUILD_NUMBER=1.22.0.1122 /bin/bash "$VERSION_VALIDATOR"
+expect_failure "RC marketing suffix is forbidden in the numeric build identity" \
+    /usr/bin/env VERSION=1.22.0-rc.2 BUILD_NUMBER=1.22.0-rc.2.1121 /bin/bash "$VERSION_VALIDATOR"
+expect_failure "numeric build must match the marketing version's base" \
+    /usr/bin/env VERSION=1.22.0-rc.2 BUILD_NUMBER=1.21.5.1121 /bin/bash "$VERSION_VALIDATOR"
+expect_failure "numeric build revision must be positive" \
+    /usr/bin/env VERSION=1.22.0-rc.2 BUILD_NUMBER=1.22.0.0 /bin/bash "$VERSION_VALIDATOR"
+pass "RC and GA share the validated numeric build sequence"
+
+STAGE_VERSION_ENV="$TMP_ROOT/version-stage.env"
+printf 'VERSION=1.22.0-rc.2\nBUILD_NUMBER=1.22.0.1121\n' > "$STAGE_VERSION_ENV"
+/bin/chmod 0600 "$STAGE_VERSION_ENV"
+/usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C \
+    /usr/bin/python3 -I "$SCRIPT_DIR/_release_env.py" --profile stage "$STAGE_VERSION_ENV" >/dev/null
+printf 'VERSION=1.22.0-rc.2\nBUILD_NUMBER=1.22.0-rc.2.1121\n' > "$STAGE_VERSION_ENV"
+expect_failure "persisted stage identity rejects an RC suffix in CFBundleVersion" \
+    /usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C \
+    /usr/bin/python3 -I "$SCRIPT_DIR/_release_env.py" --profile stage "$STAGE_VERSION_ENV"
+
 GOOD_ENV="$TMP_ROOT/release.env"
 printf '%s\n' \
     'export DEVELOPER_ID="Developer ID Application: Test (ABCDEFGHIJ)"' \
@@ -241,6 +267,43 @@ printf '%s' '<p>before ]]><evil/> after</p>' > "$FIXTURE/raw-notes.html"
     echo "  ✗ CDATA terminator was not split" >&2; exit 1;
 }
 pass "malicious CDATA terminator split and namespace-wrapped item parsed"
+
+/usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C \
+    /usr/bin/python3 -I - "$FIXTURE/scripts/_appcast_xml.py" <<'PY'
+import importlib.util
+import sys
+spec = importlib.util.spec_from_file_location('appcast_version_fixture', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+key = module.build_sort_key
+# Pinned Sparkle ignores the dash suffix and balances numeric trailing zeros.
+assert key('1.22.0-rc.1.1120') == key('1.22.0')
+assert key('1.22.0.0') == key('1.22.0')
+assert key('1.22.0-rc.1.1120') < key('1.22.0.1119')
+assert key('1.22.0.1119') < key('1.22.0.1121') < key('1.22.0.1122')
+assert key('1.22.0.9999') < key('1.22.1.1')
+assert not module.BUILD_RE.fullmatch('1.22.0-rc.2.1121')
+assert module.BUILD_RE.fullmatch('1.22.0.1121')
+PY
+pass "appcast ordering matches Sparkle for numeric and historical RC identities"
+
+/usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C \
+    /usr/bin/python3 -I "$FIXTURE/scripts/_appcast_xml.py" generate \
+    --version 1.22.0-rc.2 --build-number 1.22.0.1121 \
+    --pub-date 'Sun, 02 Aug 2026 12:00:00 +0000' \
+    --signature "$SIG" --length 17 --dmg-name MacCrab-v1.22.0-rc.2.dmg \
+    --notes-file "$FIXTURE/raw-notes.html" > "$FIXTURE/rc-item.xml"
+/usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C \
+    /usr/bin/python3 -I "$FIXTURE/scripts/_appcast_xml.py" validate-item \
+    --item "$FIXTURE/rc-item.xml" --expected-version 1.22.0-rc.2 --expected-build 1.22.0.1121 >/dev/null
+expect_failure "appcast producer rejects a nonnumeric RC build" \
+    /usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C \
+    /usr/bin/python3 -I "$FIXTURE/scripts/_appcast_xml.py" generate \
+    --version 1.22.0-rc.2 --build-number 1.22.0-rc.2.1121 \
+    --pub-date 'Sun, 02 Aug 2026 12:00:00 +0000' \
+    --signature "$SIG" --length 17 --dmg-name MacCrab-v1.22.0-rc.2.dmg \
+    --notes-file "$FIXTURE/raw-notes.html"
+pass "appcast keeps RC marketing version separate from numeric build"
 
 cat > "$FIXTURE/feed.xml" <<'XML'
 <?xml version="1.0" encoding="utf-8"?>

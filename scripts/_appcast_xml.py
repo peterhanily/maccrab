@@ -16,7 +16,8 @@ SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 MAX_ITEM_BYTES = 1024 * 1024
 MAX_FEED_BYTES = 4 * 1024 * 1024
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?\Z")
-BUILD_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?(?:\.[0-9]+)?\Z")
+BUILD_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[1-9][0-9]*\Z")
+HISTORICAL_BUILD_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?(?:\.[0-9]+)?\Z")
 PUBDATE_RE = re.compile(r"[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} \+0000\Z")
 
 
@@ -25,14 +26,19 @@ def fail(message: str) -> "None":
 
 
 def build_sort_key(build: str) -> tuple[int, ...]:
-    """Order a Sparkle build string the way Sparkle's own comparator does.
+    """Match pinned Sparkle's comparator for MacCrab's supported build shapes.
 
-    Every run of digits becomes one numeric component, so `1.21.5.1018` is
-    (1, 21, 5, 1018) and `1.21.6-rc.6.1035` is (1, 21, 6, 6, 1035). Comparing
-    tuples of unequal length is correct here because a longer build only ever
-    refines a shorter one; Python already orders (1, 21, 6) below (1, 21, 6, 4).
+    SUStandardVersionComparator stops at a dash and balances numeric versions
+    with zeros. Historical `1.22.0-rc.1.1120` therefore equals `1.22.0`, not a
+    build carrying revision 1120. New producers permit only numeric builds.
+    Unknown historical shapes fail rather than receiving an invented ordering.
     """
-    return tuple(int(part) for part in re.findall(r"[0-9]+", build))
+    if not HISTORICAL_BUILD_RE.fullmatch(build):
+        fail("appcast contains an unsupported historical build version")
+    parts = [int(part) for part in build.split("-", 1)[0].split(".")]
+    while parts and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
 def local_name(tag: str) -> str:
@@ -135,8 +141,8 @@ def validate_item_bytes(
 
     if not VERSION_RE.fullmatch(version):
         fail("invalid shortVersionString")
-    if not BUILD_RE.fullmatch(build):
-        fail("invalid Sparkle build version")
+    if not BUILD_RE.fullmatch(build) or not build.startswith(version.split("-rc.", 1)[0] + "."):
+        fail("Sparkle build must be the numeric base version and a positive revision")
     if expected_version is not None and version != expected_version:
         fail(f"shortVersionString {version!r} != expected {expected_version!r}")
     if expected_build is not None and build != expected_build:
@@ -187,8 +193,8 @@ def validate_feed_bytes(data: bytes) -> tuple[ET.Element, ET.Element]:
 def cmd_generate(args: argparse.Namespace) -> None:
     if not VERSION_RE.fullmatch(args.version):
         fail("--version must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rc.N")
-    if not BUILD_RE.fullmatch(args.build_number):
-        fail("--build-number has an unsafe shape")
+    if not BUILD_RE.fullmatch(args.build_number) or not args.build_number.startswith(args.version.split("-rc.", 1)[0] + "."):
+        fail("--build-number must be the numeric base version and a positive revision")
     if not PUBDATE_RE.fullmatch(args.pub_date):
         fail("--pub-date has an unsafe shape")
     if args.dmg_name != f"MacCrab-v{args.version}.dmg":
@@ -267,7 +273,7 @@ def cmd_inject(args: argparse.Namespace) -> None:
         fail(f"appcast already contains Sparkle build {build}")
 
     # A duplicate check is not a monotonicity check. `BUILD_NUMBER` is
-    # `VERSION.$(git rev-list --count $SOURCE_COMMIT)`, which only increases
+    # `<numeric base>.$(git rev-list --count $SOURCE_COMMIT)`, which only increases
     # along ONE linear history: a release cut from a branch that squash-merged
     # the work carries a LOWER commit count than the candidate that was actually
     # qualified. Publishing that build is worse than publishing nothing —

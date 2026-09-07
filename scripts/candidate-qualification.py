@@ -341,7 +341,7 @@ AGENT_RULE_MANIFEST_PATH = (
 HEX_OBJECT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?$")
-BUILD_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?\.[0-9]+$")
+BUILD_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[1-9][0-9]*$")
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
@@ -1156,8 +1156,8 @@ def candidate_document(
 ) -> Dict[str, Any]:
     if not VERSION_RE.fullmatch(version):
         fail("candidate version has an invalid shape")
-    if not BUILD_RE.fullmatch(build_number) or not build_number.startswith(version + "."):
-        fail("candidate build number must be <version>.<positive commit count>")
+    if not BUILD_RE.fullmatch(build_number) or not build_number.startswith(version.split("-rc.", 1)[0] + "."):
+        fail("candidate build number must be <numeric base version>.<positive commit count>")
     require_object_id(source_commit, "source_commit")
     require_object_id(source_tree, "source_tree")
     clean_ci = validate_preinstall_clean_ci(
@@ -1241,8 +1241,8 @@ def validate_candidate_document(
             f"candidate build number {build_number!r} does not match deterministic "
             f"release build {expected_build_number!r}"
         )
-    if not BUILD_RE.fullmatch(build_number) or not build_number.startswith(version + "."):
-        fail("candidate.build_number must be <version>.<positive commit count>")
+    if not BUILD_RE.fullmatch(build_number) or not build_number.startswith(version.split("-rc.", 1)[0] + "."):
+        fail("candidate.build_number must be <numeric base version>.<positive commit count>")
     validate_preinstall_clean_ci(
         document.get("preinstall_clean_ci"), source_commit=source_commit,
         source_tree=source_tree, path="candidate.preinstall_clean_ci",

@@ -9,12 +9,8 @@
 // panel can show "which collectors are alive" without hardcoding
 // the list.
 //
-// Why one centralised registry rather than touching each
-// collector actor: the monitor consumers in MonitorTasks already
-// loop over `for await event in state.<collector>.events`. Adding
-// one `await state.collectorRegistry.recordTick(...)` call per
-// loop is the smallest possible change that preserves each
-// collector's existing API and isolation.
+// Sources that poll and suppress unchanged results supply separate completion
+// telemetry. Receiving an event cannot prove that a later poll completed.
 
 import Foundation
 import os.log
@@ -29,6 +25,12 @@ public actor CollectorRegistry {
         /// Wall-clock time of the most recent event from this collector.
         /// Nil before the first event.
         public let lastTick: Date?
+        /// Last completed network poll, independent of emitted events. Optional
+        /// so older heartbeat consumers and other collector registrations retain
+        /// their existing contracts.
+        public let lastPoll: Date?
+        public let completedPollCount: UInt64?
+        public let nativeESHealth: ESDeliveryHealth.Snapshot?
         /// Total events observed from this collector since daemon start.
         public let eventCount: UInt64
         /// Number of times the collector reported an internal error.
@@ -39,9 +41,9 @@ public actor CollectorRegistry {
         /// dashboard to decide whether a missing tick is "normal idle"
         /// (e.g. USBMonitor between hotplug events) or "stalled".
         public let expectedIntervalSeconds: Int
-        /// Derived health: true when `lastTick` is within 5× the
-        /// expected interval (or `lastTick` is nil because the
-        /// collector is event-driven and quiet by default).
+        /// Derived health uses verified poll completion where available, with
+        /// event-silence policy for other sources and explicit errors taking
+        /// precedence over either form of progress.
         public let healthy: Bool
         /// v1.21.6-rc.45: WHY the collector is in this state, in operator
         /// words. `healthy` alone cannot distinguish "running and quiet" from
@@ -57,9 +59,13 @@ public actor CollectorRegistry {
                     errorCount: UInt64, lastError: String?,
                     expectedIntervalSeconds: Int, healthy: Bool,
                     reason: String = "", state: CollectorHealthState? = nil,
-                    enabled: Bool = true) {
+                    enabled: Bool = true, lastPoll: Date? = nil,
+                    completedPollCount: UInt64? = nil, nativeESHealth: ESDeliveryHealth.Snapshot? = nil) {
             self.name = name
             self.lastTick = lastTick
+            self.lastPoll = lastPoll
+            self.completedPollCount = completedPollCount
+            self.nativeESHealth = nativeESHealth
             self.eventCount = eventCount
             self.errorCount = errorCount
             self.lastError = lastError
@@ -77,6 +83,8 @@ public actor CollectorRegistry {
 
     private struct InternalEntry {
         var lastTick: Date?
+        var pollingHealth: NetworkPollingHealth? = nil
+        var nativeESHealth: (@Sendable () -> ESDeliveryHealth.Snapshot)? = nil
         var eventCount: UInt64 = 0
         var errorCount: UInt64 = 0
         var lastError: String?
@@ -165,10 +173,14 @@ public actor CollectorRegistry {
         expectsContinuousTraffic: Bool = false,
         started: Bool = true,
         enabled: Bool = true,
-        disabledReason: String? = nil
+        disabledReason: String? = nil,
+        pollingHealth: NetworkPollingHealth? = nil,
+        nativeESHealth: (@Sendable () -> ESDeliveryHealth.Snapshot)? = nil
     ) {
         entries[name] = InternalEntry(
             lastTick: nil,
+            pollingHealth: pollingHealth,
+            nativeESHealth: nativeESHealth,
             eventCount: 0,
             errorCount: 0,
             lastError: nil,
@@ -310,6 +322,11 @@ public actor CollectorRegistry {
         entries.map { (name, entry) in
             let state: CollectorHealthState
             let reason: String
+            let poll = entry.pollingHealth?.snapshot()
+            let native = entry.nativeESHealth?()
+            let pollErrors = entry.errorCount.addingReportingOverflow(poll?.errorCount ?? 0)
+            let combinedErrors = (pollErrors.overflow ? UInt64.max : pollErrors.partialValue)
+                .addingReportingOverflow(native?.canaryFailuresTotal ?? 0)
             let silenceBudget = Double(entry.expectedIntervalSeconds) * 10
             if !entry.enabled {
                 state = .disabled
@@ -326,6 +343,32 @@ public actor CollectorRegistry {
                 state = now.timeIntervalSince(entry.registeredAt) < silenceBudget
                     ? .starting : .failed
                 reason = "not started"
+            } else if let native {
+                state = native.state
+                reason = native.reason
+            } else if let poll {
+                // Polling liveness must not depend on downstream event arrival:
+                // quiet sweeps emit nothing, and old queued events can arrive
+                // after the enumerator has stopped or failed.
+                if poll.stopped {
+                    state = .failed
+                    reason = "polling stopped"
+                } else if poll.activeError != nil {
+                    state = .failed
+                    reason = "errors reported"
+                } else if !poll.started {
+                    let withinGrace = now.timeIntervalSince(entry.registeredAt)
+                        < Double(entry.expectedIntervalSeconds) * 5
+                    state = withinGrace ? .starting : .stalled
+                    reason = "started, awaiting first poll"
+                } else {
+                    let fresh = (poll.secondsSinceProgress ?? .infinity)
+                        < Double(entry.expectedIntervalSeconds) * 5
+                    state = fresh ? (poll.lastCompletedAt == nil ? .starting : .healthy) : .stalled
+                    reason = fresh
+                        ? (poll.lastCompletedAt == nil ? "started, awaiting first poll" : "polling")
+                        : "no completed poll within 5x its interval"
+                }
             } else if let recovery = entry.lastVerifiedRecovery,
                       entry.lastTick.map({ $0 < recovery }) ?? true {
                 let withinGrace = entry.eventDriven
@@ -361,13 +404,17 @@ public actor CollectorRegistry {
                 name: name,
                 lastTick: entry.lastTick,
                 eventCount: entry.eventCount,
-                errorCount: entry.errorCount,
-                lastError: entry.lastError,
+                errorCount: combinedErrors.overflow ? .max : combinedErrors.partialValue,
+                lastError: entry.streamEnded ? entry.lastError
+                    : (entry.activeError ?? native?.lastError ?? poll?.activeError ?? poll?.lastError ?? entry.lastError),
                 expectedIntervalSeconds: entry.expectedIntervalSeconds,
                 healthy: state == .healthy,
                 reason: reason,
                 state: state,
-                enabled: entry.enabled
+                enabled: entry.enabled,
+                lastPoll: poll?.lastCompletedAt,
+                completedPollCount: poll?.completedPollCount,
+                nativeESHealth: native
             )
         }
         .sorted { $0.name < $1.name }

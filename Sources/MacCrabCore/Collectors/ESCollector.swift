@@ -149,6 +149,13 @@ public final class ESCollector: @unchecked Sendable {
     /// locked `isEmpty` check the rest of the time. The spawn NEVER happens from
     /// the callback — only the cheap recognizer note does. See `CoverageCanary`.
     private let canaryRegistry = ESCanaryRegistry()
+    public let deliveryHealth = ESDeliveryHealth()
+
+    public func deliveryHealthSnapshot() -> ESDeliveryHealth.Snapshot {
+        let latest = contexts.compactMap { $0.tracker.lastCallbackUptimeNanoseconds() }.max()
+        return deliveryHealth.snapshot(lastCallbackUptimeNanoseconds: latest)
+    }
+
 
     // v1.21.4 Phase-4 (Mitigation C): the Phase-3 bounded off-thread worker is
     // now PER-CONTEXT (one per split client), not a single shared worker — a
@@ -1234,6 +1241,7 @@ public final class ESCollector: @unchecked Sendable {
         muteSelf()
         try subscribe()
         lifecyclePhase = .running
+        deliveryHealth.started()
 
         logger.info("ESCollector initialised — \(self.contexts.count) ES client(s), split_degraded=\(self.splitDegraded).")
     }
@@ -1459,11 +1467,13 @@ public final class ESCollector: @unchecked Sendable {
             // kernel-assigned BEFORE delivery, so the gap accounting must happen
             // here, once per delivered message, in delivery order. Both fields are
             // present at the 13.0 deploy floor (seq_num v≥2, global_seq_num v≥4).
+            let startNanos = DispatchTime.now().uptimeNanoseconds
             let evType = message.pointee.event_type.rawValue
             tracker.record(
                 eventType: evType,
                 seqNum: message.pointee.seq_num,
-                globalSeq: message.pointee.global_seq_num
+                globalSeq: message.pointee.global_seq_num,
+                callbackUptimeNanoseconds: startNanos
             )
             // v1.21.4 Phase-2 (D3): coverage-canary recognizer, ON the callback
             // boundary (kernel delivery). Gated on `isArmed` (a single locked
@@ -1483,7 +1493,6 @@ public final class ESCollector: @unchecked Sendable {
             // the normaliser-equivalent admission guard BEFORE retaining/enqueueing:
             // otherwise messages that can only be discarded still consume the
             // bounded worker and shed unrelated detection input under ordinary load.
-            let startNanos = DispatchTime.now().uptimeNanoseconds
             // OPEN/WRITE admission decodes one borrowed path token. Drain that
             // temporary at the callback boundary; the worker's autorelease pool
             // is never entered for messages intentionally rejected here.
@@ -1828,6 +1837,7 @@ public final class ESCollector: @unchecked Sendable {
         }
         lifecyclePhase = .stopping
         lifecycleCondition.unlock()
+        deliveryHealth.stop()
 
         // v1.21.4 Phase-4 (Mitigation C): symmetric teardown across every
         // context. `teardownContext` drains that context's off-thread worker

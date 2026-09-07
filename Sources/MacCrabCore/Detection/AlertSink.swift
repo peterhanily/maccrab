@@ -28,6 +28,7 @@ public actor AlertSink {
     private struct EvidenceCaptureRequest: Sendable {
         let alertId: String
         let timestamp: Date
+        let enqueuedAt: ContinuousClock.Instant
         /// The exact bounded representation prepared before AlertStore commit.
         /// Never carry the raw Event onto the post-commit worker: doing so lets
         /// the snapshot and evidence paths apply different privacy/bounds.
@@ -73,6 +74,9 @@ public actor AlertSink {
     private var evidenceQueueTail = 0
     private var evidenceQueueCount = 0
     private var evidenceWorker: Task<Void, Never>?
+    private let evidenceMonotonicNow: @Sendable () -> ContinuousClock.Instant
+    private var evidenceInFlightEnqueuedAt: ContinuousClock.Instant?
+    private var evidenceOperationStartedAt: ContinuousClock.Instant?
     private var evidenceAccepting = true
     private var evidenceCaptureOffered = 0
     private var evidenceCaptureCompleted = 0
@@ -137,6 +141,7 @@ public actor AlertSink {
             Event
         ) async -> EventJournalContextStatus)? = nil,
         liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared,
+        evidenceMonotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         evidenceCaptureOverride: (@Sendable (
             _ alertId: String,
             _ timestamp: Date
@@ -145,6 +150,7 @@ public actor AlertSink {
         self.alertStore = alertStore
         self.eventStore = eventStore
         self.evidenceCaptureOverride = evidenceCaptureOverride
+        self.evidenceMonotonicNow = evidenceMonotonicNow
         self.journalAdmissionVerifier = journalAdmissionVerifier
         self.journalEventEnsurer = journalEventEnsurer
         self.liveMemoryBudget = liveMemoryBudget
@@ -490,6 +496,7 @@ public actor AlertSink {
         evidenceQueue[evidenceQueueTail] = EvidenceCaptureRequest(
             alertId: alertId,
             timestamp: timestamp,
+            enqueuedAt: evidenceMonotonicNow(),
             triggeringCandidate: triggeringCandidate,
             journalContext: journalContext
         )
@@ -517,8 +524,12 @@ public actor AlertSink {
     private func drainEvidenceQueue() async {
         while let request = dequeueEvidenceCapture() {
             evidenceCaptureInFlight = 1
+            evidenceInFlightEnqueuedAt = request.enqueuedAt
+            evidenceOperationStartedAt = evidenceMonotonicNow()
             await captureEvidence(request)
             evidenceCaptureInFlight = 0
+            evidenceInFlightEnqueuedAt = nil
+            evidenceOperationStartedAt = nil
         }
         evidenceWorker = nil
         // Actor isolation makes the empty-check + nil transition atomic with
@@ -576,7 +587,8 @@ public actor AlertSink {
     /// capture slot indefinitely. Generous by intent: it exists to guarantee the
     /// wait terminates, not to cut short a genuinely transient pressure interval
     /// (the ownership suite exercises ~5s intervals deliberately).
-    private static let exactEvidenceRetryWindow: Duration = .seconds(30)
+    private static let exactEvidenceRetryWindow: Duration =
+        .seconds(AlertEvidenceCaptureResponsiveness.exactSnapshotRetrySeconds)
 
     private func captureEvidence(_ request: EvidenceCaptureRequest) async {
         do {
@@ -702,7 +714,13 @@ public actor AlertSink {
             // Shutdown has a fixed deadline. A transiently blocked selection
             // cancelled at that boundary must retain the alert's atomic
             // `.pending` context as restart-stable unfinished work; it is not
-            // evidence of a terminal capture failure.
+            // evidence of a terminal capture failure. The live lane must still
+            // settle its ownership: this is reported shed, while the durable
+            // context deliberately remains pending for later recovery.
+            evidenceCaptureShed += 1
+            if !evidenceAccepting && Task.isCancelled {
+                evidenceShedAtShutdownDeadline += 1
+            }
             return
         } catch {
             // The parent insert's atomic `.pending` row is already fail-visible.
@@ -1092,7 +1110,16 @@ public actor AlertSink {
     }
 
     public func evidenceStats() -> AlertEvidenceCaptureTelemetry {
-        AlertEvidenceCaptureTelemetry(
+        let instant = evidenceMonotonicNow()
+        func age(_ started: ContinuousClock.Instant?) -> TimeInterval {
+            guard let started else { return 0 }
+            let elapsed = started.duration(to: instant).components
+            return Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+        }
+        // FIFO head is the oldest queued item; no per-snapshot queue traversal.
+        let queuedAt = evidenceQueueCount > 0 ? evidenceQueue[evidenceQueueHead]?.enqueuedAt : nil
+        let oldest = [queuedAt, evidenceInFlightEnqueuedAt].compactMap { $0 }.min()
+        return AlertEvidenceCaptureTelemetry(
             offered: evidenceCaptureOffered,
             completed: evidenceCaptureCompleted,
             shed: evidenceCaptureShed,
@@ -1109,7 +1136,9 @@ public actor AlertSink {
             exactContextIncomplete: evidenceExactContextIncomplete,
             exactContextQueryFailures: evidenceExactContextQueryFailures,
             alertsRejectedAfterSeal: alertsRejectedAfterSeal,
-            alertAdmissionsInFlight: alertAdmissionsInFlight
+            alertAdmissionsInFlight: alertAdmissionsInFlight,
+            oldestOutstandingAgeSeconds: age(oldest),
+            activeOperationAgeSeconds: age(evidenceOperationStartedAt)
         )
     }
 
@@ -1160,7 +1189,7 @@ public actor AlertSink {
         return AlertSinkShutdownResult(
             completed: evidenceCaptureCompleted,
             failed: evidenceCaptureFailures,
-            shedAtDeadline: shedAtDeadline,
+            shedAtDeadline: evidenceShedAtShutdownDeadline,
             pending: evidenceQueueCount + evidenceCaptureInFlight,
             durablePendingContexts: durablePendingContexts,
             alertAdmissionsInFlight: alertAdmissionsInFlight,

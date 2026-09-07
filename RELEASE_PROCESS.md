@@ -338,9 +338,16 @@ Output: `.build/MacCrab-v<version>.dmg`, signed + notarized +
 stapled.
 
 For `release.sh`, CFBundleVersion is deterministic:
-`<version>.<git-commit-count>`. Rebuilding the same source commit therefore
+`<numeric-base-version>.<git-commit-count>`. For example, marketing version
+`1.22.0-rc.2` at commit count 1121 uses build `1.22.0.1121`. Sparkle ignores
+everything after a dash, so putting `-rc.N` in the build would discard the
+revision during comparison. Rebuilding the same source commit therefore
 reuses its identity instead of creating another system-extension zombie.
-Standalone development builds default to `<version>.<unix-time>` so changed
+RC and GA builds share this numeric sequence. A GA following an RC of the same
+base version needs a later descendant source commit; renaming the same commit
+does not create a newer build. Publication also checks ancestry and the existing
+feed's build ordering. These checks do not attest a particular installed update.
+Standalone development builds default to `<numeric-base-version>.<unix-time>` so changed
 bytes at the same marketing version still force sysextd to replace the active
 extension. CFBundleShortVersionString remains `<version>`.
 
@@ -448,11 +455,10 @@ via Sparkle auto-update:
      prompts the user to relaunch.
    - On relaunch, `OSSystemExtensionRequest.activationRequest`
      fires from MacCrabApp's startup. Because CFBundleVersion is
-     distinct per build (`<version>.<unix-time>`), sysextd treats
-     the new .systemextension bundle as a different version,
-     deactivates the old sysext, and activates the new one — no
-     user re-approval prompt unless the team-id changed (it never
-     should).
+     distinct for a later source revision (`<numeric-base-version>.<commit-count>`),
+     sysextd can distinguish the new .systemextension bundle. Verify the running
+     engine identity after activation; an OS approval or reboot requirement
+     must be resolved before claiming the update completed.
 
 All attempted downstream failures are accumulated so later publishers still
 run. Any failure ends with `RELEASE INCOMPLETE` and a non-zero exit; the full

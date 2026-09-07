@@ -27,7 +27,7 @@ struct WalPinIdleReleaseTests {
         _ = try EventStore(directory: dir.path)                  // create events.db
         let reader = try EventStore(directory: dir.path, forceReadOnly: true)
 
-        let app = AppState()
+        let app = AppState(engineSource: .init(directory: dir.path), startBackgroundWork: false)
         app.primeCachedEventStoreForTesting(reader)
         #expect(app.hasCachedEventStoreForTesting, "precondition: a reader is cached")
 

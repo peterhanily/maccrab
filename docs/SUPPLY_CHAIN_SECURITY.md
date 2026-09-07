@@ -354,7 +354,7 @@ diff /tmp/actual_pub.txt /tmp/expected_pub.txt || exit 1
 security find-identity -v -p codesigning | grep "Developer ID Application: Peter Hanily"
 
 # 3. The appcast entry verifies before publishing
-scripts/generate-appcast-entry.sh --dmg .build/MacCrab-v<version>.dmg --version <version> || exit 1
+scripts/generate-appcast-entry.sh --dmg .build/MacCrab-v<version>.dmg --version <version> --build-number <numeric-base-version>.<commit-count> || exit 1
 ```
 
 ---

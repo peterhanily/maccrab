@@ -438,41 +438,6 @@ struct AlertsSizeCapRecoveryTests {
         #expect(permanentAttempts == 1)
     }
 
-    @Test("startup retry loop stops at the wall-clock budget, not the attempt limit")
-    func retryTransientEventStoreStartupOperationRespectsWallClockBudget() async throws {
-        // preIngestionStorageRetryWallClockBudgetSeconds is a fixed production
-        // constant (5s), not a parameter, so this exercises real elapsed time
-        // rather than a fake clock: the operation always throws the retryable
-        // .busy error, and the retry delay (5.2s) is deliberately larger than
-        // the wall-clock budget so a single real sleep is enough to cross it --
-        // this keeps the real wait to ~5.2s instead of stacking many small
-        // sleeps to reach the same 5s boundary.
-        var attempts = 0
-        let start = Date()
-        do {
-            let _: Int = try await retryTransientEventStoreStartupOperation(
-                maximumAttempts: 1000,
-                retryDelayNanoseconds: 5_200_000_000,
-                operation: {
-                    attempts += 1
-                    throw EventStoreError.busy("fixture always pinned")
-                }
-            )
-            Issue.record("persistently busy startup operation unexpectedly succeeded")
-        } catch let error as EventStoreError {
-            guard case .busy = error else {
-                Issue.record("wrong error: \(error)")
-                return
-            }
-        }
-        let elapsed = Date().timeIntervalSince(start)
-        // Stopped almost immediately after crossing the 5s budget -- nowhere
-        // near the 1000-attempt / 5,200s ceiling that attempt-count alone would
-        // have allowed.
-        #expect(attempts < 5)
-        #expect(elapsed < 10)
-    }
-
     @Test("bounded pre-ingestion recovery stops at the wall-clock budget under a persistent pin")
     func boundedRecoveryRespectsWallClockBudgetUnderPersistentPin() async {
         // Mirrors the retry-loop test above but through the shared

@@ -55,6 +55,21 @@ Features without a complete contract remain experimental and off by default.
   product must say which history/evidence features degraded; it must not report
   the detector as wholly healthy.
 
+Native ES collector health uses callback-boundary progress and the existing
+coverage canary, independently of normalized event output. Intentional callback
+filtering and quiet downstream event windows do not imply a failed poll. The
+proof-age deadline is **935 seconds**: the existing maximum 900-second canary
+interval, 20-second settle, and three 5-second store rechecks. A successful
+callback establishes initial progress; the canary must still complete within
+that deadline even while other callbacks continue. Failed, cancelled, unspawned,
+unknown, and overdue probes remain visible until a new verified probe completes.
+The existing canary verifies EXEC delivery and retained-store presence; it does
+not independently verify every subscribed event family or both split client
+queues. This deadline is not a total database-query execution guarantee. Existing native
+initialization/subscription failures, ended streams, client-split degradation and
+loss counters remain independently visible; an ended stream cannot be revived by
+old callback or probe results. The correction schedules no additional probes.
+
 ### Persistence
 
 Raw events serve three different products and therefore require separate
@@ -78,6 +93,21 @@ loading rejects or safely clamps any combination whose fixed schema/index
 floor, evidence budget, transaction reserve, and required journal window
 cannot fit beneath its cap.
 
+Alert-capture live status permits ordinary queueing while the oldest outstanding
+item is at most **90 seconds** old and the active operation is at most
+**45 seconds** old. The active target allows the existing 30 s exact-snapshot
+pressure-retry window, a final 5 s SQLite read busy wait, and two 5 s write busy
+allowances for evidence and its terminal context. The oldest-item target allows
+one preceding operation and the current one; a larger progressing queue can
+still exceed the evidence-latency target. These are responsiveness targets,
+not total SQL execution timeouts or changes to qualification/shutdown limits.
+The fixed ring stores one monotonic enqueue instant per admitted item; its head
+and the active item determine the oldest age in O(1). Missing, nonfinite,
+negative, or inconsistent timing cannot certify outstanding work healthy.
+Cancellation settles the live lane as reported shed while retaining its durable
+pending context. Completion clears only the settled item's age, and lifetime
+failure/shed counters and durable evidence gaps remain visible.
+
 ### TraceGraph
 
 TraceGraph is a bounded derived index, not a second raw-event archive.
@@ -96,6 +126,20 @@ TraceGraph is a bounded derived index, not a second raw-event archive.
   entity plus edge observations must equal attempted rows plus coalesced no-op
   rows plus physically suppressed rows plus pending rows. Both suppression
   counters are cumulative and monotonic.
+- Live dashboard status permits ordinary pending and in-flight batches only
+  while their oldest original enqueue age is at most **10.25 seconds**. This
+  responsiveness deadline is the 250 ms daemon coalescing window plus two
+  existing 5 s SQLite busy-wait allowances: one preceding in-flight batch and
+  then the current batch. It is not a total transaction execution guarantee;
+  SQLite can wait independently at multiple statements. The producer retains
+  at most two monotonic instants, one per pending/in-flight batch, and preserves
+  the original age through handoff. New arrivals and completed older batches
+  cannot reset the age of other outstanding work. Missing or invalid age with
+  outstanding work fails visibly; an idle older producer remains compatible.
+  Commit/failure settlement clears only that batch's age, while failed totals
+  stay visible for the process epoch. This live status deadline does not relax
+  qualification's existing zero-loss, conservation, recovery-wait, or final
+  drain requirements.
 - Retention recovery must leave enough headroom to avoid immediate re-blocking.
   Repeated delete/refill oscillation fails qualification even if the hard cap
   itself holds.

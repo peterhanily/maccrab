@@ -32,6 +32,13 @@ public final class V2LiveDataProvider: V2DataProvider {
 
     private let alertStore: AlertStore?
     private let eventStore: EventStore?
+    private let engineSource: V2EngineSource
+    private var eventReadsRetired = false
+
+    func retireEventReads() {
+        eventReadsRetired = true
+        eventStore?.retireReadOnlyReads()
+    }
     private let campaignStore: CampaignStore?
     private let causalStore: SQLiteCausalGraphStore?
 
@@ -64,6 +71,8 @@ public final class V2LiveDataProvider: V2DataProvider {
 
     /// Reopen stores only in this session's selected engine directory.
     public init?(source: V2EngineSource = .session) async {
+        guard !source.defersEventReads() else { return nil }
+        self.engineSource = source
         let dir: String? = source.directory
         let alertsDir   = dir.flatMap { Self.fileExists(at: $0 + "/alerts.db")     ? $0 : nil }
         let eventsDir   = dir.flatMap { Self.fileExists(at: $0 + "/events.db")     ? $0 : nil }
@@ -205,12 +214,15 @@ public final class V2LiveDataProvider: V2DataProvider {
     }
 
     public func events(limit: Int) async -> [V2MockEvent] {
+        guard !eventReadsRetired else { return [] }
+        if engineSource.defersEventReads() { retireEventReads(); return [] }
         guard let eventStore else { return [] }
         do {
             let snapshot = try await eventStore.exactEventsSnapshot(
                 since: Date().addingTimeInterval(-60 * 60),
                 category: nil, severity: nil, limit: limit
             )
+            guard !eventReadsRetired, !Task.isCancelled else { return [] }
             guard snapshot.isComplete else {
                 throw EventStoreError.exactEvidenceGap(
                     poisonRecords: snapshot.poisonRecords.count,
@@ -224,8 +236,12 @@ public final class V2LiveDataProvider: V2DataProvider {
                 snapshot.events.map(V2LiveDataProvider.toV2Event)
             }.value
             withExtendedLifetime(snapshot) {}
+            guard !eventReadsRetired, !Task.isCancelled else { return [] }
             return mapped
+        } catch is CancellationError {
+            return []
         } catch {
+            guard !eventReadsRetired else { return [] }
             lastErrorDescription = "events read: \(error)"
             return []
         }
@@ -263,9 +279,12 @@ public final class V2LiveDataProvider: V2DataProvider {
 
     /// Wave-3 recorder: durable AI-agent sessions from events.db.
     public func agentSessions(limit: Int) async -> [V2AgentSession] {
+        guard !eventReadsRetired else { return [] }
+        if engineSource.defersEventReads() { retireEventReads(); return [] }
         guard let eventStore else { return [] }
         do {
             let raw = try await eventStore.agentSessions(limit: limit)
+            guard !eventReadsRetired, !Task.isCancelled else { return [] }
             return raw.map { s in
                 V2AgentSession(
                     id: s.sessionId,
@@ -277,6 +296,8 @@ public final class V2LiveDataProvider: V2DataProvider {
                 )
             }
         } catch {
+            guard !eventReadsRetired, !Task.isCancelled,
+                  !(error is CancellationError) else { return [] }
             lastErrorDescription = "agent sessions read: \(error)"
             return []
         }

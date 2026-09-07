@@ -140,10 +140,10 @@ fi
 # even when the on-disk bundle bytes have changed. Field-observed:
 # rebuilding 1.10.0 with code changes left the OLD binary running
 # because both tuples said `1.10.0/1.10.0`. The build number is
-# `<VERSION>.<unix-time>` so every rebuild is distinct; the
+# `<numeric-version>.<unix-time>` so every rebuild is distinct; the
 # user-visible marketing version (CFBundleShortVersionString) stays
 # clean. Caller can override with `BUILD_NUMBER=<custom>`: release.sh
-# (v1.18+) exports a DETERMINISTIC `<VERSION>.<commit-count>` so an
+# (v1.18+) exports a DETERMINISTIC `<numeric-version>.<commit-count>` so an
 # identical rebuild reuses the same tuple and doesn't orphan a new
 # reboot-pending sysext zombie. The per-second epoch below is the DEV-loop
 # fallback (make dev / standalone build-release.sh): there you rebuild the
@@ -156,13 +156,22 @@ fi
 # per-second epoch computed fresh in each stage process would drift.
 # So stage mode persists BUILD_NUMBER into the staging dir during
 # unsigned-build and re-reads it in later stages.
+# Sparkle stops comparing at a dash. Keep -rc.N only in the marketing
+# version; otherwise the commit count is ignored and an RC can sort below
+# an installed numeric build of the same base version.
+BUILD_VERSION_BASE="${VERSION%%-rc.*}"
 if [ -z "${BUILD_NUMBER:-}" ]; then
-    export BUILD_NUMBER="${VERSION}.$(date +%s)"
+    export BUILD_NUMBER="${BUILD_VERSION_BASE}.$(date +%s)"
 fi
-if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?(\.[0-9]+)?$ ]]; then
-    echo "ERROR: BUILD_NUMBER has an unsafe/invalid Sparkle build shape: $BUILD_NUMBER" >&2
-    exit 2
-fi
+validate_build_number() {
+    local numeric_version="${VERSION%%-rc.*}"
+    if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[1-9][0-9]*$ ]] \
+        || [[ "$BUILD_NUMBER" != "$numeric_version".* ]]; then
+        echo "ERROR: BUILD_NUMBER must be $numeric_version.<positive numeric revision>: $BUILD_NUMBER" >&2
+        exit 2
+    fi
+}
+validate_build_number
 
 # Build channel. `release` is the default and reproduces the historical
 # behaviour exactly; `dev` marks a candidate built for the assurance lab.
@@ -1807,6 +1816,7 @@ load_stage_env() {
     if [ -f "$STAGE_ENV" ]; then
         load_maccrab_env_file stage "$STAGE_ENV"
         export BUILD_NUMBER
+        validate_build_number
     else
         echo "ERROR: stage '$STAGE' needs the staging tree from a prior 'unsigned-build' run," >&2
         echo "       but $STAGE_ENV was not found. Run:  scripts/build-release.sh unsigned-build" >&2

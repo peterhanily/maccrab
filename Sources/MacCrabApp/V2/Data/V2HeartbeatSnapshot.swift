@@ -282,11 +282,11 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
                 || acceptingMutations == false
                 || blocked
                 || storeAvailable == false
-                || writeTelemetry?.graphWriteDegraded == true
+                || graphWriteDegraded
         }
 
         public var graphWriteDegraded: Bool {
-            writeTelemetry?.graphWriteDegraded == true
+            writeTelemetry?.graphWriteDegraded ?? true
         }
 
         public var operatorDetail: String {
@@ -328,15 +328,24 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
                     failures.append("persistence accounting does not conserve")
                 }
                 if telemetry.hasOutstandingBacklog == true {
+                    let age = telemetry.oldestOutstandingAgeSeconds ?? 0
                     failures.append(
-                        "\(telemetry.ingestEventsPending ?? -1) event(s) and "
-                            + "\((telemetry.pendingEntityRows ?? 0) + (telemetry.pendingEdgeRows ?? 0)) row(s) remain pending"
+                        "the oldest pending or in-flight batch has waited "
+                            + String(format: "%.2f", age)
+                            + " seconds (live persistence deadline: "
+                            + String(format: "%.2f", CausalGraphWriteResponsiveness.maximumOutstandingAgeSeconds)
+                            + " seconds)"
                     )
+                } else if telemetry.hasOutstandingBacklog == nil {
+                    failures.append("pending-write timing is missing or invalid")
                 }
                 let detail = failures.isEmpty
                     ? "rolling-graph persistence health is degraded"
                     : failures.joined(separator: "; ")
-                return "TraceGraph admission is active, but new causal evidence is not fully durable: \(detail). Failed totals remain visible for this engine run; a pending backlog on repeated heartbeats is stuck."
+                return "TraceGraph admission is active, but new causal evidence is not fully durable: \(detail). Failed totals remain visible for this engine run. Pending work is degraded only when its measured age exceeds the live persistence deadline or its timing cannot be verified."
+            }
+            if writeTelemetry == nil {
+                return "TraceGraph persistence telemetry is unreadable. Current causal evidence durability cannot be verified."
             }
             return "TraceGraph evidence persistence is active."
         }

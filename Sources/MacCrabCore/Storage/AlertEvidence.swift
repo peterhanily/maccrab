@@ -160,6 +160,20 @@ public struct AlertEvidenceContextCounts: Sendable, Equatable {
     }
 }
 
+/// Live status targets, independent of shutdown and qualification deadlines.
+/// The exact selector retries pressure for 30 s; its final read may still enter
+/// a 5 s SQLite busy wait, followed by evidence and context writes (5 s each).
+/// Allow one preceding item plus the current one for oldest outstanding work.
+/// These are responsiveness targets, not total SQL execution timeouts.
+public enum AlertEvidenceCaptureResponsiveness {
+    public static let exactSnapshotRetrySeconds: TimeInterval = 30
+    public static let sqliteBusyAllowanceSeconds: TimeInterval = 5
+    public static let maximumActiveOperationAgeSeconds: TimeInterval =
+        exactSnapshotRetrySeconds + 3 * sqliteBusyAllowanceSeconds
+    public static let maximumOutstandingAgeSeconds: TimeInterval =
+        2 * maximumActiveOperationAgeSeconds
+}
+
 /// One actor-consistent view of the bounded post-commit capture lane.
 ///
 /// Every accepted alert owns exactly one terminal or outstanding state:
@@ -197,6 +211,8 @@ public struct AlertEvidenceCaptureTelemetry: Sendable, Equatable {
     /// Alert submissions accepted before the seal but still executing across
     /// an actor suspension at snapshot time.
     public let alertAdmissionsInFlight: Int
+    public let oldestOutstandingAgeSeconds: TimeInterval
+    public let activeOperationAgeSeconds: TimeInterval
 
     public var conserved: Bool {
         offered == completed + shed + failures + pending + inFlight
@@ -219,7 +235,9 @@ public struct AlertEvidenceCaptureTelemetry: Sendable, Equatable {
         exactContextIncomplete: Int = 0,
         exactContextQueryFailures: Int = 0,
         alertsRejectedAfterSeal: Int = 0,
-        alertAdmissionsInFlight: Int = 0
+        alertAdmissionsInFlight: Int = 0,
+        oldestOutstandingAgeSeconds: TimeInterval = 0,
+        activeOperationAgeSeconds: TimeInterval = 0
     ) {
         self.offered = offered
         self.completed = completed
@@ -238,12 +256,14 @@ public struct AlertEvidenceCaptureTelemetry: Sendable, Equatable {
         self.exactContextQueryFailures = exactContextQueryFailures
         self.alertsRejectedAfterSeal = alertsRejectedAfterSeal
         self.alertAdmissionsInFlight = alertAdmissionsInFlight
+        self.oldestOutstandingAgeSeconds = oldestOutstandingAgeSeconds
+        self.activeOperationAgeSeconds = activeOperationAgeSeconds
     }
 }
 
 /// Result of the sink's bounded terminal seal.
 ///
-/// `completed`, `failed`, and `shedAtDeadline` describe evidence jobs. A job
+/// `completed`, `failed`, and `shedAtDeadline` are cumulative evidence-job totals. A job
 /// still running when the deadline expires remains `pending`; it is never
 /// relabelled as completed or failed merely to make shutdown look clean.
 /// `alertAdmissionsInFlight` similarly exposes pre-seal alert submissions that

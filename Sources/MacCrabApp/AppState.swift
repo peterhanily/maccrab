@@ -308,13 +308,13 @@ final class AppState: ObservableObject {
         from raw: [String: Any]
     ) -> Bool? {
         guard (raw["ingest_events_total"] != nil
-                || raw["accepting_mutations"] != nil),
-              JSONSerialization.isValidJSONObject(raw),
+                || raw["accepting_mutations"] != nil) else { return nil }
+        guard JSONSerialization.isValidJSONObject(raw),
               let data = try? JSONSerialization.data(withJSONObject: raw),
               let status = try? JSONDecoder().decode(
                   MacCrabCore.HeartbeatSnapshot.TraceGraphStorageAdmission.self,
                   from: data
-              ) else { return nil }
+              ) else { return true }
         return status.graphWriteDegraded
     }
 
@@ -374,7 +374,7 @@ final class AppState: ObservableObject {
               let status = try? JSONDecoder().decode(
                   MacCrabCore.HeartbeatSnapshot.AlertEvidenceBudget.self,
                   from: data
-              ) else { return nil }
+              ) else { return true }
         return status.captureDegraded || status.transitionDegraded
     }
 
@@ -480,6 +480,12 @@ final class AppState: ObservableObject {
     /// everything to heartbeat.json — those fields still decode if
     /// present (backward-compatible).
     func refreshHeartbeat() {
+        // Startup can become stale or its file can disappear without a newer
+        // mtime. Re-evaluate this short-lived gate before the parse cache, so
+        // a stopped engine cannot leave historical investigation disabled.
+        if eventReadsDeferred {
+            reconcileEventReadDeferral(engineSource.defersEventReads())
+        }
         let path = dataDir + "/heartbeat.json"
         // v1.7.11: skip re-parse when neither heartbeat.json nor
         // heartbeat_rich.json have changed since the last successful
@@ -576,6 +582,9 @@ final class AppState: ObservableObject {
         var richTraceGraphWriteDegraded: Bool? = inlineTraceGraph.flatMap {
             Self.traceGraphWriteDegraded(from: $0)
         }
+        if json["tracegraph_storage_admission"] != nil, inlineTraceGraph == nil {
+            richTraceGraphWriteDegraded = true
+        }
         let inlineTimerLifecycle = json["timer_lifecycle"] as? [String: Any]
         var richTimerLifecycleDegraded: Bool? = inlineTimerLifecycle.flatMap {
             Self.timerLifecycleDegraded(from: $0)
@@ -611,6 +620,9 @@ final class AppState: ObservableObject {
         let inlineAlertEvidenceBudget = json["alert_evidence_budget"] as? [String: Any]
         var richAlertEvidenceBudgetDegraded: Bool? = inlineAlertEvidenceBudget.flatMap {
             Self.alertEvidenceBudgetDegraded(from: $0)
+        }
+        if json["alert_evidence_budget"] != nil, inlineAlertEvidenceBudget == nil {
+            richAlertEvidenceBudgetDegraded = true
         }
         let inlineBrowserInventory = json["browser_inventory"] as? [String: Any]
         var richBrowserInventoryDegraded: Bool? = inlineBrowserInventory.map {
@@ -686,6 +698,8 @@ final class AppState: ObservableObject {
                     richTraceGraphStoreAvailable = available
                 }
                 richTraceGraphWriteDegraded = Self.traceGraphWriteDegraded(from: traceGraph)
+            } else if richJSON["tracegraph_storage_admission"] != nil {
+                richTraceGraphWriteDegraded = true
             }
             if let timer = richJSON["timer_lifecycle"] as? [String: Any] {
                 richTimerLifecycleDegraded = Self.timerLifecycleDegraded(from: timer)
@@ -713,6 +727,8 @@ final class AppState: ObservableObject {
             }
             if let budget = richJSON["alert_evidence_budget"] as? [String: Any] {
                 richAlertEvidenceBudgetDegraded = Self.alertEvidenceBudgetDegraded(from: budget)
+            } else if richJSON["alert_evidence_budget"] != nil {
+                richAlertEvidenceBudgetDegraded = true
             }
             if let browserInventory = richJSON["browser_inventory"] as? [String: Any] {
                 richBrowserInventoryDegraded = Self.browserInventoryEvidenceUnavailable(
@@ -800,6 +816,9 @@ final class AppState: ObservableObject {
             snapshot.startedAt = Date(timeIntervalSince1970: startedAt)
         }
         heartbeat = snapshot
+        reconcileEventReadDeferral(V2EngineSource.defersEventReads(
+            phase: snapshot.bootPhase, writtenAt: snapshot.writtenAt,
+            identity: snapshot.engineIdentity, now: Date()))
         if let configured = snapshot.llmConfigured,
            let reportedAt = snapshot.llmReportedAt {
             let nextLLMStatus = LLMStatus(
@@ -1315,6 +1334,21 @@ final class AppState: ObservableObject {
     private var dataDir: String { engineSource.directory }
     private var storeGeneration: UInt64 = 0
     private var lastVerifiedEngineIdentity: EngineTelemetryIdentity?
+    @Published private(set) var eventReadsDeferred = false
+
+    /// Retire exact readers on startup without erasing already displayed
+    /// history. A retired reader cooperatively unwinds its verification work;
+    /// dropping a reference alone would not cancel an active actor call.
+    @discardableResult
+    func reconcileEventReadDeferral(_ deferred: Bool) -> Bool {
+        guard deferred != eventReadsDeferred else { return deferred }
+        eventReadsDeferred = deferred
+        storeGeneration &+= 1
+        cachedEventStore?.retireReadOnlyReads()
+        cachedEventStore = nil
+        cachedEventStorePath = nil
+        return deferred
+    }
 
     /// Missing telemetry does not erase the epoch needed to identify a later
     /// restart. Cached readers and their cursors belong to that verified epoch.
@@ -1323,6 +1357,7 @@ final class AppState: ObservableObject {
         guard V2DashboardState.updateEngineIdentity(&lastVerifiedEngineIdentity, next: identity) else { return false }
         storeGeneration &+= 1
         cachedAlertStore = nil
+        cachedEventStore?.retireReadOnlyReads()
         cachedEventStore = nil
         cachedTraceStore = nil
         cachedAlertStorePath = nil
@@ -1414,6 +1449,8 @@ final class AppState: ObservableObject {
     /// calls on @MainActor short-circuit on the cache (path-change
     /// detection only).
     private func warmUpStoresOffMain() async {
+        refreshHeartbeat()
+        let deferEvents = reconcileEventReadDeferral(engineSource.defersEventReads())
         let generation = storeGeneration
         let alertDir = dataDir
         let eventDir = dataDir
@@ -1431,14 +1468,18 @@ final class AppState: ObservableObject {
             try? AlertStore(directory: alertDir, forceReadOnly: true)
         }.value
         async let eventResult: EventStore? = Task.detached(priority: .userInitiated) {
-            try? EventStore(
+            guard !deferEvents else { return nil }
+            return try? EventStore(
                 directory: eventDir,
                 forceReadOnly: true,
                 liveMemoryBudget: .processShared
             )
         }.value
         let (alert, event) = await (alertResult, eventResult)
-        guard generation == storeGeneration else { return }
+        guard generation == storeGeneration else {
+            event?.retireReadOnlyReads()
+            return
+        }
         if let store = alert {
             cachedAlertStore = store
             cachedAlertStorePath = alertDir
@@ -1622,6 +1663,7 @@ final class AppState: ObservableObject {
         // connection the UI is not using remains free, and it keeps the file
         // handle count honest while the window is backgrounded. The getter
         // transparently reopens on next use.
+        cachedEventStore?.retireReadOnlyReads()
         cachedEventStore = nil
         // NOTE: the ClickFix clipboard bridge is deliberately NOT stopped here.
         // It's process-lifetime (started once at launch by the AppDelegate), so
@@ -1631,7 +1673,7 @@ final class AppState: ObservableObject {
 
     #if DEBUG
     /// Test-only: whether a read-only events.db connection is currently cached
-    /// (and thus holding a WAL read-mark). Used by the WAL-pin idle-release test.
+    /// Used by the idle-release test; an idle handle alone is not a read-mark.
     var hasCachedEventStoreForTesting: Bool { cachedEventStore != nil }
 
     /// Test-only: install a cached events.db connection to stand in for the one
@@ -1674,6 +1716,9 @@ final class AppState: ObservableObject {
     /// the running non-root daemon wrote to user-dir → no events
     /// visible). Same shape as the traces.db fix.
     private func eventStore() throws -> EventStore {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else {
+            throw CancellationError()
+        }
         let chosen = dataDir
         // v1.12.0 fix: see alertStore() — reopen only on path change,
         // not every 30s. FTS5 quick_check on a 962 MB events.db blocks
@@ -2441,6 +2486,7 @@ final class AppState: ObservableObject {
         until: Date = .distantFuture,
         category: MacCrabCore.EventCategory? = nil
     ) async {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return }
         let generation = storeGeneration
         do {
             let store = try eventStore()
@@ -2469,6 +2515,7 @@ final class AppState: ObservableObject {
                     until: until,
                     limit: limit
                 )
+                guard generation == storeGeneration, !Task.isCancelled else { return }
                 searchOwnership = snapshot
                 raw = snapshot.events
                 if snapshot.isComplete {
@@ -2492,6 +2539,7 @@ final class AppState: ObservableObject {
                     category: category,
                     limit: limit
                 )
+                guard generation == storeGeneration, !Task.isCancelled else { return }
                 guard snapshot.isComplete else {
                     throw EventStoreError.exactEvidenceGap(
                         poisonRecords: snapshot.poisonRecords.count,
@@ -2507,7 +2555,7 @@ final class AppState: ObservableObject {
                 raw = snapshot.events.filter { $0.timestamp <= until }
                 eventSearchCoverageWarning = nil
             }
-            guard generation == storeGeneration else { return }
+            guard generation == storeGeneration, !Task.isCancelled else { return }
             events = raw.map { eventToViewModel($0) }
             // Gate the live poll: while a search is active, the events array
             // holds FTS-ranked results; the live prepend would mix unrelated
@@ -2529,6 +2577,9 @@ final class AppState: ObservableObject {
             }
             withExtendedLifetime(exactOwnership) {}
             withExtendedLifetime(searchOwnership) {}
+        } catch is CancellationError {
+            // Startup retirement is a deferred read, not missing evidence.
+            return
         } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
             // v1.21.6-rc.38: transient pressure is not a coverage failure.
             //
@@ -2546,6 +2597,7 @@ final class AppState: ObservableObject {
             Logger(subsystem: "com.maccrab.app", category: "events")
                 .debug("Event read deferred on transient pipeline pressure: \(String(describing: error), privacy: .public)")
         } catch {
+            guard generation == storeGeneration, !Task.isCancelled else { return }
             eventSearchCoverageWarning =
                 "Event evidence could not be read completely: "
                 + error.localizedDescription
@@ -2599,6 +2651,7 @@ final class AppState: ObservableObject {
 
     /// Mirror of `loadOlderAlerts` for the Events tab.
     func loadOlderEvents(pageSize: Int = 200, category: MacCrabCore.EventCategory? = nil) async {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return }
         guard hasMoreEvents, let cursor = eventCursor else { return }
         if isLoadingOlderEvents { return }
         isLoadingOlderEvents = true
@@ -3083,20 +3136,16 @@ final class AppState: ObservableObject {
     }
 
     /// v1.22.0 (item 7): the Events view calls this on appear/disappear so the
-    /// routine 5s poll only holds a live events.db WAL read-mark while the user
-    /// is actually watching the live event stream. When it becomes visible, do
-    /// one immediate incremental load so the list is fresh without waiting a
-    /// poll cycle.
+    /// routine poll queries events.db only while the stream is visible.
+    /// EventStream's query task owns the initial load and startup resumption.
     @MainActor
     func setEventsWorkspaceVisible(_ visible: Bool) {
         guard eventsWorkspaceVisible != visible else { return }
         eventsWorkspaceVisible = visible
-        if visible {
-            Task { await loadEventsIncremental() }
-        }
     }
 
     private func loadEventsIncremental() async {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return }
         // Don't trample search results with newer rows the user didn't ask for.
         if eventSearchActive { return }
         // v1.22.0 (item 7): off the Events workspace, skip the live snapshot —
@@ -3159,9 +3208,12 @@ final class AppState: ObservableObject {
     /// pruned from the DB.
     func fetchEvent(id: String) async -> ExactEventLookupSnapshot? {
         guard let uuid = UUID(uuidString: id) else { return nil }
+        let generation = storeGeneration
         do {
             let store = try eventStore()
-            return try await store.exactEventSnapshot(id: uuid)
+            let snapshot = try await store.exactEventSnapshot(id: uuid)
+            guard generation == storeGeneration, !Task.isCancelled else { return nil }
+            return snapshot
         } catch {
             return nil
         }
@@ -3171,26 +3223,35 @@ final class AppState: ObservableObject {
     /// events.db evidence remains a read-only fallback when a new snapshot is
     /// absent; this preserves user data without an implicit migration.
     func fetchEvidence(alertId: String) async -> [Event] {
-        return await AlertEvidenceResolver.evidenceFor(
+        let generation = storeGeneration
+        let evidence = await AlertEvidenceResolver.evidenceFor(
             alertId: alertId,
             alertStore: try? alertStore(),
             legacyEventStore: try? eventStore()
         )
+        guard generation == storeGeneration, !Task.isCancelled else { return [] }
+        return evidence
     }
 
     /// v1.8.0: read aggregate counts (day, category, signer, path) from the
     /// warm-tier rollup table. Backs the Overview trends widget and the
     /// Events tab "summarized" indicator when the user picks a range >24h.
     func fetchAggregates(sinceDay: String, category: MacCrabCore.EventCategory? = nil) async -> [EventStore.AggregateRow] {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return [] }
+        let generation = storeGeneration
         do {
             let store = try eventStore()
             let rows = try await store.aggregates(
                 sinceDay: sinceDay,
                 category: category
             )
+            guard generation == storeGeneration, !Task.isCancelled else { return [] }
             eventAggregateCoverageWarning = nil
             return rows
+        } catch is CancellationError {
+            return []
         } catch {
+            guard generation == storeGeneration, !Task.isCancelled else { return [] }
             eventAggregateCoverageWarning =
                 "Daily summaries are incomplete: "
                 + error.localizedDescription
@@ -3210,6 +3271,8 @@ final class AppState: ObservableObject {
         endingAt: Date = Date(),
         category: MacCrabCore.EventCategory? = nil
     ) async -> [(Date, Int)] {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return [] }
+        let generation = storeGeneration
         do {
             let store = try eventStore()
             let snapshot = try await store.histogramSnapshot(
@@ -3218,6 +3281,7 @@ final class AppState: ObservableObject {
                 endingAt: endingAt,
                 category: category
             )
+            guard generation == storeGeneration, !Task.isCancelled else { return [] }
             eventHistogramEffectiveSince = snapshot.effectiveSince
             eventHistogramEffectiveUntil = snapshot.effectiveUntil
             if snapshot.isComplete {
@@ -3236,6 +3300,8 @@ final class AppState: ObservableObject {
                     + "are unknown, not zero."
             }
             return snapshot.bins.map { ($0.start, $0.count) }
+        } catch is CancellationError {
+            return []
         } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
             // rc.38: same reasoning as loadEvents — a momentary record-ownership
             // shortage is not a coverage failure, and reporting it as one made
@@ -3246,6 +3312,7 @@ final class AppState: ObservableObject {
                 .debug("Histogram deferred on transient pipeline pressure: \(String(describing: error), privacy: .public)")
             return []
         } catch {
+            guard generation == storeGeneration, !Task.isCancelled else { return [] }
             eventHistogramEffectiveSince = nil
             eventHistogramEffectiveUntil = nil
             eventHistogramCoverageWarning =

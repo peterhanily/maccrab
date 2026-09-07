@@ -142,7 +142,7 @@ struct EventStream: View {
 
     /// Composite key forcing the .task(id:) to re-run on either input change.
     private var aggregateInputsKey: String {
-        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")"
+        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")|\(appState.eventReadsDeferred)"
     }
 
     /// `filterCategory` bridged to the Core enum so `loadEvents` can push
@@ -154,14 +154,18 @@ struct EventStream: View {
         filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil
     }
 
-    /// Reload key for the hot-tier (non-search) event query. Range OR
-    /// category changing must re-hit the DB: category is now a DB-side
-    /// predicate (loadEvents forwards it), so a category change has to
-    /// re-query rather than only paring down the loaded ~500-row window
-    /// in memory (which undercounts on busy hosts). Same value shape as
-    /// aggregateInputsKey but drives the per-event table task.
-    private var eventQueryKey: String {
-        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")"
+    private struct EventQueryKey: Hashable {
+        let range: String
+        let category: String?
+        let filter: String
+        let deferred: Bool
+    }
+
+    /// A single query task owns search, range, category, and startup recovery.
+    /// Resuming preserves the selected query, including a centered alert window.
+    private var eventQueryKey: EventQueryKey {
+        EventQueryKey(range: timeRange.rawValue, category: filterCategory?.rawValue,
+                      filter: filterText, deferred: appState.eventReadsDeferred)
     }
 
     /// ISO date string for `daysAgo` days before now. Matches the
@@ -854,6 +858,10 @@ struct EventStream: View {
                         .accessibilityHidden(true)
                     Text(String(localized: "events.paused", defaultValue: "Paused"))
                         .foregroundColor(.orange)
+                } else if appState.eventReadsDeferred {
+                    ProgressView().controlSize(.mini)
+                    Text(String(localized: "system.startupTitle", defaultValue: "Protection is starting"))
+                        .foregroundColor(.secondary)
                 } else if appState.heartbeat?.isStale ?? true {
                     // B5: don't reassure with green "Live" when the engine
                     // isn't reporting. A stale (>120s) or missing heartbeat
@@ -883,94 +891,41 @@ struct EventStream: View {
             .background(.bar)
         }
         .onAppear {
-            // v1.10 fix: when this view mounts with a non-empty
-            // initialFilterText (the "Investigate in Events" path),
-            // immediately mark eventSearchActive so the 10s
-            // incremental poll's prepend can't corrupt the filtered
-            // result, and run a synchronous loadEvents(filter:) so
-            // the user sees filtered rows on FIRST paint instead of
-            // unfiltered rows for ~300 ms then filtered.
-            if !filterText.isEmpty {
-                appState.eventSearchActive = true
-                let bounds = computeEventsTimeBounds()
-                Task {
-                    await appState.loadEvents(
-                        filter: filterText,
-                        since: bounds.since,
-                        until: bounds.until,
-                        category: coreCategory
-                    )
-                }
-            }
+            // Prevent incremental polling from prepending unrelated rows while
+            // the single query task loads a pre-filled investigation search.
+            if !filterText.isEmpty { appState.eventSearchActive = true }
             recomputeFilter()
         }
-        // v1.8.0: filterText drives a debounced FTS5 fetch. SwiftUI cancels
-        // the previous task on every keystroke, so the only one that fires
-        // store.search() is the one whose 300ms quiet window elapses. Empty
-        // string returns to live mode (regular events query + poll prepend).
-        // First-render bypass: if `firstFilterRun` is true (set by init when
-        // initialFilterText was non-empty), skip the 300 ms debounce so
-        // pre-filled filters land immediately rather than ~300 ms after
-        // the unfiltered firehose flashes through.
-        .task(id: filterText) {
+        .task(id: eventQueryKey) {
+            guard !appState.eventReadsDeferred else { return }
             if !firstFilterRun {
                 do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
             } else {
                 firstFilterRun = false
             }
-            // Pass the time bounds so the search query honours both
-            // the user's chip selection AND any "Investigate in
-            // Events" center timestamp. Center timestamp wins when
-            // present (a click from a 14:32 alert should narrow to
-            // ±30 min around 14:32 regardless of which chip was
-            // selected); otherwise the chip's window is used.
+            guard !Task.isCancelled else { return }
             let bounds = computeEventsTimeBounds()
-            if filterText.isEmpty {
-                await appState.loadEvents(since: bounds.since, until: bounds.until, category: coreCategory)
-            } else {
-                await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until, category: coreCategory)
-            }
-        }
-        // #12: re-query the DB when the range OR category changes — in BOTH
-        // the search and non-search paths. Pre-fix the non-search path only
-        // re-filtered the already-loaded ~500-row window (via
-        // onChange→recomputeFilter), so widening the range — or picking a
-        // category — surfaced no additional DB rows and under-represented the
-        // window. `eventQueryKey` folds filterCategory into the id so a
-        // category change re-queries category-side in the DB, not just
-        // in-memory.
-        .task(id: eventQueryKey) {
-            // When centred (Investigate in Events) the window is fixed to the
-            // centre ± half-window regardless of the chip, so a chip change
-            // need not re-query (onAppear + the filterText task already load).
-            // The in-memory recomputeFilter still applies the category to the
-            // small fully-loaded centred window, so no undercount there.
-            guard initialCenterTime == nil else { return }
-            let bounds = computeEventsTimeBounds()
-            if filterText.isEmpty {
-                await appState.loadEvents(since: bounds.since, until: bounds.until, category: coreCategory)
-            } else {
-                await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until, category: coreCategory)
-            }
-            // Pre-GA review fix: a category/range change is a USER action, not a
-            // live tick — recompute the displayed set directly. The
-            // `.onReceive(appState.$events)` recompute is gated on `!isPaused`,
-            // so without this an operator who paused the stream and then changed
-            // the category saw a stale/empty table (fresh category-filtered rows
-            // sat in appState.events but never reached the view). Same bypass the
-            // "Load older" button uses.
+            await appState.loadEvents(
+                filter: filterText.isEmpty ? nil : filterText,
+                since: bounds.since, until: bounds.until, category: coreCategory
+            )
+            guard !Task.isCancelled else { return }
+            // A user query or startup recovery refreshes even a paused stream.
             recomputeFilter()
         }
         // v1.8.0: refresh aggregate rows whenever the time range crosses the
         // 24h boundary or the category filter changes. Runs only in aggregate
         // mode — inside 24h the filteredCache + live polling is canonical.
         .task(id: aggregateInputsKey) {
+            guard !appState.eventReadsDeferred else { return }
             if isAggregateMode {
                 let sinceDay = Self.isoDay(daysAgo: rangeDays)
-                aggregateRows = await appState.fetchAggregates(
+                let rows = await appState.fetchAggregates(
                     sinceDay: sinceDay,
                     category: filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil
                 )
+                guard !Task.isCancelled, !appState.eventReadsDeferred else { return }
+                aggregateRows = rows
             } else {
                 aggregateRows = []
             }
@@ -983,17 +938,20 @@ struct EventStream: View {
         // drives that chart instead). Window + granularity honour an
         // "Investigate in Events" centre time (#2).
         .task(id: histogramInputsKey) {
+            guard !appState.eventReadsDeferred else { return }
             guard !isAggregateMode else {
                 histogramRows = []
                 return
             }
             let window = histogramWindow
-            histogramRows = await appState.fetchHistogramBins(
+            let rows = await appState.fetchHistogramBins(
                 spanSeconds: window.span,
                 stepSeconds: hotHistogramGranularity.stepSeconds,
                 endingAt: window.endingAt,
                 category: filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil
             )
+            guard !Task.isCancelled, !appState.eventReadsDeferred else { return }
+            histogramRows = rows
         }
         // v1.7.11: recompute the cached filtered+sorted list only when an
         // input actually changes. Without these, the body's previous use

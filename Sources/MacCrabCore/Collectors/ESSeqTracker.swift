@@ -87,6 +87,13 @@ public final class ESSeqTracker: @unchecked Sendable {
     private var latencyBuckets: [UInt64]
     private var latencyTotalCount: UInt64 = 0
 
+    private var latestCallbackUptimeNanoseconds: UInt64?
+
+    public func lastCallbackUptimeNanoseconds() -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        return latestCallbackUptimeNanoseconds
+    }
+
     public init() {
         latencyBuckets = [UInt64](repeating: 0, count: Self.latencyBoundsMicros.count + 1)
     }
@@ -97,9 +104,14 @@ public final class ESSeqTracker: @unchecked Sendable {
     /// hole size is added to the matching tally; `last` is always advanced.
     /// Seeds (no gap) on the first message of each type and on the first
     /// message after `reset()`.
-    public func record(eventType: UInt32, seqNum: UInt64, globalSeq: UInt64) {
+    public func record(eventType: UInt32, seqNum: UInt64, globalSeq: UInt64,
+                       callbackUptimeNanoseconds: UInt64? = nil) {
         lock.lock()
         defer { lock.unlock() }
+
+        if let callbackUptimeNanoseconds {
+            latestCallbackUptimeNanoseconds = callbackUptimeNanoseconds
+        }
 
         // Per-type seq_num.
         if let last = lastSeqByType[eventType] {
@@ -179,6 +191,7 @@ public final class ESSeqTracker: @unchecked Sendable {
     public func reset() {
         lock.lock()
         defer { lock.unlock() }
+        latestCallbackUptimeNanoseconds = nil
 
         lastSeqByType.removeAll(keepingCapacity: true)
         lastGlobalSeq = 0

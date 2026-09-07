@@ -231,7 +231,7 @@ CANDIDATE_MANIFEST="$QUALIFICATION_DIR/MacCrab-v$VERSION.candidate.json"
 RUNTIME_REPORT="${RUNTIME_REPORT:-$QUALIFICATION_DIR/MacCrab-v$VERSION.runtime.json}"
 CONTAINMENT_REPORT="${CONTAINMENT_REPORT:-$QUALIFICATION_DIR/MacCrab-v$VERSION.containment.json}"
 DMG_PATH=".build/MacCrab-v$VERSION.dmg"
-BUILD_NUMBER="${VERSION}.$($GIT_BIN rev-list --count "$SOURCE_COMMIT")"
+BUILD_NUMBER="${VERSION%%-rc.*}.$($GIT_BIN rev-list --count "$SOURCE_COMMIT")"
 CI_TRANSCRIPT=""
 CI_STARTED_AT=""
 CI_COMPLETED_AT=""
@@ -654,7 +654,7 @@ echo "Step 2/6: Exact tracked-only source exported from $SOURCE_COMMIT / $SOURCE
 # run: signing/notarization and DMG creation contain timestamps, so a rebuild
 # would be a different, untested artifact even when the source tree is equal.
 # v1.18 (sysext-zombie fix): give SHIPPED builds a DETERMINISTIC, monotonic
-# CFBundleVersion (VERSION + commit count) instead of build-release.sh's
+# CFBundleVersion (numeric base version + commit count) instead of build-release.sh's
 # per-second epoch. Re-running a release on the same commit then reuses the
 # same (version, build) tuple, so sysextd does not orphan a fresh
 # "terminated waiting to uninstall on reboot" zombie for an identical
@@ -662,6 +662,8 @@ echo "Step 2/6: Exact tracked-only source exported from $SOURCE_COMMIT / $SOURCE
 # epoch stays as build-release.sh's fallback for the dev loop (`make dev`
 # rebuilds the SAME VERSION with changed code and needs a distinct tuple
 # each time to force sysextd to replace the active extension).
+# Marketing RC suffixes never enter CFBundleVersion: Sparkle ignores everything
+# after a dash. RC and GA builds share the same numeric source-commit sequence.
 echo "  Deterministic CFBundleVersion: $BUILD_NUMBER"
 
 # ...but `rev-list --count` is monotonic only along ONE ancestry, and nothing

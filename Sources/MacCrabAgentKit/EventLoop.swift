@@ -624,6 +624,8 @@ enum EventLoop {
             // Source identity travels with the envelope through both bounded
             // lanes. Credit the collector that actually produced the event;
             // category heuristics miscredited mixed ES/UL/TCC/network traffic.
+            // This is event accounting only for NetworkCollector: its separate
+            // completed-poll telemetry determines whether polling is progressing.
             await state.collectorRegistry.recordTick(name: envelope.source.key)
 
             // v1.10.0 perf: notify MCPAttributor of process exits so its

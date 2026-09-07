@@ -1415,7 +1415,10 @@ final class DaemonState {
             let sd = supportDir
             if let es = collector {
                 await eventIngestionLifecycle.spawnDriver {
-                    await driveSource(.endpointSecurity, logger: logger, essential: true, supportDir: sd, events: { es.events }, yield: yield)
+                    await driveSource(.endpointSecurity, logger: logger, essential: true, supportDir: sd,
+                                      events: { es.events },
+                                      onStreamEnded: { await self.collectorRegistry.recordStreamEnded(name: "ESCollector") },
+                                      yield: yield)
                 }
             }
             if let kdebug = kdebugCollector {
@@ -1457,6 +1460,7 @@ private func driveSource(
     essential: Bool = false,
     supportDir: String? = nil,
     events: @escaping @Sendable () -> AsyncStream<Event>,
+    onStreamEnded: (@Sendable () async -> Void)? = nil,
     yield: @escaping @Sendable (EventPipelineSource, Event) -> Void
 ) async {
     let name = source.key
@@ -1467,6 +1471,7 @@ private func driveSource(
             produced = true
             yield(source, event)
         }
+        if !Task.isCancelled { await onStreamEnded?() }
         let delay: TimeInterval
         switch state.record(produced: produced) {
         case .retry(let d):

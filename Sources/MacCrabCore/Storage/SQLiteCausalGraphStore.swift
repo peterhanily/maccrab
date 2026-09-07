@@ -2017,7 +2017,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         sqlite3_exec(openedHandle, "PRAGMA cache_size = -16000", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA mmap_size = 33554432", nil, nil, nil) // 32 MB (v1.21.4: trim daemon resident-file-page ceiling; pages are reclaimable/clean)
         sqlite3_exec(openedHandle, "PRAGMA temp_store = MEMORY", nil, nil, nil)
-        sqlite3_exec(openedHandle, "PRAGMA busy_timeout = 5000", nil, nil, nil)
+        sqlite3_busy_timeout(openedHandle, CausalGraphWriteResponsiveness.sqliteBusyTimeoutMilliseconds)
         sqlite3_exec(openedHandle, "PRAGMA foreign_keys = ON", nil, nil, nil)
         // journal_mode can create WAL/SHM after the first validation. Inspect
         // every member by descriptor again before returning the live handle.

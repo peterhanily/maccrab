@@ -1,4 +1,5 @@
 import Foundation
+import MacCrabCore
 
 /// One directory owns the engine's stores, heartbeat and diagnostic snapshots.
 /// Select once per app session; individual reads and automatic reconnects must
@@ -43,5 +44,28 @@ public struct V2EngineSource: Equatable, Sendable {
 
     func heartbeat(now: Date = Date()) -> V2HeartbeatSnapshot? {
         V2HeartbeatSnapshot.read(directory: directory, now: now)
+    }
+
+    /// Read only the small process heartbeat. Missing/stale telemetry must not
+    /// indefinitely prevent historical investigation of a stopped engine.
+    func defersEventReads(now: Date = Date()) -> Bool {
+        guard let data = try? RuntimeConfigurationFiles.readControlData(
+            at: directory + "/heartbeat.json", maximumBytes: 64 * 1024),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let written = raw["written_at_unix"] as? Double else { return false }
+        return Self.defersEventReads(
+            phase: raw["boot_phase"] as? String,
+            writtenAt: Date(timeIntervalSince1970: written),
+            identity: EngineTelemetryIdentity(heartbeat: raw), now: now)
+    }
+
+    static func defersEventReads(
+        phase: String?, writtenAt: Date?, identity: EngineTelemetryIdentity?, now: Date
+    ) -> Bool {
+        guard identity != nil, let writtenAt,
+              ["starting", "stores_ready", "rules_loaded", "collectors_started"].contains(phase ?? "")
+        else { return false }
+        let age = now.timeIntervalSince(writtenAt)
+        return age.isFinite && age >= 0 && age <= 120
     }
 }

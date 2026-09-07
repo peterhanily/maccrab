@@ -339,6 +339,48 @@ struct V2HeartbeatSnapshotTests {
         ))
     }
 
+    @Test("TraceGraph UI distinguishes ordinary batching, overdue writes, and unreadable timing")
+    func traceGraphLiveWriteAge() throws {
+        var raw: [String: Any] = [
+            "enabled": true, "blocked": false, "store_available": true,
+            "ingest_events_total": 1, "ingest_events_committed_total": 0,
+            "ingest_events_failed_total": 0, "ingest_events_in_flight": 0,
+            "ingest_events_pending": 1, "entity_observations_total": 1,
+            "edge_observations_total": 0,
+            "relevance_suppressed_file_events_total": 0, "relevance_suppressed_rows_total": 0,
+            "write_attempts_total": 0, "write_batches_committed_total": 0,
+            "write_batches_failed_total": 0, "write_batches_in_flight": 0,
+            "write_rows_attempted_total": 0, "write_rows_committed_total": 0,
+            "write_rows_failed_total": 0, "write_rows_in_flight": 0,
+            "coalesced_noop_rows_total": 0, "pending_entity_rows": 1,
+            "pending_edge_rows": 0, "oldest_outstanding_age_seconds": 0.125,
+        ]
+        let ordinary = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        #expect(!ordinary.evidenceUnavailable)
+        #expect(!ordinary.graphWriteDegraded)
+        #expect(ordinary.diagnosticDictionary["oldest_outstanding_age_seconds"] as? Double == 0.125)
+
+        raw["oldest_outstanding_age_seconds"] = 11
+        let overdue = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        #expect(overdue.evidenceUnavailable)
+        #expect(overdue.operatorDetail.contains("oldest pending or in-flight batch"))
+        #expect(overdue.operatorDetail.contains("10.25"))
+
+        raw.removeValue(forKey: "oldest_outstanding_age_seconds")
+        let missing = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        #expect(missing.evidenceUnavailable)
+        #expect(missing.operatorDetail.contains("timing is missing or invalid"))
+
+        let invalidAges: [Any] = ["invalid", Double.nan, Double.infinity]
+        for invalid in invalidAges {
+            raw["oldest_outstanding_age_seconds"] = invalid
+            let corrupt = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+            #expect(corrupt.writeTelemetry == nil)
+            #expect(corrupt.evidenceUnavailable)
+            #expect(corrupt.operatorDetail.contains("telemetry is unreadable"))
+        }
+    }
+
     @Test("Agent Trace admission uses the shared wire shape without implying trust")
     func traceStoreAdmissionDecode() throws {
         let status = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: [

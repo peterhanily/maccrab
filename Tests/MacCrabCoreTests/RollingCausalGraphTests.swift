@@ -882,6 +882,7 @@ struct RollingCausalGraphTests {
             "coalesced_noop_rows_total",
             "pending_entity_rows",
             "pending_edge_rows",
+            "oldest_outstanding_age_seconds",
         ]
         #expect(timers.contains("let w = await bridge.writeTelemetry()"))
         for key in heartbeatKeys {

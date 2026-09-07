@@ -229,6 +229,7 @@ struct HeartbeatSnapshotTests {
         "capture_offered_total": 1, "capture_completed_total": 0,
         "capture_failures_total": 0, "capture_shed_total": 0,
         "capture_pending": 0, "capture_in_flight": 1,
+        "capture_oldest_outstanding_age_seconds": 0.5, "capture_active_operation_age_seconds": 0.5,
         "capture_queue_capacity": 256, "capture_accepting": true,
         "capture_conserved": true, "allocated_bytes_exact": true,
         "mutation_generation": 7, "full_refreshes_total": 1

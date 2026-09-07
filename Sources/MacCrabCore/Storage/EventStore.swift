@@ -9,7 +9,7 @@ import Foundation
 import Darwin
 import CSQLCipher
 import CryptoKit
-import os.log
+import os
 
 /// Connection-local capability used by schema-v8 write guards. The function
 /// is registered only by an rc.13 EventStore read-write connection. Older
@@ -737,6 +737,21 @@ public actor EventStore {
     // MARK: Properties
 
     private var db: OpaquePointer?
+    private nonisolated let retiredReadOnlyReads = OSAllocatedUnfairLock(initialState: false)
+
+    /// Retire a dashboard reader without waiting behind its synchronous actor
+    /// work. Verification cooperates at statement/record boundaries, finalizing
+    /// its statements as it unwinds. This neither closes a live SQLite handle
+    /// from another thread nor affects writable engine connections.
+    public nonisolated func retireReadOnlyReads() {
+        retiredReadOnlyReads.withLock { $0 = true }
+    }
+
+    private func checkReadOnlyRetirement() throws {
+        if isReadOnly && (Task.isCancelled || retiredReadOnlyReads.withLock({ $0 })) {
+            throw CancellationError()
+        }
+    }
     private var checkpointController: SQLiteControlledCheckpointController?
     private let databasePath: String
     /// Production stores share one process-wide envelope. Tests may inject an
@@ -5068,6 +5083,7 @@ public actor EventStore {
     }
 
     private func ensureJournalIndex() throws {
+        try checkReadOnlyRetirement()
         // rc.43: any throw out of the rebuild INVALIDATES the in-memory index.
         // The chunked scan populates journalBaseLocations/journalDeltaLocations
         // incrementally, so a mid-rebuild failure (a torn concurrent-append
@@ -5560,6 +5576,8 @@ public actor EventStore {
                     let stageStarted = DispatchTime.now().uptimeNanoseconds
                     defer { recordJournalIndexStage("base_authentication", started: stageStarted) }
                     decodedBlock = try loadJournalBlock(blockID: blockID)
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     journalIntegrityFailures += 1
                     throw error
@@ -5580,6 +5598,8 @@ public actor EventStore {
                         blockID: blockID,
                         baseEvents: decodedBlock.events
                     )
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     journalIntegrityFailures += 1
                     throw error
@@ -5600,6 +5620,8 @@ public actor EventStore {
                         exactEvents: exact.events,
                         poisonByOrdinal: exact.poisonByOrdinal
                     )
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     journalIntegrityFailures += 1
                     throw error
@@ -5678,6 +5700,8 @@ public actor EventStore {
                 let stageStarted = DispatchTime.now().uptimeNanoseconds
                 defer { recordJournalIndexStage("global_terminal_integrity", started: stageStarted) }
                 try validateTerminalRevisionIntegrity()
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 journalIntegrityFailures += 1
                 throw error
@@ -5686,6 +5710,8 @@ public actor EventStore {
                 let stageStarted = DispatchTime.now().uptimeNanoseconds
                 defer { recordJournalIndexStage("global_projection_and_fts", started: stageStarted) }
                 try validateGlobalProjectionCoverage()
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 journalIntegrityFailures += 1
                 throw error
@@ -6894,6 +6920,7 @@ public actor EventStore {
         var cachedBlockID: Int64?
         var cachedBlock = OwnedJournalBlock(records: [])
         while true {
+            try checkReadOnlyRetirement()
             let rc = sqlite3_step(statement)
             if rc == SQLITE_DONE { break }
             guard rc == SQLITE_ROW else {
@@ -13477,38 +13504,36 @@ public actor EventStore {
         return snapshot
     }
 
-    private func journalRecoveryBoundaryIsDrained() throws -> Bool {
-        let drained = walCheckpointTruncate()
+    private func journalRecoveryCheckpointBoundary() throws -> WALCheckpointObservation {
+        let checkpoint = try walCheckpointTruncateObservation()
+        try checkpoint.requireValidOutcome(context: "event journal recovery checkpoint")
         let footprint = try SQLitePersistentStoreAdmission.measureFamily(
             databasePath
         )
         let cap = storagePolicy?.maxFootprintBytes
             ?? Self.defaultStoragePolicy(for: databasePath).maxFootprintBytes
         guard footprint <= cap else {
-            // A reader can pin otherwise checkpointable WAL bytes above the
-            // transition cap.  That condition is operational contention, not
-            // a permanent cap violation: startup may retry the same
-            // crash-resumable boundary without beginning another mutation.
-            // Once the checkpoint drains, an over-cap family is real and must
-            // continue to fail closed as storageNotReady.
-            if !drained {
-                throw EventStoreError.busy(
-                    "reader-pinned event journal recovery family footprint \(footprint) exceeds transition cap \(cap)"
-                )
+            // Only observed SQLite contention/undrained frames may defer this
+            // cap decision. Admission, probe and other SQLite failures retain
+            // their original causes; none establishes a reader pin.
+            if checkpoint.retryableContention {
+                try checkpoint.requireTruncated(context:
+                    "event journal recovery family footprint \(footprint) exceeds transition cap \(cap)")
             }
             throw EventStoreError.storageNotReady(
                 "event journal recovery family footprint \(footprint) exceeds transition cap \(cap)"
             )
         }
-        return drained
+        return checkpoint
+    }
+
+    private func journalRecoveryBoundaryIsDrained() throws -> Bool {
+        try journalRecoveryCheckpointBoundary().truncated
     }
 
     private func requireJournalRecoveryBoundary() throws {
-        guard try journalRecoveryBoundaryIsDrained() else {
-            throw EventStoreError.storageNotReady(
-                "event journal recovery is waiting for a reader-pinned WAL boundary"
-            )
-        }
+        try journalRecoveryCheckpointBoundary().requireTruncated(
+            context: "event journal recovery boundary")
     }
 
     private func allocatedBytesForSchemaObject(_ name: String) throws -> Int64 {
@@ -13662,11 +13687,7 @@ public actor EventStore {
             ) <= cap
         }
         if try fits() == false {
-            guard walCheckpointTruncate() else {
-                throw EventStoreError.storageNotReady(
-                    "event journal recovery cannot drain WAL before a bounded transaction"
-                )
-            }
+            try requireJournalRecoveryBoundary()
             guard try fits() else {
                 throw EventStoreError.storageNotReady(
                     "event journal recovery transaction does not fit the hard transition cap"
@@ -14618,6 +14639,7 @@ public actor EventStore {
     private func withVerifiedExactReadSnapshot<T>(
         _ body: (UInt64) throws -> T
     ) throws -> T {
+        try checkReadOnlyRetirement()
         if let db, sqlite3_get_autocommit(db) == 0 {
             // Ambient transaction owned by the caller: its lifetime is not
             // ours to bound, and verification must see its snapshot.
@@ -18541,19 +18563,103 @@ public actor EventStore {
     /// like progress under an active reader, which is still fine.
     @discardableResult
     public func walCheckpointTruncate() -> Bool {
-        guard let db = db else { return false }
-        guard (try? admitStorageCheckpoint()) != nil else { return false }
-        var log: Int32 = 0
-        var ckpt: Int32 = 0
+        (try? walCheckpointTruncateObservation().truncated) ?? false
+    }
+
+    /// Exact checkpoint result for callers whose retry/error policy depends on
+    /// the cause. The Boolean compatibility method is only best-effort.
+    struct WALCheckpointObservation: Sendable, Equatable {
+        let failure: SQLiteFailureDetails
+        let logFrames: Int32
+        let checkpointedFrames: Int32
+        let duration: Duration
+        let connectionInTransaction: Bool
+
+        var truncated: Bool {
+            failure.resultCode == SQLITE_OK && logFrames >= 0
+                && checkpointedFrames >= 0 && logFrames == checkpointedFrames
+        }
+
+        var retryableContention: Bool {
+            let primary = failure.resultCode & 0xff
+            return primary == SQLITE_BUSY || primary == SQLITE_LOCKED
+                || (primary == SQLITE_OK && logFrames >= 0
+                    && checkpointedFrames >= 0 && checkpointedFrames < logFrames)
+        }
+
+        var diagnostic: String {
+            let elapsed = duration.components
+            let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+            return "rc=\(failure.resultCode), extended=\(failure.extendedResultCode), errno=\(failure.systemErrno), frames=\(checkpointedFrames)/\(logFrames), checkpoint_seconds=\(seconds), connection_in_transaction=\(connectionInTransaction)"
+        }
+
+        func requireValidOutcome(context: String) throws {
+            guard !truncated, !retryableContention else { return }
+            if failure.resultCode == SQLITE_OK {
+                throw EventStoreError.storageNotReady(
+                    "\(context) returned no established drained boundary (\(diagnostic))")
+            }
+            throw EventStoreError.sqliteFailure(
+                context: context, message: diagnostic,
+                resultCode: failure.resultCode,
+                extendedResultCode: failure.extendedResultCode,
+                systemErrno: failure.systemErrno)
+        }
+
+        func requireTruncated(context: String) throws {
+            try requireValidOutcome(context: context)
+            guard !truncated else { return }
+            throw EventStoreError.busy(
+                "\(context) has checkpoint contention (\(diagnostic))", failure: failure)
+        }
+    }
+
+    /// Shared production primitive; the admission closure is evaluated before
+    /// SQLite and throws unchanged. Ordinary fixtures can use two independent
+    /// private connections without exposing this actor's live handle.
+    nonisolated static func truncateCheckpoint(
+        on handle: OpaquePointer,
+        admit: () throws -> Void
+    ) throws -> WALCheckpointObservation {
+        try Task.checkCancellation()
+        try admit()
+        let inTransaction = sqlite3_get_autocommit(handle) == 0
+        var log: Int32 = -1
+        var ckpt: Int32 = -1
+        let started = ContinuousClock.now
+        // SQLite leaves frame outputs undefined when zDb is nil (all attached
+        // databases). This operation admits and measures the events main family.
         let rc = sqlite3_wal_checkpoint_v2(
-            db, nil,
+            handle, "main",
             Int32(SQLITE_CHECKPOINT_TRUNCATE),
             &log, &ckpt
         )
-        if rc != SQLITE_OK, rc != SQLITE_BUSY, rc != SQLITE_LOCKED {
-            _ = latchStoragePressureIfPresent(resultCode: rc)
+        // Capture before any follow-up SQLite call can replace the cause.
+        let failure = SQLiteFailureDetails(resultCode: rc, db: handle)
+        return WALCheckpointObservation(failure: failure, logFrames: log,
+            checkpointedFrames: ckpt, duration: started.duration(to: .now),
+            connectionInTransaction: inTransaction)
+    }
+
+    func walCheckpointTruncateObservation() throws -> WALCheckpointObservation {
+        guard let db, !isReadOnly else {
+            throw EventStoreError.storageNotReady("checkpoint requires an open writable event store")
         }
-        return rc == SQLITE_OK && log == ckpt
+        let result = try Self.truncateCheckpoint(on: db) {
+            try admitStorageCheckpoint()
+        }
+        // Keep the existing pressure latch, using the captured original codes.
+        let primary = result.failure.resultCode & 0xff
+        if primary != SQLITE_OK, primary != SQLITE_BUSY, primary != SQLITE_LOCKED,
+           var admission = storageAdmission {
+            _ = admission.latchSQLitePressure(details: result.failure)
+            storageAdmission = admission
+        }
+        if !result.truncated {
+            Logger(subsystem: "com.maccrab", category: "event-checkpoint")
+                .warning("Event WAL checkpoint incomplete: \(result.diagnostic, privacy: .public)")
+        }
+        return result
     }
 
     // MARK: - Disabled off-actor full VACUUM compatibility entry point
@@ -19706,6 +19812,7 @@ public actor EventStore {
 
     /// Prepares a SQL statement.
     private func prepare(_ sql: String) throws -> OpaquePointer {
+        try checkReadOnlyRetirement()
         var stmt: OpaquePointer?
         let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
         guard rc == SQLITE_OK, let stmt else {

@@ -142,6 +142,17 @@ public struct CausalGraphIngestionWritePolicy: Sendable, Equatable {
     )
 }
 
+/// Live status deadline, independent of the stricter qualification drain gate.
+/// Allow one daemon coalescing window, one preceding batch's SQLite busy wait,
+/// and this batch's busy wait. This is a responsiveness target, not a total
+/// execution timeout: a multi-statement transaction can exceed a busy timeout.
+public enum CausalGraphWriteResponsiveness {
+    public static let sqliteBusyTimeoutMilliseconds: Int32 = 5_000
+    public static let maximumOutstandingAgeSeconds: TimeInterval =
+        CausalGraphIngestionWritePolicy.daemonCoalesced.maximumDelaySeconds
+            + 2 * Double(sqliteBusyTimeoutMilliseconds) / 1_000
+}
+
 /// Exact conservation counters for rolling-graph persistence.
 ///
 /// At an actor-isolated snapshot:
@@ -179,6 +190,10 @@ public struct CausalGraphIngestionWriteTelemetry: Sendable, Equatable {
     public let coalescedNoopRowsTotal: UInt64
     public let pendingEntityRows: Int
     public let pendingEdgeRows: Int
+    /// Age of the oldest uncommitted batch, including an in-flight transaction.
+    /// Measured with ContinuousClock; zero only when no work remains or a batch
+    /// was just admitted. Wall-clock and event timestamps do not affect it.
+    public let oldestOutstandingAgeSeconds: TimeInterval
 }
 
 public actor RollingCausalGraph {
@@ -201,6 +216,7 @@ public actor RollingCausalGraph {
         var entities: [EntityNaturalKey: TraceEntity] = [:]
         var edges: [EdgeNaturalKey: TraceEdge] = [:]
         var eventCount = 0
+        var firstEnqueuedAt: ContinuousClock.Instant?
 
         var rowCount: Int { entities.count + edges.count }
 
@@ -523,6 +539,8 @@ public actor RollingCausalGraph {
     private let materializer: TraceMaterializer
     private let policy: TracePolicy
     private let ingestionWritePolicy: CausalGraphIngestionWritePolicy
+    private let monotonicNow: @Sendable () -> ContinuousClock.Instant
+    private let persistBatch: @Sendable ([TraceEntity], [TraceEdge]) async throws -> Void
     private let anchorCallback: (@Sendable (Trace, AnchorTrigger) async -> Void)?
     private let logger = Logger(subsystem: "com.maccrab.tracegraph", category: "rolling-graph")
 
@@ -534,6 +552,9 @@ public actor RollingCausalGraph {
     /// lifecycle flush to enter while an earlier flush is suspended in the
     /// store actor; an empty pending batch does not mean that write completed.
     private var inFlightStoreWrite: Task<Void, Error>?
+    // Exactly one pending and one in-flight timestamp: bounded independently
+    // of event rate. Moving a batch never refreshes its original enqueue time.
+    private var inFlightFirstEnqueuedAt: ContinuousClock.Instant?
 
     // Exact write-conservation counters. These are intentionally owned by the
     // rolling actor: only this layer knows how many input events and redundant
@@ -574,11 +595,32 @@ public actor RollingCausalGraph {
         ingestionWritePolicy: CausalGraphIngestionWritePolicy = .immediate,
         anchorCallback: (@Sendable (Trace, AnchorTrigger) async -> Void)? = nil
     ) {
+        self.init(
+            store: store, materializer: materializer, policy: policy,
+            ingestionWritePolicy: ingestionWritePolicy, anchorCallback: anchorCallback,
+            monotonicNow: { ContinuousClock.now },
+            persistBatch: { try await store.upsertBatch(entities: $0, edges: $1) }
+        )
+    }
+
+    /// Internal dependency seam for deterministic clock/commit-boundary tests.
+    /// The public initializer always uses the real monotonic clock and store.
+    init(
+        store: CausalGraphStore,
+        materializer: TraceMaterializer,
+        policy: TracePolicy = .default,
+        ingestionWritePolicy: CausalGraphIngestionWritePolicy,
+        anchorCallback: (@Sendable (Trace, AnchorTrigger) async -> Void)? = nil,
+        monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant,
+        persistBatch: @escaping @Sendable ([TraceEntity], [TraceEdge]) async throws -> Void
+    ) {
         self.store = store
         self.materializer = materializer
         self.policy = policy
         self.ingestionWritePolicy = ingestionWritePolicy
         self.anchorCallback = anchorCallback
+        self.monotonicNow = monotonicNow
+        self.persistBatch = persistBatch
     }
 
     private func anchorDedupKey(_ anchor: AnchorTrigger) -> String? {
@@ -844,6 +886,9 @@ public actor RollingCausalGraph {
             edgeObservationsTotal,
             UInt64(edges.count)
         )
+        if pendingWriteBatch.eventCount == 0 {
+            pendingWriteBatch.firstEnqueuedAt = monotonicNow()
+        }
         let coalesced = pendingWriteBatch.append(entities: entities, edges: edges)
         coalescedNoopRowsTotal = Self.saturatingAdd(
             coalescedNoopRowsTotal,
@@ -937,6 +982,7 @@ public actor RollingCausalGraph {
         guard pendingWriteBatch.eventCount > 0 else { return }
         let batch = pendingWriteBatch
         pendingWriteBatch = PendingWriteBatch()
+        inFlightFirstEnqueuedAt = batch.firstEnqueuedAt
         let entities = batch.sortedEntities
         let edges = batch.sortedEdges
         let rowCount = entities.count + edges.count
@@ -950,15 +996,16 @@ public actor RollingCausalGraph {
         eventsInFlight += batch.eventCount
         writeRowsInFlight += rowCount
 
-        let store = self.store
+        let persistBatch = self.persistBatch
         let storeWrite = Task {
-            try await store.upsertBatch(entities: entities, edges: edges)
+            try await persistBatch(entities, edges)
         }
         inFlightStoreWrite = storeWrite
 
         do {
             try await storeWrite.value
             inFlightStoreWrite = nil
+            inFlightFirstEnqueuedAt = nil
             writeBatchesInFlight -= 1
             eventsInFlight -= batch.eventCount
             writeRowsInFlight -= rowCount
@@ -976,6 +1023,7 @@ public actor RollingCausalGraph {
             )
         } catch {
             inFlightStoreWrite = nil
+            inFlightFirstEnqueuedAt = nil
             writeBatchesInFlight -= 1
             eventsInFlight -= batch.eventCount
             writeRowsInFlight -= rowCount
@@ -996,7 +1044,16 @@ public actor RollingCausalGraph {
     }
 
     public func writeTelemetry() -> CausalGraphIngestionWriteTelemetry {
-        CausalGraphIngestionWriteTelemetry(
+        let oldest = [pendingWriteBatch.firstEnqueuedAt, inFlightFirstEnqueuedAt]
+            .compactMap { $0 }.min()
+        let age: TimeInterval
+        if let oldest {
+            let elapsed = oldest.duration(to: monotonicNow()).components
+            age = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+        } else {
+            age = 0
+        }
+        return CausalGraphIngestionWriteTelemetry(
             inputEventsTotal: inputEventsTotal,
             eventsCommittedTotal: eventsCommittedTotal,
             eventsFailedTotal: eventsFailedTotal,
@@ -1018,7 +1075,8 @@ public actor RollingCausalGraph {
             writeRowsInFlight: writeRowsInFlight,
             coalescedNoopRowsTotal: coalescedNoopRowsTotal,
             pendingEntityRows: pendingWriteBatch.entities.count,
-            pendingEdgeRows: pendingWriteBatch.edges.count
+            pendingEdgeRows: pendingWriteBatch.edges.count,
+            oldestOutstandingAgeSeconds: age
         )
     }
 

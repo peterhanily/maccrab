@@ -73,7 +73,7 @@ struct WALReadMarkTests {
             }
         }
 
-        let reader = try EventStore(directory: dir.path)
+        let reader = try EventStore(directory: dir.path, forceReadOnly: true)
         let box = StateBox()
         await reader.setJournalIndexRebuildHookForTesting { inTransaction in
             box.record(inTransaction)
@@ -91,5 +91,40 @@ struct WALReadMarkTests {
             states.allSatisfy { $0 == false },
             "journal verification ran INSIDE a transaction — the WAL read-mark pin is back: \(states)"
         )
+    }
+
+    @Test("Retiring a cold reader cancels verification and preserves writer progress")
+    func retireDuringVerification() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-read-retirement-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let writer = try EventStore(directory: dir.path)
+        for i in 0..<40 { try await writer.insert(event: makeEvent(i)) }
+        let reader = try EventStore(directory: dir.path, forceReadOnly: true)
+        let box = StateBox()
+        await reader.setJournalIndexRebuildHookForTesting { inTransaction in
+            box.record(inTransaction)
+            reader.retireReadOnlyReads()
+        }
+        do {
+            _ = try await reader.searchSnapshot(text: "walmark", limit: 40)
+            Issue.record("The retired reader completed its cold exact read")
+        } catch is CancellationError { }
+        #expect(!box.snapshot.isEmpty)
+        #expect(box.snapshot.allSatisfy { !$0 })
+        #expect(await writer.walCheckpointTruncate())
+        // Retirement is permanent for this handle, even after partial rebuild.
+        do {
+            _ = try await reader.exactEventsSnapshot(since: .distantPast, limit: 40)
+            Issue.record("Retired reader accepted another query")
+        } catch is CancellationError { }
+        let fresh = try EventStore(directory: dir.path, forceReadOnly: true)
+        let snapshot = try await fresh.exactEventsSnapshot(since: .distantPast, limit: 40)
+        #expect(snapshot.isComplete)
+        #expect(snapshot.events.count == 40)
+        // The public retirement entry point cannot cancel the writer actor.
+        writer.retireReadOnlyReads()
+        try await writer.insert(event: makeEvent(40))
+        #expect(try await writer.exactEventsSnapshot(since: .distantPast, limit: 50).events.count == 41)
     }
 }

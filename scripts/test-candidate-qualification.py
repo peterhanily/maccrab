@@ -33,7 +33,7 @@ SPEC.loader.exec_module(qualification)
 COMMIT = "1" * 40
 TREE = "2" * 40
 VERSION = "9.9.9-rc.1"
-BUILD_NUMBER = VERSION + ".123"
+BUILD_NUMBER = "9.9.9.123"
 
 
 def iso(offset: int) -> str:
@@ -1163,6 +1163,30 @@ class CandidateQualificationTests(unittest.TestCase):
             dmg=self.dmg,
             artifact_checks="digest",
         )
+
+    def test_rc_marketing_version_uses_numeric_build_identity(self) -> None:
+        candidate = self.validate_candidate()
+        self.assertEqual(candidate["version"], "9.9.9-rc.1")
+        self.assertEqual(candidate["build_number"], "9.9.9.123")
+
+    def test_candidate_rejects_rc_suffix_missing_revision_and_wrong_numeric_base(self) -> None:
+        for build in (VERSION + ".123", "9.9.9", "9.9.9.0", "9.9.8.123"):
+            with self.subTest(build=build):
+                with self.assertRaisesRegex(qualification.QualificationError, "numeric base version"):
+                    qualification.candidate_document(
+                        version=VERSION, build_number=build, source_commit=COMMIT,
+                        source_tree=TREE, dmg=self.dmg, inspection_level="digest",
+                        notarization_submission_id="",
+                        preinstall_clean_ci=preinstall_clean_ci_fixture(),
+                    )
+                changed = copy.deepcopy(self.manifest)
+                changed["candidate"]["build_number"] = build
+                with self.assertRaisesRegex(qualification.QualificationError, "numeric base version"):
+                    qualification.validate_candidate_document(
+                        changed, expected_version=VERSION, expected_source_commit=COMMIT,
+                        expected_source_tree=TREE, expected_build_number=build,
+                        dmg=self.dmg, artifact_checks="digest",
+                    )
 
     @staticmethod
     def rehash_payload_inventory(manifest: dict) -> None:

@@ -18,7 +18,7 @@ IMMEDIATE="${MACCRAB_APPCAST_IMMEDIATE:-0}"
 PHASED_INTERVAL="${MACCRAB_PHASED_ROLLOUT_INTERVAL:-86400}"
 
 usage() {
-    echo "usage: $0 --dmg MacCrab-vX.dmg --version X [--build-number X.N]" >&2
+    echo "usage: $0 --dmg MacCrab-vX.dmg --version X --build-number MAJOR.MINOR.PATCH.N" >&2
     echo "          [--release-notes-md FILE] [--phased-rollout-interval N|--immediate]" >&2
 }
 
@@ -42,9 +42,10 @@ done
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || {
     echo "ERROR: unsafe version shape: $VERSION" >&2; exit 2;
 }
-BUILD_ID="${BUILD_ID:-${BUILD_NUMBER:-$VERSION}}"
-[[ "$BUILD_ID" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?(\.[0-9]+)?$ ]] || {
-    echo "ERROR: unsafe build-number shape: $BUILD_ID" >&2; exit 2;
+BUILD_ID="${BUILD_ID:-${BUILD_NUMBER:-}}"
+[[ "$BUILD_ID" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[1-9][0-9]*$ ]] \
+    && [[ "$BUILD_ID" == "${VERSION%%-rc.*}".* ]] || {
+    echo "ERROR: build number must be ${VERSION%%-rc.*}.<positive numeric revision>: $BUILD_ID" >&2; exit 2;
 }
 [[ "$(/usr/bin/basename "$DMG")" == "MacCrab-v${VERSION}.dmg" ]] || {
     echo "ERROR: DMG basename must be MacCrab-v${VERSION}.dmg" >&2; exit 2;
