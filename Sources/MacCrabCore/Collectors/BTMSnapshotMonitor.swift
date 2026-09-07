@@ -41,8 +41,9 @@ public actor BTMSnapshotMonitor {
     private var continuation: AsyncStream<BTMSnapshotEvent>.Continuation?
     private let _events: AsyncStream<BTMSnapshotEvent>
 
-    /// Items already reported this process lifetime (de-dup, keyed on BTM UUID).
-    private var reportedItems: Set<String> = []
+    /// Recent reported BTM UUIDs. Evicting the oldest of 4096 keys permits a
+    /// repeated discovery; it never changes which current records qualify.
+    private var reportedItems = BoundedRecentSet<String>(capacity: 4_096)
 
     /// Active scan task.
     private var scanTask: Task<Void, Never>?

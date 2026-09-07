@@ -12,6 +12,54 @@
 import Foundation
 import os.log
 
+/// One-hour suppression is an expendable, bounded history, not an allowlist.
+/// Capacity eviction permits a later finding; it never allows a connection.
+/// Monotonic FIFO expiry avoids scanning every remembered destination per event.
+struct IPViolationSuppressionWindow: Sendable {
+    static let retention: Duration = .seconds(3_600)
+    private struct Entry: Sendable {
+        let ip: String
+        let recordedAt: ContinuousClock.Instant
+    }
+    private let capacity: Int
+    private var timestamps: [String: ContinuousClock.Instant] = [:]
+    private var order: [Entry] = []
+    private var head = 0
+
+    init(capacity: Int) { self.capacity = max(0, capacity) }
+
+    var count: Int { timestamps.count }
+    var orderedEntryCount: Int { order.count }
+
+    mutating func shouldSuppress(_ ip: String, at now: ContinuousClock.Instant) -> Bool {
+        while head < order.count,
+              order[head].recordedAt.duration(to: now) >= Self.retention {
+            removeOldest()
+        }
+        if timestamps[ip] != nil { return true }
+        guard capacity > 0 else { return false }
+        while timestamps.count >= capacity { removeOldest() }
+        timestamps[ip] = now
+        order.append(Entry(ip: ip, recordedAt: now))
+        return false
+    }
+
+    private mutating func removeOldest() {
+        guard head < order.count else { return }
+        let oldest = order[head]
+        if timestamps[oldest.ip] == oldest.recordedAt {
+            timestamps.removeValue(forKey: oldest.ip)
+        }
+        head += 1
+        // Bound the discarded prefix as well as the lookup table. Compaction
+        // copies at most the live suffix and is amortized across removals.
+        if head >= order.count - head {
+            order.removeFirst(head)
+            head = 0
+        }
+    }
+}
+
 // MARK: - AINetworkSandbox
 
 /// Sandboxes outbound network connections from AI coding tool process trees.
@@ -174,7 +222,7 @@ public actor AINetworkSandbox {
 
     /// Recent violations for deduplication and audit.
     private var recentViolations: [Violation] = []
-    private var ipViolationTimes: [String: Date] = [:]
+    private var ipViolationWindow: IPViolationSuppressionWindow
 
     /// Maximum number of cached violations.
     private let maxCachedViolations: Int
@@ -183,11 +231,13 @@ public actor AINetworkSandbox {
 
     public init(
         customConfigPath: String? = nil,
-        maxCachedViolations: Int = 500
+        maxCachedViolations: Int = 500,
+        maxSuppressedIPs: Int = 5_000
     ) {
         self.domainAllowlist = Self.defaultAllowlist
         self.ipAllowlist = Self.defaultIPAllowlist
-        self.maxCachedViolations = maxCachedViolations
+        self.maxCachedViolations = max(0, maxCachedViolations)
+        self.ipViolationWindow = IPViolationSuppressionWindow(capacity: maxSuppressedIPs)
 
         // Attempt to load custom allowlist from config file
         let configPath = customConfigPath ?? Self.defaultConfigPath()
@@ -250,13 +300,12 @@ public actor AINetworkSandbox {
             if destinationIP.hasPrefix(prefix) { return nil }
         }
 
-        // Rate-limit: only fire once per IP per hour (avoid alert storms)
-        let ipKey = destinationIP
-        if let lastSeen = ipViolationTimes[ipKey],
-           Date().timeIntervalSince(lastSeen) < 3600 {
+        // Remember at most maxSuppressedIPs destinations for one hour. A
+        // capacity-evicted destination can produce a fresh finding; expiry
+        // and capacity never change the allowlist decision above.
+        if ipViolationWindow.shouldSuppress(destinationIP, at: .now) {
             return nil
         }
-        ipViolationTimes[ipKey] = Date()
 
         // IP is not in allowlist
         let violation = Violation(

@@ -1834,8 +1834,8 @@ enum DaemonTimers {
                 // MISP sync (if configured)
                 if await state.mispClient.isConfigured {
                     let iocs = await state.mispClient.fetchCategorized(lastDays: 1)
-                    if !iocs.ips.isEmpty || !iocs.domains.isEmpty {
-                        await state.threatIntel.addCustomIOCs(hashes: iocs.hashes, ips: iocs.ips, domains: iocs.domains)
+                    if !iocs.ips.isEmpty || !iocs.domains.isEmpty || !iocs.hashes.isEmpty {
+                        await state.threatIntel.addMISPIOCs(hashes: iocs.hashes, ips: iocs.ips, domains: iocs.domains)
                     }
                 }
 

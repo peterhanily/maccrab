@@ -31,15 +31,21 @@ public actor BehaviorScoring {
     /// Time window for score decay (scores halve every this many seconds).
     private let decayHalfLife: TimeInterval
 
-    /// Maximum tracked processes (LRU eviction).
+    /// Maximum tracked processes, retaining the highest decayed scores.
     private let maxTrackedProcesses: Int
+    private let now: @Sendable () -> Date
+
+    /// A crossing still needs an acknowledgement slot when its new process
+    /// loses score-table eviction. Bound those deliveries independently, with
+    /// one slot even when score retention is configured off.
+    private var maxPendingThresholds: Int { max(1, maxTrackedProcesses) }
 
     // MARK: - State
 
     /// Per-process score tracking.
     private var processScores: [ProcessKey: ProcessScore] = [:]
 
-    /// Order of insertion for LRU eviction.
+    /// Order of insertion breaks equal-score eviction ties.
     private var insertionOrder: [ProcessKey] = []
 
     /// Set of process keys that have already triggered alerts (avoid re-alerting).
@@ -50,6 +56,8 @@ public actor BehaviorScoring {
     /// collapsed it. Returning a result is not delivery: callers may fail while
     /// persisting, and spending the one-shot latch before that boundary silently
     /// disabled the detector on its most common non-rule indicator paths.
+    /// A result for a just-evicted process may remain detached until delivery;
+    /// pending-cap pressure explicitly abandons the oldest unresolved token.
     private var pendingThresholds: [ProcessKey: ScoringResult] = [:]
     private var thresholdTokenToProcess: [UInt64: ProcessKey] = [:]
     private var nextThresholdToken: UInt64 = 0
@@ -127,6 +135,8 @@ public actor BehaviorScoring {
         public let totalScore: Double
         public let indicators: [(name: String, weight: Double, detail: String)]
         public let severity: Severity
+        /// Delivery expiry uses the same clock/window as retained scores.
+        let createdAt: Date
     }
 
     public enum ThresholdResolution: Sendable {
@@ -138,6 +148,9 @@ public actor BehaviorScoring {
         public let crossings: UInt64
         public let committed: UInt64
         public let filteredOrSuppressed: UInt64
+        /// Tracking ended through capacity, decay or expiry. An already-issued
+        /// external delivery may still finish; its stale token cannot settle a
+        /// later crossing and is not recounted as a confirmed outcome here.
         public let abandoned: UInt64
         public let pending: Int
         public let deliveryFailures: UInt64
@@ -278,10 +291,28 @@ public actor BehaviorScoring {
         decayHalfLife: TimeInterval = 300, // 5 minutes
         maxTrackedProcesses: Int = 5000
     ) {
+        self.init(
+            alertThreshold: alertThreshold,
+            criticalThreshold: criticalThreshold,
+            decayHalfLife: decayHalfLife,
+            maxTrackedProcesses: maxTrackedProcesses,
+            now: Date.init
+        )
+    }
+
+    /// Deterministic clock for ordinary lifecycle and expiry fixtures.
+    init(
+        alertThreshold: Double,
+        criticalThreshold: Double,
+        decayHalfLife: TimeInterval,
+        maxTrackedProcesses: Int,
+        now: @escaping @Sendable () -> Date
+    ) {
         self.alertThreshold = alertThreshold
         self.criticalThreshold = criticalThreshold
         self.decayHalfLife = decayHalfLife
-        self.maxTrackedProcesses = maxTrackedProcesses
+        self.maxTrackedProcesses = max(0, maxTrackedProcesses)
+        self.now = now
     }
 
     // MARK: - Public API
@@ -295,17 +326,27 @@ public actor BehaviorScoring {
         path: String
     ) -> ScoringResult? {
         let key = ProcessKey(pid: pid, path: path)
+        let timestamp = now()
+        // A score-table eviction must not turn a failed delivery into a new
+        // crossing on its next retry. Keep the detached token until it settles
+        // or is explicitly abandoned by capacity/expiry cleanup.
+        if processScores[key] == nil, let pending = pendingThresholds[key] {
+            if timestamp.timeIntervalSince(pending.createdAt) < decayHalfLife * 10 {
+                return pending
+            }
+            abandonPendingThreshold(for: key)
+        }
 
         // Initialize or get existing score
         var addedNewKey = false
         if processScores[key] == nil {
-            processScores[key] = ProcessScore()
+            processScores[key] = ProcessScore(lastUpdate: timestamp)
             insertionOrder.append(key)
             addedNewKey = true
         }
 
         // Apply time decay to existing score
-        applyDecay(for: key)
+        applyDecay(for: key, at: timestamp)
 
         guard var entry = processScores[key] else { return nil }
 
@@ -323,12 +364,11 @@ public actor BehaviorScoring {
         // indicators still accumulate freely — the goal is to prevent a single
         // repeating benign signal (e.g. "ai_tool_unapproved_network" firing
         // on every HTTPS request) from walking the score up on its own.
-        let now = Date()
         if let last = entry.indicatorLastAdd[indicator.name],
-           now.timeIntervalSince(last) < Self.indicatorCooldown {
+           timestamp.timeIntervalSince(last) < Self.indicatorCooldown {
             return pendingThresholds[key]
         }
-        entry.indicatorLastAdd[indicator.name] = now
+        entry.indicatorLastAdd[indicator.name] = timestamp
 
         // v1.12.0 dev-mode gate: when MACCRAB_DEV_MODE=1, halve the
         // contribution of `ai_tool_*` indicators. Rationale: on a
@@ -346,7 +386,7 @@ public actor BehaviorScoring {
 
         // Add the new indicator
         entry.rawScore += effectiveWeight
-        entry.lastUpdate = now
+        entry.lastUpdate = timestamp
         entry.indicators.append(indicator)
 
         // Cap indicators per process
@@ -363,7 +403,7 @@ public actor BehaviorScoring {
         // table at its first `maxTrackedProcesses` entries and silently
         // dropping every later process, including a high-score attacker.
         // With the score applied first, the genuinely-lowest entry is evicted.
-        if addedNewKey { evictIfNeeded() }
+        if addedNewKey { evictIfNeeded(at: timestamp) }
         let score = entry
 
         // Check threshold
@@ -380,17 +420,20 @@ public actor BehaviorScoring {
                 severity = .high
             }
 
-            nextThresholdToken &+= 1
+            makeRoomForPendingThreshold()
             // Keep zero reserved as an unmistakable invalid/default token even
-            // after UInt64 wrap in an unrealistically long-lived process.
-            if nextThresholdToken == 0 { nextThresholdToken = 1 }
+            // after UInt64 wrap, and never reuse a still-pending token.
+            repeat { nextThresholdToken &+= 1 }
+            while nextThresholdToken == 0
+                || thresholdTokenToProcess[nextThresholdToken] != nil
             let result = ScoringResult(
                 deliveryToken: nextThresholdToken,
                 processPath: path,
                 pid: pid,
                 totalScore: score.rawScore,
                 indicators: score.indicators.map { ($0.name, $0.weight, $0.detail) },
-                severity: severity
+                severity: severity,
+                createdAt: timestamp
             )
 
             pendingThresholds[key] = result
@@ -411,13 +454,15 @@ public actor BehaviorScoring {
         deliveryToken: UInt64,
         as resolution: ThresholdResolution
     ) -> Bool {
-        guard let key = thresholdTokenToProcess.removeValue(
-            forKey: deliveryToken
-        ), pendingThresholds[key]?.deliveryToken == deliveryToken else {
+        guard let key = thresholdTokenToProcess[deliveryToken],
+              pendingThresholds[key]?.deliveryToken == deliveryToken else {
             return false
         }
+        thresholdTokenToProcess.removeValue(forKey: deliveryToken)
         pendingThresholds.removeValue(forKey: key)
-        alerted.insert(key)
+        // Detached deliveries still count their real outcome, but there is no
+        // score generation left on which to retain a one-shot alert latch.
+        if processScores[key] != nil { alerted.insert(key) }
         switch resolution {
         case .committed:
             thresholdCommittedTotal &+= 1
@@ -431,7 +476,8 @@ public actor BehaviorScoring {
     /// the token. The next indicator for this process returns the same crossing
     /// and retries without inflating the score or minting a duplicate token.
     public func recordThresholdDeliveryFailure(deliveryToken: UInt64) {
-        guard thresholdTokenToProcess[deliveryToken] != nil else { return }
+        guard let key = thresholdTokenToProcess[deliveryToken],
+              pendingThresholds[key]?.deliveryToken == deliveryToken else { return }
         thresholdDeliveryFailuresTotal &+= 1
     }
 
@@ -502,40 +548,72 @@ public actor BehaviorScoring {
     public func score(forPid pid: Int32, path: String) -> Double {
         let key = ProcessKey(pid: pid, path: path)
         guard let s = processScores[key] else { return 0 }
-        return decayedScore(s)
+        return decayedScore(s, at: now())
     }
 
     /// Get the top N scored processes.
     public func topProcesses(limit: Int = 10) -> [(path: String, pid: Int32, score: Double, indicators: Int)] {
-        processScores.map { (key, score) in
-            (key.path, key.pid, decayedScore(score), score.indicators.count)
+        let timestamp = now()
+        return processScores.map { (key, score) in
+            (key.path, key.pid, decayedScore(score, at: timestamp), score.indicators.count)
         }
         .sorted { $0.2 > $1.2 }
         .prefix(limit)
         .map { ($0.0, $0.1, $0.2, $0.3) }
     }
 
-    /// Prune expired entries.
+    /// Prune expired scores and detached deliveries. A fresh delivery is not
+    /// expired merely because its score lost capacity eviction. Bounds do not
+    /// depend on this optional sweep: insertion enforces both capacities.
     public func prune() {
-        let now = Date()
+        let timestamp = now()
         let expiry = decayHalfLife * 10 // Fully expired after 10 half-lives
         processScores = processScores.filter { _, score in
-            now.timeIntervalSince(score.lastUpdate) < expiry
+            timestamp.timeIntervalSince(score.lastUpdate) < expiry
         }
         insertionOrder = insertionOrder.filter { processScores[$0] != nil }
         alerted = alerted.filter { processScores[$0] != nil }
-        for key in Array(pendingThresholds.keys)
-        where processScores[key] == nil {
+        for (key, pending) in pendingThresholds
+        where processScores[key] == nil
+            && timestamp.timeIntervalSince(pending.createdAt) >= expiry {
             abandonPendingThreshold(for: key)
         }
     }
 
+    /// Cross-collection lifecycle invariants for ordinary capacity/expiry
+    /// fixtures. These inspect authoritative state without retaining snapshots.
+    func lifecycleInvariantFailures() -> [String] {
+        var failures: [String] = []
+        let tracked = Set(processScores.keys)
+        if tracked.count > maxTrackedProcesses { failures.append("score capacity exceeded") }
+        if insertionOrder.count != tracked.count || Set(insertionOrder) != tracked {
+            failures.append("score insertion order differs from retained keys")
+        }
+        if !alerted.isSubset(of: tracked) { failures.append("alert latch outlived its score") }
+        if pendingThresholds.count > maxPendingThresholds {
+            failures.append("pending delivery capacity exceeded")
+        }
+        if thresholdTokenToProcess.count != pendingThresholds.count {
+            failures.append("pending token index cardinality differs")
+        }
+        for (key, pending) in pendingThresholds {
+            if key.pid != pending.pid || key.path != pending.processPath
+                || pending.deliveryToken == 0
+                || thresholdTokenToProcess[pending.deliveryToken] != key {
+                failures.append("pending delivery identity differs from token index")
+            }
+        }
+        if !thresholdTelemetry().conservesCrossings {
+            failures.append("threshold outcomes do not conserve crossings")
+        }
+        return failures
+    }
+
     // MARK: - Private
 
-    private func applyDecay(for key: ProcessKey) {
+    private func applyDecay(for key: ProcessKey, at timestamp: Date) {
         guard var score = processScores[key] else { return }
-        let now = Date()
-        let elapsed = now.timeIntervalSince(score.lastUpdate)
+        let elapsed = timestamp.timeIntervalSince(score.lastUpdate)
         if elapsed > 0 {
             let decayFactor = pow(0.5, elapsed / decayHalfLife)
             score.rawScore *= decayFactor
@@ -548,17 +626,18 @@ public actor BehaviorScoring {
             // 0.5^(elapsed) step) and crushes the score far below its true value —
             // a slow-burn process whose one indicator repeats (the exact case the
             // 120s cooldown was added for) never reaches alertThreshold.
-            score.lastUpdate = now
+            score.lastUpdate = timestamp
             processScores[key] = score
         }
     }
 
-    private func decayedScore(_ score: ProcessScore) -> Double {
-        let elapsed = Date().timeIntervalSince(score.lastUpdate)
+    private func decayedScore(_ score: ProcessScore, at timestamp: Date) -> Double {
+        // Match applyDecay: a backward wall-clock correction cannot add score.
+        let elapsed = max(0, timestamp.timeIntervalSince(score.lastUpdate))
         return score.rawScore * pow(0.5, elapsed / decayHalfLife)
     }
 
-    private func evictIfNeeded() {
+    private func evictIfNeeded(at timestamp: Date) {
         // Evict the entry with the LOWEST decayed score, not the oldest-inserted
         // one. A long-lived, high-score process (e.g. a slow-burn attacker) must
         // survive churn from transient benign processes — FIFO eviction would
@@ -571,8 +650,10 @@ public actor BehaviorScoring {
             var lowest = Double.greatestFiniteMagnitude
             for key in insertionOrder {
                 guard let score = processScores[key] else { continue }
-                let decayed = decayedScore(score)
-                if decayed < lowest {
+                let decayed = decayedScore(score, at: timestamp)
+                // The first retained key is a deterministic fallback, including
+                // equal maximum finite scores that are not < the initial bound.
+                if victim == nil || decayed < lowest {
                     lowest = decayed
                     victim = key
                 }
@@ -584,6 +665,21 @@ public actor BehaviorScoring {
             if let idx = insertionOrder.firstIndex(of: evict) {
                 insertionOrder.remove(at: idx)
             }
+        }
+    }
+
+    private func makeRoomForPendingThreshold() {
+        while pendingThresholds.count >= maxPendingThresholds {
+            // Capacity work is bounded by the independent pending cap. Token
+            // issuance distance preserves oldest-first order across wrapping.
+            guard let oldest = pendingThresholds.values.max(by: {
+                (nextThresholdToken &- $0.deliveryToken)
+                    < (nextThresholdToken &- $1.deliveryToken)
+            }) else { return }
+            abandonPendingThreshold(for: ProcessKey(
+                pid: oldest.pid,
+                path: oldest.processPath
+            ))
         }
     }
 

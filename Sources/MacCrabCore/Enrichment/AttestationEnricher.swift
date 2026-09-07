@@ -68,13 +68,31 @@ public actor AttestationEnricher {
 
     public typealias Fetcher = @Sendable (URL) async -> Data?
 
-    private var cache: [String: (result: AttestationResult, fetched: Date)] = [:]
-    private let cacheTTL: TimeInterval
+    struct Provenance: Sendable {
+        let builder: String?
+        let sourceRepo: String?
+    }
+    private let cache: PackageEnrichmentCache<Provenance>
     private let fetcher: Fetcher
 
     public init(cacheTTL: TimeInterval = 24 * 3600, fetcher: Fetcher? = nil) {
-        self.cacheTTL = cacheTTL
+        self.cache = PackageEnrichmentCache(ttl: cacheTTL)
         self.fetcher = fetcher ?? Self.defaultFetcher
+    }
+
+    init(cacheTTL: TimeInterval, capacity: Int, maximumBytes: Int = 8 * 1024 * 1024,
+         maximumActive: Int = 4, maximumWaiters: Int = 16,
+         now: @escaping @Sendable () -> ContinuousClock.Instant,
+         observe: (@Sendable (PackageEnrichmentCache<Provenance>.Snapshot) -> Void)? = nil,
+         fetcher: @escaping Fetcher) {
+        self.cache = PackageEnrichmentCache(ttl: cacheTTL, capacity: capacity, maximumBytes: maximumBytes,
+                                            maximumActive: maximumActive, maximumWaiters: maximumWaiters,
+                                            now: now, observe: observe)
+        self.fetcher = fetcher
+    }
+
+    func cacheSnapshot() async -> PackageEnrichmentCache<Provenance>.Snapshot {
+        await cache.snapshot()
     }
 
     private static let defaultFetcher: Fetcher = { url in
@@ -93,16 +111,19 @@ public actor AttestationEnricher {
         priorBuilder: String? = nil
     ) async -> AttestationResult {
         let cacheKey = "\(registry.rawValue):\(packageName)@\(version)"
-        if let entry = cache[cacheKey], Date().timeIntervalSince(entry.fetched) < cacheTTL {
-            return entry.result
-        }
         guard let url = url(forPackage: packageName, version: version, registry: registry) else {
             return fail(packageName: packageName, version: version, registry: registry, reason: "could not build attestation URL")
         }
-        guard let data = await fetcher(url) else {
-            return fail(packageName: packageName, version: version, registry: registry, reason: "fetch failed")
+        let fetcher = self.fetcher
+        guard let parsed = await cache.value(for: cacheKey, load: {
+            guard !Task.isCancelled, let data = await fetcher(url), !Task.isCancelled,
+                  let parsed = Self.parse(data: data, registry: registry) else { return nil }
+            return .init(value: parsed, payloadBytes: data.count)
+        }) else {
+            return fail(packageName: packageName, version: version, registry: registry,
+                        reason: "fetch failed, response unreadable, cancelled, or enrichment capacity unavailable")
         }
-        let parsed = parse(data: data, registry: registry)
+        // Cache registry facts, not a previous caller's prior-builder comparison.
         var warnings: [String] = []
         let status: AttestationStatus
         if parsed.builder == nil && parsed.sourceRepo == nil {
@@ -118,7 +139,6 @@ public actor AttestationEnricher {
             status: status, builder: parsed.builder, sourceRepo: parsed.sourceRepo,
             priorBuilder: priorBuilder, warnings: warnings
         )
-        cache[cacheKey] = (result, Date())
         return result
     }
 
@@ -150,9 +170,9 @@ public actor AttestationEnricher {
     }
 
     /// Parse the attestation JSON / metadata response into (builder, sourceRepo).
-    nonisolated private func parse(data: Data, registry: Registry) -> (builder: String?, sourceRepo: String?) {
+    nonisolated private static func parse(data: Data, registry: Registry) -> Provenance? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return (nil, nil)
+            return nil
         }
         switch registry {
         case .npm:
@@ -160,7 +180,7 @@ public actor AttestationEnricher {
             // `predicateType`, `predicate.buildDefinition.externalParameters.workflow.repository`
             // (Sigstore in-toto v1 predicate).
             guard let attestations = json["attestations"] as? [[String: Any]] else {
-                return (nil, nil)
+                return nil
             }
             for att in attestations {
                 if let predicate = att["predicate"] as? [String: Any] {
@@ -169,24 +189,24 @@ public actor AttestationEnricher {
                         let builder = (predicate["runDetails"] as? [String: Any])
                             .flatMap { ($0["builder"] as? [String: Any])?["id"] as? String }
                         let repo = (extParams["workflow"] as? [String: Any])?["repository"] as? String
-                        return (builder, repo)
+                        return Provenance(builder: builder, sourceRepo: repo)
                     }
                 }
             }
-            return (nil, nil)
+            return Provenance(builder: nil, sourceRepo: nil)
         case .pypi:
             // PyPI per-version JSON has `urls[].provenance` when PEP 740
             // attestations were uploaded. Distinct from npm: the repo
             // identifier is embedded in the bundle's certificate
             // identity claim, which the simple summary API surfaces as
             // `digests` only. For v1.12 we only confirm provenance presence.
-            guard let urls = json["urls"] as? [[String: Any]] else { return (nil, nil) }
+            guard let urls = json["urls"] as? [[String: Any]] else { return nil }
             for entry in urls {
                 if entry["provenance"] != nil {
-                    return ("pypi-trusted-publisher", nil)
+                    return Provenance(builder: "pypi-trusted-publisher", sourceRepo: nil)
                 }
             }
-            return (nil, nil)
+            return Provenance(builder: nil, sourceRepo: nil)
         }
     }
 }

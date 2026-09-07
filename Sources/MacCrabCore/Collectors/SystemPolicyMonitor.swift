@@ -51,8 +51,9 @@ public actor SystemPolicyMonitor {
     /// MDM profiles we have already emitted a `rogueMDMProfile` content-
     /// inspection alert for. A profile that modifies security policy stays
     /// installed — without this the content-inspection loop re-alerted on the
-    /// same profile every poll.
-    private var mdmRogueContentAlerted: Set<String> = []
+    /// same profile every poll. Reconcile successful inventories and retain at
+    /// most 4096 recent paths; eviction may allow a repeated content alert.
+    private var mdmRogueContentAlerted = BoundedRecentSet<String>(capacity: 4_096)
     /// Paths we have already emitted a "quarantine stripped" event for.
     /// Without this, every full scan re-alerts on the same Downloads items,
     /// which previously accounted for the bulk of SystemPolicyMonitor noise.
@@ -582,14 +583,33 @@ public actor SystemPolicyMonitor {
     private func checkMDMProfiles() {
         // Enumerate current profiles from the profiles CLI (triggers MDM refresh)
         _ = runCommand("/usr/bin/profiles", args: ["list", "-output", "stdout-xml"])
+        inspectMDMProfiles(at: "/var/db/ConfigurationProfiles")
+    }
 
-        // Scan the configuration profiles directory
-        let profileDir = "/var/db/ConfigurationProfiles"
+    /// Directory/content reconciliation, separated from the native refresh so
+    /// ordinary filesystem fixtures can exercise failure/recovery transitions.
+    func inspectMDMProfiles(
+        at profileDir: String,
+        listDirectory: @Sendable (String) throws -> [String] = {
+            try FileManager.default.contentsOfDirectory(atPath: $0)
+        }
+    ) {
         let currentProfiles: Set<String>
-        if let items = try? FileManager.default.contentsOfDirectory(atPath: profileDir) {
+        do {
+            let items = try listDirectory(profileDir)
             currentProfiles = Set(items.filter { $0.hasSuffix(".mobileconfig") || $0.hasSuffix(".plist") })
-        } else {
-            currentProfiles = []
+            let currentPaths = Set(currentProfiles.map { profileDir + "/" + $0 })
+            mdmRogueContentAlerted.retain { currentPaths.contains($0) }
+        } catch {
+            let error = error as NSError
+            let missing = error.domain == NSCocoaErrorDomain
+                && (error.code == CocoaError.fileReadNoSuchFile.rawValue
+                    || error.code == CocoaError.fileNoSuchFile.rawValue)
+            let reason = missing ? "directory_missing" : "enumeration_failed"
+            logger.error("MDM inventory unavailable (\(reason, privacy: .public)); preserving the last known profile baseline and content-alert history.")
+            // A successful empty listing below proves an empty inventory. An
+            // absent/unreadable inventory directory does not prove removals.
+            return
         }
 
         // --- Drift detection: detect installations and removals ---

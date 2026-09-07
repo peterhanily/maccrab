@@ -83,15 +83,29 @@ public actor PackageMetadataAnalyzer {
 
     // MARK: - State
 
-    private var cache: [String: (result: MetadataAnomalyResult, fetched: Date)] = [:]
-    private let cacheTTL: TimeInterval
+    private let cache: PackageEnrichmentCache<MetadataAnomalyResult>
     private let fetcher: Fetcher
 
     // MARK: - Init
 
     public init(cacheTTL: TimeInterval = 24 * 3600, fetcher: Fetcher? = nil) {
-        self.cacheTTL = cacheTTL
+        self.cache = PackageEnrichmentCache(ttl: cacheTTL)
         self.fetcher = fetcher ?? Self.defaultFetcher
+    }
+
+    init(cacheTTL: TimeInterval, capacity: Int, maximumBytes: Int = 8 * 1024 * 1024,
+         maximumActive: Int = 4, maximumWaiters: Int = 16,
+         now: @escaping @Sendable () -> ContinuousClock.Instant,
+         observe: (@Sendable (PackageEnrichmentCache<MetadataAnomalyResult>.Snapshot) -> Void)? = nil,
+         fetcher: @escaping Fetcher) {
+        self.cache = PackageEnrichmentCache(ttl: cacheTTL, capacity: capacity, maximumBytes: maximumBytes,
+                                            maximumActive: maximumActive, maximumWaiters: maximumWaiters,
+                                            now: now, observe: observe)
+        self.fetcher = fetcher
+    }
+
+    func cacheSnapshot() async -> PackageEnrichmentCache<MetadataAnomalyResult>.Snapshot {
+        await cache.snapshot()
     }
 
     /// Default fetcher uses the hardened registry session
@@ -104,26 +118,24 @@ public actor PackageMetadataAnalyzer {
 
     // MARK: - Public API
 
-    /// Analyze a package by name + registry. Returns nil if the registry
-    /// fetch failed completely; otherwise returns a result with partial
-    /// data (score reflects only what was retrievable).
+    /// Analyze a package by name + registry. Returns nil when the fetch or
+    /// parsing fails, the caller is cancelled, or all fetch slots are occupied.
+    /// Valid partial metadata still produces a score from available fields.
     public func analyze(packageName: String, registry: Registry) async -> MetadataAnomalyResult? {
         let cacheKey = "\(registry.rawValue):\(packageName)"
-        if let entry = cache[cacheKey], Date().timeIntervalSince(entry.fetched) < cacheTTL {
-            return entry.result
-        }
         guard let url = url(forPackage: packageName, registry: registry) else { return nil }
-        guard let data = await fetcher(url) else { return nil }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-
-        let result = score(packageName: packageName, registry: registry, json: json)
-        cache[cacheKey] = (result, Date())
-        return result
+        let fetcher = self.fetcher
+        return await cache.value(for: cacheKey) {
+            guard !Task.isCancelled, let data = await fetcher(url), !Task.isCancelled,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            let result = Self.score(packageName: packageName, registry: registry, json: json)
+            return .init(value: result, payloadBytes: data.count)
+        }
     }
 
     // MARK: - Scoring
 
-    private func score(packageName: String, registry: Registry, json: [String: Any]) -> MetadataAnomalyResult {
+    nonisolated private static func score(packageName: String, registry: Registry, json: [String: Any]) -> MetadataAnomalyResult {
         var score = 0
         var reasons: [String] = []
 

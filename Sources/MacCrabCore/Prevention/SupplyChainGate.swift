@@ -20,11 +20,18 @@ public actor SupplyChainGate {
     }
 
     private var isEnabled = false
-    private var blockedInstalls: [BlockedInstall] = []
+    /// Audit tail only: discarding an old record cannot change prevention.
+    private var blockedInstalls: BoundedRecentHistory<BlockedInstall>
+    private var blockedInstallCount = 0
     private let maxAgeHours: Double  // Block packages younger than this
 
     public init(maxAgeHours: Double = 24) {
+        self.init(maxAgeHours: maxAgeHours, historyCapacity: 1_024)
+    }
+
+    init(maxAgeHours: Double, historyCapacity: Int) {
         self.maxAgeHours = maxAgeHours
+        self.blockedInstalls = BoundedRecentHistory(capacity: historyCapacity)
     }
 
     /// Enable the supply chain gate.
@@ -116,16 +123,24 @@ public actor SupplyChainGate {
             reason: reason,
             timestamp: Date()
         )
-        blockedInstalls.append(blocked)
+        recordBlockedInstall(blocked)
 
         return blocked
     }
 
-    /// Get history of blocked installs.
-    public func history() -> [BlockedInstall] { blockedInstalls }
+    /// Recent audit history, oldest first (up to 1024 records in production).
+    /// The lifetime total in stats is independent of this retained tail.
+    public func history() -> [BlockedInstall] { blockedInstalls.elements }
 
     public func stats() -> (enabled: Bool, blocked: Int) {
-        (isEnabled, blockedInstalls.count)
+        (isEnabled, blockedInstallCount)
+    }
+
+    /// Records an already-made decision only. Keeping this boundary separate
+    /// lets ordinary retention fixtures avoid every process/termination API.
+    func recordBlockedInstall(_ blocked: BlockedInstall) {
+        blockedInstalls.append(blocked)
+        if blockedInstallCount < Int.max { blockedInstallCount += 1 }
     }
 
     // MARK: - Process ancestry helpers (nonisolated, used from the actor and

@@ -97,8 +97,10 @@ public actor BrowserExtensionMonitor {
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
     /// Never key an extension by id alone: ids can legitimately collide across
     /// users, browsers and profiles, and a version update must be observable.
-    private var knownExtensionFamilies: Set<String> = []
-    private var knownExtensionVersions: Set<String> = []
+    /// Retain 4096 recent identities per history. An evicted identity may be
+    /// reported again; permission inspection and version identity stay intact.
+    private var knownExtensionFamilies = BoundedRecentSet<String>(capacity: 4_096)
+    private var knownExtensionVersions = BoundedRecentSet<String>(capacity: 4_096)
     private let pollInterval: TimeInterval
     private let homesProvider: @Sendable () -> [RealUserHome]
     private let directoryEntryBudgetPerHome: Int

@@ -40,7 +40,7 @@ public actor ThreatIntelFeed {
 
     public struct IOCRecord: Sendable, Codable, Hashable {
         public let value: String
-        public let source: String          // "MalwareBazaar" | "Feodo" | "URLhaus" | "Custom"
+        public let source: String          // "MalwareBazaar" | "Feodo" | "URLhaus" | "MISP" | "Custom"
         public let firstSeen: Date?        // when the feed first observed it
         public let lastSeenInFeed: Date    // when WE most recently saw it in a refresh — drives age eviction
         public let malwareFamily: String?  // "AsyncRAT", "Cobalt Strike", "Lumma", etc.
@@ -602,6 +602,45 @@ public actor ThreatIntelFeed {
         ips: [String] = [],
         domains: [String] = []
     ) -> ImportResult {
+        importIOCs(hashes: hashes, ips: ips, domains: domains, source: "Custom")
+    }
+
+    /// Recurring MISP results are feed observations, not operator-pinned IOCs.
+    /// Apply retention here even when the independent abuse.ch refresh is off.
+    /// A failed/empty import leaves the last good cache intact. Accepted counts
+    /// describe validated observations; the shared category caps may evict older
+    /// feed records from that set before this call returns.
+    ///
+    /// Older releases persisted MISP observations as `Custom`. Those records
+    /// cannot be distinguished from genuine operator input and remain pinned.
+    @discardableResult
+    public func addMISPIOCs(
+        hashes: [String] = [],
+        ips: [String] = [],
+        domains: [String] = []
+    ) -> ImportResult {
+        let result = importIOCs(hashes: hashes, ips: ips, domains: domains, source: "MISP")
+        if result.accepted > 0 {
+            evictStale()
+            enforceCaps()
+        }
+        return result
+    }
+
+    /// A feed refresh must never erase an operator's independent reason to
+    /// retain the same value. Otherwise the latest actual feed observation
+    /// supplies provenance and freshness; do not attribute a MISP observation
+    /// to an older record's different feed.
+    static func mergingFeedRecord(_ incoming: IOCRecord, existing: IOCRecord?) -> IOCRecord {
+        if let existing, existing.source == "Custom" {
+            return existing
+        }
+        return incoming
+    }
+
+    private func importIOCs(
+        hashes: [String], ips: [String], domains: [String], source: String
+    ) -> ImportResult {
         guard !terminallyStopped else {
             var rejected: [String] = []
             for category in [hashes, ips, domains] {
@@ -614,6 +653,9 @@ public actor ThreatIntelFeed {
             return ImportResult(accepted: 0, rejected: rejected)
         }
         let now = Date()
+        // MISP's categorized import does not carry the provider's first-seen
+        // timestamp. Only our last observation is known for those records.
+        let firstSeen: Date? = source == "Custom" ? now : nil
         var accepted = 0
         var rejected: [String] = []
 
@@ -623,7 +665,9 @@ public actor ThreatIntelFeed {
                 if rejected.count < Self.importRejectionReportCap { rejected.append(trimmed) }
                 continue
             }
-            hashRecords[normalized] = IOCRecord(value: normalized, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            let record = IOCRecord(value: normalized, source: source, firstSeen: firstSeen, lastSeenInFeed: now)
+            hashRecords[normalized] = source == "Custom" ? record
+                : Self.mergingFeedRecord(record, existing: hashRecords[normalized])
             accepted += 1
         }
         for ip in ips {
@@ -632,7 +676,9 @@ public actor ThreatIntelFeed {
                 if rejected.count < Self.importRejectionReportCap { rejected.append(trimmed) }
                 continue
             }
-            ipRecords[normalized] = IOCRecord(value: normalized, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            let record = IOCRecord(value: normalized, source: source, firstSeen: firstSeen, lastSeenInFeed: now)
+            ipRecords[normalized] = source == "Custom" ? record
+                : Self.mergingFeedRecord(record, existing: ipRecords[normalized])
             accepted += 1
         }
         for d in domains {
@@ -641,11 +687,13 @@ public actor ThreatIntelFeed {
                 if rejected.count < Self.importRejectionReportCap { rejected.append(trimmed) }
                 continue
             }
-            domainRecords[normalized] = IOCRecord(value: normalized, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            let record = IOCRecord(value: normalized, source: source, firstSeen: firstSeen, lastSeenInFeed: now)
+            domainRecords[normalized] = source == "Custom" ? record
+                : Self.mergingFeedRecord(record, existing: domainRecords[normalized])
             accepted += 1
         }
         if !rejected.isEmpty {
-            logger.warning("Custom IOC import: rejected \(rejected.count) malformed entries (accepted \(accepted))")
+            logger.warning("\(source, privacy: .public) IOC import: rejected \(rejected.count) malformed entries (accepted \(accepted))")
         }
         return ImportResult(accepted: accepted, rejected: rejected)
     }
@@ -853,11 +901,12 @@ public actor ThreatIntelFeed {
 
             parsed += 1
             let isNew = ipRecords[ip] == nil
-            ipRecords[ip] = IOCRecord(
+            let record = IOCRecord(
                 value: ip, source: "Feodo",
                 firstSeen: firstSeen, lastSeenInFeed: now,
                 malwareFamily: family
             )
+            ipRecords[ip] = Self.mergingFeedRecord(record, existing: ipRecords[ip])
             if isNew { added += 1 }
         }
         // A 200 with an empty / unparseable body parses ZERO records.
@@ -911,7 +960,7 @@ public actor ThreatIntelFeed {
                 malwareFamily: threat, tags: tags
             )
             if urlRecords[urlValue] == nil { added += 1 }
-            urlRecords[urlValue] = urlRec
+            urlRecords[urlValue] = Self.mergingFeedRecord(urlRec, existing: urlRecords[urlValue])
 
             // Derive parent host as a domain entry.
             // v1.9 Phase-5.2 (TI-H1): refuse to insert when the host
@@ -933,7 +982,7 @@ public actor ThreatIntelFeed {
                     malwareFamily: threat, tags: tags
                 )
                 if domainRecords[host] == nil { added += 1 }
-                domainRecords[host] = dRec
+                domainRecords[host] = Self.mergingFeedRecord(dRec, existing: domainRecords[host])
             }
         }
         guard parsed > 0 else {
@@ -985,12 +1034,13 @@ public actor ThreatIntelFeed {
 
             parsed += 1
             let isNew = hashRecords[hash] == nil
-            hashRecords[hash] = IOCRecord(
+            let record = IOCRecord(
                 value: hash, source: "MalwareBazaar",
                 firstSeen: firstSeen, lastSeenInFeed: now,
                 malwareFamily: signature, tags: tags,
                 fileType: fileType
             )
+            hashRecords[hash] = Self.mergingFeedRecord(record, existing: hashRecords[hash])
             if isNew { added += 1 }
         }
         guard parsed > 0 else {

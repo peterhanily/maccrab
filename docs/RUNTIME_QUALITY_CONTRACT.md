@@ -154,6 +154,36 @@ TraceGraph is a bounded derived index, not a second raw-event archive.
   never saturate during it, drain all waiters at the final boundary, and keep
   both completed maximum and live oldest waits at or below five seconds.
 
+### Retained lookup and diagnostic history
+
+AI-network finding suppression remembers at most 5,000 unresolved destination IPs
+for one hour using a monotonic clock. Repeated observations do not extend the
+deadline. Capacity eviction permits a subsequent finding for that IP. Browser
+extension family/version histories, reported background items, and MDM content
+paths each retain 4,096 recent keys; a forgotten identity can be reported again.
+Successful MDM inventory reads also remove paths that are no longer present.
+Supply-chain prevention retains a 1,024-record audit tail and a separate
+saturating lifetime blocked count.
+
+Package metadata and attestation caches retain at most 128 entries and 8 MiB of
+charged payload weight per analyzer. This charge is accounting based on response
+and key bytes, not a measured process-memory bound. Monotonic TTL and least-recent
+use determine eviction. Registry facts are cached independently of each caller's
+prior-builder comparison. Each analyzer permits four active registry requests and
+16 waiters per request; saturation returns unavailable enrichment. A request whose
+last waiter cancels retains its active slot until the loader finishes, and its
+late result cannot repopulate the cache. Installed resource measurements remain
+required.
+
+New MISP observations use feed provenance and the existing feed age/category
+limits, including when the separate abuse.ch refresh is disabled. Operator Custom
+records retain their independent pin when the same IOC appears in another feed.
+Older caches may contain MISP observations already labeled Custom; their original
+source cannot be recovered reliably. These ambiguous records stay preserved and
+can exceed the feed caps or consume all feed capacity. Review of those legacy
+pins remains necessary; this correction does not infer ownership or discard
+operator-provided indicators.
+
 ### AI features
 
 Deterministic evidence and authorization always exist without an LLM. An LLM

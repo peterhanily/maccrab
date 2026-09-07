@@ -2041,7 +2041,7 @@ enum DaemonSetup {
                 print("MISP integration: configured (deferred fetch)")
                 let mispIOCs = await mispClient.fetchCategorized(lastDays: 7)
                 if !mispIOCs.ips.isEmpty || !mispIOCs.domains.isEmpty || !mispIOCs.hashes.isEmpty {
-                    await threatIntel.addCustomIOCs(hashes: mispIOCs.hashes, ips: mispIOCs.ips, domains: mispIOCs.domains)
+                    await threatIntel.addMISPIOCs(hashes: mispIOCs.hashes, ips: mispIOCs.ips, domains: mispIOCs.domains)
                     print("  MISP import (deferred): \(mispIOCs.ips.count) IPs, \(mispIOCs.domains.count) domains, \(mispIOCs.hashes.count) hashes")
                 }
             }
