@@ -4,7 +4,7 @@
 // Pin the V2DeepLink contract: maccrab://<workspace>/<tab>?entity=...&filters=...
 // round-trips. Tests cover scheme rejection, unknown workspace, missing tab,
 // filter ordering determinism, and the parse(url:) → goto(_:) pipeline used
-// by the deep-link handler in V2RootView.
+// by the scene-local deep-link handler in V2DashboardShell.
 
 import Testing
 import Foundation
@@ -188,29 +188,63 @@ struct V2DeepLinkTests {
         #expect(dest.workspace == .investigation)
         #expect(dest.tab == .investigationTraceGraph)
     }
-    // APPCORE-01: the scene .onOpenURL bridge hands OS-delivered URLs to
-    // V2DashboardState.goto(url:). Pin that a valid link navigates and a
-    // malformed link raises an error toast without crashing or moving the
-    // workspace — the safe-handling contract the new wiring relies on.
-    @Test("goto(url:) navigates on a valid maccrab:// deep link")
+    // Exercise the same route boundary as the shell's .onOpenURL handler.
+    // OS scene selection and existing-window reuse still require installed UI
+    // coverage; these tests pin navigation ownership and management exclusion.
+    @Test("a scene URL changes only its owning window's navigation and filters")
     @MainActor
     func testGotoURLNavigatesValidLink() throws {
         let state = V2DashboardState()
-        let url = try #require(URL(string: "maccrab://alerts/alertsopen?entity=alt-001"))
-        state.goto(url: url)
+        let otherWindow = V2DashboardState()
+        otherWindow.currentWorkspace = .events
+        otherWindow.alertSearchQuery = "existing investigation"
+        let otherTabs = otherWindow.selectedTabs
+        let otherEntities = otherWindow.selectedEntities
+        let otherRecents = otherWindow.recentDestinations
+        let url = try #require(URL(string: "maccrab://alerts/alertsopen?entity=alt-001&q=target"))
+        V2DashboardShell.handleSceneURL(url, state: state)
         #expect(state.currentWorkspace == .alerts)
         #expect(state.selectedTabs[.alerts] == .alertsOpen)
+        #expect(state.alertSearchQuery == "target")
         #expect(state.toast?.kind != .error)
+        #expect(otherWindow.currentWorkspace == .events)
+        #expect(otherWindow.alertSearchQuery == "existing investigation")
+        #expect(otherWindow.selectedTabs == otherTabs)
+        #expect(otherWindow.selectedEntities == otherEntities)
+        #expect(otherWindow.recentDestinations == otherRecents)
+        #expect(otherWindow.toast == nil)
     }
 
-    @Test("goto(url:) shows an error toast and does not navigate on a malformed link")
+    @Test("the scene handler shows an error toast and does not navigate on a malformed link")
     @MainActor
     func testGotoURLMalformedLinkIsSafe() throws {
         let state = V2DashboardState()
         let before = state.currentWorkspace
         let url = try #require(URL(string: "maccrab://bogus/zzz"))
-        state.goto(url: url)
+        V2DashboardShell.handleSceneURL(url, state: state)
         #expect(state.currentWorkspace == before)
         #expect(state.toast?.kind == .error)
+    }
+
+    @Test("management links leave navigation to the existing app confirmation handlers", arguments: [
+        "maccrab://deactivate",
+        "maccrab://install/plugin/example",
+        "maccrab://install/plugin/example?url=https://example.invalid/plugin"
+    ])
+    @MainActor
+    func testSceneURLDefersManagementLink(_ raw: String) throws {
+        let state = V2DashboardState()
+        state.currentWorkspace = .events
+        state.alertSearchQuery = "existing investigation"
+        let tabs = state.selectedTabs
+        let entities = state.selectedEntities
+        let recents = state.recentDestinations
+        V2DashboardShell.handleSceneURL(try #require(URL(string: raw)), state: state)
+        #expect(state.currentWorkspace == .events)
+        #expect(state.alertSearchQuery == "existing investigation")
+        #expect(state.selectedTabs == tabs)
+        #expect(state.selectedEntities == entities)
+        #expect(state.recentDestinations == recents)
+        #expect(state.toast == nil)
     }
 }

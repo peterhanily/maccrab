@@ -156,6 +156,52 @@ struct DaemonTimerLifecycleTests {
         #expect(snapshot.conservesAcceptedHandlers)
     }
 
+    @Test("Two coverage generations stay bounded and finishing one preserves the active label")
+    func boundedCoverageGenerationOverlap() async {
+        let lifecycle = DaemonTimerLifecycle(maximumInFlightHandlers: 4, coalesceByLabel: true)
+        let first = BlockingTimerHandler(), second = BlockingTimerHandler()
+        #expect(lifecycle.submit(label: "coverage-canary", maximumConcurrentHandlersForLabel: 2) {
+            await first.run()
+        })
+        #expect(lifecycle.submit(label: "coverage-canary", maximumConcurrentHandlersForLabel: 2) {
+            await second.run()
+        })
+        await first.waitUntilStarted()
+        await second.waitUntilStarted()
+        #expect(!lifecycle.submit(label: "coverage-canary", maximumConcurrentHandlersForLabel: 2) {})
+        #expect(lifecycle.snapshot().inFlightHandlers == 2)
+
+        // Finish the newer task first. The older, potentially blocked read is
+        // still owned, so ordinary one-per-label submission must still coalesce.
+        await second.release()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        while lifecycle.snapshot().completedHandlers < 1, ContinuousClock.now < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(lifecycle.snapshot().completedHandlers == 1)
+        #expect(lifecycle.snapshot().inFlightHandlers == 1)
+        #expect(!lifecycle.submit(label: "coverage-canary") {})
+
+        let third = BlockingTimerHandler()
+        #expect(lifecycle.submit(label: "coverage-canary", maximumConcurrentHandlersForLabel: 2) {
+            await third.run()
+        })
+        await third.waitUntilStarted()
+        #expect(!lifecycle.submit(label: "coverage-canary", maximumConcurrentHandlersForLabel: 2) {})
+        #expect(lifecycle.submit(label: "unrelated") {})
+        await first.release()
+        await third.release()
+        #expect(await lifecycle.shutdown(deadline: 30.0))
+        let final = lifecycle.snapshot()
+        #expect(final.acceptedHandlers == 4)
+        #expect(final.completedHandlers == 4)
+        #expect(final.coalescedByLabel["coverage-canary"] == 3)
+        #expect(final.rejectedHandlers == 0)
+        #expect(final.inFlightHandlers == 0)
+        #expect(final.conservesAcceptedHandlers)
+        #expect(final.conservesOfferedHandlers)
+    }
+
     @Test("concurrent shutdown callers share one recorded result")
     func concurrentShutdownSharesResult() async {
         let lifecycle = DaemonTimerLifecycle()

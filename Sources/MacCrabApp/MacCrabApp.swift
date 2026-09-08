@@ -65,6 +65,8 @@ struct MacCrabApp: App {
         // Main dashboard window — opens on launch.
         WindowGroup("MacCrab Dashboard") {
             V2RootView(appState: appState, sysextManager: sysextManager)
+                // Reuse an existing Dashboard for registered deep links.
+                .handlesExternalEvents(preferring: ["maccrab://"], allowing: ["maccrab://"])
                 // Single source of truth for the dashboard's minimum
                 // window size. Pre-v1.12.9 there were two competing
                 // minimums — 950×600 here and 1280×800 inside
@@ -154,14 +156,9 @@ struct MacCrabApp: App {
                         break  // bounded by the gate's deadline
                     }
                 }
-                // maccrab:// deep links (APPCORE-01). The OS delivers the
-                // URL here; V2 owns its navigation state via @StateObject,
-                // so we cross the module boundary via NotificationCenter —
-                // same bridge pattern as maccrab.openAlert. Bring the
-                // dashboard window forward (LSUIElement menubar app) then
-                // hand the URL to V2DashboardShell, which calls
-                // state.goto(url:). Unknown/malformed links are handled
-                // safely there (error toast, no crash).
+                // Management links retain the existing explicit confirmation
+                // handlers. Ordinary navigation is handled inside the selected
+                // Dashboard scene by V2DashboardShell, without a broadcast.
                 .onOpenURL { url in
                     NSApp.activate(ignoringOtherApps: true)
                     // v1.17 (issue #2): uninstall-assist. OSSystemExtensionRequest
@@ -193,11 +190,6 @@ struct MacCrabApp: App {
                         // ignored — nothing is installed.
                         return
                     }
-                    NotificationCenter.default.post(
-                        name: Notification.Name("maccrab.openURL"),
-                        object: nil,
-                        userInfo: ["url": url]
-                    )
                 }
                 .sheet(item: $pendingInstallLink) { link in
                     RaveInstallConsentSheet(link: link) {

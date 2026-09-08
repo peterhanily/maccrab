@@ -4898,7 +4898,10 @@ enum DaemonTimers {
             // Re-arm for the next jittered fire immediately; the probe itself
             // runs off-timer in a Task (spawn NEVER happens in the ES callback).
             coverageCanaryTimer.schedule(deadline: .now() + canaryJitterSeconds(), repeating: .never)
-            timerLifecycle.submit(label: "coverage-canary") {
+            // One newer probe may start while its predecessor reconciles.
+            // beginCanary invalidates that older generation. Two stuck queries
+            // coalesce further fires instead of accumulating detached work.
+            timerLifecycle.submit(label: "coverage-canary", maximumConcurrentHandlersForLabel: 2) {
                 await runCoverageCanary(state: state)
             }
         }
@@ -5098,6 +5101,9 @@ enum DaemonTimers {
         // advances during essentially every probe and would misattribute real
         // eviction gaps in the opposite direction.
         let droppedAtHandoff = collector.canaryDroppedAtHandoff(nonce)
+        // Callback evidence is now captured. Reconciliation only needs the
+        // nonce string; stop decoding argv for this probe on subsequent execs.
+        collector.disarmCanaryNonce(nonce)
         let verdict = CoverageCanaryEvaluator.verdict(
             seenAtCallback: seenAtCallback,
             storePresence: storePresence,
@@ -5162,6 +5168,60 @@ enum DaemonTimers {
         // Route via AlertSink so it inherits dedup/suppression (backstops the
         // per-cycle cadence if a gap persists across several probes).
         _ = try? await state.alertSink.submit(alert: alert)
+
+        // The initial deadline is unchanged and its failure remains visible.
+        // A probe can still be waiting behind ordinary ingress at that point.
+        // Keep this supervised timer task, not an additional task or fast lane,
+        // until this same nonce is verified, superseded, stopped, or expires.
+        if seenAtCallback, !droppedAtHandoff,
+           await reconcileCoverageCanary(
+               health: collector.deliveryHealth,
+               healthToken: healthToken,
+               pause: {
+                   try await Task.sleep(nanoseconds: canaryDBRecheckSeconds * 1_000_000_000)
+               },
+               isPresent: {
+                   try await state.eventStore.containsProjectedFTSMatch(
+                       text: nonce, since: since, until: Date()
+                   )
+               }
+           ) {
+            Logger(subsystem: "com.maccrab", category: "coverage-canary")
+                .notice("Coverage canary verified in FTS after its initial storage deadline; the earlier failure remains accounted.")
+        }
+    }
+
+    /// Bounded reconciliation of one failed storage proof. Misses and query
+    /// errors never clear degraded health. The production closure retains the
+    /// existing store plus probe identity/time, never an Event or result snapshot.
+    /// Generation/deadline checks also run after each suspension, so a delayed
+    /// result cannot overwrite a newer probe or revive a stopped collector.
+    static func reconcileCoverageCanary(
+        health: ESDeliveryHealth,
+        healthToken: UInt64,
+        pause: @Sendable () async throws -> Void,
+        isPresent: @Sendable () async throws -> Bool
+    ) async -> Bool {
+        // A second bound on query work, independent of the monotonic deadline.
+        // The usual next jittered probe invalidates this generation earlier.
+        let maximumAttempts = Int(ESDeliveryHealth.maximumProofAgeSeconds)
+            / Int(canaryDBRecheckSeconds)
+        for _ in 0..<maximumAttempts {
+            guard !Task.isCancelled,
+                  health.canReconcileStoredCanary(healthToken) else { return false }
+            do { try await pause() } catch { return false }
+            guard !Task.isCancelled,
+                  health.canReconcileStoredCanary(healthToken) else { return false }
+            do {
+                if try await isPresent() {
+                    return health.reconcileStoredCanary(healthToken)
+                }
+            } catch {
+                // The original failed/unknown verdict remains in force.
+                // A later actual FTS match is the only recovery evidence.
+            }
+        }
+        return false
     }
 
     /// Store-side half of the two-point check: is an event carrying `nonce`

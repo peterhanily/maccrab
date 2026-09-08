@@ -181,6 +181,19 @@ public enum EventPrivacySanitizer {
                 || lowered.contains("auth") || lowered.contains("://")
         }
         let lowered = value.lowercased()
+        if value.utf8.allSatisfy({ $0 < 128 }) {
+            // ASCII has no canonical-equivalence or grapheme boundaries to
+            // resolve. Literal Foundation searches avoid repeatedly walking
+            // Swift Substring indices for every hint in ordinary event fields.
+            // Keep the original Unicode path below and leave both redactors
+            // authoritative: a hint only decides whether they must run.
+            let searchable = lowered as NSString
+            let original = value as NSString
+            return credentialHints.contains {
+                searchable.range(of: $0, options: .literal).location != NSNotFound
+            } || original.range(of: "SK", options: .literal).location != NSNotFound
+                || original.range(of: "AC", options: .literal).location != NSNotFound
+        }
         return credentialHints.contains { lowered.contains($0) }
             || lowered.hasPrefix("-p")
             || value.contains("SK") || value.contains("AC")

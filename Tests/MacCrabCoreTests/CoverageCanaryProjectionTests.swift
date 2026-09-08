@@ -485,6 +485,45 @@ struct CoverageCanaryProjectionTests {
         withExtendedLifetime(diagnostic) {}
     }
 
+    @Test("A delayed source-time probe reconciles only after its ordinary journal insert reaches FTS")
+    func lateAdmissionReconcilesTheOriginalProbe() async throws {
+        let directory = try directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("events.db").path
+        let store = try EventStore(path: path)
+        _ = try await store.recoverJournalBeforeProducers()
+        let nonce = CoverageCanary.makeNonce()
+        // Older than the guaranteed admission window: source time must not
+        // silently exclude a delayed event that is admitted to the journal now.
+        let canary = event(nonce: nonce, timestamp: Date().addingTimeInterval(-1_200))
+        let since = canary.timestamp.addingTimeInterval(-30)
+        #expect(!(try await store.containsProjectedFTSMatch(text: nonce, since: since, until: Date())))
+        let health = ESDeliveryHealth()
+        health.started()
+        let token = try #require(health.beginCanary())
+        health.finishCanary(token, outcome: .storeQueryUnknown)
+        #expect(health.snapshot(lastCallbackUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds).state == .failed)
+        let recovered = await DaemonTimers.reconcileCoverageCanary(
+            health: health, healthToken: token,
+            pause: {
+                _ = try await store.insert(events: [canary], lane: .priority)
+            },
+            isPresent: {
+                try await store.containsProjectedFTSMatch(text: nonce, since: since, until: Date())
+            }
+        )
+        #expect(recovered)
+        #expect(try await store.exactEventSnapshot(id: canary.id).event == canary)
+        let diagnostic = try await store.searchSnapshot(text: nonce, since: since, until: Date(), limit: 1)
+        #expect(!diagnostic.requestedWindowComplete)
+        #expect(diagnostic.events.map(\.id) == [canary.id])
+        let final = health.snapshot(lastCallbackUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds)
+        #expect(final.state == .healthy)
+        #expect(final.canaryChecksTotal == 1)
+        #expect(final.canaryFailuresTotal == 1)
+        withExtendedLifetime(diagnostic) {}
+    }
+
     @Test("An actual FTS query failure remains unknown")
     func queryFailureCannotReportPresent() async throws {
         let directory = try directory()

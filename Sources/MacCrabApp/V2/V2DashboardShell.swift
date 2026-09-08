@@ -160,14 +160,18 @@ struct V2DashboardShell: View {
                 workspace: .alerts, tab: .alertsOpen, entityId: id
             ))
         }
-        // maccrab:// deep links (APPCORE-01). MacCrabApp.swift's scene
-        // .onOpenURL posts the OS-delivered URL here. goto(url:) parses it
-        // via V2DeepLink and navigates; unknown/malformed links surface an
-        // error toast without crashing.
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("maccrab.openURL"))) { note in
-            guard let url = note.userInfo?["url"] as? URL else { return }
-            state.goto(url: url)
+        // SwiftUI delivers the URL to one selected scene. Keep its navigation
+        // local, leaving other windows' investigation state untouched.
+        .onOpenURL { url in
+            Self.handleSceneURL(url, state: state)
         }
+    }
+
+    @MainActor
+    static func handleSceneURL(_ url: URL, state: V2DashboardState) {
+        // The enclosing app view owns these existing confirmation flows.
+        guard url.host != "deactivate", url.host != "install" else { return }
+        state.goto(url: url)
     }
 
     @ViewBuilder

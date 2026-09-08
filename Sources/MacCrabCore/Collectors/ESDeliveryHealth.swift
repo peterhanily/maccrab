@@ -38,6 +38,7 @@ public final class ESDeliveryHealth: @unchecked Sendable {
     private var stopped = false
     private var generation: UInt64 = 0
     private var activeCanary: UInt64?
+    private var lastCanaryStartedAt: UInt64?
     private var lastCanaryCompletedAt: UInt64?
     private var lastOutcome: CanaryOutcome?
     private var checks: UInt64 = 0
@@ -65,6 +66,7 @@ public final class ESDeliveryHealth: @unchecked Sendable {
         guard startedAt != nil, !stopped else { return nil }
         generation &+= 1
         activeCanary = generation
+        lastCanaryStartedAt = monotonicNow()
         return generation
     }
 
@@ -80,6 +82,35 @@ public final class ESDeliveryHealth: @unchecked Sendable {
             failures = failures == .max ? .max : failures + 1
             lastError = "coverage canary: \(effectiveOutcome.rawValue)"
         }
+    }
+
+    /// A missed storage deadline remains a recorded failure while the same
+    /// probe waits in the ordinary pipeline. Only the latest probe may be
+    /// reconciled, within the existing proof-age horizon from its start.
+    /// Starting another probe or stopping the collector invalidates this work.
+    public func canReconcileStoredCanary(_ token: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return canReconcileStoredCanaryLocked(token)
+    }
+
+    /// Called only after the callback-seen probe obtains a positive FTS proof.
+    /// Rechecking is not a new probe: preserve both check and failure history.
+    @discardableResult
+    public func reconcileStoredCanary(_ token: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !Task.isCancelled, canReconcileStoredCanaryLocked(token) else { return false }
+        lastOutcome = .healthy
+        lastCanaryCompletedAt = monotonicNow()
+        return true
+    }
+
+    private func canReconcileStoredCanaryLocked(_ token: UInt64) -> Bool {
+        guard !stopped, generation == token, activeCanary == nil,
+              lastOutcome == .storeQueryUnknown || lastOutcome == .evictionGap,
+              let started = lastCanaryStartedAt else { return false }
+        let now = monotonicNow()
+        guard now >= started else { return false }
+        return Double(now - started) / 1_000_000_000 <= Self.maximumProofAgeSeconds
     }
 
     public func snapshot(lastCallbackUptimeNanoseconds: UInt64?) -> Snapshot {

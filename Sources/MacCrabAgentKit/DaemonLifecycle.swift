@@ -304,6 +304,7 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
     @discardableResult
     func submit(
         label: String,
+        maximumConcurrentHandlersForLabel: Int? = nil,
         operation: @escaping @Sendable () async -> Void
     ) -> Bool {
         lock.lock()
@@ -315,7 +316,18 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
             lock.unlock()
             return false
         }
-        if coalesceByLabel, activeLabels.contains(label) {
+        // A small explicit label allowance lets a newer coverage probe
+        // supersede its predecessor without letting blocked old queries grow
+        // an unbounded task population. All other callers keep their existing
+        // coalescing policy and the shared total admission cap still applies.
+        let labelIsFull: Bool
+        if let maximumConcurrentHandlersForLabel {
+            let count = taskLabels.values.reduce(0) { $0 + ($1 == label ? 1 : 0) }
+            labelIsFull = count >= max(1, maximumConcurrentHandlersForLabel)
+        } else {
+            labelIsFull = coalesceByLabel && activeLabels.contains(label)
+        }
+        if labelIsFull {
             coalescedHandlers &+= 1
             coalescedByLabel[label, default: 0] &+= 1
             lock.unlock()
@@ -417,7 +429,8 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
     private func complete(id: UInt64) {
         lock.withLock {
             guard tasks.removeValue(forKey: id) != nil else { return }
-            if let label = taskLabels.removeValue(forKey: id) {
+            if let label = taskLabels.removeValue(forKey: id),
+               !taskLabels.values.contains(label) {
                 activeLabels.remove(label)
             }
             completedHandlers &+= 1
