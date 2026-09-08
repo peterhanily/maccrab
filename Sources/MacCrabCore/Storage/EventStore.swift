@@ -766,6 +766,9 @@ public actor EventStore {
     /// before its checkpoint. Production leaves this nil.
     private var journalExpiryPostCommitHookForTesting:
         (@Sendable () -> Void)?
+    /// Observes actual expiry checkpoint attempts; production leaves this nil.
+    private var journalExpiryCheckpointHookForTesting:
+        (@Sendable () -> Void)?
     private var storagePolicy: SQLitePersistentStorePolicy?
     private var storageAdmission: SQLitePersistentStoreAdmission?
     /// Authoritative PRAGMA page_size captured at each open/reopen. Transaction
@@ -847,6 +850,8 @@ public actor EventStore {
     /// wide legacy rows, but pre-producer recovery requires this exact set to
     /// be absent before it reports ready.
     private static let supersededEventIndexes = [
+        "idx_events_process_path",
+        "idx_events_ts_severity",
         "idx_events_category",
         "idx_events_severity",
         "idx_events_ts_category",
@@ -859,13 +864,16 @@ public actor EventStore {
         "idx_events_parent_exe_ts",
         "idx_events_ai_session",
     ]
+    /// Retained for empty-store bootstrap and compatibility with older stores.
+    /// Existing v8 stores do not require or rebuild this optional index.
+    private static let journalCategoryIndexSQL =
+        "CREATE INDEX IF NOT EXISTS idx_events_cat_sev_ts ON events(event_category, severity, timestamp)"
     /// Read-only inventory that a durable `schema_finalized = 1` marker must
     /// prove before routine reopen may bypass rc.12 -> rc.13 transition work.
     /// The pre-producer recovery path repeats this validation and adds the
     /// full FTS external-content integrity check before any producer starts.
     private static let finalizedJournalSchemaObjects: [(String, String)] = [
         ("idx_events_timestamp", "view"),
-        ("idx_events_cat_sev_ts", "index"),
         ("idx_event_projection_timestamp", "index"),
         ("idx_event_projection_locator", "index"),
         ("idx_event_projection_victim", "index"),
@@ -1494,6 +1502,8 @@ public actor EventStore {
         ),
         // v1.21.5 PERF: index hygiene on `events`, the highest-insert-rate table
         // in the product — every index on it is a B-tree write per row.
+        // This describes v7's query layout. v8 exact queries use the journal,
+        // so existing-store upgrades no longer require the replacement index.
         //
         // Drops two indexes that were strict prefixes of wider ones and so were
         // pure insert cost with no possible read benefit (see the baseline schema
@@ -1519,7 +1529,7 @@ public actor EventStore {
             sql: [
                 "DROP INDEX IF EXISTS idx_events_process_path",
                 "DROP INDEX IF EXISTS idx_events_ts_severity",
-                "CREATE INDEX IF NOT EXISTS idx_events_cat_sev_ts ON events(event_category, severity, timestamp)",
+                journalCategoryIndexSQL,
             ]
         ),
         // v1.21.6-rc.13: complete, checksummed block journal plus a bounded
@@ -2212,6 +2222,672 @@ public actor EventStore {
         )
     }
 
+    private final class TransitionReclaimDeadline {
+        let end = ContinuousClock.now.advanced(by: .seconds(30))
+        var expired: Bool { ContinuousClock.now >= end }
+    }
+
+    private struct LegacyBootstrapReclaimPlan {
+        let indexes: Set<String>
+        let metadataAllocationBytes: Int64
+        let metadataTransactionBytes: Int64
+        let maximumTransactionBytes: Int64
+    }
+
+    private static func transitionScalar(
+        _ db: OpaquePointer, _ sql: String, allowNegative: Bool = false
+    ) throws -> Int64 {
+        var raw: OpaquePointer?
+        let prepared = sqlite3_prepare_v2(db, sql, -1, &raw, nil)
+        guard prepared == SQLITE_OK, let statement = raw else {
+            sqlite3_finalize(raw)
+            throw EventStoreError.storageNotReady("legacy bootstrap scalar could not be prepared")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              sqlite3_column_type(statement, 0) == SQLITE_INTEGER else {
+            throw EventStoreError.storageNotReady("legacy bootstrap scalar was unavailable")
+        }
+        let result = sqlite3_column_int64(statement, 0)
+        guard (allowNegative || result >= 0), sqlite3_step(statement) == SQLITE_DONE else {
+            throw EventStoreError.storageNotReady("legacy bootstrap scalar was invalid")
+        }
+        return result
+    }
+
+    private static func withLegacyBootstrapWorkspace<Result>(
+        on db: OpaquePointer,
+        budget: EventPipelineLiveMemoryBudget,
+        _ body: (EventPipelineMemoryLease, TransitionReclaimDeadline) throws -> Result
+    ) throws -> Result {
+        guard try transitionScalar(db, "SELECT COUNT(*) FROM pragma_journal_mode WHERE journal_mode='wal'") == 1,
+              sqlite3_compileoption_used("TEMP_STORE=2") == 1 else {
+            throw EventStoreError.storageNotReady("legacy bootstrap requires its verified WAL and memory-journal configuration")
+        }
+        var powersafe: Int32 = -1
+        guard sqlite3_file_control(db, "main", SQLITE_FCNTL_POWERSAFE_OVERWRITE, &powersafe) == SQLITE_OK,
+              powersafe == 1,
+              let lease = budget.tryAcquire(bytes: EventJournalCodec.maximumWorkspaceBytes,
+                  owner: .eventStoreWorkspace) else {
+            throw EventStoreError.storageNotReady("legacy bootstrap is waiting for verified bounded storage workspace")
+        }
+        defer { withExtendedLifetime(lease) {} }
+        let spill = try transitionScalar(db, "PRAGMA cache_spill")
+        let cache = try transitionScalar(db, "PRAGMA cache_size", allowNegative: true)
+        let mmap = try transitionScalar(db, "PRAGMA mmap_size")
+        let timeout = try transitionScalar(db, "PRAGMA busy_timeout")
+        let temp = try transitionScalar(db, "PRAGMA temp_store")
+        let deadline = TransitionReclaimDeadline()
+        func restore() throws {
+            sqlite3_progress_handler(db, 0, nil, nil)
+            if sqlite3_get_autocommit(db) == 0 { try Self.exec(db, "ROLLBACK") }
+            try Self.exec(db, "PRAGMA cache_spill=\(spill)")
+            try Self.exec(db, "PRAGMA cache_size=\(cache)")
+            try Self.exec(db, "PRAGMA mmap_size=\(mmap)")
+            try Self.exec(db, "PRAGMA busy_timeout=\(timeout)")
+            try Self.exec(db, "PRAGMA temp_store=\(temp)")
+        }
+        do {
+            try Self.exec(db, "PRAGMA cache_size=-1024")
+            try Self.exec(db, "PRAGMA mmap_size=0")
+            try Self.exec(db, "PRAGMA cache_spill=OFF")
+            try Self.exec(db, "PRAGMA busy_timeout=250")
+            // DROP/CREATE use an automatic statement journal even with cache
+            // spills disabled. Keep its before-images in the leased memory.
+            try Self.exec(db, "PRAGMA temp_store=MEMORY")
+            // Cooperative VM/statement deadline; an internal b-tree traversal
+            // or blocked filesystem operation is not a strict wall-time bound.
+            sqlite3_progress_handler(db, 1000, { pointer in
+                guard let pointer else { return 1 }
+                return Unmanaged<TransitionReclaimDeadline>.fromOpaque(pointer)
+                    .takeUnretainedValue().expired ? 1 : 0
+            }, Unmanaged.passUnretained(deadline).toOpaque())
+            defer {
+                sqlite3_progress_handler(db, 0, nil, nil)
+                withExtendedLifetime(deadline) {}
+            }
+            try Task.checkCancellation()
+            let result = try body(lease, deadline)
+            try Task.checkCancellation()
+            try restore()
+            guard !deadline.expired else {
+                throw EventStoreError.storageNotReady("legacy bootstrap reached its cooperative work deadline; committed progress is preserved")
+            }
+            return result
+        } catch {
+            let original = error
+            try restore()
+            if deadline.expired {
+                throw EventStoreError.storageNotReady("legacy bootstrap reached its cooperative work deadline; committed progress is preserved")
+            }
+            throw original
+        }
+    }
+
+    /// One-time structural validation before the legacy rollback barrier.
+    /// This reserves an estimate of the valid published format's live SQLite
+    /// workspace, not an allocator/RSS limit for malformed encoded lengths.
+    /// The complete main database is checked together, including cross-tree
+    /// page ownership. FTS external-content equivalence is checked separately
+    /// during journal finalization; SQLite quick_check does not prove it.
+    private static func checkLegacySQLiteStructure(
+        on db: OpaquePointer,
+        budget: EventPipelineLiveMemoryBudget,
+        existingWorkspace: EventPipelineMemoryLease?,
+        existingDeadline: TransitionReclaimDeadline?
+    ) throws {
+        guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else {
+            throw SQLitePersistentStoreAdmissionError.schemaTransactionNotSerialized
+        }
+        var leases: [EventPipelineMemoryLease] = []
+        defer { withExtendedLifetime(leases) {}; withExtendedLifetime(existingWorkspace) {} }
+        if existingWorkspace == nil {
+            guard let initial = budget.tryAcquire(bytes: 2 * 1_048_576, owner: .eventStoreWorkspace) else {
+                throw EventStoreError.storageNotReady("legacy structural check is waiting for initial owned workspace")
+            }
+            leases.append(initial)
+        }
+        let deadline = existingDeadline ?? TransitionReclaimDeadline()
+        defer { withExtendedLifetime(deadline) {} }
+        let cache = try transitionScalar(db, "PRAGMA cache_size", allowNegative: true)
+        let mmap = try transitionScalar(db, "PRAGMA mmap_size")
+        func restore() throws {
+            if existingDeadline == nil { sqlite3_progress_handler(db, 0, nil, nil) }
+            try Self.exec(db, "PRAGMA cache_size=\(cache)")
+            try Self.exec(db, "PRAGMA mmap_size=\(mmap)")
+        }
+        func sqliteError(_ rc: Int32) -> EventStoreError {
+            let failure = SQLiteFailureDetails(resultCode: rc, db: db)
+            return .sqliteFailure(context: "legacy structural quick_check",
+                message: "SQLite structural check did not complete",
+                resultCode: failure.resultCode,
+                extendedResultCode: failure.extendedResultCode,
+                systemErrno: failure.systemErrno)
+        }
+        do {
+            try Task.checkCancellation()
+            try Self.exec(db, "PRAGMA cache_size=-1024")
+            try Self.exec(db, "PRAGMA mmap_size=0")
+            if existingDeadline == nil {
+                sqlite3_progress_handler(db, 1000, { pointer in
+                    guard let pointer else { return 1 }
+                    return Unmanaged<TransitionReclaimDeadline>.fromOpaque(pointer)
+                        .takeUnretainedValue().expired ? 1 : 0
+                }, Unmanaged.passUnretained(deadline).toOpaque())
+            }
+            let expectedFTS = """
+                CREATE VIRTUAL TABLE events_fts USING fts5(
+                    process_name, process_path, process_commandline,
+                    file_path, network_dest_ip, tcc_service, tcc_client,
+                    content=events, content_rowid=rowid
+                )
+                """
+            guard let fts = try Self.schemaObject(on: db, named: "events_fts"),
+                  fts.type == "table",
+                  Self.canonicalSchemaSQL(fts.sql) == Self.canonicalSchemaSQL(expectedFTS),
+                  try transitionScalar(db, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND lower(sql) LIKE 'create virtual table %'") == 1,
+                  try transitionScalar(db, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('events_fts_data','events_fts_idx','events_fts_docsize','events_fts_config')") == 4,
+                  try transitionScalar(db, "SELECT COUNT(*) FROM events_fts_data WHERE typeof(block)!='blob' OR (id NOT IN (1,10) AND (id>>37 NOT BETWEEN 1 AND 2000))") == 0 else {
+                throw EventStoreError.storageNotReady("legacy structural check requires the published FTS storage format")
+            }
+            let pageCount = try transitionScalar(db, "PRAGMA page_count")
+            let schemaBytes = try transitionScalar(db,
+                "SELECT COALESCE(SUM(COALESCE(octet_length(sql),0)+256),0) FROM sqlite_schema")
+            let encoded = try transitionScalar(db,
+                "SELECT COALESCE(SUM(octet_length(block)),0) FROM events_fts_data")
+            let maximumPage = try transitionScalar(db,
+                "SELECT COALESCE(MAX(octet_length(block)),0) FROM events_fts_data")
+            var segments: Int64 = 0
+            var maximumSegment: Int64 = 0
+            var firstID: Int64 = 137_438_953_472
+            // Seek each segment through the INTEGER PRIMARY KEY, then sum only
+            // its rowid range. No GROUP BY/DISTINCT sorter or segment array is
+            // allocated before the final workspace reservation.
+            while true {
+                let segment = try transitionScalar(db, """
+                    SELECT COALESCE((SELECT id>>37 FROM events_fts_data
+                        WHERE id>=\(firstID) ORDER BY id LIMIT 1),0)
+                    """)
+                if segment == 0 { break }
+                guard segment <= 2_000, segments < 2_000 else {
+                    throw EventStoreError.storageNotReady("legacy structural check segment inventory is invalid")
+                }
+                let nextID = (segment + 1) << 37
+                let bytes = try transitionScalar(db, """
+                    SELECT COALESCE(SUM(octet_length(block)),0) FROM events_fts_data
+                    WHERE id>=\(firstID) AND id<\(nextID)
+                    """)
+                maximumSegment = max(maximumSegment, bytes)
+                segments += 1
+                firstID = nextID
+            }
+            // Bundled fts5_dri uses a 37-bit segment suffix; dlidx height has
+            // five bits. Each forward segment iterator retains at most two leaf
+            // pages plus a 32-level doclist index. Direct blob reads do not make
+            // a VDBE payload copy. Term/position buffers round up by powers of two;
+            // NOOUTPUT integrity traversal materializes one segment's position
+            // list at a time. SQLITE_DEBUG's nested query checks are not enabled.
+            let dataBuffers = min(encoded, SQLitePersistentStoreAdmission.saturatingMultiply(
+                maximumPage, by: SQLitePersistentStoreAdmission.saturatingAdd(segments * 34, 2)))
+            let termBuffers = SQLitePersistentStoreAdmission.saturatingMultiply(
+                min(encoded, SQLitePersistentStoreAdmission.saturatingMultiply(segments + 2, by: 32_769)), by: 2)
+            let positionBuffer = SQLitePersistentStoreAdmission.saturatingMultiply(
+                SQLitePersistentStoreAdmission.saturatingAdd(maximumSegment, 8), by: 2)
+            var estimate = SQLitePersistentStoreAdmission.saturatingAdd(dataBuffers, termBuffers)
+            for bytes in [positionBuffer, segments * 8_192, pageCount / 8 + 1,
+                          SQLitePersistentStoreAdmission.saturatingMultiply(schemaBytes, by: 4),
+                          Int64(2 * 1_048_576)] {
+                estimate = SQLitePersistentStoreAdmission.saturatingAdd(estimate, bytes)
+            }
+            // Multiple individually bounded S leases can use the existing shared
+            // startup envelope. This does not change any owner or process limit.
+            guard estimate <= Int64(budget.snapshot().maximumBytes) else {
+                throw EventStoreError.storageNotReady("legacy structural check workspace exceeds the existing memory envelope")
+            }
+            let alreadyOwned = (existingWorkspace?.bytes ?? 0) + leases.reduce(0) { $0 + $1.bytes }
+            var remaining = max(0, Int(estimate) - alreadyOwned)
+            while remaining > 0 {
+                let bytes = min(remaining, EventJournalCodec.maximumWorkspaceBytes)
+                guard let lease = budget.tryAcquire(bytes: bytes, owner: .eventStoreWorkspace) else {
+                    throw EventStoreError.storageNotReady("legacy structural check is waiting for owned memory workspace")
+                }
+                leases.append(lease)
+                remaining -= bytes
+            }
+            try Task.checkCancellation()
+            var raw: OpaquePointer?
+            let prepared = sqlite3_prepare_v2(db, "PRAGMA main.quick_check(1)", -1, &raw, nil)
+            guard prepared == SQLITE_OK else {
+                sqlite3_finalize(raw)
+                throw sqliteError(prepared)
+            }
+            guard let statement = raw else {
+                throw EventStoreError.storageNotReady("legacy structural check returned no statement")
+            }
+            defer { sqlite3_finalize(statement) }
+            let result = sqlite3_step(statement)
+            guard result != SQLITE_DONE else {
+                throw EventStoreError.storageNotReady("legacy structural check returned no verdict")
+            }
+            guard result == SQLITE_ROW else { throw sqliteError(result) }
+            // Do not copy or expose SQLite's possibly user-derived diagnostic,
+            // and never turn a non-ok row into synthetic SQLITE_CORRUPT.
+            guard sqlite3_column_type(statement, 0) == SQLITE_TEXT,
+                  sqlite3_column_bytes(statement, 0) == 2,
+                  let value = sqlite3_column_text(statement, 0),
+                  value[0] == 111, value[1] == 107 else {
+                throw EventStoreError.storageNotReady("legacy structural quick_check reported an issue; original storage is preserved")
+            }
+            let completed = sqlite3_step(statement)
+            guard completed != SQLITE_ROW else {
+                throw EventStoreError.storageNotReady("legacy structural check did not return one complete verdict")
+            }
+            guard completed == SQLITE_DONE else { throw sqliteError(completed) }
+            try Task.checkCancellation()
+            guard !deadline.expired else {
+                throw EventStoreError.storageNotReady("legacy structural check reached its cooperative deadline; retry preserves storage")
+            }
+            try restore()
+        } catch {
+            let original = error
+            try restore()
+            if deadline.expired {
+                throw EventStoreError.storageNotReady("legacy structural check reached its cooperative deadline; retry preserves storage")
+            }
+            throw original
+        }
+    }
+
+    /// The exception is deliberately limited to the measured published format.
+    /// It does not lower the policy reserve or authorize a partially proved
+    /// barrier. All inventory, allocation and headroom probes share its writer
+    /// snapshot. The existing bootstrap then retires only the indexes this
+    /// plan proved sufficient, and restores ordinary admission before return.
+    private static func legacyBootstrapReclaimPlan(
+        on db: OpaquePointer,
+        path: String,
+        policy: SQLitePersistentStorePolicy
+    ) throws -> LegacyBootstrapReclaimPlan {
+        guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else {
+            throw SQLitePersistentStoreAdmissionError.schemaTransactionNotSerialized
+        }
+        let pageSize = try transitionScalar(db, "PRAGMA page_size")
+        let pageCount = try transitionScalar(db, "PRAGMA page_count")
+        let freelist = try transitionScalar(db, "PRAGMA freelist_count")
+        guard pageSize == 4_096, pageCount > 0, freelist < pageCount,
+              try transitionScalar(db, "PRAGMA auto_vacuum") == 2,
+              try SchemaMigrator.readVersion(db: db) == 6,
+              try transitionScalar(db, "SELECT COUNT(*) FROM pragma_encoding WHERE encoding='UTF-8'") == 1,
+              try transitionScalar(db, "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('sqlite_stat1','sqlite_stat2','sqlite_stat3','sqlite_stat4')") == 0 else {
+            throw EventStoreError.storageNotReady("legacy bootstrap cannot prove this dense store's preserving reclaim budget")
+        }
+        if try transitionScalar(db,
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='journal_block_id'") != 0 {
+            guard try transitionScalar(db,
+                "SELECT EXISTS(SELECT 1 FROM events WHERE journal_block_id IS NOT NULL LIMIT 1)") == 0 else {
+                throw EventStoreError.storageNotReady("legacy bootstrap cannot treat a populated journal projection as empty metadata")
+            }
+        }
+        let family = try SQLitePersistentStoreAdmission.measureFamily(path)
+        let main = try SQLitePersistentStoreAdmission.measureMainFile(path)
+        let free = try SQLitePersistentStoreAdmission.measureFreeSpace(policy.storageVolumePath)
+        guard family >= main, family <= policy.maxFootprintBytes,
+              try transitionScalar(db, "PRAGMA max_page_count") == pageCount else {
+            throw EventStoreError.storageNotReady("legacy bootstrap requires its original bounded main-file ceiling")
+        }
+        let sidecars = family - main
+        let capRoom = policy.maxFootprintBytes - family
+        let freeRoom = max(0, free - policy.freeSpaceFloorBytes)
+        guard capRoom > sidecars, freeRoom > sidecars else {
+            throw EventStoreError.storageNotReady("legacy bootstrap cannot reserve a write and its checkpoint")
+        }
+        let storageBudget = min(policy.transactionReserveBytes,
+            min((capRoom - sidecars) / 2, (freeRoom - sidecars) / 2))
+
+        let schemaRows = try transitionScalar(db, "SELECT COUNT(*) FROM sqlite_schema")
+        let schemaBytes = try transitionScalar(db, """
+            SELECT COALESCE(SUM(COALESCE(octet_length(type),0)
+                + COALESCE(octet_length(name),0) + COALESCE(octet_length(tbl_name),0)
+                + COALESCE(octet_length(sql),0) + 256),0) FROM sqlite_schema
+            """)
+        var recordCount = schemaRows
+        var encodedBytes = schemaBytes
+        var emptyRoots: Int64 = 1 // sqlite_sequence may be created by AUTOINCREMENT.
+        guard let migration = Self.schemaMigrations.first(where: { $0.version == 8 }) else {
+            throw EventStoreError.storageNotReady("legacy bootstrap migration definition is missing")
+        }
+        for sql in migration.sql {
+            let normalized = Self.canonicalSchemaSQL(sql)
+            if normalized.hasPrefix("create table ") {
+                let table = String(normalized.split(separator: " ")[2])
+                if table != "event_storage_state",
+                   let existing = try Self.schemaObject(on: db, named: table) {
+                    guard existing.type == "table",
+                          try transitionScalar(db,
+                            "SELECT EXISTS(SELECT 1 FROM \(table) LIMIT 1)") == 0 else {
+                        throw EventStoreError.storageNotReady("legacy bootstrap cannot treat populated journal tables as empty metadata")
+                    }
+                }
+            }
+            guard try !SchemaMigrator.pendingStorageWork(on: db, statements: [sql]).isEmpty else { continue }
+            let newRecords: Int64
+            if normalized.hasPrefix("create table ") {
+                // The fixed v8 table definitions have at most two automatic
+                // indexes. Count three roots/records even for WITHOUT ROWID.
+                newRecords = 3
+                emptyRoots += 3
+            } else if normalized.hasPrefix("create ") {
+                newRecords = 1
+                if normalized.hasPrefix("create index ")
+                    || normalized.hasPrefix("create unique index ") {
+                    emptyRoots += 1
+                }
+            } else {
+                newRecords = 0 // ADD COLUMN only extends an existing schema record.
+            }
+            recordCount += newRecords
+            encodedBytes = SQLitePersistentStoreAdmission.saturatingAdd(encodedBytes,
+                Int64(sql.utf8.count) + 256 * max(1, newRecords))
+        }
+        recordCount += 1 // Possible sqlite_sequence schema record.
+        encodedBytes = SQLitePersistentStoreAdmission.saturatingAdd(encodedBytes, 256)
+        guard recordCount <= 512 else {
+            throw EventStoreError.storageNotReady("legacy bootstrap schema exceeds its bounded inventory")
+        }
+        // Bound the entire resulting sqlite_schema, including the existing
+        // records, rather than pretending each DDL allocates 256 KiB. At most
+        // one leaf and one interior page per record overcounts a valid table
+        // b-tree; the doubled encoded bytes cover overflow representation.
+        // Every new empty data/index root is charged separately. Existing
+        // roots moved by mode-2 allocation change locations, not root count.
+        let schemaAllocation = SQLitePersistentStoreAdmission.conservativeEncodedRowMutationBytes(
+            logicalRepresentationBytes: encodedBytes,
+            pageSizeBytes: pageSize,
+            maximumLeafPageTouches: Int(recordCount * 2)
+        )
+        let metadataAllocation = SQLitePersistentStoreAdmission.saturatingAdd(
+            schemaAllocation,
+            SQLitePersistentStoreAdmission.saturatingAdd(emptyRoots * pageSize,
+                SQLitePersistentStoreAdmission.conservativeRowMutationBytes)
+        )
+        let pointerMapPages = pageCount / ((pageSize - 255) / 5 + 1) + 2
+        // Charge the complete resulting schema and all possible pointer maps
+        // for each independent DDL, with both retained/rollback images. With
+        // <=512 schema records, height is <=10; 52 extra pages cover two new
+        // balance siblings per level plus three root allocations/relocations
+        // (eight non-map pages each). Cache spills must remain disabled.
+        let metadataTransaction = SQLitePersistentStoreAdmission.saturatingAdd(
+            SQLitePersistentStoreAdmission.saturatingMultiply(
+                SQLitePersistentStoreAdmission.saturatingAdd(metadataAllocation,
+                    pointerMapPages * pageSize), by: 2),
+            SQLitePersistentStoreAdmission.saturatingAdd(
+                SQLitePersistentStoreAdmission.transactionFixedOverheadBytes(
+                    pageSizeBytes: pageSize, maximumTreePathPageTouches: 48), 65_536)
+        )
+        func fits(_ estimate: Int64) -> Bool {
+            // Two page images are already in the storage estimate. Charge
+            // their cache bookkeeping and the separate 1-MiB clean cache.
+            let memory = SQLitePersistentStoreAdmission.saturatingAdd(
+                SQLitePersistentStoreAdmission.saturatingAdd(estimate, estimate / 8), 1_114_112)
+            let writeAndCheckpoint = SQLitePersistentStoreAdmission.saturatingAdd(
+                SQLitePersistentStoreAdmission.saturatingMultiply(estimate, by: 2), sidecars)
+            return estimate <= storageBudget
+                && writeAndCheckpoint <= policy.transactionReserveBytes
+                && memory <= Int64(EventJournalCodec.maximumWorkspaceBytes)
+        }
+        guard fits(metadataTransaction) else {
+            throw EventStoreError.storageNotReady("legacy bootstrap metadata cannot fit its storage and owned-memory budgets")
+        }
+        var selected = Set<String>()
+        var reclaimable = freelist * pageSize
+        for name in ["idx_events_timestamp"] + Self.supersededEventIndexes {
+            guard let object = try Self.schemaObject(on: db, named: name) else { continue }
+            if name == "idx_events_timestamp", object.type == "view" {
+                guard Self.canonicalSchemaSQL(object.sql) == Self.canonicalSchemaSQL(Self.rollbackBarrierViewSQL) else {
+                    throw EventStoreError.storageNotReady("legacy bootstrap timestamp barrier is invalid")
+                }
+                continue
+            }
+            // Literal names come exclusively from this fixed source allowlist.
+            guard object.type == "index",
+                  try transitionScalar(db, "SELECT COUNT(*) FROM sqlite_schema WHERE name='\(name)' AND type='index' AND tbl_name='events'") == 1,
+                  try transitionScalar(db, "SELECT COUNT(*) FROM pragma_index_list('events') WHERE name='\(name)' AND \"unique\"=0 AND origin='c'") == 1 else {
+                throw EventStoreError.storageNotReady("legacy bootstrap index ownership or uniqueness is invalid: \(name)")
+            }
+            let allocated = try transitionScalar(db,
+                "SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name='\(name)'")
+            guard allocated > 0, allocated % pageSize == 0 else {
+                throw EventStoreError.storageNotReady("legacy bootstrap index allocation is invalid")
+            }
+            let indexBytes = SQLitePersistentStoreAdmission.saturatingMultiply(allocated, by: 2)
+            var estimate = SQLitePersistentStoreAdmission.saturatingAdd(indexBytes,
+                SQLitePersistentStoreAdmission.saturatingAdd(metadataTransaction,
+                    SQLitePersistentStoreAdmission.transactionFixedOverheadBytes(
+                        pageSizeBytes: pageSize, maximumTreePathPageTouches: 8)))
+            if name == "idx_events_timestamp" {
+                let guards = try Self.missingRollbackGuards(on: db, existingTablesOnly: true).count
+                let ordinaryBarrier = SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+                    rowMutationBytes: SQLitePersistentStoreAdmission.saturatingAdd(indexBytes,
+                        Int64(guards + 1) * SQLitePersistentStoreAdmission.conservativeRowMutationBytes),
+                    pageSizeBytes: pageSize, maximumTreePathPageTouches: 8 + guards)
+                estimate = max(estimate, ordinaryBarrier)
+            }
+            if fits(estimate) {
+                selected.insert(name)
+                reclaimable = SQLitePersistentStoreAdmission.saturatingAdd(reclaimable, allocated)
+            } else if name == "idx_events_timestamp" {
+                throw EventStoreError.storageNotReady("legacy bootstrap timestamp barrier cannot fit its bounded transaction")
+            }
+        }
+        let deficit = max(0, family - (policy.maxFootprintBytes - policy.transactionReserveBytes))
+        let needed = SQLitePersistentStoreAdmission.saturatingAdd(deficit,
+            SQLitePersistentStoreAdmission.saturatingAdd(metadataAllocation, 65_536))
+        guard reclaimable >= needed else {
+            throw EventStoreError.storageNotReady("legacy bootstrap has insufficient proven index/freelist bytes to restore ordinary admission before producers")
+        }
+        return LegacyBootstrapReclaimPlan(indexes: selected,
+            metadataAllocationBytes: metadataAllocation,
+            metadataTransactionBytes: metadataTransaction,
+            maximumTransactionBytes: storageBudget)
+    }
+
+    /// Recover only unused mode-2 pages before installing the one-way barrier.
+    /// Each independent transaction preserves every row and schema object.
+    /// A pin, exhausted budget or partial failure leaves resumable SQLite state.
+    /// The time deadline is cooperative: VM/statement boundaries cannot interrupt
+    /// a blocked filesystem call or one internal b-tree freelist traversal.
+    private static func reclaimLegacyTransitionHeadroom(
+        on handle: OpaquePointer,
+        path: String,
+        admission: inout SQLitePersistentStoreAdmission,
+        liveMemoryBudget: EventPipelineLiveMemoryBudget
+    ) throws {
+        let policy = admission.policy
+        let reserve = policy.transactionReserveBytes
+        let cap = policy.maxFootprintBytes
+        let initialFamily = try SQLitePersistentStoreAdmission.measureFamily(path)
+        guard initialFamily > cap - reserve else { return }
+        guard initialFamily <= cap else {
+            throw SQLitePersistentStoreAdmissionError.footprintLimit(
+                footprintBytes: initialFamily, reserveBytes: 0,
+                maxFootprintBytes: cap
+            )
+        }
+        func scalar(_ name: String) throws -> Int64 {
+            var statement: OpaquePointer?
+            let rc = sqlite3_prepare_v2(handle, "PRAGMA \(name)", -1, &statement, nil)
+            guard rc == SQLITE_OK, let statement else {
+                sqlite3_finalize(statement)
+                throw EventStoreError.storageNotReady("pre-transition reclaim pragma unavailable: \(name)")
+            }
+            defer { sqlite3_finalize(statement) }
+            guard sqlite3_step(statement) == SQLITE_ROW,
+                  sqlite3_column_type(statement, 0) == SQLITE_INTEGER else {
+                throw EventStoreError.storageNotReady("pre-transition reclaim pragma invalid: \(name)")
+            }
+            return sqlite3_column_int64(statement, 0)
+        }
+        guard try scalar("auto_vacuum") == 2 else { return }
+        var journal: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "PRAGMA journal_mode", -1, &journal, nil) == SQLITE_OK,
+              let journal else {
+            sqlite3_finalize(journal)
+            throw EventStoreError.storageNotReady("pre-transition reclaim journal mode unavailable")
+        }
+        let journalStep = sqlite3_step(journal)
+        let isWAL = journalStep == SQLITE_ROW
+            && sqlite3_column_text(journal, 0).map { String(cString: $0).lowercased() == "wal" } == true
+        sqlite3_finalize(journal)
+        guard isWAL else { return }
+        // Read capability; never force PSOW on. Otherwise sector co-writes
+        // and FULL-sync padding require a different physical-write bound.
+        var powersafe: Int32 = -1
+        guard sqlite3_file_control(handle, "main", SQLITE_FCNTL_POWERSAFE_OVERWRITE, &powersafe) == SQLITE_OK,
+              powersafe == 1 else {
+            throw EventStoreError.storageNotReady("pre-transition reclaim requires verified powersafe-overwrite support")
+        }
+        guard let workspace = liveMemoryBudget.tryAcquire(
+            bytes: EventJournalCodec.maximumWorkspaceBytes,
+            owner: .eventStoreWorkspace
+        ) else {
+            throw EventStoreError.memoryLeaseUnavailable("pre-transition reclaim is waiting for bounded workspace")
+        }
+        defer { withExtendedLifetime(workspace) {} }
+        let savedSpill = try scalar("cache_spill")
+        let savedCache = try scalar("cache_size")
+        let savedMmap = try scalar("mmap_size")
+        let savedTimeout = try scalar("busy_timeout")
+        let deadline = TransitionReclaimDeadline()
+        func checkDeadline() throws {
+            try Task.checkCancellation()
+            guard !deadline.expired else {
+                throw EventStoreError.storageNotReady("pre-transition reclaim reached its 30-second work deadline; retry preserves committed progress")
+            }
+        }
+        func restore() throws {
+            sqlite3_progress_handler(handle, 0, nil, nil)
+            if sqlite3_get_autocommit(handle) == 0 {
+                try Self.exec(handle, "ROLLBACK")
+            }
+            try Self.exec(handle, "PRAGMA cache_spill = \(savedSpill)")
+            try Self.exec(handle, "PRAGMA cache_size = \(savedCache)")
+            try Self.exec(handle, "PRAGMA mmap_size = \(savedMmap)")
+            try Self.exec(handle, "PRAGMA busy_timeout = \(savedTimeout)")
+        }
+        func checkpoint() throws {
+            try checkDeadline()
+            let result = try Self.truncateCheckpoint(on: handle) {
+                let snapshot = try admission.admitCheckpoint()
+                let peak = snapshot.familyFootprintBytes.addingReportingOverflow(snapshot.sidecarBytes)
+                guard !peak.overflow, peak.partialValue <= cap else {
+                    throw SQLitePersistentStoreAdmissionError.footprintLimit(
+                        footprintBytes: snapshot.familyFootprintBytes,
+                        reserveBytes: snapshot.sidecarBytes,
+                        maxFootprintBytes: cap
+                    )
+                }
+            }
+            try result.requireTruncated(context: "pre-transition reclaim checkpoint")
+            guard try SQLitePersistentStoreAdmission.measureFamily(path) <= cap else {
+                throw EventStoreError.storageNotReady("pre-transition reclaim checkpoint exceeded its family cap")
+            }
+        }
+        do {
+            try Self.exec(handle, "PRAGMA busy_timeout = 250")
+            try Self.exec(handle, "PRAGMA cache_size = -1024")
+            try Self.exec(handle, "PRAGMA mmap_size = 0")
+            try Self.exec(handle, "PRAGMA cache_spill = OFF")
+            sqlite3_progress_handler(handle, 1000, { pointer in
+                guard let pointer else { return 1 }
+                return Unmanaged<TransitionReclaimDeadline>.fromOpaque(pointer)
+                    .takeUnretainedValue().expired ? 1 : 0
+            }, Unmanaged.passUnretained(deadline).toOpaque())
+            defer {
+                sqlite3_progress_handler(handle, 0, nil, nil)
+                withExtendedLifetime(deadline) {}
+            }
+            try checkpoint()
+            var family = try SQLitePersistentStoreAdmission.measureFamily(path)
+            // A stale WAL alone can consume the original headroom.
+            if family > cap - reserve {
+                let target = max(0, cap - min(cap, SQLitePersistentStoreAdmission.saturatingMultiply(reserve, by: 2)))
+                var batches = 0
+                while family > target {
+                    try checkDeadline()
+                    guard batches < 256 else {
+                        throw EventStoreError.storageNotReady("pre-transition reclaim reached its 256-batch work limit; retry preserves committed progress")
+                    }
+                    guard sqlite3_get_autocommit(handle) != 0 else {
+                        throw EventStoreError.storageNotReady("pre-transition reclaim requires a standalone transaction")
+                    }
+                    try Self.exec(handle, "BEGIN IMMEDIATE TRANSACTION")
+                    try admission.admitSerializedIncrementalReclaim(estimatedTransactionBytes: 0, on: handle)
+                    let pageSize = try scalar("page_size")
+                    let pageCount = try scalar("page_count")
+                    let freelist = try scalar("freelist_count")
+                    let measuredFamily = admission.lastFootprintBytes ?? Int64.max
+                    guard pageCount > 0, freelist >= 0, freelist < pageCount else {
+                        throw EventStoreError.storageNotReady("pre-transition reclaim page accounting is invalid")
+                    }
+                    if freelist == 0 {
+                        try Self.exec(handle, "ROLLBACK")
+                        if measuredFamily <= cap - reserve { break }
+                        throw EventStoreError.storageNotReady("pre-transition reclaim has insufficient reusable pages for transition headroom")
+                    }
+                    let free = admission.lastFreeSpaceBytes ?? 0
+                    let main = try SQLitePersistentStoreAdmission.measureMainFile(path)
+                    guard measuredFamily >= main else {
+                        throw EventStoreError.storageNotReady("pre-transition reclaim family measurement is inconsistent")
+                    }
+                    let sidecars = measuredFamily - main
+                    let capRoom = cap - measuredFamily
+                    let freeRoom = max(0, free - policy.freeSpaceFloorBytes)
+                    guard capRoom > sidecars, freeRoom > sidecars else {
+                        throw EventStoreError.storageNotReady("pre-transition reclaim cannot reserve its transaction and checkpoint")
+                    }
+                    let budget = min(reserve, min((capRoom - sidecars) / 2, (freeRoom - sidecars) / 2))
+                    let plan = SQLitePersistentStoreAdmission.boundedIncrementalReclaimPlan(
+                        requestedPages: Int(clamping: min(freelist, 128)),
+                        pageCount: pageCount, pageSizeBytes: pageSize,
+                        budgetBytes: budget, workspaceBytes: Int64(workspace.bytes)
+                    )
+                    guard plan.pages > 0 else {
+                        throw EventStoreError.storageNotReady("pre-transition reclaim has no bounded page quantum within its storage and memory budgets")
+                    }
+                    try admission.admitSerializedIncrementalReclaim(
+                        estimatedTransactionBytes: plan.estimatedTransactionBytes, on: handle
+                    )
+                    _ = try StoragePragmas.runIncrementalVacuum(on: handle, maxPages: plan.pages)
+                    let afterPages = try scalar("page_count")
+                    let afterFreelist = try scalar("freelist_count")
+                    guard afterPages < pageCount, afterFreelist < freelist else {
+                        throw EventStoreError.storageNotReady("pre-transition reclaim made no page progress")
+                    }
+                    try checkDeadline()
+                    try Self.exec(handle, "COMMIT")
+                    try checkpoint()
+                    let afterFamily = try SQLitePersistentStoreAdmission.measureFamily(path)
+                    guard afterFamily < family else {
+                        throw EventStoreError.storageNotReady("pre-transition reclaim made no physical progress")
+                    }
+                    family = afterFamily
+                    batches += 1
+                }
+            }
+            // Only physical recovery can clear the original pressure latch and
+            // retry the lower max_page_count that was impossible before reclaim.
+            try admission.admitWrite(estimatedTransactionBytes: 0, on: handle)
+            try restore()
+        } catch {
+            let original = error
+            try restore()
+            if deadline.expired {
+                throw EventStoreError.storageNotReady("pre-transition reclaim reached its 30-second work deadline; retry preserves committed progress")
+            }
+            throw original
+        }
+    }
+
     /// Opens a SQLite database before actor isolation begins.
     /// Returns (db handle, isReadOnly) so init can assign to stored properties.
     ///
@@ -2225,7 +2901,8 @@ public actor EventStore {
     private static func openDatabase(
         at path: String,
         forceReadOnly: Bool = false,
-        storagePolicy: SQLitePersistentStorePolicy? = nil
+        storagePolicy: SQLitePersistentStorePolicy? = nil,
+        liveMemoryBudget: EventPipelineLiveMemoryBudget
     ) throws -> (
         OpaquePointer,
         Bool,
@@ -2391,6 +3068,36 @@ public actor EventStore {
             }
         }
 
+        var deferredLegacyBootstrap = false
+        if !isReadOnly, existingEventSubstrate,
+           try !Self.journalSchemaIsFinalized(on: handle),
+           var current = admission {
+            do {
+                let family = try SQLitePersistentStoreAdmission.measureFamily(path)
+                let deficit = max(0, family - (current.policy.maxFootprintBytes
+                    - current.transactionReserveBytes))
+                let main = try SQLitePersistentStoreAdmission.measureMainFile(path)
+                let reusable = try Self.transitionScalar(handle, "PRAGMA freelist_count")
+                    * Self.transitionScalar(handle, "PRAGMA page_size")
+                if deficit > 0, reusable < deficit,
+                   main > current.policy.maxFootprintBytes - current.transactionReserveBytes {
+                    // No mutation is authorized by this flag. The barrier's
+                    // writer snapshot must first prove enough admissible index
+                    // retirement to reclaim the complete ordinary reserve.
+                    deferredLegacyBootstrap = true
+                } else {
+                    try Self.reclaimLegacyTransitionHeadroom(
+                        on: handle, path: path, admission: &current,
+                        liveMemoryBudget: liveMemoryBudget
+                    )
+                }
+            } catch {
+                admission = current
+                throw error
+            }
+            admission = current
+        }
+
         var writerInitializationAllowed = !isReadOnly
             && !(admission?.growthBlocked ?? false)
 
@@ -2459,6 +3166,11 @@ public actor EventStore {
         // admission; then install the bounded additive v8 metadata/tables the
         // same way. Every boundary is idempotent and crash-resumable.
         if !isReadOnly, existingEventSubstrate {
+            func performJournalTransition(
+                workspace: EventPipelineMemoryLease? = nil,
+                deadline: TransitionReclaimDeadline? = nil
+            ) throws {
+            var bootstrapPlan: LegacyBootstrapReclaimPlan?
             // A completed schema-v8 transition is a validation-only reopen.
             // Probe its durable marker before any TRUNCATE checkpoint or
             // transaction-reserve gate: a dashboard reader may legitimately
@@ -2482,6 +3194,15 @@ public actor EventStore {
             var journalTransitionReady = true
 
             func transitionBoundaryIsDrained() throws -> Bool {
+                if deferredLegacyBootstrap, var current = admission {
+                    defer { admission = current }
+                    let snapshot = try current.admitCheckpoint()
+                    let peak = SQLitePersistentStoreAdmission.saturatingAdd(
+                        snapshot.familyFootprintBytes, snapshot.sidecarBytes)
+                    guard peak <= journalTransitionCap else {
+                        throw EventStoreError.storageNotReady("legacy bootstrap checkpoint does not fit the unchanged family cap")
+                    }
+                }
                 var logFrames: Int32 = 0
                 var checkpointedFrames: Int32 = 0
                 let checkpointRC = sqlite3_wal_checkpoint_v2(
@@ -2519,16 +3240,36 @@ public actor EventStore {
                 return logFrames == 0 || logFrames == checkpointedFrames
             }
 
-            func transitionCanStartNextStatement() throws -> Bool {
+            func transitionCanStartNextStatement(estimatedBytes: Int64 = 0) throws -> Bool {
                 let footprint = try SQLitePersistentStoreAdmission
                     .measureFamily(path)
-                let reserve = admission?.transactionReserveBytes
-                    ?? SQLitePersistentStorePolicy.eventTransactionReserveBytes
+                let reserve = deferredLegacyBootstrap ? estimatedBytes
+                    : (admission?.transactionReserveBytes
+                        ?? SQLitePersistentStorePolicy.eventTransactionReserveBytes)
                 guard footprint <= journalTransitionCap,
                       reserve <= journalTransitionCap - footprint else {
                     return false
                 }
                 return true
+            }
+
+            func admitDeferredTransition(_ estimate: Int64) throws {
+                guard let bootstrapPlan, estimate <= bootstrapPlan.maximumTransactionBytes,
+                      var current = admission else {
+                    throw EventStoreError.storageNotReady("legacy bootstrap transaction lacks its preserving preflight")
+                }
+                defer { admission = current }
+                let family = try SQLitePersistentStoreAdmission.measureFamily(path)
+                let main = try SQLitePersistentStoreAdmission.measureMainFile(path)
+                guard family >= main else {
+                    throw EventStoreError.storageNotReady("legacy bootstrap family accounting is inconsistent")
+                }
+                // Fund the write and its conservative checkpoint separately.
+                // This never borrows the maintenance cap/floor relaxation.
+                let combined = SQLitePersistentStoreAdmission.saturatingAdd(
+                    SQLitePersistentStoreAdmission.saturatingMultiply(estimate, by: 2), family - main)
+                try current.admitSerializedLegacyTransition(
+                    estimatedTransactionBytes: combined, on: handle)
             }
 
             func applyTransitionStatement(
@@ -2540,13 +3281,12 @@ public actor EventStore {
                     statements: [sql]
                 )
                 guard !pending.isEmpty else { return true }
-                guard try transitionCanStartNextStatement() else {
-                    return false
-                }
                 let estimate = estimatedTransactionBytes
+                    ?? (deferredLegacyBootstrap ? bootstrapPlan?.metadataTransactionBytes : nil)
                     ?? admission?.transactionReserveBytes
                     ?? SQLitePersistentStorePolicy.eventTransactionReserveBytes
-                if var current = admission {
+                guard try transitionCanStartNextStatement(estimatedBytes: estimate) else { return false }
+                if !deferredLegacyBootstrap, var current = admission {
                     guard estimate <= current.transactionReserveBytes else {
                         return false
                     }
@@ -2557,7 +3297,9 @@ public actor EventStore {
                 }
                 try Self.exec(handle, "BEGIN IMMEDIATE TRANSACTION")
                 do {
-                    if var current = admission {
+                    if deferredLegacyBootstrap {
+                        try admitDeferredTransition(estimate)
+                    } else if var current = admission {
                         try current.admitSerializedWrite(
                             estimatedTransactionBytes: estimate,
                             maintenance: true,
@@ -2632,6 +3374,17 @@ public actor EventStore {
                         "idx_events_timestamp has an unexpected schema type"
                     )
                 }
+                if barrier?.type != "view" {
+                    try Self.checkLegacySQLiteStructure(on: handle, budget: liveMemoryBudget,
+                        existingWorkspace: workspace, existingDeadline: deadline)
+                }
+                if deferredLegacyBootstrap {
+                    guard let policy = effectivePolicy else {
+                        throw EventStoreError.storageNotReady("legacy bootstrap policy is missing")
+                    }
+                    bootstrapPlan = try Self.legacyBootstrapReclaimPlan(
+                        on: handle, path: path, policy: policy)
+                }
                 let missingGuards = try Self.missingRollbackGuards(
                     on: handle,
                     existingTablesOnly: true
@@ -2679,7 +3432,7 @@ public actor EventStore {
                                 + (barrier?.type == "view" ? 0 : 1)
                         )
                     )
-                let estimate = SQLitePersistentStoreAdmission
+                var estimate = SQLitePersistentStoreAdmission
                     .conservativeTransactionBytes(
                         rowMutationBytes:
                             SQLitePersistentStoreAdmission
@@ -2692,12 +3445,19 @@ public actor EventStore {
                         maximumTreePathPageTouches:
                             8 + missingGuards.count
                     )
+                if let bootstrapPlan {
+                    estimate = max(estimate, SQLitePersistentStoreAdmission.saturatingAdd(
+                        SQLitePersistentStoreAdmission.saturatingMultiply(allocated, by: 2),
+                        bootstrapPlan.metadataTransactionBytes))
+                }
                 do {
                     // A large legacy index needs a schema budget, not the
                     // small fixed reserve used for ordinary event writes.
                     // Keep the entire drop/view/guards transaction bounded by
                     // fresh family and free-space measurements under this lock.
-                    if var current = admission {
+                    if deferredLegacyBootstrap {
+                        try admitDeferredTransition(estimate)
+                    } else if var current = admission {
                         try current.admitSerializedSchemaWrite(
                             estimatedTransactionBytes: estimate,
                             on: handle
@@ -2744,7 +3504,15 @@ public actor EventStore {
             if !journalSchemaIsFinalized, journalTransitionReady {
                 journalTransitionReady = try installRollbackBarrier()
             }
-            // Install the additive journal substrate first. If one legacy
+            if deferredLegacyBootstrap, !journalSchemaIsFinalized, journalTransitionReady {
+                // The deferred main-file ceiling remains the original page
+                // count. Retire the preflight-selected indexes before adding
+                // journal roots, so those roots can reuse the proved pages.
+                journalTransitionReady = try retireSupersededIndexes()
+            }
+            // Normal admission installs the additive journal substrate first.
+            // The deferred branch has already retired its proved index set.
+            // If one other legacy
             // index is too large to drop within the transaction reserve, a
             // later pre-producer transcode can empty it before retrying the
             // idempotent DROP; the upgrade never has to guess at scratch.
@@ -2787,7 +3555,7 @@ public actor EventStore {
                     )
                 }
             }
-            if !journalSchemaIsFinalized, journalTransitionReady {
+            func retireSupersededIndexes() throws -> Bool {
                 func indexDropEstimate(_ name: String) throws -> Int64 {
                     var statement: OpaquePointer?
                     let rc = sqlite3_prepare_v2(
@@ -2832,22 +3600,35 @@ public actor EventStore {
                         )
                 }
                 for name in Self.supersededEventIndexes {
-                    let estimate = try indexDropEstimate(name)
+                    if let bootstrapPlan, !bootstrapPlan.indexes.contains(name) { continue }
+                    var estimate = try indexDropEstimate(name)
+                    if let bootstrapPlan {
+                        estimate = SQLitePersistentStoreAdmission.saturatingAdd(
+                            estimate, bootstrapPlan.metadataTransactionBytes)
+                    }
                     let reserve = admission?.transactionReserveBytes
                         ?? SQLitePersistentStorePolicy.eventTransactionReserveBytes
                     // Leave an individually-too-large index intact until the
                     // pre-producer transcode has removed its legacy entries.
-                    // The additive journal schema is already durable, so this
-                    // is a safe, explicit partial-transition boundary.
-                    if estimate > reserve { continue }
+                    // Normal admission has already made the additive schema
+                    // durable. A deferred transition must retain its proof.
+                    if estimate > reserve {
+                        guard !deferredLegacyBootstrap else {
+                            throw EventStoreError.storageNotReady("legacy bootstrap index estimate no longer fits its preserving plan")
+                        }
+                        continue
+                    }
                     guard try applyTransitionStatement(
                         "DROP INDEX IF EXISTS \(name)",
                         estimatedTransactionBytes: estimate
                     ) else {
-                        journalTransitionReady = false
-                        break
+                        return false
                     }
                 }
+                return true
+            }
+            if !deferredLegacyBootstrap, !journalSchemaIsFinalized, journalTransitionReady {
+                journalTransitionReady = try retireSupersededIndexes()
             }
             guard journalTransitionReady else {
                 throw EventStoreError.storageNotReady(
@@ -2855,6 +3636,7 @@ public actor EventStore {
                 )
             }
             if !writerInitializationAllowed, !journalSchemaIsFinalized,
+               !deferredLegacyBootstrap,
                var current = admission {
                 do {
                     try current.admitWrite(
@@ -2870,6 +3652,27 @@ public actor EventStore {
                         "event journal transition completed but writer admission remains blocked: \(error.localizedDescription)"
                     )
                 }
+            }
+            }
+            if deferredLegacyBootstrap {
+                try Self.withLegacyBootstrapWorkspace(on: handle, budget: liveMemoryBudget) { workspace, deadline in
+                    try performJournalTransition(workspace: workspace, deadline: deadline)
+                }
+                guard var current = admission else {
+                    throw EventStoreError.storageNotReady("legacy bootstrap lost its storage admission")
+                }
+                do {
+                    try Self.reclaimLegacyTransitionHeadroom(on: handle, path: path,
+                        admission: &current, liveMemoryBudget: liveMemoryBudget)
+                    admission = current
+                    try StoragePragmas.applyEventStorePragmasChecked(to: handle)
+                    writerInitializationAllowed = true
+                } catch {
+                    admission = current
+                    throw error
+                }
+            } else {
+                try performJournalTransition()
             }
         }
 
@@ -3052,7 +3855,20 @@ public actor EventStore {
             // deferred quick_check task is scheduled by the daemon.
             try SchemaMigrator.run(
                 on: handle,
-                migrations: Self.schemaMigrations,
+                // Existing stores retire v7's old indexes through the measured
+                // transition path. Its optional category index is unnecessary
+                // for v8's journal queries; do not rebuild legacy rows at boot.
+                // Preserve the admitted version/header step. Fresh empty
+                // stores retain the original inexpensive bootstrap index.
+                migrations: Self.schemaMigrations.map { migration in
+                    existingEventSubstrate && migration.version == 7
+                        ? Migration(
+                            version: migration.version,
+                            name: migration.name,
+                            sql: []
+                        )
+                        : migration
+                },
                 skipQuickCheck: true,
                 beforeStorageWork: { work in
                     try admitSchemaWork(work)
@@ -3337,6 +4153,17 @@ public actor EventStore {
                 )
             }
         }
+        // Exact event pages/filtering and retention summaries use the journal;
+        // sparse search uses FTS plus rowid or timestamp/text predicates. None
+        // requires v7's category/severity index. Preserve existing copies,
+        // but never make its absence prevent a valid v8 store from starting.
+        if let optionalIndex = try schemaObject(
+            on: db, named: "idx_events_cat_sev_ts"
+        ), optionalIndex.type != "index" {
+            throw EventStoreError.storageNotReady(
+                "optional event category index has an unexpected schema type"
+            )
+        }
         try validateRollbackProtection(on: db)
     }
 
@@ -3455,7 +4282,8 @@ public actor EventStore {
             let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
                 at: databasePath,
                 forceReadOnly: true,
-                storagePolicy: nil
+                storagePolicy: nil,
+                liveMemoryBudget: liveMemoryBudget
             )
             self.db = handle
             self.isReadOnly = ro
@@ -3469,7 +4297,8 @@ public actor EventStore {
             let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
                 at: databasePath,
                 forceReadOnly: false,
-                storagePolicy: effectiveStoragePolicy
+                storagePolicy: effectiveStoragePolicy,
+                liveMemoryBudget: liveMemoryBudget
             )
             self.db = handle
             self.isReadOnly = ro
@@ -3504,7 +4333,8 @@ public actor EventStore {
         let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
             at: path,
             forceReadOnly: forceReadOnly,
-            storagePolicy: effectiveStoragePolicy
+            storagePolicy: effectiveStoragePolicy,
+            liveMemoryBudget: liveMemoryBudget
         )
         self.db = handle
         self.isReadOnly = ro
@@ -3613,6 +4443,12 @@ public actor EventStore {
         _ hook: (@Sendable () -> Void)?
     ) {
         journalExpiryPostCommitHookForTesting = hook
+    }
+
+    internal func setJournalExpiryCheckpointHookForTesting(
+        _ hook: (@Sendable () -> Void)?
+    ) {
+        journalExpiryCheckpointHookForTesting = hook
     }
 
     public func insert(event: Event) throws {
@@ -3803,6 +4639,7 @@ public actor EventStore {
         event: Event,
         applyInsertFilter: Bool,
         projection: ProjectionReference? = nil,
+        prepared suppliedPreparation: PreparedPersistedEvent? = nil,
         beforeWrite: (Int64) throws -> Void
     ) throws -> Bool {
         // v1.8.0 Layer 1: drop noise events at insert. Cheaper than letting
@@ -3813,7 +4650,18 @@ public actor EventStore {
            filter.shouldDrop(event: event) {
             return false
         }
-        let prepared = try preparePersistedEvent(event)
+        let prepared: PreparedPersistedEvent
+        if let suppliedPreparation {
+            guard suppliedPreparation.event == event,
+                  suppliedPreparation.overflow == nil else {
+                throw EventStoreError.encodingFailed(
+                    "Sparse insertion preparation does not match exact event"
+                )
+            }
+            prepared = suppliedPreparation
+        } else {
+            prepared = try preparePersistedEvent(event)
+        }
         let event = prepared.projectionEvent
         // Sparse projection rows retain canonical JSON as a downgrade-safe
         // compatibility copy. The copy is bounded to at most four rows/sec;
@@ -7511,7 +8359,8 @@ public actor EventStore {
 
     private func terminalRevisionTransactionEstimate(
         payloadBytes: Int,
-        eventCount: Int
+        eventCount: Int,
+        canaryProjectionRefreshCount: Int = 0
     ) -> Int64 {
         guard eventCount > 0 else { return 0 }
         let projectionLogical = Int64(eventCount)
@@ -7529,10 +8378,32 @@ public actor EventStore {
                 pageSizeBytes: sqlitePageSizeBytes,
                 maximumLeafPageTouches: 2 * eventCount + 2
             )
-        return SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+        let ordinary = SQLitePersistentStoreAdmission.conservativeTransactionBytes(
             rowMutationBytes: mutation,
             pageSizeBytes: sqlitePageSizeBytes,
             maximumTreePathPageTouches: 8
+        )
+        guard canaryProjectionRefreshCount > 0 else { return ordinary }
+        // A growing canary may replace at most the other three sparse rows
+        // in its admission bucket. Charge their FTS/content deletion, bounded
+        // disposition roster rewrite and coverage ledgers before any DML.
+        // Poison-only settlement keeps the default zero count and its existing
+        // protected headroom; this allowance belongs to actual row refreshes.
+        let victimMutation = SQLitePersistentStoreAdmission
+            .conservativeEncodedRowMutationBytes(
+                logicalRepresentationBytes:
+                    Int64(Self.projectionBytesPerBucket + 4_096),
+                pageSizeBytes: sqlitePageSizeBytes,
+                maximumLeafPageTouches: 20
+            )
+        let perVictim = eventTransactionEstimate(rowMutationBytes: victimMutation)
+        let victims = SQLitePersistentStoreAdmission.saturatingMultiply(
+            Int64(canaryProjectionRefreshCount),
+            by: Int64(Self.projectionRowsPerBucket - 1)
+        )
+        return SQLitePersistentStoreAdmission.saturatingAdd(
+            ordinary,
+            SQLitePersistentStoreAdmission.saturatingMultiply(perVictim, by: victims)
         )
     }
 
@@ -8149,7 +9020,11 @@ public actor EventStore {
                 "journal block transaction estimate \(estimate) exceeds reserve \(reserve)"
             )
         }
-        let maintenance = !legacyRowIDs.isEmpty || inheritedLossCount > 0
+        // Split migration appends deliberately leave the legacy row in place
+        // until a second bounded transaction. They still require the recovery
+        // hard-cap check and do not need future producer settlement headroom.
+        let maintenance = projectionMode == .migrationSplit
+            || !legacyRowIDs.isEmpty || inheritedLossCount > 0
         if maintenance {
             try admitJournalRecoveryTransaction(
                 estimatedBytes: estimate
@@ -9071,6 +9946,59 @@ public actor EventStore {
         }
     }
 
+    /// Plan a complete rank-respecting replacement without mutating any row.
+    /// The existing projection contract admits at most four rows per bucket,
+    /// so a refresh can examine/replace at most the other three. A partial
+    /// plan must never discard neighbors and then omit the canary anyway.
+    private func canaryProjectionReplacementPlan(
+        bucket: Int64,
+        row: WorstProjectionRow,
+        incomingRank: Int32,
+        prospectiveBytes: Int
+    ) throws -> [WorstProjectionRow]? {
+        let statement = try prepare(
+            """
+            SELECT rowid, id, projection_rank, projection_estimated_bytes,
+                   journal_block_id, journal_ordinal
+            FROM events
+            WHERE journal_block_id IS NOT NULL
+              AND projection_bucket = ?1 AND rowid != ?2
+            ORDER BY projection_rank DESC, id DESC LIMIT ?3
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, bucket)
+        sqlite3_bind_int64(statement, 2, row.rowID)
+        sqlite3_bind_int(statement, 3, Int32(Self.projectionRowsPerBucket - 1))
+        var remainingBytes = prospectiveBytes
+        var victims: [WorstProjectionRow] = []
+        while remainingBytes > Self.projectionBytesPerBucket {
+            let rc = sqlite3_step(statement)
+            if rc == SQLITE_DONE { return nil }
+            guard rc == SQLITE_ROW,
+                  let idText = sqlite3_column_text(statement, 1) else {
+                throw EventStoreError.stepFailed("canary projection replacement lookup failed")
+            }
+            let victim = WorstProjectionRow(
+                rowID: sqlite3_column_int64(statement, 0),
+                id: String(cString: idText),
+                rank: sqlite3_column_int(statement, 2),
+                bytes: Int(sqlite3_column_int64(statement, 3)),
+                blockID: sqlite3_column_int64(statement, 4),
+                ordinal: Int(sqlite3_column_int(statement, 5))
+            )
+            guard incomingRank < victim.rank
+                    || (incomingRank == victim.rank && row.id < victim.id)
+            else { return nil }
+            guard victim.bytes > 0, victim.bytes <= remainingBytes else {
+                throw EventStoreError.decodingFailed("canary projection replacement bytes are invalid")
+            }
+            remainingBytes -= victim.bytes
+            victims.append(victim)
+        }
+        return victims
+    }
+
     /// Remove one stale sparse representation while preserving the exact
     /// append-local disposition/coverage conservation. Used when a reviewed
     /// value cannot itself fit the bounded promotion overlay: leaving the old
@@ -9083,7 +10011,8 @@ public actor EventStore {
         replacement: JournalProjectionDisposition,
         context: String
     ) throws -> Bool {
-        guard replacement == .quota || replacement == .physical else {
+        guard replacement == .quota || replacement == .physical
+                || replacement == .replaced else {
             throw EventStoreError.stepFailed(
                 "\(context) has an invalid omission transition"
             )
@@ -9128,14 +10057,19 @@ public actor EventStore {
             expected: .materialized,
             replacement: replacement
         )
-        let column = replacement == .quota
-            ? "omitted_quota_count" : "omitted_physical_count"
+        let column: String
+        switch replacement {
+        case .quota: column = "omitted_quota_count"
+        case .replaced: column = "omitted_replaced_count"
+        default: column = "omitted_physical_count"
+        }
+        let replacementCount = replacement == .replaced ? 1 : 0
         try executeExpectingSingleChange(
-            "UPDATE event_projection_block_coverage SET materialized_count = materialized_count - 1, materialized_bytes = materialized_bytes - \(row.bytes), \(column) = \(column) + 1 WHERE block_id = \(blockID)",
+            "UPDATE event_projection_block_coverage SET materialized_count = materialized_count - 1, materialized_bytes = materialized_bytes - \(row.bytes), \(column) = \(column) + 1, replacement_total = replacement_total + \(replacementCount) WHERE block_id = \(blockID)",
             context: "\(context) block omission"
         )
         try executeExpectingSingleChange(
-            "UPDATE event_projection_coverage SET materialized_count = materialized_count - 1, materialized_bytes = materialized_bytes - \(row.bytes), \(column) = \(column) + 1, updated_at = \(Date().timeIntervalSince1970) WHERE bucket_start = \(bucket)",
+            "UPDATE event_projection_coverage SET materialized_count = materialized_count - 1, materialized_bytes = materialized_bytes - \(row.bytes), \(column) = \(column) + 1, replacement_total = replacement_total + \(replacementCount), updated_at = \(Date().timeIntervalSince1970) WHERE bucket_start = \(bucket)",
             context: "\(context) global omission"
         )
         return true
@@ -9231,9 +10165,38 @@ public actor EventStore {
             // already equals the canonical terminal-preferred projection.
             return true
         }
+        guard newBytes <= Self.projectionBytesPerBucket else {
+            _ = try dematerializeProjectionIfPresent(
+                blockID: location.blockID,
+                ordinal: location.ordinal,
+                replacement: .quota,
+                context: context
+            )
+            return false
+        }
         let usage = try projectionCoverageUsage(bucket: bucket)
-        let prospectiveBucketBytes = usage.bytes - row.bytes + newBytes
+        var prospectiveBucketBytes = usage.bytes - row.bytes + newBytes
+        var replacementVictims: [WorstProjectionRow] = []
+        if prospectiveBucketBytes > Self.projectionBytesPerBucket,
+           reason == .coverageCanary,
+           let plan = try canaryProjectionReplacementPlan(
+               bucket: bucket,
+               row: row,
+               incomingRank: rank,
+               prospectiveBytes: prospectiveBucketBytes
+           ) {
+            replacementVictims = plan
+            prospectiveBucketBytes -= plan.reduce(0) { $0 + $1.bytes }
+        }
         let growth = max(0, newBytes - row.bytes)
+        // Deleting an FTS row can allocate delete postings before a later
+        // merge reclaims them. Do not subtract retired victims from physical
+        // ownership; conservatively charge their bounded mutations as well.
+        let replacementPhysicalCharge = replacementVictims.reduce(Int64(0)) {
+            SQLitePersistentStoreAdmission.saturatingAdd(
+                $0, projectionPhysicalCharge(estimatedBytes: $1.bytes)
+            )
+        }
         try refreshProjectionPhysicalUpperBoundIfNeeded()
         let physicalLimit = reason == .coverageCanary
             ? Self.projectionPhysicalLimitBytes
@@ -9251,6 +10214,9 @@ public actor EventStore {
                 projectionPhysicalCharge(estimatedBytes: growth)
             )
         }
+        projectedUpper = SQLitePersistentStoreAdmission.saturatingAdd(
+            projectedUpper, replacementPhysicalCharge
+        )
         if projectedUpper > physicalLimit {
             try refreshProjectionPhysicalUpperBoundIfNeeded(force: true)
             projectedUpper = projectionOwnedUpperBoundBytes ?? Int64.max
@@ -9260,6 +10226,9 @@ public actor EventStore {
                     projectionPhysicalCharge(estimatedBytes: growth)
                 )
             }
+            projectedUpper = SQLitePersistentStoreAdmission.saturatingAdd(
+                projectedUpper, replacementPhysicalCharge
+            )
         }
         guard prospectiveBucketBytes <= Self.projectionBytesPerBucket,
               projectedUpper <= physicalLimit else {
@@ -9273,6 +10242,17 @@ public actor EventStore {
             return false
         }
 
+        for victim in replacementVictims {
+            guard try dematerializeProjectionIfPresent(
+                blockID: victim.blockID,
+                ordinal: victim.ordinal,
+                replacement: .replaced,
+                context: "canary terminal projection replacement"
+            ) else {
+                throw EventStoreError.stepFailed("planned canary projection victim disappeared")
+            }
+        }
+
         try evictProjection(row)
         let inserted = try insert(
             event: exactEvent,
@@ -9284,7 +10264,8 @@ public actor EventStore {
                 estimatedBytes: newBytes,
                 rank: rank,
                 bucket: bucket
-            )
+            ),
+            prepared: prepared
         ) { _ in }
         guard inserted else {
             throw EventStoreError.stepFailed(
@@ -10442,7 +11423,9 @@ public actor EventStore {
             let durableEstimate = terminalRevisionTransactionEstimate(
                 payloadBytes: (needsPromotionWrite ? matchJSON.count : 0)
                     + Self.maxRawJsonBytes,
-                eventCount: 1
+                eventCount: 1,
+                canaryProjectionRefreshCount:
+                    NoiseFilter.isCoverageCanaryProbe(event: promotedEvent) ? 1 : 0
             )
             do {
                 try requireCurrentFamilyCapacityUnderWriterLock(
@@ -10583,7 +11566,10 @@ public actor EventStore {
     /// Production terminal seam. The caller compacts away its typed delta,
     /// transfers the preparation lease J -> S, and passes that exact lease.
     /// Storage authenticates the full block while decoding only the target
-    /// ordinal, then drops the base graph before taking the writer lock.
+    /// ordinal, then drops ordinary event graphs before taking the writer lock.
+    /// A recognized coverage canary may retain its small terminal projection
+    /// under that same J lease through commit, so its FTS proof survives the
+    /// production terminal update without retaining full graphs for all events.
     @discardableResult
     public func appendTerminalDeltas(
         preparedDeltas: [EventTerminalDeltaStoragePreparation],
@@ -10633,6 +11619,8 @@ public actor EventStore {
             let location: JournalLocation
             let framedSHA256: Data
             let write: PlannedWrite
+            var canaryProjection: PreparedPersistedEvent? = nil
+            var canaryOwnership: EventPipelineMemoryLease? = nil
         }
         func poisonPlan(
             location: JournalLocation,
@@ -10682,6 +11670,7 @@ public actor EventStore {
                 workspaceLease: workspaceLease
             )
             let base = owned.record.value
+            let baseOwnershipBytes = owned.record.ownershipLease.bytes
             guard base.id == prepared.eventID,
                   owned.record.canonicalSHA256
                     == prepared.baseCanonicalSHA256,
@@ -10795,7 +11784,7 @@ public actor EventStore {
                 workspaceRetainedInputBytes:
                     prepared.compactRetainedByteEstimate
             )
-            return Plan(
+            var plan = Plan(
                 location: location,
                 framedSHA256: owned.framedSHA256,
                 write: .delta(
@@ -10804,7 +11793,55 @@ public actor EventStore {
                     terminalBytes: terminalJSON.count
                 )
             )
+            if NoiseFilter.isCoverageCanaryProbe(event: terminal),
+               terminalJSON.count <= Self.maxRawJsonBytes {
+                let preflight = try EventJournalAdmissionValidator.preflight(terminal)
+                // No truncation is needed below maxRawJsonBytes. Account for
+                // the still-live base, terminal/validation/encoding graphs,
+                // canonical bytes, projection Data/String and indexed text
+                // before constructing the additional projection buffers.
+                let components = [
+                    baseOwnershipBytes,
+                    preflight.sourceRetainedByteEstimate,
+                    preflight.sourceRetainedByteEstimate,
+                    preflight.sourceRetainedByteEstimate,
+                    terminalJSON.count,
+                    Self.maxRawJsonBytes * 3,
+                    Self.maxIndexedCommandLineBytes,
+                    4_096,
+                ]
+                var retained = 0
+                for component in components {
+                    let sum = retained.addingReportingOverflow(component)
+                    guard component >= 0, !sum.overflow else {
+                        throw EventStoreError.memoryLeaseUnavailable(
+                            "terminal canary projection ownership exceeds its bounded workspace"
+                        )
+                    }
+                    retained = sum.partialValue
+                }
+                guard !preflight.structurallyOverflowed,
+                      retained <= owned.record.ownershipLease.bytes else {
+                    throw EventStoreError.memoryLeaseUnavailable(
+                        "terminal canary projection ownership exceeds its bounded workspace"
+                    )
+                }
+                plan.canaryProjection = try preparePersistedEvent(
+                    EventJournalIngressPreparation(
+                        event: terminal,
+                        canonicalJSON: terminalJSON,
+                        canonicalSHA256: terminalDigest,
+                        sourceIdentitySHA256: prepared.sourceIdentitySHA256,
+                        overflow: nil
+                    )
+                )
+                plan.canaryOwnership = owned.record.ownershipLease
+            }
+            return plan
         }()
+        // The exceptional canary graph and its existing J credit have one
+        // lifetime on success, refusal, rollback and idempotent return.
+        defer { withExtendedLifetime(plan) {} }
 
         let poisonEstimate = terminalRevisionTransactionEstimate(
             payloadBytes: 512,
@@ -10972,7 +12009,9 @@ public actor EventStore {
                         }
                         let exactEstimate = terminalRevisionTransactionEstimate(
                             payloadBytes: block.payload.storedBytes,
-                            eventCount: 1
+                            eventCount: 1,
+                            canaryProjectionRefreshCount:
+                                plan.canaryProjection == nil ? 0 : 1
                         )
                         if fits {
                             do {
@@ -11091,12 +12130,21 @@ public actor EventStore {
                                 rowID: sqlite3_last_insert_rowid(db),
                                 context: "terminal delta"
                             )
-                            _ = try dematerializeProjectionIfPresent(
-                                blockID: plan.location.blockID,
-                                ordinal: plan.location.ordinal,
-                                replacement: .physical,
-                                context: "terminal delta"
-                            )
+                            if let canary = plan.canaryProjection {
+                                _ = try reconcileExistingProjectionUnderWriterLock(
+                                    event: canary.event,
+                                    location: plan.location,
+                                    context: "terminal canary delta",
+                                    prepared: canary
+                                )
+                            } else {
+                                _ = try dematerializeProjectionIfPresent(
+                                    blockID: plan.location.blockID,
+                                    ordinal: plan.location.ordinal,
+                                    replacement: .physical,
+                                    context: "terminal delta"
+                                )
+                            }
                             try execute("COMMIT")
                             committed = true
                             disposition = .inserted
@@ -11529,7 +12577,12 @@ public actor EventStore {
                         ? Int64.max
                         : terminalRevisionTransactionEstimate(
                             payloadBytes: nextPayload.partialValue,
-                            eventCount: nextCount
+                            eventCount: nextCount,
+                            canaryProjectionRefreshCount:
+                                uniqueRecords.filter {
+                                    NoiseFilter.isCoverageCanaryProbe(event: $0.event)
+                                }.count
+                                + (NoiseFilter.isCoverageCanaryProbe(event: terminal.event) ? 1 : 0)
                         )
                     if !uniqueRecords.isEmpty, estimate > reserve { break }
                     guard estimate <= reserve else {
@@ -11785,7 +12838,11 @@ public actor EventStore {
                     }
                     let plannedEstimate = terminalRevisionTransactionEstimate(
                         payloadBytes: plannedPayload,
-                        eventCount: uniqueRecords.count
+                        eventCount: uniqueRecords.count,
+                        canaryProjectionRefreshCount: uniqueRecords.filter {
+                            capacityPoisonByLocation[$0.location] == nil
+                                && NoiseFilter.isCoverageCanaryProbe(event: $0.event)
+                        }.count
                     )
                     var exactPlanAdmitted = true
                     do {
@@ -13546,8 +14603,8 @@ public actor EventStore {
         return max(0, sqlite3_column_int64(statement, 0))
     }
 
-    /// Complete a transition that deliberately deferred one or more large
-    /// legacy-index drops until canonical transcode emptied their wide rows.
+    /// Complete deferred legacy-index retirement after canonical transcode
+    /// emptied the wide legacy rows.
     /// Every DROP is independently reserve/cap-admitted and followed by a
     /// drained, exact family measurement. No producer may run while an old
     /// detection-era index remains and amplifies sparse-tier writes.
@@ -14029,6 +15086,90 @@ public actor EventStore {
         return try migrationSnapshot()
     }
 
+    /// Startup may defer retained work to avoid a reader-driven boot loop.
+    /// A running retention pass instead conserves its frozen cutoff through
+    /// the caller's existing bounded busy-retry policy.
+    public enum JournalExpiryPinnedEntryBehavior: Sendable {
+        case deferUntilNextPass
+        case conserveCurrentCutoff
+    }
+
+    private static let journalExpiryCheckpointBlockLimit = 64
+
+    private func journalExpiryCheckpointBoundary() throws -> WALCheckpointObservation {
+        journalExpiryCheckpointHookForTesting?()
+        return try journalRecoveryCheckpointBoundary()
+    }
+
+    private func rollbackJournalExpiryTransaction() throws {
+        guard let db else {
+            throw EventStoreError.storageNotReady("journal expiry lost its database")
+        }
+        if sqlite3_get_autocommit(db) == 0 {
+            try Self.exec(db, "ROLLBACK")
+        }
+        guard sqlite3_get_autocommit(db) != 0 else {
+            throw EventStoreError.storageNotReady(
+                "journal expiry rollback left a transaction active"
+            )
+        }
+    }
+
+    private static func isJournalExpiryCapacityRefusal(_ error: Error) -> Bool {
+        guard let error = error as? SQLitePersistentStoreAdmissionError else {
+            return false
+        }
+        switch error {
+        case .footprintLimit, .lowFreeSpace: return true
+        default: return false
+        }
+    }
+
+    /// Called immediately after precise maintenance admission, under the same
+    /// writer lock and before DML. This extra, non-latching check decides only
+    /// whether prior committed blocks can wait for a shared checkpoint. It
+    /// never borrows the next block's one-reserve recovery allowance or clears
+    /// ordinary admission's sticky pressure state.
+    private func journalExpiryCanCoalesce(estimatedBytes: Int64) throws -> Bool {
+        guard let db, sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else {
+            throw SQLitePersistentStoreAdmissionError.schemaTransactionNotSerialized
+        }
+        let policy = storageAdmission?.policy ?? storagePolicy
+            ?? Self.defaultStoragePolicy(for: databasePath)
+        let family: Int64
+        let free: Int64
+        if let admission = storageAdmission,
+           let measuredFamily = admission.lastFootprintBytes,
+           let measuredFree = admission.lastFreeSpaceBytes {
+            family = measuredFamily
+            free = measuredFree
+        } else {
+            family = try SQLitePersistentStoreAdmission.measureFamily(databasePath)
+            free = try SQLitePersistentStoreAdmission.measureFreeSpace(
+                policy.storageVolumePath
+            )
+        }
+        let protected = terminalSettlementProtectionActive
+            ? terminalPoisonSettlementHeadroomBytes : 0
+        let projectedFamily = family.addingReportingOverflow(estimatedBytes)
+        let requiredFamily = projectedFamily.partialValue
+            .addingReportingOverflow(protected)
+        guard !projectedFamily.overflow, !requiredFamily.overflow,
+              requiredFamily.partialValue <= policy.maxFootprintBytes,
+              estimatedBytes >= 0, free >= estimatedBytes else { return false }
+        // Maintenance admits with floor zero; the eventual checkpoint must
+        // still protect the configured floor and its whole sidecar. Charge
+        // the full estimate as both possible WAL growth and consumed free
+        // blocks. The actual checkpoint repeats its authoritative gate.
+        let main = try SQLitePersistentStoreAdmission.measureMainFile(databasePath)
+        return SQLitePersistentStoreAdmission.checkpointAdmissionSnapshot(
+            mainFileBytes: main,
+            familyFootprintBytes: projectedFamily.partialValue,
+            freeSpaceBytes: free - estimatedBytes,
+            freeSpaceFloorBytes: policy.freeSpaceFloorBytes
+        ).admitted
+    }
+
     /// Expire only whole authenticated admission blocks whose durable
     /// `retained_until` has passed. Exact terminal/promotion-applied Events are
     /// rolled into the existing 30-day aggregate contract in the same
@@ -14037,7 +15178,8 @@ public actor EventStore {
     @discardableResult
     public func expireJournalBlocks(
         retainedThrough now: Date = Date(),
-        maximumBlocks: Int = 256
+        maximumBlocks: Int = 256,
+        pinnedEntry: JournalExpiryPinnedEntryBehavior = .deferUntilNextPass
     ) throws -> Int {
         guard !isReadOnly, maximumBlocks > 0 else { return 0 }
         let cutoff = now.timeIntervalSince1970
@@ -14047,19 +15189,9 @@ public actor EventStore {
             )
         }
         try ensureJournalIndex()
-        // rc.34: expiry itself is what exhausts the FTS index (one tombstone
-        // segment per block, with automerge disabled), and an exhausted index
-        // then makes expiry fail — permanently, because the only compaction
-        // path runs after a readiness this failure prevents. Break that loop
-        // here, before the first delete needs a segid.
+        // FTS ceiling recovery also applies when no journal block is eligible:
+        // startup must relieve an exhausted legacy index before its next write.
         try recoverExhaustedFTSIndexIfNeeded()
-        // Expiry is routine retention, not schema recovery. A dashboard or
-        // other read-only client may pin healthy WAL frames indefinitely. Do
-        // not begin a WAL-producing rollup transaction until the prior
-        // boundary drains; returning zero makes the startup/timer caller stop
-        // this sweep without treating an ordinary reader as storage failure.
-        // The family-cap measurement remains fail-closed.
-        guard try journalRecoveryBoundaryIsDrained() else { return 0 }
         if journalExpirySummaryCutoff != cutoff {
             journalExpirySummaryCutoff = cutoff
             journalExpirySummaryCursor = 0
@@ -14143,6 +15275,20 @@ public actor EventStore {
             return 0
         }
 
+        // Only eligible retained work needs an expiry checkpoint or retry.
+        // Preserve startup's reader deferral, while the runtime timer explicitly
+        // requests typed busy to conserve this frozen cutoff.
+        let entryBoundary = try journalExpiryCheckpointBoundary()
+        if !entryBoundary.truncated {
+            switch pinnedEntry {
+            case .deferUntilNextPass: return 0
+            case .conserveCurrentCutoff:
+                try entryBoundary.requireTruncated(context: "journal expiry entry")
+            }
+        }
+
+        enum CoalescingBoundary: Error { case checkpointRequired }
+
         struct AggregateKey: Hashable {
             let day: String
             let category: String
@@ -14183,8 +15329,13 @@ public actor EventStore {
         }
 
         var expiredEvents = 0
+        var committedSinceCheckpoint = 0
 
-        for candidate in eligible {
+        func expireCandidate(
+            _ candidate: (index: Int, summary: VerifiedJournalSummary),
+            retryableAdmissionStage: inout Bool
+        ) throws {
+            retryableAdmissionStage = true
             let summary = candidate.summary
             let blockID = summary.blockID
             let reserve = storageTransactionReserveBytes
@@ -14198,6 +15349,7 @@ public actor EventStore {
                 estimatedBytes: 0,
                 maintenance: true
             )
+            retryableAdmissionStage = false
             do {
                 let exact = try loadExactJournalBlock(blockID: blockID)
                 var aggregates: [AggregateKey: Int64] = [:]
@@ -14384,10 +15536,16 @@ public actor EventStore {
                 // This is the authoritative, race-free capacity decision. All
                 // reads feeding `estimate` occurred after BEGIN IMMEDIATE and
                 // no page has been mutated yet.
+                retryableAdmissionStage = true
                 try requireCurrentFamilyCapacityUnderWriterLock(
                     estimatedBytes: estimate,
                     maintenance: true
                 )
+                retryableAdmissionStage = false
+                if committedSinceCheckpoint > 0,
+                   try !journalExpiryCanCoalesce(estimatedBytes: estimate) {
+                    throw CoalescingBoundary.checkpointRequired
+                }
                 let aggregate = try prepare(
                     """
                     INSERT INTO event_aggregates (
@@ -14541,6 +15699,7 @@ public actor EventStore {
                 }
                 try execute("COMMIT")
                 expiredEvents += summary.eventCount
+                committedSinceCheckpoint += 1
                 addJournalBlockTombstone(blockID)
                 journalExpirySummaryCursor = candidate.index + 1
                 journalVerifiedBlocks = max(0, journalVerifiedBlocks - 1)
@@ -14556,20 +15715,50 @@ public actor EventStore {
                 }
                 projectionOwnedUpperBoundBytes = nil
                 journalExpiryPostCommitHookForTesting?()
-                // A crash after COMMIT is bounded by the preflight above. A
-                // reader that arrives after that commit may pin its healthy
-                // WAL boundary. Stop this sweep at the durable commit instead
-                // of turning ordinary dashboard activity into a daemon-start
-                // failure or stacking another WAL-producing transaction.
-                // A genuinely over-cap family still throws fail-closed from
-                // journalRecoveryBoundaryIsDrained().
-                guard try journalRecoveryBoundaryIsDrained() else {
-                    return expiredEvents
-                }
             } catch {
-                try? execute("ROLLBACK")
+                try rollbackJournalExpiryTransaction()
                 throw error
             }
+        }
+        for candidate in eligible {
+            var retriedAfterCheckpoint = false
+            while true {
+                var retryableAdmissionStage = false
+                do {
+                    try expireCandidate(
+                        candidate,
+                        retryableAdmissionStage: &retryableAdmissionStage
+                    )
+                } catch {
+                    // Capacity retries are permitted only before DML and only
+                    // after earlier blocks made progress. A checked rollback is
+                    // mandatory before checkpointing this connection.
+                    try rollbackJournalExpiryTransaction()
+                    let needsBoundary = error is CoalescingBoundary
+                        || (retryableAdmissionStage
+                            && Self.isJournalExpiryCapacityRefusal(error))
+                    guard needsBoundary, committedSinceCheckpoint > 0,
+                          !retriedAfterCheckpoint else { throw error }
+                    let boundary = try journalExpiryCheckpointBoundary()
+                    guard boundary.truncated else { return expiredEvents }
+                    committedSinceCheckpoint = 0
+                    retriedAfterCheckpoint = true
+                    continue
+                }
+                // A new reader can arrive between checkpoints. Its pin is
+                // detected at this bounded boundary, not necessarily after the
+                // first block. Once observed, this invocation stops mutating.
+                if committedSinceCheckpoint == Self.journalExpiryCheckpointBlockLimit {
+                    let boundary = try journalExpiryCheckpointBoundary()
+                    guard boundary.truncated else { return expiredEvents }
+                    committedSinceCheckpoint = 0
+                }
+                break
+            }
+        }
+        if committedSinceCheckpoint > 0 {
+            let boundary = try journalExpiryCheckpointBoundary()
+            guard boundary.truncated else { return expiredEvents }
         }
         return expiredEvents
     }
@@ -15500,12 +16689,14 @@ public actor EventStore {
 
     public func exactEventsSnapshot(
         since: Date,
+        until: Date = .distantFuture,
         category: EventCategory? = nil,
         severity: Severity? = nil,
         limit: Int = 1000
     ) throws -> ExactEventQuerySnapshot {
         try exactEventQuerySnapshot(
             since: since,
+            until: until,
             category: category,
             severity: severity,
             limit: limit,
@@ -15866,6 +17057,46 @@ public actor EventStore {
             )
         }
         return []
+    }
+
+    /// Positive proof that the verified journal's sparse tier has an FTS match
+    /// in the requested source-time range. This scalar query retains no Event
+    /// graphs and needs no array-result memory lease. It does not prove that a
+    /// complete Event can be decoded/returned, or that an empty result proves
+    /// absence from the canonical journal. There is deliberately no LIKE
+    /// fallback: callers using this as an FTS health proof must keep misses
+    /// and failures distinct from a successful FTS match.
+    public func containsProjectedFTSMatch(
+        text: String,
+        since: Date,
+        until: Date
+    ) throws -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let phrase = "\"" + trimmed.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        return try withVerifiedExactReadSnapshot { _ in
+            let statement = try prepare(
+                """
+                SELECT 1 FROM events e
+                JOIN events_fts fts ON e.rowid = fts.rowid
+                WHERE events_fts MATCH ?1
+                  AND e.timestamp >= ?2 AND e.timestamp <= ?3
+                LIMIT 1
+                """
+            )
+            defer { sqlite3_finalize(statement) }
+            bindText(statement, index: 1, value: phrase)
+            sqlite3_bind_double(statement, 2, since.timeIntervalSince1970)
+            sqlite3_bind_double(statement, 3, min(
+                until.timeIntervalSince1970, Date().timeIntervalSince1970
+            ))
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW: return true
+            case SQLITE_DONE: return false
+            default:
+                throw EventStoreError.stepFailed("projection FTS presence query failed")
+            }
+        }
     }
 
     /// Query the bounded FTS/typed tier while carrying the exact retained
@@ -16343,9 +17574,9 @@ public actor EventStore {
     /// categories to keep the footprint under cap. Any sequence rule, graph rule
     /// or hunt that needs file history beyond ~30 s was silently blind.
     ///
-    /// Cheap: MIN/MAX + GROUP BY over the covering `idx_events_cat_sev_ts` /
-    /// `idx_events_ts_category` indexes, called at the 30 s heartbeat cadence,
-    /// never on the insert path.
+    /// Combines authenticated journal summary bounds with any remaining exact
+    /// legacy Events. It does not depend on a sparse category/severity index.
+    /// Called at the 30 s heartbeat cadence, never on the insert path.
     public func retainedWindowSecondsByCategory(
         asOf: Date = Date()
     ) throws -> [String: EventCategoryRetentionWindow] {
@@ -19201,7 +20432,8 @@ public actor EventStore {
             let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
                 at: databasePath,
                 forceReadOnly: false,
-                storagePolicy: storagePolicy
+                storagePolicy: storagePolicy,
+                liveMemoryBudget: liveMemoryBudget
             )
             db = handle
             isReadOnly = ro
@@ -19849,7 +21081,8 @@ public actor EventStore {
         ) = try Self.openDatabase(
             at: databasePath,
             forceReadOnly: false,
-            storagePolicy: policy
+            storagePolicy: policy,
+            liveMemoryBudget: liveMemoryBudget
         )
         if let insertStmt { sqlite3_finalize(insertStmt) }
         if let db {

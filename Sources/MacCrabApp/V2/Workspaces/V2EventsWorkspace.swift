@@ -14,10 +14,13 @@ import SwiftUI
 struct V2EventsWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
+    @State private var visibilityOwner = UUID()
+    @StateObject private var querySession: EventQuerySession
 
     init(state: V2DashboardState, appState: AppState) {
         self.state = state
         self.appState = appState
+        _querySession = StateObject(wrappedValue: EventQuerySession(reader: appState))
     }
 
     var body: some View {
@@ -45,19 +48,19 @@ struct V2EventsWorkspace: View {
             }
             EventStream(
                 appState: appState,
+                querySession: querySession,
                 initialFilterText: state.pendingEventsFilter ?? "",
                 initialCenterTime: state.pendingEventsCenterTime,
                 centerHalfWindowSeconds: state.pendingEventsHalfWindowSeconds
             )
             .id("events:\(state.pendingEventsFilter ?? "default"):\(state.pendingEventsCenterTime?.timeIntervalSince1970 ?? 0)")
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // v1.22.0 (item 7): only while the live event stream is on screen
-            // does the routine poll open a live events.db read snapshot. Off
-            // screen, that WAL-pinning read is skipped so the engine's WAL
-            // checkpoint is never starved of a reader-free window under burst.
-            .onAppear { appState.setEventsWorkspaceVisible(true) }
-            .onDisappear { appState.setEventsWorkspaceVisible(false) }
         }
+        // Register the workspace, not the EventStream whose filter-driven .id
+        // changes can overlap old/new appear callbacks. Owners are per window;
+        // the shared poll keeps one reader while any Events workspace remains.
+        .onAppear { appState.setEventsWorkspaceVisible(true, owner: visibilityOwner, session: querySession) }
+        .onDisappear { appState.setEventsWorkspaceVisible(false, owner: visibilityOwner) }
     }
 
     /// "Filtered by <X> ± <window> at <time>" banner. Pre-fix this

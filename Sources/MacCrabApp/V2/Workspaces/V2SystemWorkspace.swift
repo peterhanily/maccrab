@@ -39,6 +39,12 @@ public struct V2SystemWorkspace: View {
         self.sysextManager = sysextManager
     }
 
+    /// Startup deliberately defers database providers. Status must remain
+    /// readable from this window's selected engine without opening its stores.
+    nonisolated static func readSelectedHeartbeat(source: V2EngineSource) async -> V2HeartbeatSnapshot? {
+        await Task.detached(priority: .userInitiated) { source.heartbeat() }.value
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             V2WorkspaceTabStrip(
@@ -70,7 +76,8 @@ public struct V2SystemWorkspace: View {
                 V2StartupFailure.read(directory: source.directory)
             }.value
             self.startupFailure = report
-            let h = await state.provider.heartbeat()
+            let h = await Self.readSelectedHeartbeat(source: source)
+            guard !Task.isCancelled else { return }
             await MainActor.run { self.heartbeat = h }
 
             // Read trust-substrate info on a detached task so the

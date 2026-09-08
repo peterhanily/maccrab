@@ -19,6 +19,7 @@ struct V2CrabWidget: View {
     enum Mood { case happy, calm, alert, critical }
 
     let mood: Mood
+    let protectionStatus: V2ProtectionStatus
     var criticalCampaigns: Int = 0
     var canAcknowledge: Bool = false
     var eventRate: Double = 0
@@ -100,8 +101,21 @@ struct V2CrabWidget: View {
         }
     }
 
-    private var statusText: String {
-        if !connected { return String(localized: "overview.crab.quipOffline", defaultValue: "MacCrab is asleep — the engine isn't running.") }
+    var statusText: String {
+        // Mood describes campaigns/posture, and `connected` describes store
+        // access. Neither establishes that this engine completed startup.
+        switch protectionStatus {
+        case .starting:
+            return String(localized: "system.startupTitle", defaultValue: "Protection is starting")
+        case .unavailable:
+            return String(localized: "overview.bannerTitleUnavailable", defaultValue: "Protection unavailable — engine not ready")
+        case .degraded:
+            return String(localized: "overview.bannerTitleDegraded", defaultValue: "Protection degraded — review System Health")
+        case .inactive:
+            return String(localized: "overview.bannerTitleInactive", defaultValue: "Protection inactive — daemon not detected")
+        case .active:
+            break
+        }
         if feeding { return String(localized: "overview.crab.quipFed", defaultValue: "Om nom — Crabby snapped up an event! 🦀") }
         if petting { return String(localized: "overview.crab.quipPetted", defaultValue: "♥ MacCrab loves the attention!") }
         switch mood {

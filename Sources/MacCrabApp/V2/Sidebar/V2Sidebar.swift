@@ -275,17 +275,31 @@ struct V2Sidebar: View {
 
     // MARK: - Footer
 
-    /// Sidebar footer reflects real protection state (active / degraded
-    /// / inactive). Pre-fix it always said "Protection active" — even
-    /// when the daemon was offline.
+    var protectionStatus: V2ProtectionStatus {
+        V2ProtectionStatus.resolve(
+            providerLive: state.provider.mode == .live,
+            heartbeatPresent: appState.heartbeat != nil,
+            heartbeatStale: appState.heartbeat?.isStale ?? true,
+            readiness: appState.heartbeat?.readiness ?? .unavailable,
+            degraded: appState.isProtectionDegraded
+        )
+    }
+
+    /// Match Overview's readiness even when startup defers the database provider.
     private var protectionFooter: some View {
-        let degraded = appState.isProtectionDegraded
-        // Inactive = not reading live data: offline (no daemon yet, release) or
-        // mock (DEBUG/dev). Either way the footer says "Protection inactive".
-        let inactive = state.provider.mode != .live
-        let color: Color = inactive ? V2Theme.high : (degraded ? V2Theme.warning : V2Theme.healthy)
-        let title: String = inactive ? "Protection inactive" : (degraded ? "Protection degraded" : "Protection active")
-        let subtitle: String = inactive ? "No daemon detected" : (degraded ? "Click for details" : "Click for details")
+        let status = protectionStatus
+        let color: Color = status == .active ? V2Theme.healthy
+            : (status == .inactive ? V2Theme.high : V2Theme.warning)
+        let title: String = {
+            switch status {
+            case .active: return "Protection active"
+            case .starting: return "Protection starting"
+            case .unavailable: return "Protection unavailable"
+            case .degraded: return "Protection degraded"
+            case .inactive: return "Protection inactive"
+            }
+        }()
+        let subtitle = status == .inactive ? "No daemon detected" : "Click for details"
         return Button(action: onProtectionTap) {
             HStack(spacing: 10) {
                 ZStack {
@@ -441,5 +455,4 @@ private struct V2SidebarItem: View {
         return .clear
     }
 }
-
 

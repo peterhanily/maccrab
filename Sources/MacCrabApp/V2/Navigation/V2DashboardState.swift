@@ -86,7 +86,7 @@ public final class V2DashboardState: ObservableObject {
     /// Bumped by the auto-refresh timer; workspaces key their
     /// `.task` modifiers off this so they re-fetch on each tick.
     @Published public var refreshTick: Int = 0
-    private var autoRefreshTask: Task<Void, Never>? = nil
+    private(set) var autoRefreshTask: Task<Void, Never>? = nil
     /// Whether the dashboard is the active (frontmost) scene. Driven by the
     /// shell's `scenePhase`. The auto-refresh loop keeps sleeping while this is
     /// false but does NOT bump `refreshTick` — so a hidden / backgrounded
@@ -209,6 +209,8 @@ public final class V2DashboardState: ObservableObject {
             tab: tabs[currentWorkspace]
         ))
     }
+
+    deinit { autoRefreshTask?.cancel() }
 
     // MARK: - Live data
 
@@ -375,18 +377,28 @@ public final class V2DashboardState: ObservableObject {
 
     /// Start the periodic refresh loop. Idempotent.
     public func startAutoRefresh() {
+        // A window's pending connection may return after its task was cancelled.
+        // It must not start a new loop or cancel a newer appearance's loop.
+        guard !Task.isCancelled else { return }
         autoRefreshTask?.cancel()
         autoRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                let secs = await MainActor.run { self?.refreshIntervalSeconds ?? 5 }
-                try? await Task.sleep(nanoseconds: UInt64(secs) * 1_000_000_000)
+                guard let secs = await MainActor.run(body: { self?.refreshIntervalSeconds }) else {
+                    return
+                }
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(secs) * 1_000_000_000)
+                } catch {
+                    return
+                }
                 guard !Task.isCancelled else { break }
                 await MainActor.run {
                     // Skip the tick while hidden/backgrounded — the loop keeps
                     // running so it resumes instantly, but no re-render fires.
-                    guard let self, self.foregroundActive else { return }
+                    guard !Task.isCancelled, let self, self.foregroundActive else { return }
                     self.refreshTick &+= 1
                 }
+                guard !Task.isCancelled else { return }
                 await self?.resumeProviderAfterStartup()
             }
         }

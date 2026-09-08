@@ -328,6 +328,65 @@ public struct SQLitePersistentStoreAdmission {
         return (pages, saturatingAdd(unavailable, requested))
     }
 
+    /// A pre-transition incremental vacuum may move a b-tree page and update
+    /// pointer maps for all of its children. Charge every possible pointer-map
+    /// page once, plus eight data/freelist/parent pages per step. The caller
+    /// must disable cache spilling for the transaction so a dirty pointer-map
+    /// page cannot acquire repeated WAL images, and verify WAL/PSOW with no
+    /// nested savepoints. A step allocates once: page1, up to three freelist
+    /// pages, the moved page, its parent and a preserved source page fit eight;
+    /// child fan-out changes only the separately charged pointer maps.
+    /// No row payload is decoded.
+    static func boundedIncrementalReclaimPlan(
+        requestedPages: Int,
+        pageCount: Int64,
+        pageSizeBytes: Int64,
+        budgetBytes: Int64,
+        workspaceBytes: Int64
+    ) -> (pages: Int, estimatedTransactionBytes: Int64, workspaceBytes: Int64) {
+        guard requestedPages > 0, pageCount > 0,
+              pageSizeBytes >= 512,
+              pageSizeBytes <= maximumSQLitePageBytes,
+              pageSizeBytes & (pageSizeBytes - 1) == 0,
+              budgetBytes > 0, workspaceBytes > 0 else { return (0, 0, 0) }
+        // SQLite's one-byte reserved-space header cannot exceed 255 bytes.
+        let minimumPointerMapEntries = (pageSizeBytes - 255) / 5
+        let pointerMapPages = saturatingAdd(
+            pageCount / (minimumPointerMapEntries + 1), 2
+        )
+        let fixedPages = saturatingAdd(pointerMapPages, 12)
+        let diskPerPage = saturatingMultiply(
+            saturatingAdd(pageSizeBytes, 24), by: 2
+        )
+        let memoryPerPage = saturatingMultiply(
+            saturatingAdd(pageSizeBytes, 256), by: 2
+        )
+        let fixedDisk = saturatingAdd(
+            saturatingMultiply(fixedPages, by: diskPerPage), 65_536
+        )
+        // The caller caps clean cache at 1 MiB and disables mmap/spilling;
+        // dirty pages and their bookkeeping are charged separately above.
+        let fixedMemory = saturatingAdd(
+            saturatingMultiply(fixedPages, by: memoryPerPage), 1_114_112
+        )
+        guard fixedDisk < budgetBytes, fixedMemory < workspaceBytes else {
+            return (0, fixedDisk, fixedMemory)
+        }
+        let pages = min(
+            min(requestedPages, 128),
+            Int(clamping: min(
+                (budgetBytes - fixedDisk) / saturatingMultiply(diskPerPage, by: 8),
+                (workspaceBytes - fixedMemory) / saturatingMultiply(memoryPerPage, by: 8)
+            ))
+        )
+        let stepPages = saturatingMultiply(Int64(pages), by: 8)
+        return (
+            pages,
+            saturatingAdd(fixedDisk, saturatingMultiply(stepPages, by: diskPerPage)),
+            saturatingAdd(fixedMemory, saturatingMultiply(stepPages, by: memoryPerPage))
+        )
+    }
+
     /// Pure checkpoint-headroom calculation shared by the primary stores and
     /// the independently admitted trace stores. Callers must take fresh main,
     /// family, and f_bavail measurements at the operation boundary. Invalid or
@@ -622,6 +681,49 @@ public struct SQLitePersistentStoreAdmission {
         estimatedTransactionBytes: Int64,
         on db: OpaquePointer
     ) throws {
+        try admitSerializedStorageWork(
+            estimatedTransactionBytes: estimatedTransactionBytes,
+            on: db,
+            reinstallPageLimit: true
+        )
+    }
+
+    /// Strict physical reclaim before schema transition. A current main file
+    /// above cap-minus-reserve cannot accept the lower max_page_count until it
+    /// shrinks. Retain that pending limit and pressure latch; authorize only a
+    /// reserve-bounded, serialized reclaim within the unchanged cap and floor.
+    mutating func admitSerializedIncrementalReclaim(
+        estimatedTransactionBytes: Int64,
+        on db: OpaquePointer
+    ) throws {
+        try admitSerializedLegacyTransition(
+            estimatedTransactionBytes: estimatedTransactionBytes, on: db
+        )
+    }
+
+    /// A pre-producer legacy transition can consume an explicitly sized part
+    /// of the ordinary reserve while its original lower page ceiling remains
+    /// pending. The caller must prove a preserving route back to normal
+    /// admission before installing the one-way barrier. No producer uses this
+    /// entry point; cap, free-space floor and maximum transaction size remain
+    /// unchanged, and success does not clear the pressure latch.
+    mutating func admitSerializedLegacyTransition(
+        estimatedTransactionBytes: Int64,
+        on db: OpaquePointer
+    ) throws {
+        try validateTransactionEstimate(estimatedTransactionBytes)
+        try admitSerializedStorageWork(
+            estimatedTransactionBytes: estimatedTransactionBytes,
+            on: db,
+            reinstallPageLimit: false
+        )
+    }
+
+    private mutating func admitSerializedStorageWork(
+        estimatedTransactionBytes: Int64,
+        on db: OpaquePointer,
+        reinstallPageLimit: Bool
+    ) throws {
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else {
             throw SQLitePersistentStoreAdmissionError.schemaTransactionNotSerialized
         }
@@ -655,7 +757,7 @@ public struct SQLitePersistentStoreAdmission {
                     requiredFreeBytes: requiredFree.overflow ? Int64.max : requiredFree.partialValue
                 )
             }
-            if pageLimitPending { try installPageLimit(on: db) }
+            if reinstallPageLimit, pageLimitPending { try installPageLimit(on: db) }
         } catch let error as SQLitePersistentStoreAdmissionError {
             latchedFailure = error
             throw error

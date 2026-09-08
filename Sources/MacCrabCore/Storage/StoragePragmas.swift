@@ -220,8 +220,9 @@ enum StoragePragmas {
     // file grew unbounded between sweeps.
     //
     // `PRAGMA incremental_vacuum(N)` reclaims up to N pages from the
-    // *end* of the file by truncating in place. It requires **zero**
-    // scratch space — only that the DB was created with
+    // *end* of the file by truncating in place. It avoids a whole-file
+    // scratch copy, but its WAL and checkpoint still need admitted space.
+    // The DB must have been created with
     // `auto_vacuum = INCREMENTAL` (mode 2). Mode is per-file and
     // persistent; we read it at runtime and only attempt the reclaim
     // when the file actually supports it.
@@ -281,9 +282,8 @@ enum StoragePragmas {
         return sqlite3_column_int(stmt, 0)
     }
 
-    /// Run `PRAGMA incremental_vacuum(N)` with a passive checkpoint
-    /// before and a truncate checkpoint after so the WAL doesn't keep
-    /// "deleted" pages alive after the in-place truncate.
+    /// Run `PRAGMA incremental_vacuum(N)` without implicit checkpoints.
+    /// The persistent caller owns admission and checkpoint boundaries.
     ///
     /// `maxPages` is clamped to `incrementalVacuumHardCap` and to the
     /// current `freelist_count` — passing a larger value to
@@ -323,8 +323,8 @@ enum StoragePragmas {
         guard mode == 2 else {
             // Not in INCREMENTAL mode — the pragma would be a no-op
             // anyway, but we explicitly skip so callers can log the
-            // gap. (Pre-v1.10 EventStore DBs and all current
-            // TraceStore / CausalGraphStore DBs are mode 0.)
+            // gap. Older files can retain mode 0 even though fresh stores
+            // now initialize INCREMENTAL before enabling WAL.
             return IncrementalVacuumResult(
                 freelistBefore: 0,
                 freelistAfter: 0,
@@ -352,8 +352,8 @@ enum StoragePragmas {
         if requested > 0 {
             // `PRAGMA incremental_vacuum(N)` is the documented form;
             // SQLite reclaims min(N, freelist_count) pages from the
-            // end of the file by truncating in place. No scratch
-            // disk needed.
+            // end of the file by truncating in place. The caller must admit
+            // the resulting page writes and checkpoint space first.
             let sql = "PRAGMA incremental_vacuum(\(requested))"
             var errmsg: UnsafeMutablePointer<CChar>?
             let rc = sqlite3_exec(handle, sql, nil, nil, &errmsg)

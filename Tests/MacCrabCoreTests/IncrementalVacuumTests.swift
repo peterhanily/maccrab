@@ -5,8 +5,8 @@
 //
 // `PRAGMA incremental_vacuum(N)` reclaims freelist pages from the END
 // of the SQLite file by truncating in place. Unlike full VACUUM it
-// requires ZERO scratch disk, so the size-cap enforcer can call it
-// even when the volume is too tight for a full file rewrite.
+// avoids a whole-file scratch copy. Its WAL and checkpoint still need
+// temporary headroom, which persistent callers must admit separately.
 //
 // Contract pinned here:
 //   1. When `auto_vacuum = INCREMENTAL` is active on the file, the
@@ -22,14 +22,9 @@
 //      detects the runtime auto_vacuum mode and performs no implicit
 //      WAL checkpoint; persistent callers own the path/floor-aware gates.
 //
-// Pre-existing observation pinned by `pragmaOrderMatters`: the
-// current StoragePragmas order (journal_mode WAL FIRST, then
-// auto_vacuum INCREMENTAL) yields mode 0 on this SQLite build —
-// meaning all four production stores actually ship with mode 0
-// auto_vacuum and the incrementalVacuum path is a no-op until
-// either (a) the order is fixed on a future release with
-// migrate-existing semantics, or (b) the operator runs
-// `maccrabctl maintenance vacuum` to convert.
+// `pragmaOrderMatters` preserves the regression control: WAL first yields
+// mode 0. Production now sets auto_vacuum first, and fresh-store tests
+// require mode 2. Older existing files can still retain mode 0.
 
 import Testing
 import Foundation
@@ -176,7 +171,7 @@ struct StoragePragmasIncrementalVacuumTests {
         sqlite3_close(dbI)
     }
 
-    @Test("Reclaims freelist pages without scratch disk when INCREMENTAL is active")
+    @Test("Reclaims freelist pages in place when INCREMENTAL is active")
     func reclaimsPagesInPlace() async throws {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("maccrab-incvac-reclaim-\(UUID().uuidString)")
@@ -296,13 +291,9 @@ struct StoragePragmasIncrementalVacuumTests {
         #expect(result.pagesReclaimed == 0)
     }
 
-    /// PIN the current StoragePragmas PRAGMA order so a future fix
-    /// is deliberate. journal_mode WAL FIRST yields mode 0 on this
-    /// SQLite build; auto_vacuum FIRST yields mode 2. Both store
-    /// inits (EventStore + AlertStore + CampaignStore) currently use
-    /// the WAL-first order — which means production DBs ship in
-    /// mode 0 and the helper is a no-op there until a one-shot
-    /// `maccrabctl maintenance vacuum` runs.
+    /// Preserve both ordering outcomes: WAL first leaves mode 0; production's
+    /// auto_vacuum-first ordering creates mode 2. Setting the pragma later
+    /// cannot convert an existing populated mode-0 file without a rebuild.
     @Test("PRAGMA order pin: auto_vacuum after journal_mode yields mode 0")
     func pragmaOrderMatters() async throws {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -350,15 +341,11 @@ struct EventStoreIncrementalVacuumTests {
 
     @Test("incrementalVacuum runs against mode 2 after Wave 9B.1 PRAGMA-order fix")
     func returnsZeroOnGapInit() async throws {
-        // Per the StoragePragmas PRAGMA-order pin above, the fresh
-        // EventStore DB ships with auto_vacuum=NONE. The helper
-        // must therefore short-circuit to a clean 0 — NOT throw and
-        // NOT silently report nonzero.
+        // A fresh store uses INCREMENTAL but has no free pages to reclaim.
         let (store, tmp, path) = try await makeStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let mode = await store.autoVacuumMode()
-        // Pin: fresh EventStore DB is in mode 0 (gap).
         #expect(mode == 2)
 
         let reclaimed = try await store.incrementalVacuum(maxPages: 10_000)
@@ -503,9 +490,9 @@ struct CampaignStoreIncrementalVacuumTests {
     }
 }
 
-// MARK: - TraceStore (known gap — never opted into INCREMENTAL)
+// MARK: - TraceStore
 
-@Suite("TraceStore: incrementalVacuum (Wave 9B — known gap)")
+@Suite("TraceStore: incrementalVacuum (Wave 9B)")
 struct TraceStoreIncrementalVacuumTests {
 
     private func makeStore() throws -> (TraceStore, URL, String) {
@@ -522,13 +509,11 @@ struct TraceStoreIncrementalVacuumTests {
         let (store, tmp, _) = try makeStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let mode = await store.autoVacuumMode()
-        // KNOWN GAP: traces.db doesn't set INCREMENTAL on creation
-        // in v1.12.6. Pinned here so a future migration is
-        // deliberate.
+        // Fresh stores must preserve the corrected initialization order.
         #expect(mode == 2, "TraceStore: auto_vacuum=INCREMENTAL after Wave 9B.1")
     }
 
-    @Test("Returns 0 cleanly under the gap")
+    @Test("Returns 0 when a fresh store has no reusable pages")
     func gracefulNoOpUnderGap() async throws {
         let (store, tmp, _) = try makeStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -537,9 +522,9 @@ struct TraceStoreIncrementalVacuumTests {
     }
 }
 
-// MARK: - SQLiteCausalGraphStore (known gap — never opted into INCREMENTAL)
+// MARK: - SQLiteCausalGraphStore
 
-@Suite("SQLiteCausalGraphStore: incrementalVacuum (Wave 9B — known gap)")
+@Suite("SQLiteCausalGraphStore: incrementalVacuum (Wave 9B)")
 struct SQLiteCausalGraphStoreIncrementalVacuumTests {
 
     private func makeStore() async throws -> (SQLiteCausalGraphStore, URL, String) {
@@ -556,12 +541,11 @@ struct SQLiteCausalGraphStoreIncrementalVacuumTests {
         let (store, tmp, _) = try await makeStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let mode = await store.autoVacuumMode()
-        // KNOWN GAP: tracegraph.db (worst real-world offender:
-        // 11 GB on a dev box) doesn't set INCREMENTAL on creation.
+        // Fresh stores must preserve the corrected initialization order.
         #expect(mode == 2, "SQLiteCausalGraphStore: auto_vacuum=INCREMENTAL after Wave 9B.1")
     }
 
-    @Test("Returns 0 cleanly under the gap")
+    @Test("Returns 0 when a fresh store has no reusable pages")
     func gracefulNoOpUnderGap() async throws {
         let (store, tmp, _) = try await makeStore()
         defer { try? FileManager.default.removeItem(at: tmp) }

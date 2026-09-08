@@ -194,6 +194,12 @@ public struct EventInsertFilter: Sendable {
     /// lives in. Unknown categories default to NOT eligible.
     static func isDuplicateEligible(_ event: Event) -> Bool {
         guard event.process.isPlatformBinary else { return false }
+        // A coverage probe proves this particular nonce reached persistence.
+        // Ordinary true executions share its duplicate tuple because that tuple
+        // intentionally omits argv. Do not let them consume the probe, or let
+        // a probe seed the routine duplicate window. Explicit process/path
+        // exclusions still run first in shouldDrop(event:).
+        guard !NoiseFilter.isCoverageCanaryProbe(event: event) else { return false }
         switch event.eventCategory {
         case .process, .file: return true
         default: return false

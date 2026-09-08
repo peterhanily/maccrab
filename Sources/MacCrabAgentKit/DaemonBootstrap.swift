@@ -49,7 +49,8 @@ public enum DaemonBootstrap {
         supportDir: String,
         startedAt: Date,
         component: String,
-        reason: String
+        reason: String,
+        failure: Error? = nil
     ) throws -> Never {
         logger.fault("Pre-ingestion storage readiness failed for \(component, privacy: .public): \(reason, privacy: .public). No ingestion producer was started.")
         DaemonSetup.writeBootPhase(
@@ -57,16 +58,23 @@ public enum DaemonBootstrap {
             phase: "storage_not_ready",
             startedAt: startedAt
         )
-        throw DaemonBootstrapError.preIngestionStorageNotReady(
+        let startupError = DaemonBootstrapError.preIngestionStorageNotReady(
             component: component,
             reason: reason
         )
+        DaemonSetup.writePreIngestionFailureReport(
+            supportDir: supportDir,
+            component: component,
+            failure: failure ?? startupError
+        )
+        throw startupError
     }
 
     static func failPreIngestionStorage(
         state: DaemonState,
         component: String,
-        reason: String
+        reason: String,
+        failure: Error? = nil
     ) throws -> Never {
         try failPreIngestionStorage(
             supportDir: state.supportDir,
@@ -74,7 +82,8 @@ public enum DaemonBootstrap {
                 timeIntervalSince1970: DaemonProcessIdentity.current.startedAtUnix
             ),
             component: component,
-            reason: reason
+            reason: reason,
+            failure: failure
         )
     }
 

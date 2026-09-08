@@ -163,6 +163,45 @@ struct EventStoreCategoryQueryTests {
         #expect(Set(all.events.map { $0.eventCategory }) == Set([.process, .network, .file]))
     }
 
+    @Test("exact Events applies both time bounds before its result limit")
+    func historicalWindowBeforeLimit() async throws {
+        let (store, tmp) = try makeTempEventStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let base = Date().addingTimeInterval(-600)
+        let expected = [
+            event(at: base, category: .process),
+            event(at: base.addingTimeInterval(10), category: .process),
+            event(at: base.addingTimeInterval(20), category: .process),
+        ]
+        for value in expected { try await store.insert(event: value) }
+        try await store.insert(event: event(
+            at: base.addingTimeInterval(-1), category: .process
+        ))
+        try await store.insert(event: event(
+            at: base.addingTimeInterval(15), category: .network
+        ))
+        // More newer rows than the requested limit used to hide every row in
+        // a centred historical window when the UI filtered `until` afterward.
+        for offset in 0..<4 {
+            try await store.insert(event: event(
+                at: base.addingTimeInterval(Double(100 + offset)), category: .process
+            ))
+        }
+        let snapshot = try await store.exactEventsSnapshot(
+            since: base, until: base.addingTimeInterval(20),
+            category: .process, limit: 3
+        )
+        #expect(snapshot.isComplete)
+        #expect(snapshot.events == Array(expected.reversed()),
+                "The inclusive range and category must be applied before LIMIT")
+        let empty = try await store.exactEventsSnapshot(
+            since: base.addingTimeInterval(30), until: base.addingTimeInterval(40),
+            category: .process, limit: 3
+        )
+        #expect(empty.isComplete)
+        #expect(empty.events.isEmpty)
+    }
+
     @Test("admission category counts include the fractional activation bucket")
     func categoryCountsIncludeActivationBucket() async throws {
         let (store, tmp) = try makeTempEventStore()

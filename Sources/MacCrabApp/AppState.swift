@@ -15,7 +15,7 @@ import os.log
 // MARK: - AppState
 
 @MainActor
-final class AppState: ObservableObject {
+final class AppState: ObservableObject, EventQueryReading {
 
     // MARK: Published state
 
@@ -1187,11 +1187,22 @@ final class AppState: ObservableObject {
     private var previousStatsHeartbeatWrittenAt: Date? = nil
     private var lastStatsUpdate: Date = Date()
     /// v1.22.0 (item 7): the routine poll only opens a live events.db read
-    /// snapshot (which pins the WAL) while the Events workspace is actually on
-    /// screen. Set by the Events view's appear/disappear. Off screen, the poll
-    /// reads nothing from events.db, so the writer's checkpoint always has a
-    /// reader-free window and the WAL cannot bloat past the family cap.
-    private var eventsWorkspaceVisible: Bool = false
+    /// snapshot (which pins the WAL) while at least one Events workspace is on
+    /// screen. Each window owns a registration, so leaving one workspace does
+    /// not stop the remaining window's incremental updates.
+    private var visibleEventsWorkspaceOwners: Set<UUID> = []
+    var eventsWorkspaceVisible: Bool { !visibleEventsWorkspaceOwners.isEmpty }
+    private struct EventQueryRegistration { weak var session: EventQuerySession? }
+    private var eventQueryRegistrations: [UUID: EventQueryRegistration] = [:]
+    private var visibleEventQuerySessions: [EventQuerySession] {
+        eventQueryRegistrations.values.compactMap(\.session)
+    }
+    var shouldReadIncrementalEvents: Bool {
+        visibleEventQuerySessions.contains { $0.canReceiveIncremental }
+            || (!eventSearchActive && visibleEventsWorkspaceOwners.contains {
+                eventQueryRegistrations[$0] == nil
+            })
+    }
     private var rulesLoaded_cached = false
     /// v1.11.1 (audit perf MEDIUM): mtime gate ported from
     /// V2LiveDataProvider.rules(). Lets `loadRules()` short-circuit on
@@ -1333,6 +1344,7 @@ final class AppState: ObservableObject {
     let engineSource: V2EngineSource
     private var dataDir: String { engineSource.directory }
     private var storeGeneration: UInt64 = 0
+    var eventQueryEpoch: UInt64 { storeGeneration }
     private var lastVerifiedEngineIdentity: EngineTelemetryIdentity?
     @Published private(set) var eventReadsDeferred = false
 
@@ -1344,6 +1356,7 @@ final class AppState: ObservableObject {
         guard deferred != eventReadsDeferred else { return deferred }
         eventReadsDeferred = deferred
         storeGeneration &+= 1
+        for session in visibleEventQuerySessions { session.synchronizeSourceEpoch() }
         cachedEventStore?.retireReadOnlyReads()
         cachedEventStore = nil
         cachedEventStorePath = nil
@@ -1356,6 +1369,7 @@ final class AppState: ObservableObject {
     func reconcileEngineIdentity(_ identity: EngineTelemetryIdentity?) -> Bool {
         guard V2DashboardState.updateEngineIdentity(&lastVerifiedEngineIdentity, next: identity) else { return false }
         storeGeneration &+= 1
+        for session in visibleEventQuerySessions { session.synchronizeSourceEpoch() }
         cachedAlertStore = nil
         cachedEventStore?.retireReadOnlyReads()
         cachedEventStore = nil
@@ -2479,128 +2493,83 @@ final class AppState: ObservableObject {
         }
     }
 
+    // Legacy single-result entry point. EventStream uses a window-owned session;
+    // this cache remains available to existing callers and alert context cards.
     func loadEvents(
-        limit: Int = 500,
-        filter: String? = nil,
-        since: Date = .distantPast,
-        until: Date = .distantFuture,
+        limit: Int = 500, filter: String? = nil,
+        since: Date = .distantPast, until: Date = .distantFuture,
         category: MacCrabCore.EventCategory? = nil
     ) async {
-        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return }
+        let query = EventQuerySession.Query(filter: filter, since: since, until: until,
+                                             category: category, acceptsIncremental: false)
+        let generation = storeGeneration
+        do {
+            guard let page = try await readEventQuery(query, limit: limit) else { return }
+            guard generation == storeGeneration, !Task.isCancelled else { return }
+            events = page.events
+            eventCursor = page.nextCursor
+            hasMoreEvents = page.nextCursor != nil
+            eventSearchActive = query.isSearch
+            eventSearchCoverageWarning = page.coverageWarning
+        } catch is CancellationError {
+        } catch {
+            guard generation == storeGeneration, !Task.isCancelled else { return }
+            eventSearchCoverageWarning = "Event evidence could not be read completely: " + error.localizedDescription
+        }
+    }
+
+    func readEventQuery(_ query: EventQuerySession.Query, limit: Int) async throws -> EventQuerySession.Page? {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return nil }
         let generation = storeGeneration
         do {
             let store = try eventStore()
             let raw: [Event]
             var exactOwnership: ExactEventQuerySnapshot?
             var searchOwnership: EventSearchSnapshot?
-            let isSearch = filter.map { !$0.isEmpty } ?? false
-            if let query = filter, isSearch {
-                // Pass [since, until] through to FTS5/LIKE so an
-                // "Investigate in Events" navigation can narrow to
-                // the alert's firing window (e.g. ±30 min around the
-                // alert timestamp). Without an upper bound, a search
-                // from an alert 30 days ago still surfaced today's
-                // events that matched the same process — which
-                // wasn't what the user clicked Investigate to see.
-                //
-                // EventStore.search has no category predicate, so a
-                // search + category combo is narrowed by the caller's
-                // in-memory pass (EventStream.recomputeFilter) rather
-                // than DB-side. That path is limit-capped, so on a busy
-                // host it undercounts the same way the non-search path
-                // used to — the hot-tier fix below is the primary one.
+            var warning: String?
+            if let text = query.filter, query.isSearch {
                 let snapshot = try await store.searchSnapshot(
-                    text: query,
-                    since: since,
-                    until: until,
-                    limit: limit
-                )
-                guard generation == storeGeneration, !Task.isCancelled else { return }
+                    text: text, since: query.since, until: query.until, limit: limit)
+                guard generation == storeGeneration else { throw CancellationError() }
+                try Task.checkCancellation()
                 searchOwnership = snapshot
                 raw = snapshot.events
-                if snapshot.isComplete {
-                    eventSearchCoverageWarning = nil
-                } else {
-                    eventSearchCoverageWarning =
-                        "Search is partial: \(snapshot.projectionOmitted) "
+                if !snapshot.isComplete {
+                    warning = "Search is partial: \(snapshot.projectionOmitted) "
                         + "retained events are outside the search projection "
                         + "and \(snapshot.gaps.total) evidence gaps remain. "
                         + "No match is not proof of absence."
                 }
             } else {
-                // EventStore.events doesn't yet take an upper bound;
-                // narrow client-side after the fetch. The result set
-                // for non-search queries is already small (`limit`
-                // capped) so this is fine. `category` IS pushed DB-side
-                // so the picker filters the whole hot tier, not just the
-                // ~500-row loaded window (which undercounts on busy hosts).
+                // Apply the upper boundary before LIMIT, so newer events cannot
+                // crowd a historical investigation window out of the result.
                 let snapshot = try await store.exactEventsSnapshot(
-                    since: since,
-                    category: category,
-                    limit: limit
-                )
-                guard generation == storeGeneration, !Task.isCancelled else { return }
+                    since: query.since, until: query.until, category: query.category, limit: limit)
+                guard generation == storeGeneration else { throw CancellationError() }
+                try Task.checkCancellation()
                 guard snapshot.isComplete else {
                     throw EventStoreError.exactEvidenceGap(
                         poisonRecords: snapshot.poisonRecords.count,
-                        corruptLegacyRecords:
-                            snapshot.corruptLegacyRecords,
-                        inheritedLegacyLossRecords:
-                            snapshot.inheritedLegacyLossRecords,
-                        resourceLimitedRecords:
-                            snapshot.resourceLimitedRecords
-                    )
+                        corruptLegacyRecords: snapshot.corruptLegacyRecords,
+                        inheritedLegacyLossRecords: snapshot.inheritedLegacyLossRecords,
+                        resourceLimitedRecords: snapshot.resourceLimitedRecords)
                 }
                 exactOwnership = snapshot
-                raw = snapshot.events.filter { $0.timestamp <= until }
-                eventSearchCoverageWarning = nil
+                raw = snapshot.events
             }
-            guard generation == storeGeneration, !Task.isCancelled else { return }
-            events = raw.map { eventToViewModel($0) }
-            // Gate the live poll: while a search is active, the events array
-            // holds FTS-ranked results; the live prepend would mix unrelated
-            // newer rows in at the top.
-            eventSearchActive = isSearch
-            // FTS5 search is ordered by relevance, not time, so its tail isn't
-            // a meaningful cursor — disable "Load older" while a search is
-            // active. The non-search path orders by (timestamp DESC, id DESC),
-            // matching the keyset cursor contract.
-            if !isSearch, raw.count == limit, let oldest = raw.last {
-                eventCursor = PaginationCursor(
-                    timestamp: oldest.timestamp,
-                    id: oldest.id.uuidString
-                )
-                hasMoreEvents = true
-            } else {
-                eventCursor = nil
-                hasMoreEvents = false
-            }
+            guard generation == storeGeneration else { throw CancellationError() }
+            try Task.checkCancellation()
+            let next: PaginationCursor?
+            if !query.isSearch, raw.count == limit, let oldest = raw.last {
+                next = PaginationCursor(timestamp: oldest.timestamp, id: oldest.id.uuidString)
+            } else { next = nil }
+            let result = EventQuerySession.Page(events: raw.map { eventToViewModel($0) },
+                                                nextCursor: next, coverageWarning: warning)
             withExtendedLifetime(exactOwnership) {}
             withExtendedLifetime(searchOwnership) {}
-        } catch is CancellationError {
-            // Startup retirement is a deferred read, not missing evidence.
-            return
+            return result
         } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
-            // v1.21.6-rc.38: transient pressure is not a coverage failure.
-            //
-            // Decoding a journal block needs a bounded record-ownership lease,
-            // and a momentary shortage surfaced here as "Event evidence could
-            // not be read completely", which reads like permanent data loss.
-            // It is not: the next poll almost always succeeds. Leave the prior
-            // warning state untouched and let the refresh timer retry rather
-            // than alarming the user about a condition that has already passed.
-            //
-            // A genuinely persistent shortage still reaches the user, because
-            // every subsequent poll takes this path and the Events view stays
-            // empty — the honest signal — instead of showing a scary string for
-            // a hiccup.
-            Logger(subsystem: "com.maccrab.app", category: "events")
-                .debug("Event read deferred on transient pipeline pressure: \(String(describing: error), privacy: .public)")
-        } catch {
-            guard generation == storeGeneration, !Task.isCancelled else { return }
-            eventSearchCoverageWarning =
-                "Event evidence could not be read completely: "
-                + error.localizedDescription
+            return nil
         }
     }
 
@@ -2649,33 +2618,38 @@ final class AppState: ObservableObject {
         } catch {}
     }
 
-    /// Mirror of `loadOlderAlerts` for the Events tab.
+    /// Legacy cursor wrapper; visible Events windows keep their own cursors.
     func loadOlderEvents(pageSize: Int = 200, category: MacCrabCore.EventCategory? = nil) async {
-        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return }
-        guard hasMoreEvents, let cursor = eventCursor else { return }
-        if isLoadingOlderEvents { return }
+        guard hasMoreEvents, let cursor = eventCursor, !isLoadingOlderEvents else { return }
         isLoadingOlderEvents = true
         defer { isLoadingOlderEvents = false }
+        let query = EventQuerySession.Query(filter: nil, since: .distantPast, until: .distantFuture,
+                                             category: category, acceptsIncremental: false)
         let generation = storeGeneration
         do {
-            let store = try eventStore()
-            let page = try await store.exactEventsPageSnapshot(
-                before: cursor,
-                category: category,
-                pageSize: pageSize
-            )
-            guard generation == storeGeneration else { return }
-            let existing = Set(events.map { $0.id })
-            let appended = page.items
-                .filter { !existing.contains($0.id) }
-                .map { eventToViewModel($0) }
-            if !appended.isEmpty {
-                events.append(contentsOf: appended)
-            }
+            guard let page = try await readOlderEventQuery(before: cursor, query: query, pageSize: pageSize) else { return }
+            guard generation == storeGeneration, !Task.isCancelled else { return }
+            let existing = Set(events.map(\.id))
+            events.append(contentsOf: page.events.filter { !existing.contains($0.id) })
             eventCursor = page.nextCursor
             hasMoreEvents = page.nextCursor != nil
-            withExtendedLifetime(page) {}
         } catch {}
+    }
+
+    func readOlderEventQuery(before cursor: PaginationCursor, query: EventQuerySession.Query,
+                             pageSize: Int) async throws -> EventQuerySession.Page? {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return nil }
+        let generation = storeGeneration
+        let store = try eventStore()
+        let page = try await store.exactEventsPageSnapshot(before: cursor, category: query.category, pageSize: pageSize)
+        guard generation == storeGeneration else { throw CancellationError() }
+        try Task.checkCancellation()
+        let rows = page.items.filter { $0.timestamp >= query.since && $0.timestamp <= query.until }
+        let reachedStart = page.items.last.map { $0.timestamp < query.since } ?? true
+        let result = EventQuerySession.Page(events: rows.map { eventToViewModel($0) },
+                                            nextCursor: reachedStart ? nil : page.nextCursor)
+        withExtendedLifetime(page) {}
+        return result
     }
 
     func loadRules() async {
@@ -3139,15 +3113,27 @@ final class AppState: ObservableObject {
     /// routine poll queries events.db only while the stream is visible.
     /// EventStream's query task owns the initial load and startup resumption.
     @MainActor
-    func setEventsWorkspaceVisible(_ visible: Bool) {
-        guard eventsWorkspaceVisible != visible else { return }
-        eventsWorkspaceVisible = visible
+    func setEventsWorkspaceVisible(_ visible: Bool, owner: UUID, session: EventQuerySession? = nil) {
+        if visible {
+            guard session == nil || session?.source == engineSource else { return }
+            visibleEventsWorkspaceOwners.insert(owner)
+            if let session {
+                eventQueryRegistrations[owner] = EventQueryRegistration(session: session)
+                session.synchronizeSourceEpoch()
+            }
+        } else {
+            visibleEventsWorkspaceOwners.remove(owner)
+            eventQueryRegistrations.removeValue(forKey: owner)?.session?.invalidatePendingReads()
+        }
     }
 
-    private func loadEventsIncremental() async {
+    func loadEventsIncremental() async {
         guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return }
-        // Don't trample search results with newer rows the user didn't ask for.
-        if eventSearchActive { return }
+        let sessions = visibleEventQuerySessions
+        for session in sessions { session.pollTick() }
+        // Search, centred investigation and aggregate-only windows cannot use
+        // live prepends. Do not open a journal snapshot just to discard it.
+        guard shouldReadIncrementalEvents else { return }
         // v1.22.0 (item 7): off the Events workspace, skip the live snapshot —
         // its WAL read-mark (with the Overview provider's) was defeating the
         // engine's checkpoint under burst and forcing event shed.
@@ -3163,6 +3149,9 @@ final class AppState: ObservableObject {
             guard snapshot.isComplete else {
                 eventSearchCoverageWarning =
                     "Incremental event evidence is incomplete."
+                for session in sessions {
+                    session.receiveIncremental([], epoch: generation, warning: eventSearchCoverageWarning)
+                }
                 return
             }
             let newViewModels = snapshot.events
@@ -3174,6 +3163,7 @@ final class AppState: ObservableObject {
                 if events.count > 5000 { events = Array(events.prefix(5000)) }
                 lastEventTimestamp = newViewModels.first?.timestamp ?? lastEventTimestamp
             }
+            for session in sessions { session.receiveIncremental(newViewModels, epoch: generation) }
             withExtendedLifetime(snapshot) {}
         } catch {}
     }
@@ -3233,92 +3223,70 @@ final class AppState: ObservableObject {
         return evidence
     }
 
-    /// v1.8.0: read aggregate counts (day, category, signer, path) from the
-    /// warm-tier rollup table. Backs the Overview trends widget and the
-    /// Events tab "summarized" indicator when the user picks a range >24h.
     func fetchAggregates(sinceDay: String, category: MacCrabCore.EventCategory? = nil) async -> [EventStore.AggregateRow] {
-        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return [] }
         let generation = storeGeneration
         do {
-            let store = try eventStore()
-            let rows = try await store.aggregates(
-                sinceDay: sinceDay,
-                category: category
-            )
+            guard let rows = try await readEventAggregates(sinceDay: sinceDay, category: category) else { return [] }
             guard generation == storeGeneration, !Task.isCancelled else { return [] }
             eventAggregateCoverageWarning = nil
             return rows
-        } catch is CancellationError {
-            return []
-        } catch {
+        } catch is CancellationError { return [] }
+        catch {
             guard generation == storeGeneration, !Task.isCancelled else { return [] }
-            eventAggregateCoverageWarning =
-                "Daily summaries are incomplete: "
-                + error.localizedDescription
+            eventAggregateCoverageWarning = "Daily summaries are incomplete: " + error.localizedDescription
             return []
         }
     }
 
-    /// v1.8.0 polish: SQL-side histogram bin counts. The Events-tab chart
-    /// was previously built from the 500-row in-memory cache, which on a
-    /// 264 events/sec host covered ~2 seconds of activity — every bin
-    /// collapsed into one regardless of window size. This fetches counts
-    /// straight from the events table via GROUP BY on a stepped bucket
-    /// expression so the chart accurately reflects the full window.
-    func fetchHistogramBins(
-        spanSeconds: TimeInterval,
-        stepSeconds: Int,
-        endingAt: Date = Date(),
-        category: MacCrabCore.EventCategory? = nil
-    ) async -> [(Date, Int)] {
-        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return [] }
+    func readEventAggregates(sinceDay: String, category: MacCrabCore.EventCategory?) async throws -> [EventStore.AggregateRow]? {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return nil }
+        let generation = storeGeneration
+        let rows = try await eventStore().aggregates(sinceDay: sinceDay, category: category)
+        guard generation == storeGeneration else { throw CancellationError() }
+        try Task.checkCancellation()
+        return rows
+    }
+
+    func fetchHistogramBins(spanSeconds: TimeInterval, stepSeconds: Int, endingAt: Date = Date(),
+                            category: MacCrabCore.EventCategory? = nil) async -> [(Date, Int)] {
         let generation = storeGeneration
         do {
-            let store = try eventStore()
-            let snapshot = try await store.histogramSnapshot(
-                spanSeconds: spanSeconds,
-                stepSeconds: stepSeconds,
-                endingAt: endingAt,
-                category: category
-            )
+            guard let result = try await readEventHistogram(spanSeconds: spanSeconds, stepSeconds: stepSeconds,
+                                                            endingAt: endingAt, category: category) else { return [] }
             guard generation == storeGeneration, !Task.isCancelled else { return [] }
-            eventHistogramEffectiveSince = snapshot.effectiveSince
-            eventHistogramEffectiveUntil = snapshot.effectiveUntil
-            if snapshot.isComplete {
-                eventHistogramCoverageWarning = nil
-            } else {
-                let effectiveSeconds = max(
-                    0,
-                    Int(snapshot.effectiveUntil.timeIntervalSince(
-                        snapshot.effectiveSince
-                    ))
-                )
-                eventHistogramCoverageWarning =
-                    "Histogram covers only the provable retained "
-                    + "\(effectiveSeconds)-second interval and has "
-                    + "\(snapshot.gaps.total) evidence gaps; missing bins "
-                    + "are unknown, not zero."
-            }
-            return snapshot.bins.map { ($0.start, $0.count) }
-        } catch is CancellationError {
-            return []
-        } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
-            // rc.38: same reasoning as loadEvents — a momentary record-ownership
-            // shortage is not a coverage failure, and reporting it as one made
-            // the histogram look broken during ordinary pressure. Return no bins
-            // for this pass and let the refresh timer retry; do NOT overwrite the
-            // coverage warning with a message about evidence that is still there.
-            Logger(subsystem: "com.maccrab.app", category: "events")
-                .debug("Histogram deferred on transient pipeline pressure: \(String(describing: error), privacy: .public)")
-            return []
-        } catch {
+            eventHistogramCoverageWarning = result.coverageWarning
+            eventHistogramEffectiveSince = result.effectiveSince
+            eventHistogramEffectiveUntil = result.effectiveUntil
+            return result.bins
+        } catch is CancellationError { return [] }
+        catch {
             guard generation == storeGeneration, !Task.isCancelled else { return [] }
             eventHistogramEffectiveSince = nil
             eventHistogramEffectiveUntil = nil
-            eventHistogramCoverageWarning =
-                "Histogram evidence could not be read completely: "
-                + error.localizedDescription
+            eventHistogramCoverageWarning = "Histogram evidence could not be read completely: " + error.localizedDescription
             return []
+        }
+    }
+
+    func readEventHistogram(spanSeconds: TimeInterval, stepSeconds: Int, endingAt: Date,
+                            category: MacCrabCore.EventCategory?) async throws -> EventQuerySession.Histogram? {
+        guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return nil }
+        let generation = storeGeneration
+        do {
+            let snapshot = try await eventStore().histogramSnapshot(spanSeconds: spanSeconds, stepSeconds: stepSeconds,
+                                                                   endingAt: endingAt, category: category)
+            guard generation == storeGeneration else { throw CancellationError() }
+            try Task.checkCancellation()
+            var warning: String?
+            if !snapshot.isComplete {
+                let seconds = max(0, Int(snapshot.effectiveUntil.timeIntervalSince(snapshot.effectiveSince)))
+                warning = "Histogram covers only the provable retained \(seconds)-second interval and has "
+                    + "\(snapshot.gaps.total) evidence gaps; missing bins are unknown, not zero."
+            }
+            return .init(bins: snapshot.bins.map { ($0.start, $0.count) }, effectiveSince: snapshot.effectiveSince,
+                         effectiveUntil: snapshot.effectiveUntil, coverageWarning: warning)
+        } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
+            return nil
         }
     }
 

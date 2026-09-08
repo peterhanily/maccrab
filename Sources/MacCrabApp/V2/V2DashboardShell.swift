@@ -8,6 +8,7 @@ struct V2DashboardShell: View {
 
     @StateObject private var state: V2DashboardState
     @State private var noticesExpanded = false
+    @State private var refreshAppearanceID: UUID?
     @ObservedObject var appState: AppState
     @ObservedObject var sysextManager: SystemExtensionManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -108,8 +109,18 @@ struct V2DashboardShell: View {
         .task {
             // Best-effort live data connect + start auto-refresh on
             // first launch. No-op for live if no MacCrab DBs exist.
+            guard !Task.isCancelled else { return }
+            let appearanceID = UUID()
+            refreshAppearanceID = appearanceID
             await state.connectLiveData()
+            guard !Task.isCancelled, refreshAppearanceID == appearanceID else { return }
             state.startAutoRefresh()
+        }
+        .onDisappear {
+            // Invalidate an in-flight connect even before SwiftUI delivers task
+            // cancellation; an older appearance cannot restart this window.
+            refreshAppearanceID = nil
+            state.stopAutoRefresh()
         }
         // Upgrade-handoff recovery: when the sysext finishes (re)booting
         // (bootPhase non-ready→ready), re-probe the on-disk stores once.

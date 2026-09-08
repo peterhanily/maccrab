@@ -27,6 +27,7 @@ enum TimeRange: String, CaseIterable {
 
 struct EventStream: View {
     @ObservedObject var appState: AppState
+    @ObservedObject var querySession: EventQuerySession
     @State private var filterText: String
     @State private var filterCategory: EventCategory? = nil
 
@@ -54,11 +55,13 @@ struct EventStream: View {
 
     init(
         appState: AppState,
+        querySession: EventQuerySession,
         initialFilterText: String = "",
         initialCenterTime: Date? = nil,
         centerHalfWindowSeconds: TimeInterval = 30 * 60
     ) {
         self.appState = appState
+        self.querySession = querySession
         self._filterText = State(initialValue: initialFilterText)
         self._firstFilterRun = State(initialValue: !initialFilterText.isEmpty)
         self.initialCenterTime = initialCenterTime
@@ -96,7 +99,7 @@ struct EventStream: View {
 
     /// v1.7.11: memoized cache. Pre-fix this was a computed `var
     /// filteredCache: [EventViewModel]` that re-filtered AND re-sorted
-    /// `appState.events` on every body re-evaluation, AND was read TWICE
+    /// `querySession.events` on every body re-evaluation, AND was read TWICE
     /// per body call (count badge + Table data). Combined with macOS
     /// `Table`'s NSTableView backing — which inflates Auto Layout
     /// constraints on every rebind and doesn't release them until the
@@ -142,7 +145,7 @@ struct EventStream: View {
 
     /// Composite key forcing the .task(id:) to re-run on either input change.
     private var aggregateInputsKey: String {
-        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")|\(appState.eventReadsDeferred)"
+        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")|\(appState.eventReadsDeferred)|\(querySession.sourceEpoch)"
     }
 
     /// `filterCategory` bridged to the Core enum so `loadEvents` can push
@@ -159,13 +162,16 @@ struct EventStream: View {
         let category: String?
         let filter: String
         let deferred: Bool
+        let epoch: UInt64
+        let retry: UInt64
     }
 
     /// A single query task owns search, range, category, and startup recovery.
     /// Resuming preserves the selected query, including a centered alert window.
     private var eventQueryKey: EventQueryKey {
         EventQueryKey(range: timeRange.rawValue, category: filterCategory?.rawValue,
-                      filter: filterText, deferred: appState.eventReadsDeferred)
+                      filter: filterText, deferred: appState.eventReadsDeferred,
+                      epoch: querySession.sourceEpoch, retry: querySession.retryTick)
     }
 
     /// ISO date string for `daysAgo` days before now. Matches the
@@ -289,16 +295,16 @@ struct EventStream: View {
     }
 
     /// Recompute the filtered+sorted cache. Called from .onAppear,
-    /// .onReceive(appState.$events), and .onChange of any filter input.
+    /// .onReceive(querySession.$events), and .onChange of any filter input.
     /// Pure function over current state — no @Published mutations.
     ///
     /// v1.8.0: free-text search no longer filters in-memory. The 500-row
     /// in-memory window meant `bash` matched ~5/100K events; the user thought
-    /// the search was broken. Search now goes through `appState.loadEvents
-    /// (filter:)`, which hits the FTS5 index, and the in-memory pass below
+    /// the search was broken. Search now goes through the window's query
+    /// session and the shared FTS5 reader; the in-memory pass below
     /// only handles category + time-range — the two filters that don't have
     /// a database-side equivalent and cheap to evaluate locally.
-    /// Compute the [since, until] bounds for `appState.loadEvents`.
+    /// Compute the [since, until] bounds for this window's query.
     /// Pre-fix `loadEvents` was called with no time bound; the FTS5
     /// query happily returned 30-day-old matches when the user
     /// expected "events around the time the alert fired". Now:
@@ -314,6 +320,13 @@ struct EventStream: View {
         }
         let since = timeRange.seconds.map { Date().addingTimeInterval(-$0) } ?? .distantPast
         return (since, .distantFuture)
+    }
+
+    private func currentQuery() -> EventQuerySession.Query {
+        let bounds = computeEventsTimeBounds()
+        return .init(filter: filterText.isEmpty ? nil : filterText,
+                     since: bounds.since, until: bounds.until, category: coreCategory,
+                     acceptsIncremental: initialCenterTime == nil && !isAggregateMode)
     }
 
     /// Effective [endingAt, span] for the hot-tier histogram. During an
@@ -349,10 +362,10 @@ struct EventStream: View {
         }
     }
 
-    /// Histogram task id: the range/category composite plus the live refresh
-    /// tick, so a live prepend re-runs the SQL bin query. (#16)
+    /// Visibility starts/stops chart reads; range/category and live prepends
+    /// refresh a chart that remains visible. (#16)
     private var histogramInputsKey: String {
-        "\(aggregateInputsKey)|\(histogramRefreshTick)"
+        "\(aggregateInputsKey)|\(showHistogram)|\(histogramRefreshTick)"
     }
 
     /// True once the oldest already-loaded event predates the active window's
@@ -362,7 +375,7 @@ struct EventStream: View {
     private var loadOlderCrossedWindow: Bool {
         guard initialCenterTime == nil, let seconds = timeRange.seconds else { return false }
         let cutoff = Date().addingTimeInterval(-seconds)
-        guard let oldest = appState.events.map(\.timestamp).min() else { return false }
+        guard let oldest = querySession.events.map(\.timestamp).min() else { return false }
         return oldest < cutoff
     }
 
@@ -467,8 +480,8 @@ struct EventStream: View {
         saveExport(([header] + rows).joined(separator: "\n"), suggestedName: "maccrab-event-aggregates.csv")
     }
 
-    private func recomputeFilter() {
-        var results = appState.events
+    private func recomputeFilter(_ rows: [EventViewModel]? = nil) {
+        var results = rows ?? querySession.events
 
         if let category = filterCategory {
             results = results.filter { $0.category == category }
@@ -538,17 +551,8 @@ struct EventStream: View {
 
                 Button {
                     Task {
-                        let bounds = computeEventsTimeBounds()
-                        if filterText.isEmpty {
-                            await appState.loadEvents(since: bounds.since, until: bounds.until, category: coreCategory)
-                        } else {
-                            await appState.loadEvents(
-                                filter: filterText,
-                                since: bounds.since,
-                                until: bounds.until,
-                                category: coreCategory
-                            )
-                        }
+                        await querySession.loadEvents(currentQuery())
+                        recomputeFilter()
                     }
                 } label: {
                     Image(systemName: "arrow.clockwise")
@@ -636,11 +640,11 @@ struct EventStream: View {
                 let hotGranularity = hotHistogramGranularity
                 let dailySpanDays = max(1, Int((timeRange.seconds ?? (7 * 86400)) / 86400))
                 let effectiveHistogramEnd =
-                    appState.eventHistogramEffectiveUntil
+                    querySession.eventHistogramEffectiveUntil
                     ?? histogramWindow.endingAt
                 let effectiveHistogramSpan = max(
                     1,
-                    appState.eventHistogramEffectiveSince.map {
+                    querySession.eventHistogramEffectiveSince.map {
                         effectiveHistogramEnd.timeIntervalSince($0)
                     } ?? histogramWindow.span
                 )
@@ -659,7 +663,7 @@ struct EventStream: View {
                 // #14: the SQL histogram counts ALL events in the window, not
                 // just the current FTS matches (fetchHistogramBins takes no text
                 // filter). Say so, so the bars aren't read as the filtered table.
-                if appState.eventSearchActive {
+                if querySession.eventSearchActive {
                     Text(String(localized: "events.histogramAllEvents",
                                 defaultValue: "Histogram shows all events in range — not filtered by the search text"))
                         .font(.caption2)
@@ -693,10 +697,10 @@ struct EventStream: View {
             }
 
             if let warning = isAggregateMode
-                ? appState.eventAggregateCoverageWarning
-                : (appState.eventSearchCoverageWarning
+                ? querySession.eventAggregateCoverageWarning
+                : (querySession.eventSearchCoverageWarning
                     ?? (showHistogram
-                        ? appState.eventHistogramCoverageWarning : nil)) {
+                        ? querySession.eventHistogramCoverageWarning : nil)) {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(.orange)
@@ -722,7 +726,13 @@ struct EventStream: View {
                         .scaledSystem(48)
                         .foregroundColor(.secondary.opacity(0.5))
                         .accessibilityHidden(true)
-                    Text(String(localized: "events.noMatch", defaultValue: "No events matching current filters"))
+                    if querySession.isLoading {
+                        ProgressView("Loading events…")
+                    }
+                    Text(querySession.isLoading ? "Reading the selected event query"
+                         : (querySession.eventSearchCoverageWarning != nil
+                            ? "Event results are not fully available"
+                            : String(localized: "events.noMatch", defaultValue: "No events matching current filters")))
                         .font(.headline)
                         .foregroundColor(.secondary)
                     if filterCategory != nil || !filterText.isEmpty {
@@ -811,12 +821,12 @@ struct EventStream: View {
             // anchored at the bottom. Hidden once we hit the end-of-table OR
             // when the user is in aggregate mode (the cursor only makes
             // sense over the hot-tier events table, not over rollup rows).
-            if appState.hasMoreEvents && !isAggregateMode && !loadOlderCrossedWindow {
+            if querySession.hasMoreEvents && !isAggregateMode && !loadOlderCrossedWindow {
                 HStack {
                     Spacer()
                     Button {
                         Task {
-                            await appState.loadOlderEvents(category: coreCategory)
+                            await querySession.loadOlderEvents()
                             // #13: an explicit user fetch — reflect it even
                             // while Paused (Pause freezes the live firehose,
                             // not on-demand paging, so the onReceive recompute
@@ -826,15 +836,15 @@ struct EventStream: View {
                         }
                     } label: {
                         Label(
-                            appState.isLoadingOlderEvents
+                            querySession.isLoadingOlderEvents
                                 ? String(localized: "events.loadOlder.loading", defaultValue: "Loading…")
                                 : String(localized: "events.loadOlder", defaultValue: "Load older"),
-                            systemImage: appState.isLoadingOlderEvents ? "hourglass" : "arrow.down.circle"
+                            systemImage: querySession.isLoadingOlderEvents ? "hourglass" : "arrow.down.circle"
                         )
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(appState.isLoadingOlderEvents)
+                    .disabled(querySession.isLoadingOlderEvents)
                     Spacer()
                 }
                 .padding(.vertical, 6)
@@ -843,7 +853,7 @@ struct EventStream: View {
 
             // Status bar
             HStack {
-                if appState.eventSearchActive {
+                if querySession.eventSearchActive {
                     // v1.8.0: search results are FTS-ranked, not time-ordered.
                     // Make it explicit so the user doesn't expect newest-first
                     // and isn't surprised when the live counter still ticks.
@@ -873,6 +883,12 @@ struct EventStream: View {
                         .accessibilityHidden(true)
                     Text(String(localized: "events.stale", defaultValue: "Daemon not reporting"))
                         .foregroundColor(.secondary)
+                } else if appState.heartbeat?.isReady != true {
+                    Image(systemName: "exclamationmark.shield")
+                        .foregroundColor(.orange)
+                        .accessibilityHidden(true)
+                    Text(String(localized: "system.notReadyTitle", defaultValue: "The engine is not ready"))
+                        .foregroundColor(.secondary)
                 } else {
                     Image(systemName: "circle.fill")
                         .foregroundColor(.green)
@@ -890,37 +906,32 @@ struct EventStream: View {
             .padding(.vertical, 6)
             .background(.bar)
         }
-        .onAppear {
-            // Prevent incremental polling from prepending unrelated rows while
-            // the single query task loads a pre-filled investigation search.
-            if !filterText.isEmpty { appState.eventSearchActive = true }
-            recomputeFilter()
-        }
+        .onAppear { recomputeFilter() }
         .task(id: eventQueryKey) {
+            guard !Task.isCancelled else { return }
+            // Pause freezes live arrivals, not a newly selected query. Clear
+            // the old query's table before debounce or an asynchronous read.
+            filteredCache = []
+            selectedEventID = nil
             guard !appState.eventReadsDeferred else { return }
-            if !firstFilterRun {
-                do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
-            } else {
-                firstFilterRun = false
-            }
+            let debounce = !firstFilterRun
+            firstFilterRun = false
+            await querySession.loadEvents(currentQuery(), debounce: debounce)
             guard !Task.isCancelled else { return }
-            let bounds = computeEventsTimeBounds()
-            await appState.loadEvents(
-                filter: filterText.isEmpty ? nil : filterText,
-                since: bounds.since, until: bounds.until, category: coreCategory
-            )
-            guard !Task.isCancelled else { return }
-            // A user query or startup recovery refreshes even a paused stream.
+            // Explicit queries refresh even a paused stream.
             recomputeFilter()
         }
         // v1.8.0: refresh aggregate rows whenever the time range crosses the
         // 24h boundary or the category filter changes. Runs only in aggregate
         // mode — inside 24h the filteredCache + live polling is canonical.
         .task(id: aggregateInputsKey) {
+            guard !Task.isCancelled else { return }
+            aggregateRows = []
+            identifiedAggregates = []
             guard !appState.eventReadsDeferred else { return }
             if isAggregateMode {
                 let sinceDay = Self.isoDay(daysAgo: rangeDays)
-                let rows = await appState.fetchAggregates(
+                let rows = await querySession.fetchAggregates(
                     sinceDay: sinceDay,
                     category: filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil
                 )
@@ -934,23 +945,23 @@ struct EventStream: View {
         // v1.8.0 polish: SQL-side histogram. Re-fetched on time-range,
         // category, or aggregate-mode change — and now also on the live
         // refresh tick (#16), so the chart tracks the live table instead of
-        // going stale. Skips work in aggregate mode (the daily aggregate path
-        // drives that chart instead). Window + granularity honour an
+        // going stale. Hidden charts and aggregate mode do not read hot-tier
+        // bins (the daily aggregate path drives that chart instead).
+        // Window + granularity honour an
         // "Investigate in Events" centre time (#2).
         .task(id: histogramInputsKey) {
-            guard !appState.eventReadsDeferred else { return }
-            guard !isAggregateMode else {
-                histogramRows = []
-                return
-            }
+            guard !Task.isCancelled else { return }
+            histogramRows = []
             let window = histogramWindow
-            let rows = await appState.fetchHistogramBins(
+            let rows = await querySession.fetchHistogramBins(
                 spanSeconds: window.span,
                 stepSeconds: hotHistogramGranularity.stepSeconds,
                 endingAt: window.endingAt,
-                category: filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil
+                category: filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil,
+                isVisible: showHistogram && !isAggregateMode
             )
-            guard !Task.isCancelled, !appState.eventReadsDeferred else { return }
+            guard !Task.isCancelled, !appState.eventReadsDeferred,
+                  showHistogram, !isAggregateMode else { return }
             histogramRows = rows
         }
         // v1.7.11: recompute the cached filtered+sorted list only when an
@@ -963,9 +974,15 @@ struct EventStream: View {
         // C4: honour Pause. When paused, drop the live poll's prepended
         // rows on the floor instead of rebuilding the table — the visible
         // set stays frozen. Explicit filter/sort changes below still apply.
-        .onReceive(appState.$events) { _ in
+        .onReceive(querySession.$presentationResetTick) { _ in
+            filteredCache = []
+            selectedEventID = nil
+        }
+        .onReceive(querySession.$events) { rows in
             guard !isPaused else { return }
-            recomputeFilter()
+            // Published delivers before the property setter completes. Use the
+            // emitted rows rather than reading the previous stored array.
+            recomputeFilter(rows)
             // #16: keep the histogram in step with the live table. The
             // histogram task is keyed on this tick, so each live prepend
             // re-queries the SQL bins — but only when the chart is actually

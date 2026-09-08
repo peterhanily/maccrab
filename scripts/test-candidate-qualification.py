@@ -543,6 +543,33 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
             "es_kernel_dropped_total": 0,
             "es_copy_backpressure_dropped_total": 0,
             "es_stream_yield_dropped_total": 0,
+            "es_mode": "native client",
+            "es_client_split_degraded": False,
+            "es_sensor_degraded": False,
+            "es_sensor_degraded_detail": "nominal",
+            "collector_health": [
+                {
+                    "name": "ESCollector", "enabled": True,
+                    "state": "healthy", "healthy": True,
+                    "reason": "native callbacks active",
+                    "error_count": 0,
+                    "native_canary_checks_total": 1,
+                    "native_canary_failures_total": 0,
+                    "native_canary_outcome": "healthy",
+                    "native_callback_age_seconds": 1.0,
+                    "native_canary_age_seconds": 20.0,
+                },
+                {
+                    "name": "FSEventsCollector", "enabled": False,
+                    "state": "disabled", "healthy": False,
+                    "reason": "Endpoint Security provides file monitoring",
+                },
+                {
+                    "name": "UltrasonicMonitor", "enabled": False,
+                    "state": "disabled", "healthy": False,
+                    "reason": "Optional microphone monitoring is turned off",
+                },
+            ],
             "deferred_enrichment_buffer": {
                 "identity_rejected_patches_total": 0,
                 "reservation_conserved": True,
@@ -1713,6 +1740,126 @@ class CandidateQualificationTests(unittest.TestCase):
             64,
         )
 
+    def test_mach_cpu_ticks_convert_for_native_timebases(self) -> None:
+        for ticks, ratio, expected in (
+            (0, (1, 1), 0.0),
+            (1_000_000_000, (1, 1), 1.0),
+            (2_500_000_000, (1, 1), 2.5),
+            (24_000_000, (125, 3), 1.0),
+            (72_000_000, (125, 3), 3.0),
+            (12_000_000, (125, 3), 0.5),
+            (1, (125, 3), 125 / 3_000_000_000),
+        ):
+            with self.subTest(ticks=ticks, ratio=ratio):
+                self.assertEqual(
+                    qualification.mach_absolute_ticks_to_seconds(ticks, timebase=ratio),
+                    expected,
+                )
+
+    def test_mach_cpu_conversion_rejects_invalid_input_and_ratios(self) -> None:
+        for ticks in (-1, True, None, 1.5, float("inf")):
+            with self.subTest(ticks=ticks):
+                with self.assertRaisesRegex(qualification.QualificationError, "Mach CPU ticks"):
+                    qualification.mach_absolute_ticks_to_seconds(ticks, timebase=(1, 1))
+        for ratio in (
+            (), (1,), (1, 1, 1), [1, 1], "1:1", (0, 1), (1, 0),
+            (-1, 1), (1, -1), (True, 1), (1, True), (1.0, 1), (1, 1.0),
+            (1, None), (1, float("inf")), (1, float("nan")),
+            (0x1_0000_0000, 1), (1, 0x1_0000_0000),
+        ):
+            with self.subTest(ratio=ratio):
+                with self.assertRaisesRegex(qualification.QualificationError, "Mach timebase"):
+                    qualification.mach_absolute_ticks_to_seconds(1, timebase=ratio)
+
+    def test_mach_timebase_query_uses_native_abi_and_caches_success(self) -> None:
+        self.assertEqual(ctypes.sizeof(qualification.DarwinMachTimebaseInfo), 8)
+        self.assertEqual(qualification.DarwinMachTimebaseInfo.numer.offset, 0)
+        self.assertEqual(qualification.DarwinMachTimebaseInfo.denom.offset, 4)
+
+        def query(pointer):
+            info = ctypes.cast(pointer, ctypes.POINTER(qualification.DarwinMachTimebaseInfo)).contents
+            info.numer = 125
+            info.denom = 3
+            return 0
+
+        library = mock.Mock()
+        library.mach_timebase_info.side_effect = query
+        qualification.darwin_mach_timebase.cache_clear()
+        try:
+            with mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
+                    mock.patch.object(qualification.ctypes, "CDLL", return_value=library) as load:
+                self.assertEqual(qualification.darwin_mach_timebase(), (125, 3))
+                self.assertEqual(qualification.darwin_mach_timebase(), (125, 3))
+                self.assertEqual(qualification.mach_absolute_ticks_to_seconds(24_000_000), 1.0)
+            load.assert_called_once_with("/usr/lib/libSystem.B.dylib", use_errno=True)
+            library.mach_timebase_info.assert_called_once()
+            self.assertEqual(
+                library.mach_timebase_info.argtypes,
+                [ctypes.POINTER(qualification.DarwinMachTimebaseInfo)],
+            )
+            self.assertIs(library.mach_timebase_info.restype, ctypes.c_int)
+        finally:
+            qualification.darwin_mach_timebase.cache_clear()
+
+    def test_mach_timebase_query_rejects_errors_and_does_not_cache_failure(self) -> None:
+        for result, numer, denom in ((5, 125, 3), (0, 0, 3), (0, 125, 0)):
+            with self.subTest(result=result, numer=numer, denom=denom):
+                def query(pointer):
+                    info = ctypes.cast(pointer, ctypes.POINTER(qualification.DarwinMachTimebaseInfo)).contents
+                    info.numer = numer
+                    info.denom = denom
+                    return result
+
+                library = mock.Mock()
+                library.mach_timebase_info.side_effect = query
+                qualification.darwin_mach_timebase.cache_clear()
+                try:
+                    with mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
+                            mock.patch.object(qualification.ctypes, "CDLL", return_value=library):
+                        for _ in range(2):
+                            with self.assertRaisesRegex(qualification.QualificationError, "Mach timebase query"):
+                                qualification.darwin_mach_timebase()
+                    self.assertEqual(library.mach_timebase_info.call_count, 2)
+                finally:
+                    qualification.darwin_mach_timebase.cache_clear()
+
+    def test_mach_timebase_query_requires_available_native_api(self) -> None:
+        qualification.darwin_mach_timebase.cache_clear()
+        try:
+            with mock.patch.object(qualification.platform, "system", return_value="Linux"), \
+                    mock.patch.object(qualification.ctypes, "CDLL") as load:
+                with self.assertRaisesRegex(qualification.QualificationError, "requires macOS"):
+                    qualification.darwin_mach_timebase()
+                load.assert_not_called()
+            with mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
+                    mock.patch.object(qualification.ctypes, "CDLL", side_effect=OSError("fixture unavailable")):
+                with self.assertRaisesRegex(qualification.QualificationError, "Mach timebase query is unavailable"):
+                    qualification.darwin_mach_timebase()
+        finally:
+            qualification.darwin_mach_timebase.cache_clear()
+
+    def test_native_engine_cpu_conversion_preserves_process_start_identity(self) -> None:
+        identity = self.runtime["samples"][0]["engine_process"]
+        usage = qualification.DarwinRUsageInfoV4()
+        usage.ri_user_time = 48_000_000
+        usage.ri_system_time = 24_000_000
+        usage.ri_proc_start_abstime = identity["process_start_abstime"]
+        usage.ri_phys_footprint = 123_456
+        usage.ri_diskio_byteswritten = 654_321
+        with mock.patch.object(qualification, "darwin_process_path", return_value=pathlib.Path(identity["executable_path"])), \
+                mock.patch.object(qualification, "darwin_process_rusage", return_value=usage), \
+                mock.patch.object(qualification, "darwin_process_cdhash", return_value=identity["running_cdhash"]), \
+                mock.patch.object(qualification, "darwin_mach_timebase", return_value=(125, 3)), \
+                mock.patch.object(qualification, "sha256_file", return_value=identity["executable_sha256"]), \
+                mock.patch.object(pathlib.Path, "is_symlink", return_value=False), \
+                mock.patch.object(pathlib.Path, "is_file", return_value=True):
+            observed = qualification.engine_process_observation(identity["pid"])
+        self.assertEqual(observed["engine_cpu_seconds_total"], 3.0)
+        self.assertEqual(observed["process_start_abstime"], identity["process_start_abstime"])
+        self.assertEqual(observed["engine_memory_footprint_bytes"], 123_456)
+        self.assertEqual(observed["engine_disk_write_bytes_total"], 654_321)
+        self.assertEqual(observed["running_cdhash"], identity["running_cdhash"])
+
     def test_prewarm_readiness_allows_a_first_investigation_in_flight(self) -> None:
         """`healthy` means "has succeeded once", so the first one is in limbo.
 
@@ -1866,6 +2013,177 @@ class CandidateQualificationTests(unittest.TestCase):
                 phase="fixture rejected enrichment", require_drained=True,
                 expected_pid=4321,
             )
+
+    def test_native_es_canary_failure_rejects_readiness_with_zero_loss(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+        observation["heartbeat"]["collector_health"][0].update({
+            "enabled": True, "healthy": False, "state": "failed",
+            "reason": "coverage canary: storeQueryUnknown",
+            "native_canary_outcome": "storeQueryUnknown",
+            "native_canary_failures_total": 1,
+        })
+        self.rederive_sample(report, 0)
+        self.assertTrue(all(value == 0 for value in report["samples"][0]["losses"].values()))
+        for require_llm_ready in (False, True):
+            with self.subTest(require_llm_ready=require_llm_ready):
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    "ESCollector.*coverage canary: storeQueryUnknown",
+                ):
+                    qualification.validate_runtime_readiness(
+                        observation, "fixture native ES", phase="fixture native ES",
+                        require_drained=True, expected_pid=4321,
+                        require_llm_ready=require_llm_ready,
+                    )
+
+    def test_native_es_canary_failure_rejects_middle_and_final_runtime_samples(self) -> None:
+        for index in (len(self.runtime["samples"]) // 2, len(self.runtime["samples"]) - 1):
+            with self.subTest(index=index):
+                report = copy.deepcopy(self.runtime)
+                report["recorder_observations"][index]["heartbeat"]["collector_health"][0].update({
+                    "healthy": False, "state": "failed",
+                    "reason": "coverage canary: storeQueryUnknown",
+                    "native_canary_outcome": "storeQueryUnknown",
+                    "native_canary_failures_total": 1,
+                })
+                self.rederive_sample(report, index)
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    "fail-fast readiness fault:.*storeQueryUnknown",
+                ):
+                    self.validate_runtime(report)
+
+    def test_native_es_required_fields_are_not_defaulted(self) -> None:
+        for target, keys in (
+            ("heartbeat", (
+                "es_mode", "es_client_split_degraded", "es_sensor_degraded",
+                "collector_health",
+            )),
+            ("collector", ("name", "enabled", "healthy", "state", "reason")),
+        ):
+            for key in keys:
+                with self.subTest(target=target, missing=key):
+                    heartbeat = copy.deepcopy(self.runtime["recorder_observations"][0]["heartbeat"])
+                    row = heartbeat if target == "heartbeat" else heartbeat["collector_health"][0]
+                    del row[key]
+                    with self.assertRaisesRegex(qualification.QualificationError, re.escape(key)):
+                        qualification.native_es_readiness_failures(heartbeat, "fixture heartbeat")
+
+    def test_native_es_rejects_malformed_field_types(self) -> None:
+        for target, key, values in (
+            ("heartbeat", "es_mode", (None, False, 1, [], {}, "")),
+            ("heartbeat", "es_client_split_degraded", (None, 0, 1, "false", [])),
+            ("heartbeat", "es_sensor_degraded", (None, 0, 1, "false", [])),
+            ("collector", "name", (None, False, 1, [], {}, "")),
+            ("collector", "enabled", (None, 0, 1, "true", [])),
+            ("collector", "healthy", (None, 0, 1, "true", [])),
+            ("collector", "state", (None, False, 1, [], {}, "", "unrecognized")),
+            ("collector", "reason", (None, False, 1, [], {})),
+            ("collector", "last_error", (None, False, 1, [], {})),
+            ("collector", "native_canary_outcome", (None, False, 1, [], {}, "", "unknown")),
+        ):
+            for value in values:
+                with self.subTest(target=target, key=key, value=value):
+                    heartbeat = copy.deepcopy(self.runtime["recorder_observations"][0]["heartbeat"])
+                    row = heartbeat if target == "heartbeat" else heartbeat["collector_health"][0]
+                    row[key] = value
+                    with self.assertRaisesRegex(qualification.QualificationError, re.escape(key)):
+                        qualification.native_es_readiness_failures(heartbeat, "fixture heartbeat")
+
+    def test_native_es_inventory_must_be_well_formed_and_unambiguous(self) -> None:
+        original = self.runtime["recorder_observations"][0]["heartbeat"]
+        healthy = copy.deepcopy(original["collector_health"][0])
+        failed = {**healthy, "state": "failed", "healthy": False, "reason": "fixture failure"}
+        disabled = copy.deepcopy(original["collector_health"][1])
+        for rows in (None, {}, "ESCollector", [], [None], [{}], [disabled],
+                     [healthy, healthy], [healthy, failed], [failed, healthy]):
+            with self.subTest(rows=rows):
+                heartbeat = copy.deepcopy(original)
+                heartbeat["collector_health"] = rows
+                with self.assertRaisesRegex(qualification.QualificationError, "collector_health"):
+                    qualification.native_es_readiness_failures(heartbeat, "fixture heartbeat")
+
+    def test_native_es_missing_and_duplicate_evidence_rejects_final_runtime(self) -> None:
+        for defect in ("missing mode", "duplicate ESCollector"):
+            with self.subTest(defect=defect):
+                report = copy.deepcopy(self.runtime)
+                index = len(report["samples"]) - 1
+                heartbeat = report["recorder_observations"][index]["heartbeat"]
+                if defect == "missing mode":
+                    del heartbeat["es_mode"]
+                    expected = "es_mode"
+                else:
+                    heartbeat["collector_health"].append(copy.deepcopy(heartbeat["collector_health"][0]))
+                    expected = "exactly one ESCollector"
+                self.rederive_sample(report, index)
+                with self.assertRaisesRegex(qualification.QualificationError, expected):
+                    self.validate_runtime(report)
+
+    def test_native_es_rejects_degraded_modes_flags_and_collector_states(self) -> None:
+        cases = [
+            ("heartbeat", "es_mode", "eslogger proxy", "not native client"),
+            ("heartbeat", "es_mode", "kdebug", "not native client"),
+            ("heartbeat", "es_mode", "none", "not native client"),
+            ("heartbeat", "es_client_split_degraded", True, "split is degraded"),
+            ("heartbeat", "es_sensor_degraded", True, "sensor is degraded"),
+            ("collector", "enabled", False, "not enabled and healthy"),
+            ("collector", "healthy", False, "not enabled and healthy"),
+        ]
+        cases.extend(
+            ("collector", "state", state, "not enabled and healthy")
+            for state in ("disabled", "starting", "failed", "stalled")
+        )
+        cases.extend(
+            ("collector", "native_canary_outcome", outcome, f"canary outcome is {outcome}")
+            for outcome in (
+                "kernelGap", "ingestHandoffGap", "evictionGap",
+                "storeQueryUnknown", "spawnFailed", "cancelled",
+            )
+        )
+        for target, key, value, expected in cases:
+            with self.subTest(target=target, key=key, value=value):
+                heartbeat = copy.deepcopy(self.runtime["recorder_observations"][0]["heartbeat"])
+                row = heartbeat if target == "heartbeat" else heartbeat["collector_health"][0]
+                row[key] = value
+                failures = qualification.native_es_readiness_failures(heartbeat, "fixture heartbeat")
+                self.assertRegex("; ".join(failures), expected)
+
+    def test_native_es_current_recovery_and_disabled_optional_collectors_pass(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        for index, observation in enumerate(report["recorder_observations"]):
+            es = observation["heartbeat"]["collector_health"][0]
+            es.update({
+                "reason": "回復済み — callbacks active",
+                "last_error": "coverage canary: storeQueryUnknown",
+                "error_count": 1,
+                "native_canary_checks_total": 2,
+                "native_canary_failures_total": 1,
+                "native_canary_outcome": "healthy",
+            })
+            self.rederive_sample(report, index)
+        first = report["recorder_observations"][0]
+        optional = first["heartbeat"]["collector_health"][1:]
+        self.assertEqual({row["name"] for row in optional}, {"FSEventsCollector", "UltrasonicMonitor"})
+        self.assertTrue(all(row["enabled"] is False and row["healthy"] is False for row in optional))
+        qualification.validate_runtime_readiness(
+            first, "fixture recovered ES", phase="fixture recovered ES",
+            require_drained=True, expected_pid=4321,
+        )
+        self.validate_runtime(report)
+
+    def test_native_es_initial_canary_grace_does_not_claim_a_completed_probe(self) -> None:
+        heartbeat = copy.deepcopy(self.runtime["recorder_observations"][0]["heartbeat"])
+        es = heartbeat["collector_health"][0]
+        del es["native_canary_outcome"]
+        es["native_canary_checks_total"] = 0
+        es["native_canary_age_seconds"] = 250.0
+        self.assertEqual(
+            qualification.native_es_readiness_failures(heartbeat, "fixture initial ES grace"),
+            [],
+        )
+        self.assertNotIn("native_canary_outcome", es)
+        self.assertEqual(es["native_canary_checks_total"], 0)
 
     def test_initial_loss_fails_before_source_probes_or_epoch_sleep(self) -> None:
         report = copy.deepcopy(self.runtime)

@@ -1752,9 +1752,23 @@ struct CausalGraphSubstrateRetentionTests {
             #expect(failClosed.lowerBound < producer.lowerBound)
         }
         #expect(bootstrap.contains("phase: \"storage_not_ready\""))
-        #expect(bootstrap.contains(
-            "throw DaemonBootstrapError.preIngestionStorageNotReady"
+        let failureHelperStart = try #require(bootstrap.range(of:
+            "static func failPreIngestionStorage("
         ))
+        let failureHelperEnd = try #require(bootstrap.range(of:
+            "static func failPreIngestionStorage(",
+            range: failureHelperStart.upperBound..<bootstrap.endIndex
+        ))
+        let failureHelper = bootstrap[failureHelperStart.lowerBound..<failureHelperEnd.lowerBound]
+        let startupError = try #require(failureHelper.range(of:
+            "let startupError = DaemonBootstrapError.preIngestionStorageNotReady"
+        ))
+        let failureReport = try #require(failureHelper.range(of:
+            "DaemonSetup.writePreIngestionFailureReport("
+        ))
+        let failureThrow = try #require(failureHelper.range(of: "throw startupError"))
+        #expect(startupError.lowerBound < failureReport.lowerBound)
+        #expect(failureReport.lowerBound < failureThrow.lowerBound)
         #expect(bootstrap.contains(
             "public static func prepare(printBanner: Bool = true) async throws"
         ))

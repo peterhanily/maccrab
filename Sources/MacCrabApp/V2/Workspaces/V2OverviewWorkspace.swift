@@ -1040,6 +1040,7 @@ struct V2OverviewWorkspace: View {
     private var crabCard: some View {
         V2CrabWidget(
             mood: effectiveCrabMood,
+            protectionStatus: protectionState,
             criticalCampaigns: kpis.activeCampaignsCritical,
             canAcknowledge: canAcknowledgeCrab,
             eventRate: kpis.eventRateCoverageComplete

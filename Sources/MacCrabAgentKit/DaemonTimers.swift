@@ -2386,7 +2386,8 @@ enum DaemonTimers {
                             .expireJournalBlocks(
                                 retainedThrough: retainedThrough,
                                 maximumBlocks:
-                                    journalExpiryMaximumBlocksPerQuantum
+                                    journalExpiryMaximumBlocksPerQuantum,
+                                pinnedEntry: .conserveCurrentCutoff
                             )
                     } catch let error as EventStoreError {
                         await state.eventStore.endSizeCapPrune()
@@ -5127,20 +5128,28 @@ enum DaemonTimers {
         case .evictionGap:
             stageDetail = "was seen at the ES callback but is absent from events.db — the store/eviction path lost it (retention sweep or insert gap). "
         case .storeQueryUnknown:
-            stageDetail = "was seen at the ES callback, but the retained-window or sparse-projection coverage ledger cannot prove whether the empty store query means absence — storage/query coverage is incomplete. "
+            stageDetail = "was seen at the ES callback, but its presence in retained storage could not be verified: the store query failed or returned an incomplete empty result. This does not prove the event was lost. "
         case .healthy:
             stageDetail = ""
         }
-        let description =
-            "Coverage canary lost at the \(stage) stage: a self-generated probe exec "
-            + stageDetail
-            + "MacCrab's own telemetry coverage is degraded; verify what is generating load or storage pressure."
+        let coverageUnverified = verdict == .storeQueryUnknown
+        let description = (
+            coverageUnverified
+                ? "Coverage canary could not be verified at the \(stage) stage: a self-generated probe exec "
+                : "Coverage canary lost at the \(stage) stage: a self-generated probe exec "
+        ) + stageDetail + (
+            coverageUnverified
+                ? "MacCrab's telemetry coverage verification is degraded; review the coverage-canary diagnostics and current storage health."
+                : "MacCrab's own telemetry coverage is degraded; verify what is generating load or storage pressure."
+        )
 
         let alert = Alert(
             // Synthetic self-defense ruleId (same convention as the D2
             // sensor-degraded meta-alert). NOT a Rules/ entry.
             ruleId: "maccrab.self-defense.coverage_gap",
-            ruleTitle: "Coverage Gap: telemetry canary lost at \(stage)",
+            ruleTitle: coverageUnverified
+                ? "Coverage verification incomplete: telemetry canary storage/query"
+                : "Coverage Gap: telemetry canary lost at \(stage)",
             severity: severity,
             eventId: UUID().uuidString,
             processPath: CoverageCanary.spawnBinaryPath,
@@ -5156,8 +5165,11 @@ enum DaemonTimers {
     }
 
     /// Store-side half of the two-point check: is an event carrying `nonce`
-    /// present in events.db? Uses the FTS/command-line search the hunt tool
-    /// uses. An empty sparse result proves absence only when its retained-window,
+    /// present in the verified FTS projection? A scalar match proves that
+    /// pipeline without retaining a decoded Event/result array. It does not
+    /// attest full Event decoding. A miss uses the hunt query for diagnostics;
+    /// a LIKE-only hit cannot turn a failed FTS proof healthy. An empty sparse
+    /// result proves absence only when its retained-window,
     /// projection, and poison ledgers are complete. Errors and incomplete empty
     /// snapshots stay explicitly unknown instead of masquerading as eviction.
     static func canaryPresentInDB(
@@ -5165,16 +5177,72 @@ enum DaemonTimers {
         nonce: String,
         since: Date
     ) async -> CoverageCanaryEvaluator.StorePresence {
+        await canaryPresentInDB(eventStore: state.eventStore, nonce: nonce, since: since)
+    }
+
+    /// The store-side proof is independently testable with an ordinary private
+    /// EventStore; the callback/spawn half still requires native ES on a host.
+    static func canaryPresentInDB(
+        eventStore: EventStore,
+        nonce: String,
+        since: Date
+    ) async -> CoverageCanaryEvaluator.StorePresence {
         do {
-            let snapshot = try await state.eventStore.searchSnapshot(
+            if try await eventStore.containsProjectedFTSMatch(
+                text: nonce, since: since, until: Date()
+            ) {
+                return .present
+            }
+            let snapshot = try await eventStore.searchSnapshot(
                 text: nonce,
                 since: since,
                 until: Date(),
                 limit: 1
             )
-            if !snapshot.events.isEmpty { return .present }
+            if !snapshot.events.isEmpty {
+                Logger(subsystem: "com.maccrab", category: "coverage-canary")
+                    .warning("Coverage canary FTS proof missed but a later projection search found a match; kind=fts_missing_projection_present. FTS coverage remains unknown.")
+                return .coverageUnknown
+            }
+            if !snapshot.isComplete {
+                // Only fixed scalar fields, never the nonce or event payload.
+                // These projection counts cover the retained admission ledger;
+                // they do not identify which omission, if any, affected this
+                // probe. The existing probe makes at most four query attempts.
+                Logger(subsystem: "com.maccrab", category: "coverage-canary")
+                    .warning("Coverage canary store query incomplete-empty; retained projection totals (not probe-specific): quota=\(snapshot.projectionOmittedQuota, privacy: .public), replaced=\(snapshot.projectionOmittedReplaced, privacy: .public), physical=\(snapshot.projectionOmittedPhysical, privacy: .public), external=\(snapshot.projectionOmittedExternal, privacy: .public), migration=\(snapshot.projectionOmittedMigration, privacy: .public), pending=\(snapshot.projectionPending, privacy: .public); requested_window_complete=\(snapshot.requestedWindowComplete ? 1 : 0, privacy: .public); gaps: poison=\(snapshot.gaps.canonicalPoisonRecords, privacy: .public), corrupt_legacy=\(snapshot.gaps.corruptLegacyRecords, privacy: .public), inherited_legacy_loss=\(snapshot.gaps.inheritedLegacyLossRecords, privacy: .public), resource_limited=\(snapshot.gaps.resourceLimitedRecords, privacy: .public). Presence remains unknown.")
+            }
             return snapshot.isComplete ? .absent : .coverageUnknown
         } catch {
+            // Closed classifications only. Associated descriptions can contain
+            // SQL, paths, or event details and must not reach health logging.
+            let kind: String
+            if let storeError = error as? EventStoreError {
+                switch storeError {
+                case .databaseOpenFailed: kind = "databaseOpenFailed"
+                case .prepareFailed: kind = "prepareFailed"
+                case .stepFailed: kind = "stepFailed"
+                case .encodingFailed: kind = "encodingFailed"
+                case .decodingFailed: kind = "decodingFailed"
+                case .storageNotReady: kind = "storageNotReady"
+                case .diskFull: kind = "diskFull"
+                case .busy: kind = "busy"
+                case .memoryLeaseUnavailable: kind = "memoryLeaseUnavailable"
+                case .sqliteFailure: kind = "sqliteFailure"
+                case .exactEvidenceGap: kind = "exactEvidenceGap"
+                case .aggregateEvidenceGap: kind = "aggregateEvidenceGap"
+                case .incompleteRetentionWindow: kind = "incompleteRetentionWindow"
+                case .sparseProjectionIncomplete: kind = "sparseProjectionIncomplete"
+                case .resourceOwnershipRequired: kind = "resourceOwnershipRequired"
+                default: kind = "otherEventStoreError"
+                }
+            } else if error is CancellationError {
+                kind = "cancelled"
+            } else {
+                kind = "unexpectedError"
+            }
+            Logger(subsystem: "com.maccrab", category: "coverage-canary")
+                .warning("Coverage canary store query failed; kind=\(kind, privacy: .public). Presence remains unknown.")
             return .coverageUnknown
         }
     }

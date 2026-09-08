@@ -128,6 +128,30 @@ enum DaemonSetup {
         return "initialization_failed"
     }
 
+    /// Pre-producer failures bypass corruption recovery. Publish the same
+    /// structured support contract without persisting raw failure text. This
+    /// boundary did not reset a store, but cannot attest every preceding
+    /// migration/retention operation, so preservation remains unverified.
+    static func writePreIngestionFailureReport(
+        supportDir: String, component: String, failure: Error
+    ) {
+        let database: String
+        switch component {
+        case "EventStore": database = "events.db"
+        case "AlertStore": database = "alerts.db"
+        case "TraceGraph": database = "tracegraph.db"
+        default: database = "unknown"
+        }
+        writeCrashReport(
+            supportDir: supportDir,
+            error: "Required storage was not ready before ingestion.",
+            action: "Startup stopped. Preserve existing data and export diagnostics before recovery.",
+            database: database,
+            failure: failure,
+            preservation: "unverified"
+        )
+    }
+
     enum DatabaseQuarantineAuthorizationError: Error, LocalizedError {
         case missingSQLiteFailureDetails(database: String)
         case notExplicitCorruption(database: String, details: SQLiteFailureDetails)
@@ -719,7 +743,8 @@ enum DaemonSetup {
                 supportDir: supportDir,
                 startedAt: startedAt,
                 component: "EventStore",
-                reason: "pre-open legacy-evidence measurement failed: \(error.localizedDescription)"
+                reason: "pre-open legacy-evidence measurement failed: \(error.localizedDescription)",
+                failure: error
             )
         }
         var transition = legacyEvidenceTransitionBudget.update(
@@ -790,7 +815,8 @@ enum DaemonSetup {
                     supportDir: supportDir,
                     startedAt: startedAt,
                     component: "EventStore",
-                    reason: error.localizedDescription
+                    reason: error.localizedDescription,
+                    failure: error
                 )
             }
             eventStore = Self.recoverEventStore(
@@ -873,7 +899,8 @@ enum DaemonSetup {
                 supportDir: supportDir,
                 startedAt: startedAt,
                 component: "EventStore",
-                reason: "event journal pre-producer recovery failed: \(error.localizedDescription)"
+                reason: "event journal pre-producer recovery failed: \(error.localizedDescription)",
+                failure: error
             )
         }
         guard journalRecovery.complete,
@@ -964,7 +991,8 @@ enum DaemonSetup {
                 supportDir: supportDir,
                 startedAt: startedAt,
                 component: "EventStore",
-                reason: "event journal expiry/rollup failed before producers: \(error.localizedDescription)"
+                reason: "event journal expiry/rollup failed before producers: \(error.localizedDescription)",
+                failure: error
             )
         }
         Self.logBootStep(label: "after_journal_expiry", startedAt: startedAt)
@@ -1494,7 +1522,8 @@ enum DaemonSetup {
                 supportDir: supportDir,
                 startedAt: startedAt,
                 component: "EventStore",
-                reason: "activation-boundary priority+file reprobe failed: \(error.localizedDescription)"
+                reason: "activation-boundary priority+file reprobe failed: \(error.localizedDescription)",
+                failure: error
             )
         }
         logger.notice("EventStore activation-boundary proof refreshed immediately before producers; footprint=\(eventActivationProof.footprintBytes), target=\(eventStartupBoundary.targetBytes)")
@@ -1512,7 +1541,8 @@ enum DaemonSetup {
                 supportDir: supportDir,
                 startedAt: startedAt,
                 component: "AlertStore",
-                reason: "activation-boundary ordinary reprobe failed: \(error.localizedDescription)"
+                reason: "activation-boundary ordinary reprobe failed: \(error.localizedDescription)",
+                failure: error
             )
         }
         logger.notice("AlertStore activation-boundary proof refreshed immediately before producers; footprint=\(alertActivationProof.footprintBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")

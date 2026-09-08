@@ -24,15 +24,20 @@ public enum EventPrivacySanitizer {
     /// not warrant dozens of `NSRegularExpression` scans each.
     private static let credentialHints = [
         "password", "passwd", "secret", "token", "credential",
-        "bearer ", "authorization", "api-key", "api_key", "apikey",
+        "bearer", "authorization", "api-key", "api_key", "apikey",
         "access-key", "access_key", "private-key", "private_key",
-        "key=", "auth=", "://", " -p", "sk-", "aiza", "akia",
+        // Candidate markers must allow the redactors' whitespace, assignment
+        // suffixes and embedded quoted MySQL forms. Regexes decide redaction.
+        "key", "auth", "://", "-p", "sk-", "aiza", "akia",
         "asia", "agpa", "aida", "aroa", "aipa", "anpa", "anva",
         "asca", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
         "github_pat_", "xoxa-", "xoxb-", "xoxo-", "xoxp-",
         "xoxr-", "xoxs-", "npm_", "pmak-", "whsec_", "sg.",
         "key-", "cf", "dop_v1_", "hrku-", "vrcl_", "vercel_",
         "eyj",
+        // Deliberate policy expansion: the existing Stripe redactor accepts
+        // these underscore prefixes, which the earlier "sk-" hint missed.
+        "sk_live_", "sk_test_", "pk_live_", "pk_test_", "rk_live_", "rk_test_",
     ]
 
     public struct Result: Sendable, Equatable {
@@ -168,10 +173,12 @@ public enum EventPrivacySanitizer {
     }
 
     private static func mayContainCredential(_ value: String) -> Bool {
-        // MySQL's compact `-pVALUE` and Twilio's upper-case `SK`/`AC` shapes
-        // are the only useful candidates shorter than the keyword gate.
+        // Short quoted assignments, MySQL options and URL fragments can
+        // still contain credentials. Avoid scanning the full vendor list.
         guard value.utf8.count >= 8 else {
-            return value.hasPrefix("-p") || value.contains(" -p")
+            let lowered = value.lowercased()
+            return lowered.contains("-p") || lowered.contains("key")
+                || lowered.contains("auth") || lowered.contains("://")
         }
         let lowered = value.lowercased()
         return credentialHints.contains { lowered.contains($0) }

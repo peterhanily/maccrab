@@ -18,6 +18,7 @@ import copy
 import ctypes
 import ctypes.util
 import datetime as dt
+import functools
 import hashlib
 import json
 import math
@@ -37,6 +38,12 @@ import sys
 import tempfile
 import time
 from typing import Any, Dict, Iterable, List, Mapping, NoReturn, Sequence, Tuple
+
+
+class DarwinMachTimebaseInfo(ctypes.Structure):
+    """macOS mach_timebase_info_data_t: two uint32_t fields, in this order."""
+
+    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
 
 
 class DarwinRUsageInfoV4(ctypes.Structure):
@@ -4402,14 +4409,94 @@ def forgive_flowing_boundary_lanes(
     return survivors
 
 
+def native_es_readiness_failures(
+    heartbeat: Mapping[str, Any], path: str,
+) -> List[str]:
+    """Require current native ES coverage; retain diagnostic reasons as data.
+
+    Optional collectors may be intentionally disabled. Only the native ES row
+    is required here, and its historical last_error does not override a later
+    verified recovery. The raw heartbeat remains the source of this decision.
+    """
+    fatal: List[str] = []
+    mode = string_value(heartbeat.get("es_mode"), f"{path}.es_mode")
+    split_degraded = bool_value(
+        heartbeat.get("es_client_split_degraded"),
+        f"{path}.es_client_split_degraded",
+    )
+    sensor_degraded = bool_value(
+        heartbeat.get("es_sensor_degraded"), f"{path}.es_sensor_degraded",
+    )
+    rows = list_value(
+        heartbeat.get("collector_health"), f"{path}.collector_health",
+        nonempty=True,
+    )
+    matches: List[Tuple[Dict[str, Any], str]] = []
+    for index, raw in enumerate(rows):
+        row_path = f"{path}.collector_health[{index}]"
+        row = object_value(raw, row_path)
+        name = string_value(row.get("name"), f"{row_path}.name")
+        if name == "ESCollector":
+            matches.append((row, row_path))
+    if len(matches) != 1:
+        fail(f"{path}.collector_health must contain exactly one ESCollector")
+    es, es_path = matches[0]
+    enabled = bool_value(es.get("enabled"), f"{es_path}.enabled")
+    healthy = bool_value(es.get("healthy"), f"{es_path}.healthy")
+    state = string_value(es.get("state"), f"{es_path}.state")
+    if state not in {"disabled", "starting", "healthy", "failed", "stalled"}:
+        fail(f"{es_path}.state is not a known collector state")
+    reason = string_value(es.get("reason"), f"{es_path}.reason", nonempty=False)
+    diagnostics = [f"reason={reason!r}"]
+    if "last_error" in es:
+        last_error = string_value(
+            es["last_error"], f"{es_path}.last_error", nonempty=False,
+        )
+        diagnostics.append(f"last_error={last_error!r}")
+    # The producer omits this field before the first completed canary during
+    # its initial proof grace. Do not invent a completed-probe requirement or
+    # a zero-lifetime-failure policy as part of this current-health check.
+    if "native_canary_outcome" in es:
+        outcome = string_value(
+            es["native_canary_outcome"], f"{es_path}.native_canary_outcome",
+        )
+        if outcome not in {
+            "healthy", "kernelGap", "ingestHandoffGap", "evictionGap",
+            "storeQueryUnknown", "spawnFailed", "cancelled",
+        }:
+            fail(f"{es_path}.native_canary_outcome is unknown")
+        diagnostics.append(f"native_canary_outcome={outcome}")
+        if outcome != "healthy":
+            fatal.append(f"native ES canary outcome is {outcome}")
+    if mode != "native client":
+        fatal.append(f"ES mode is not native client: {mode!r}")
+    if split_degraded:
+        fatal.append("native ES client split is degraded")
+    if sensor_degraded:
+        detail = heartbeat.get("es_sensor_degraded_detail")
+        if detail is not None:
+            detail = string_value(
+                detail, f"{path}.es_sensor_degraded_detail", nonempty=False,
+            )
+        fatal.append(f"native ES sensor is degraded: {detail!r}")
+    if not enabled or state != "healthy" or not healthy:
+        fatal.append(
+            f"ESCollector is not enabled and healthy "
+            f"(enabled={enabled}, state={state}, healthy={healthy}; "
+            + "; ".join(diagnostics) + ")"
+        )
+    return fatal
+
+
 def runtime_readiness_failures(
     raw: Any, path: str, *, expected_pid: int | None = None,
     require_llm_ready: bool = True,
 ) -> Tuple[List[str], List[str]]:
-    """Return permanent faults and transient drain work for one observation.
+    """Return disqualifying faults and transient drain work for one observation.
 
-    Permanent faults make a zero-loss epoch impossible without repairing the
-    candidate or gracefully starting a new process epoch. Drain work is
+    Loss history remains disqualifying for this process epoch. Current native
+    ES faults reject the observation even when no loss counter advances, and
+    require verified recovery before another epoch can qualify. Drain work is
     allowed while a known prewarm/workload operation is completing, but must
     be empty immediately before t0 and at the fixed post-burst boundary.
     """
@@ -4421,6 +4508,7 @@ def runtime_readiness_failures(
     heartbeat = object_value(
         observation.get("heartbeat"), f"{path}.heartbeat"
     )
+    fatal.extend(native_es_readiness_failures(heartbeat, f"{path}.heartbeat"))
     deferred_buffer = object_value(
         heartbeat.get("deferred_enrichment_buffer"),
         f"{path}.heartbeat.deferred_enrichment_buffer",
@@ -5839,6 +5927,52 @@ def darwin_process_rusage(pid: int) -> DarwinRUsageInfoV4:
     return usage
 
 
+@functools.lru_cache(maxsize=1)
+def darwin_mach_timebase() -> Tuple[int, int]:
+    """Cache a successful native Mach-tick to nanosecond ratio for this process."""
+    if platform.system() != "Darwin":
+        fail("Mach timebase inspection requires macOS")
+    try:
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        query = library.mach_timebase_info
+    except (OSError, AttributeError) as exc:
+        fail(f"Mach timebase query is unavailable: {exc}")
+    query.argtypes = [ctypes.POINTER(DarwinMachTimebaseInfo)]
+    query.restype = ctypes.c_int
+    info = DarwinMachTimebaseInfo()
+    result = query(ctypes.byref(info))
+    if result != 0:
+        fail(f"Mach timebase query failed with kernel result {result}")
+    if info.numer == 0 or info.denom == 0:
+        fail("Mach timebase query returned a non-positive ratio")
+    return int(info.numer), int(info.denom)
+
+
+def mach_absolute_ticks_to_seconds(
+    ticks: int, *, timebase: Tuple[int, int] | None = None,
+) -> float:
+    """Convert native CPU duration ticks; process-start identity stays in ticks.
+
+    An explicit ratio permits ordinary deterministic fixtures without querying
+    the host. Production uses the validated cached mach_timebase_info result.
+    Multiply Python integers before division to avoid uint64 overflow or an
+    early truncation of fractional nanoseconds.
+    """
+    count = int_value(ticks, "Mach CPU ticks")
+    ratio = darwin_mach_timebase() if timebase is None else timebase
+    if not isinstance(ratio, tuple) or len(ratio) != 2:
+        fail("Mach timebase must contain numerator and denominator")
+    numer = int_value(ratio[0], "Mach timebase numerator", minimum=1)
+    denom = int_value(ratio[1], "Mach timebase denominator", minimum=1)
+    if numer > 0xFFFFFFFF or denom > 0xFFFFFFFF:
+        fail("Mach timebase ratio must fit its uint32 ABI")
+    try:
+        seconds = (count * numer) / (denom * 1_000_000_000)
+    except OverflowError:
+        fail("Mach CPU seconds exceed the finite numeric range")
+    return number_value(seconds, "Mach CPU seconds", minimum=0)
+
+
 def darwin_process_metrics(pid: int) -> Dict[str, Any]:
     """Read cumulative CPU/write counters and physical footprint from rusage v4."""
     path = darwin_process_path(pid)
@@ -5847,9 +5981,11 @@ def darwin_process_metrics(pid: int) -> Dict[str, Any]:
         fail("installed engine executable is missing, non-regular, or redirected")
     return {
         "pid": pid,
-        "engine_cpu_seconds_total": (
+        # XNU fill_task_rusage publishes ri_user_time/ri_system_time in Mach
+        # absolute-time units. The 1:1 Intel ratio is not portable to arm64.
+        "engine_cpu_seconds_total": mach_absolute_ticks_to_seconds(
             int(usage.ri_user_time) + int(usage.ri_system_time)
-        ) / 1_000_000_000.0,
+        ),
         "process_start_abstime": int(usage.ri_proc_start_abstime),
         "engine_memory_footprint_bytes": int(usage.ri_phys_footprint),
         "engine_disk_write_bytes_total": int(usage.ri_diskio_byteswritten),
