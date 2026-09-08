@@ -1700,16 +1700,29 @@ enum DaemonSetup {
         // appeared "Stalled" in the dashboard the entire time their
         // event loops were running normally and just hadn't seen a
         // matching kernel event yet. v1.10.0 audit fix.
-        // `expectsContinuousTraffic`: the unified log and DNS see traffic on any
-        // active Mac, so prolonged silence means the sensor is dead rather than
-        // idle. Both shipped broken and reported healthy for months precisely
-        // because event-driven collectors were exempt from any liveness check.
+        // Unified Log retains its event-silence watchdog. DNS uses independent
+        // capture-loop progress below, since a working capture can observe no
+        // supported DNS packets while resolver caches or encrypted DNS are used.
         await collectorRegistry.register(
             name: "UnifiedLogCollector", expectedIntervalSeconds: 30,
             eventDriven: true, expectsContinuousTraffic: true)
+        // Capture status and successful loop checks are independent of parsed
+        // DNS traffic. Construct before registration; start remains at its
+        // existing startup step, after all diagnostics are connected.
+        let dnsCollector = DNSCollector { status in
+            switch status {
+            case .capturing:
+                await collectorRegistry.recordRecovery(name: "DNSCollector")
+            case .unavailable(let reason):
+                await collectorRegistry.recordError(name: "DNSCollector", message: reason)
+            }
+        }
         await collectorRegistry.register(
             name: "DNSCollector", expectedIntervalSeconds: 30,
-            eventDriven: true, expectsContinuousTraffic: true)
+            eventDriven: true, expectsContinuousTraffic: true, started: false,
+            dnsCaptureHealth: { [weak dnsCollector] in
+                dnsCollector?.captureDiagnostics ?? DNSCaptureDiagnostics()
+            })
         // FSEvents is the NON-ROOT fallback for ES; the shipped sysext is root, so
         // it is registered-but-never-started on every release install. It
         // reported Healthy there for the life of the feature.
@@ -2291,14 +2304,6 @@ enum DaemonSetup {
         // Capture diagnostics are installed before start so setup failures are
         // visible even when the collector has never produced a DNS event.
         Self.logBootStep(label: "before_dns_collector", startedAt: startedAt)
-        let dnsCollector = DNSCollector { status in
-            switch status {
-            case .capturing:
-                await collectorRegistry.recordRecovery(name: "DNSCollector")
-            case .unavailable(let reason):
-                await collectorRegistry.recordError(name: "DNSCollector", message: reason)
-            }
-        }
         await dnsCollector.start()
         print("DNS collector capture task started")
 

@@ -138,8 +138,8 @@ Homebrew cask.
 
 For a publishable RC, run `release.sh 1.2.3-rc.1 --publish-rc`. The first
 invocation creates the tracked-object candidate and stops. Install that exact
-DMG, enable Agent Traces/the loopback OTLP receiver, configure a working
-alert-investigation LLM, keep ordinary browser/terminal/dashboard work active,
+DMG, enable Agent Traces/the loopback OTLP receiver, keep ordinary
+browser/terminal/dashboard work active,
 and run the printed recorder command (do not hand-edit the incomplete template):
 
 ```bash
@@ -154,7 +154,8 @@ The second invocation validates and publishes the preserved DMG without
 rebuilding it. The recorder fails quickly, before the 900-second epoch, if the
 installed engine omits any required producer conservation ledger, if TraceStore
 is not an enabled full writer, if any cumulative loss/storage failure makes a
-zero-loss epoch impossible, or if the LLM is disabled or failed. A configured,
+zero-loss epoch impossible, or if a configured LLM has failed. An unconfigured
+LLM is supported and must remain disabled with no request activity. A configured,
 never-used schema-2 LLM may initially be `healthy=false`: before t0 the recorder
 runs an exact alert-only prewarm and requires one uniquely identified committed
 alert row, valid investigation JSON on that same stable alert ID, accepted
@@ -170,7 +171,7 @@ continuity. The pressure path is source-checked against stable sequence
 filename predicates before use. Both ingress lanes must reach the predeclared
 1,274 offered-events/s rate and fully drain through persistence with zero shed,
 and the span must advance and drain the TraceStore ledger. The workload must
-exit by offset 390 and all queues must drain by offset 450; failure terminates
+exit by offset 390 and all queues must drain by offset 780; failure terminates
 and reaps the dedicated process group. TraceGraph's additive physical-write
 suppression counters are proof-safe rather than loss only when monotonic and
 when observations equal attempted plus coalesced plus physically suppressed
@@ -180,8 +181,8 @@ positive and, under the current one-row-per-event contract, equal.
 The alert trigger runs from a per-run unique copy of `/bin/echo`, so the
 one-hour rule/executable alert-deduplication window cannot suppress a retry. A
 read-only/no-follow, parameter-bound query of the installed `alerts.db` must
-find exactly one new row for that path after the trigger boundary. That same
-row must acquire schema-valid investigation JSON while the LLM ledger advances
+find exactly one new row for that path after the trigger boundary. When an LLM
+is configured, that row must acquire schema-valid investigation JSON while its ledger advances
 by one or more starts with `accepted == started`, zero rejected/unattributed
 work, and no unfinished operation. Unrelated legitimate investigations may run
 concurrently, but cannot substitute for this causal proof. At minute 7.5 the

@@ -85,6 +85,7 @@ public actor CollectorRegistry {
         var lastTick: Date?
         var pollingHealth: NetworkPollingHealth? = nil
         var nativeESHealth: (@Sendable () -> ESDeliveryHealth.Snapshot)? = nil
+        var dnsCaptureHealth: (@Sendable () -> DNSCaptureDiagnostics)? = nil
         var eventCount: UInt64 = 0
         var errorCount: UInt64 = 0
         var lastError: String?
@@ -175,12 +176,14 @@ public actor CollectorRegistry {
         enabled: Bool = true,
         disabledReason: String? = nil,
         pollingHealth: NetworkPollingHealth? = nil,
-        nativeESHealth: (@Sendable () -> ESDeliveryHealth.Snapshot)? = nil
+        nativeESHealth: (@Sendable () -> ESDeliveryHealth.Snapshot)? = nil,
+        dnsCaptureHealth: (@Sendable () -> DNSCaptureDiagnostics)? = nil
     ) {
         entries[name] = InternalEntry(
             lastTick: nil,
             pollingHealth: pollingHealth,
             nativeESHealth: nativeESHealth,
+            dnsCaptureHealth: dnsCaptureHealth,
             eventCount: 0,
             errorCount: 0,
             lastError: nil,
@@ -324,9 +327,12 @@ public actor CollectorRegistry {
             let reason: String
             let poll = entry.pollingHealth?.snapshot()
             let native = entry.nativeESHealth?()
+            let dns = entry.dnsCaptureHealth?()
             let pollErrors = entry.errorCount.addingReportingOverflow(poll?.errorCount ?? 0)
-            let combinedErrors = (pollErrors.overflow ? UInt64.max : pollErrors.partialValue)
+            let nativeErrors = (pollErrors.overflow ? UInt64.max : pollErrors.partialValue)
                 .addingReportingOverflow(native?.canaryFailuresTotal ?? 0)
+            let combinedErrors = (nativeErrors.overflow ? UInt64.max : nativeErrors.partialValue)
+                .addingReportingOverflow(dns?.kernelStatisticsErrorsTotal ?? 0)
             let silenceBudget = Double(entry.expectedIntervalSeconds) * 10
             if !entry.enabled {
                 state = .disabled
@@ -346,6 +352,39 @@ public actor CollectorRegistry {
             } else if let native {
                 state = native.state
                 reason = native.reason
+            } else if let dns {
+                // A quiet, cached or encrypted resolver need not emit any
+                // supported DNS packets. Preserve the existing silence budget,
+                // but apply it to successful capture-loop observations rather
+                // than parsed events. Capture availability alone is not progress.
+                if !dns.available {
+                    state = .failed
+                    reason = "DNS capture unavailable"
+                } else if dns.captureCheckFailureActive {
+                    state = .failed
+                    reason = "DNS capture statistics check failed"
+                } else if let bindingAge = dns.bindingAgeSeconds,
+                          bindingAge.isFinite, bindingAge >= 0 {
+                    if dns.kernelStatisticsAvailable {
+                        if let age = dns.successfulCaptureCheckAgeSeconds,
+                           age.isFinite, age >= 0, age <= bindingAge,
+                           dns.successfulCaptureChecksTotal > 0 {
+                            state = age < silenceBudget ? .healthy : .stalled
+                            reason = state == .healthy
+                                ? "capture loop progressing; DNS event coverage reported separately"
+                                : "no successful DNS capture check within 10x its interval"
+                        } else {
+                            state = .stalled
+                            reason = "DNS capture progress time unavailable"
+                        }
+                    } else {
+                        state = bindingAge < silenceBudget ? .starting : .stalled
+                        reason = "configured, awaiting successful DNS capture check"
+                    }
+                } else {
+                    state = .stalled
+                    reason = "DNS capture progress time unavailable"
+                }
             } else if let poll {
                 // Polling liveness must not depend on downstream event arrival:
                 // quiet sweeps emit nothing, and old queued events can arrive

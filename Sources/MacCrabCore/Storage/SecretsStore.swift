@@ -4,32 +4,17 @@
 // Keychain-backed storage for API keys, bearer tokens, and anything else
 // that shouldn't sit in plaintext on disk or in the process environment.
 //
-// # Why
+// Queries use the service/account namespace below and an optional access-group
+// attribute. This wrapper retains macOS's default file-based Keychain backend;
+// it does not request the data-protection Keychain. Actual access depends on
+// each process's Keychain context, search list and item ACL. Declaring the same
+// access-group entitlement alone does not establish GUI/root/CLI/MCP sharing.
 //
-// Before v1.3.5, API keys lived in two places:
-//   - `$MACCRAB_LLM_CLAUDE_KEY` (and friends) — shell env, inherited by every
-//     child, visible in `ps e`, exportable via crash reports.
-//   - `~/Library/Application Support/MacCrab/llm_config.json` — plaintext
-//     JSON on disk with default file perms (0644 on first write — any other
-//     user-level process can read).
-//
-// Neither is encrypted. Neither is scoped to MacCrab as the accessor.
-// The macOS Keychain solves both: items are encrypted at rest under the
-// user's login password (or Secure Enclave-wrapped where available) and
-// only processes with a matching code-signing identity + access group can
-// read them.
-//
-// # Sysext sharing
-//
-// The dashboard (.app) uses this keychain store for cloud API keys, and the
-// System Extension (sysextd, root) declares the same
-// `79S425CW99.com.maccrab.shared` keychain-access-group entitlement. The app,
-// CLI, MCP server, and engine therefore resolve persistent LLM credentials
-// here; `llm_config.json` carries non-secret provider/model/URL settings only.
-// The v1.17.4 privileged-inbox bridge
-// (V2DaemonControl.sendLLMConfig → DaemonTimers.handleLLMConfigRequests) also
-// carries NON-SECRET config only. Engine/MCP reads use the non-interactive API
-// below so a background process never raises a Keychain authorization prompt.
+// Callers use this wrapper for persistent credentials. llm_config.json and the
+// privileged-inbox bridge carry non-secret provider/model/URL settings only.
+// Background callers request non-interactive access so authorization denial is
+// returned instead of prompting; their credential access remains subject to
+// the backend and ACL checks above.
 
 import Foundation
 import LocalAuthentication
@@ -110,6 +95,22 @@ public enum SecretsStoreError: Error, CustomStringConvertible {
     }
 }
 
+// Internal operation boundary for deterministic tests; production uses Security.framework.
+// No test needs to query or mutate the user's Keychain to verify query scope.
+struct SecretsStoreKeychainOperations: Sendable {
+    var copyMatching: @Sendable ([String: Any], UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus
+    var update: @Sendable ([String: Any], [String: Any]) -> OSStatus
+    var add: @Sendable ([String: Any]) -> OSStatus
+    var delete: @Sendable ([String: Any]) -> OSStatus
+
+    static let system = Self(
+        copyMatching: { SecItemCopyMatching($0 as CFDictionary, $1) },
+        update: { SecItemUpdate($0 as CFDictionary, $1 as CFDictionary) },
+        add: { SecItemAdd($0 as CFDictionary, nil) },
+        delete: { SecItemDelete($0 as CFDictionary) }
+    )
+}
+
 // MARK: - SecretsStore
 
 /// Typed wrapper over `SecItemAdd` / `SecItemCopyMatching` / `SecItemUpdate`
@@ -124,25 +125,39 @@ public struct SecretsStore: Sendable {
     /// Namespaced so the db-encryption and future features don't collide.
     public static let service = "com.maccrab.secrets"
 
-    /// Default shared keychain access group. The app, sysext, CLI, and MCP
-    /// tool signatures declare this group, so each principal can resolve the
-    /// persistent item written by Settings.
+    /// Default access-group attribute requested by callers. Its entitlement
+    /// does not by itself prove access across process or user contexts; the
+    /// selected Keychain backend and item ACL determine actual access.
     public static let defaultAccessGroup = "79S425CW99.com.maccrab.shared"
 
-    /// `kSecAttrAccessGroup` to claim. Defaults to `defaultAccessGroup`;
-    /// pass `nil` for tests or to read pre-v1.8.1 items written before
-    /// the access group was set.
+    /// Optional `kSecAttrAccessGroup` query attribute. Passing nil omits it;
+    /// omission is not a test isolation boundary. Tests also need a unique
+    /// service namespace.
     public let accessGroup: String?
 
-    public init(accessGroup: String? = SecretsStore.defaultAccessGroup) {
+    /// Instance service namespace. Production defaults remain unchanged;
+    /// callers that require isolated storage must provide a separate service.
+    public let serviceNamespace: String
+    private let keychain: SecretsStoreKeychainOperations
+
+    public init(
+        accessGroup: String? = SecretsStore.defaultAccessGroup,
+        service: String = SecretsStore.service
+    ) {
+        self.init(accessGroup: accessGroup, service: service, keychain: .system)
+    }
+
+    init(accessGroup: String?, service: String, keychain: SecretsStoreKeychainOperations) {
         self.accessGroup = accessGroup
+        self.serviceNamespace = service
+        self.keychain = keychain
     }
 
     /// Base query every SecItem* call starts from.
     private func baseQuery(for key: SecretKey) -> [String: Any] {
         var q: [String: Any] = [
             kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
+            kSecAttrService as String: serviceNamespace,
             kSecAttrAccount as String: key.rawValue,
         ]
         if let group = accessGroup { q[kSecAttrAccessGroup as String] = group }
@@ -158,8 +173,8 @@ public struct SecretsStore: Sendable {
     /// v1.8.1 migration: if a with-group lookup misses AND we have a
     /// non-nil access group AND a without-group item exists, return its
     /// value AND silently rewrite it with-group so the next read finds
-    /// it through the fast path. After one release cycle the without-
-    /// group fallback is empty and this branch becomes dead code.
+    /// it through the fast path. Preserve the original item: omitting an
+    /// access group searches broadly, so it cannot identify an old-only item.
     public func get(_ key: SecretKey) throws -> String? {
         try get(key, migrateLegacy: true)
     }
@@ -188,7 +203,7 @@ public struct SecretsStore: Sendable {
         }
 
         var result: AnyObject?
-        let status = SecItemCopyMatching(q as CFDictionary, &result)
+        let status = keychain.copyMatching(q, &result)
         switch status {
         case errSecSuccess:
             guard let data = result as? Data,
@@ -213,19 +228,20 @@ public struct SecretsStore: Sendable {
     }
 
     /// Look up the item WITHOUT the access group. If found, rewrite it
-    /// with the group attached and delete the legacy entry. Returns the
-    /// migrated value, or nil if no legacy item exists.
+    /// with the group attached and preserve the original entry. An unscoped
+    /// query can also match the destination; it is not a safe deletion selector.
+    /// Returns the copied value, or nil if no legacy item exists.
     private func migrateLegacyItem(for key: SecretKey) throws -> String? {
-        var legacyQuery: [String: Any] = [
+        let legacyQuery: [String: Any] = [
             kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
+            kSecAttrService as String: serviceNamespace,
             kSecAttrAccount as String: key.rawValue,
             kSecReturnData as String:  true,
             kSecMatchLimit as String:  kSecMatchLimitOne,
         ]
-        // No accessGroup attribute — matches pre-v1.8.1 entries.
+        // No accessGroup attribute — a broad compatibility lookup, not an old-item identity.
         var result: AnyObject?
-        let status = SecItemCopyMatching(legacyQuery as CFDictionary, &result)
+        let status = keychain.copyMatching(legacyQuery, &result)
         guard status == errSecSuccess,
               let data = result as? Data,
               let str = String(data: data, encoding: .utf8) else {
@@ -233,11 +249,10 @@ public struct SecretsStore: Sendable {
         }
         // Rewrite with group attached. set() handles add-or-update.
         try set(key, value: str)
-        // Delete the without-group version. Best-effort: if this fails
-        // we'll just pick it up on the next read and retry.
-        legacyQuery.removeValue(forKey: kSecReturnData as String)
-        legacyQuery.removeValue(forKey: kSecMatchLimit as String)
-        SecItemDelete(legacyQuery as CFDictionary)
+        // Retain the source. Without an exact, distinct old-item identity,
+        // deletion could remove the destination just written (or another match).
+        // This also preserves the item when the backend aliases grouped and
+        // ungrouped queries. Do not change the production keychain backend here.
         return str
     }
 
@@ -286,12 +301,12 @@ public struct SecretsStore: Sendable {
         if let authenticationContext {
             updateQuery[kSecUseAuthenticationContext as String] = authenticationContext
         }
-        let updateStatus = SecItemUpdate(
-            updateQuery as CFDictionary,
+        let updateStatus = keychain.update(
+            updateQuery,
             [
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            ] as CFDictionary
+            ]
         )
         if updateStatus == errSecSuccess { return }
 
@@ -304,7 +319,7 @@ public struct SecretsStore: Sendable {
                 q[kSecUseAuthenticationContext as String] = authenticationContext
             }
 
-            let addStatus = SecItemAdd(q as CFDictionary, nil)
+            let addStatus = keychain.add(q)
             if addStatus == errSecSuccess { return }
             throw SecretsStoreError.osStatus(addStatus)
         }
@@ -312,7 +327,10 @@ public struct SecretsStore: Sendable {
         throw SecretsStoreError.osStatus(updateStatus)
     }
 
-    /// Delete any existing item for `key`. No-op if the item doesn't exist.
+    /// Delete all accessible entries for this service/account, including legacy
+    /// entries the compatibility lookup can read. Otherwise a later get() could
+    /// copy a retained legacy value back after deletion. Other services and
+    /// accounts are outside this scope. No-op if no matching item exists.
     public func delete(_ key: SecretKey) throws {
         try delete(key, authenticationContext: nil)
     }
@@ -322,10 +340,17 @@ public struct SecretsStore: Sendable {
         authenticationContext: LAContext?
     ) throws {
         var query = baseQuery(for: key)
+        // Explicit deletion targets the same logical key as the broad legacy
+        // lookup. This is never used to clean up a source during migration.
+        query.removeValue(forKey: kSecAttrAccessGroup as String)
+        // File-based macOS Keychain defaults to one match, unlike the data-
+        // protection backend. Specify all so a retained legacy copy cannot
+        // survive a successful deletion and later be migrated back.
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
         if let authenticationContext {
             query[kSecUseAuthenticationContext as String] = authenticationContext
         }
-        let status = SecItemDelete(query as CFDictionary)
+        let status = keychain.delete(query)
         switch status {
         case errSecSuccess, errSecItemNotFound:
             return
@@ -341,7 +366,7 @@ public struct SecretsStore: Sendable {
         var q = baseQuery(for: key)
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         q[kSecReturnData as String] = false  // don't decrypt if we don't need to
-        let status = SecItemCopyMatching(q as CFDictionary, nil)
+        let status = keychain.copyMatching(q, nil)
         return status == errSecSuccess
     }
 

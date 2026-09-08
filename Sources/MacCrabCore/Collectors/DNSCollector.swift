@@ -369,8 +369,11 @@ public actor DNSCollector {
                     status = .unavailable(reason: openingFailure
                         ?? "No primary IPv4 interface is available for supported BPF capture")
                 }
+                // Publish the current binding before its recovery callback can
+                // clear the registry's old error. Repeating the same configured
+                // binding does not count as a successful capture-loop check.
+                telemetry.availability(status)
                 if await statusReporter.report(status) {
-                    telemetry.availability(status)
                     switch status {
                     case .capturing(let interface):
                         logger.info("DNS collector: capturing Ethernet/IPv4 DNS on \(interface, privacy: .public)")

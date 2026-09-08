@@ -719,10 +719,16 @@ check "Swift test suite" swift test --no-parallel
 # pitch is that its claims are checkable, an unchecked green badge is the wrong
 # kind of decoration. The suite has just run and its summary is still in
 # $CI_LOCAL_OUTPUT, so the true number is free to obtain — compare against the
-# count that was actually executed, not against another hand-maintained file.
+# count that actually executed, excluding opt-in tests the framework skipped.
 # Read it BEFORE the next check() overwrites the buffer.
 OBSERVED_TEST_COUNT=$(/usr/bin/sed -n 's/.*Test run with \([0-9][0-9]*\) tests.*/\1/p' \
     "$CI_LOCAL_OUTPUT" | /usr/bin/tail -1)
+# Swift Testing includes disabled tests in its summary total. Count only its
+# explicit skip records; test names that contain "skipped" are not skip records.
+SKIPPED_TEST_COUNT=$(/usr/bin/grep -c '^➜ Test .* skipped\.$' "$CI_LOCAL_OUTPUT" || true)
+if [ -n "$OBSERVED_TEST_COUNT" ]; then
+    OBSERVED_TEST_COUNT=$((OBSERVED_TEST_COUNT - SKIPPED_TEST_COUNT))
+fi
 assert_readme_tests_badge() {
     local observed="$1" badge
     if [ -z "$observed" ]; then

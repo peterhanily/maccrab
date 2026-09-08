@@ -24,13 +24,13 @@ import Foundation
 @Suite("SecretsStore")
 struct SecretsStoreTests {
 
-    /// Use a throwaway SecretKey across every test so we don't pollute
-    /// whatever keys the running user actually has configured.
-    /// `.urlScanKey` is picked arbitrarily — same Keychain item class,
-    /// and the suite deletes it in every test's setup + teardown so
-    /// there's no interference with real data even on a dev machine.
+    // The account enum is shared with production, so isolation must come from
+    // a unique service per test instance. Never touch the production namespace.
     private let testKey = SecretKey.urlScanKey
-    private let store = SecretsStore()
+    private let store = SecretsStore(
+        accessGroup: nil,
+        service: "com.maccrab.tests.secrets." + UUID().uuidString
+    )
 
     /// Opt-in guard. macOS prompts for Keychain access the first time a
     /// freshly-built binary touches it; in CI, Claude Code's sandbox, or
@@ -112,12 +112,11 @@ struct SecretsStoreTests {
         cleanup()
         defer { cleanup() }
 
-        // Preserve any pre-existing keys so the test doesn't touch user state.
-        let before = Set(store.storedKeys())
+        // This unique service starts empty; no production keys are queried.
+        #expect(store.storedKeys().isEmpty)
         try store.set(testKey, value: "x")
         let after = Set(store.storedKeys())
-        #expect(after.contains(testKey))
-        #expect(after.subtracting(before) == [testKey])
+        #expect(after == [testKey])
     }
 
     @Test("unicode values survive the round trip", .enabled(if: SecretsStoreTests.isEnabled))

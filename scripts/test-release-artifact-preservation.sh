@@ -136,10 +136,10 @@ make_ci_fixture() {
         '# ci-local.sh parses this summary to enforce the README tests badge, so the' \
         '# stub must emit the real shape rather than nothing.' \
         'case "$*" in' \
-        '    test*) printf "Test run with 1 tests in 1 suites passed after 0.001 seconds.\n" ;;' \
+        '    test*) printf "➜ Test \"optional fixture\" skipped.\nTest run with 2 tests in 1 suites passed after 0.001 seconds.\n" ;;' \
         'esac' \
         'exit 0'
-    # Must agree with the stub count above; the badge gate is deliberately exact.
+    # One of the two defined tests is skipped; the badge must count one executed test.
     printf 'fixture README [![Tests](https://img.shields.io/badge/tests-1%%20passing-brightgreen)]()\n' \
         > "$fixture/README.md"
     write_executable "$fixture/fake-bin/python3" \
