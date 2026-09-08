@@ -1507,6 +1507,9 @@
 "system.metricStale" = "verouderd";
 "system.metricTruncations" = "Afkappingen";
 "system.notReadyDetail" = "De bewaking is nog niet gestart. Exporteer diagnostiek om de opstartstatus bij uw probleemmelding te voegen.";
+"system.alertWriteFailuresTitle" = "Fouten bij het schrijven van waarschuwingen gemeld";
+"system.alertWriteFailuresDetail" = "Deze engine meldt %lld fouten bij het schrijven van waarschuwingen in de afgelopen 24 uur. Dit telt mislukte schrijfpogingen, niet afzonderlijke verloren waarschuwingen, en betekent niet dat de opslag nog steeds geblokkeerd is.";
+"system.alertWriteFailuresUnknown" = "Het aantal fouten bij het schrijven van waarschuwingen dat de engine meldt, is ongeldig. Met deze heartbeat kan niet worden gecontroleerd of recente waarschuwingen zijn opgeslagen.";
 "system.notReadyTitle" = "De engine is niet gereed";
 "system.openPrivacySecurity" = "Privacy en beveiliging openen";
 "system.openSettingsDesc" = "AI-backend, meldingen, peilinterval, bewaartermijnen, reactieacties en integraties staan allemaal in het centrale instellingenvenster.";

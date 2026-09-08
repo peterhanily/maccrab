@@ -82,6 +82,11 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     public let traceStoreStorageAdmission: TraceGraphStorageAdmission?
     /// Live transition-aware alerts/events caps and the steady-state envelope.
     public let alertEvidenceBudget: MacCrabCore.HeartbeatSnapshot.AlertEvidenceBudget?
+    /// Recent failed alert write attempts, independent of current admission.
+    /// Zero is the compatibility default for an absent older-engine field;
+    /// nil means a present count could not be trusted.
+    public let alertInsertErrorsTotal: Int?
+    public var alertWritesRequireAttention: Bool { alertInsertErrorsTotal != 0 }
     /// Joinable timer-handler lifecycle accounting. One in-flight heartbeat
     /// handler is normal; conservation/rejection while accepting is not.
     public let timerLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
@@ -1119,6 +1124,7 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             traceGraphStorageAdmission: traceGraphStorageAdmission,
             traceStoreStorageAdmission: traceStoreStorageAdmission,
             alertEvidenceBudget: alertEvidenceBudget,
+            alertInsertErrorsTotal: alertWriteFailureCount(from: raw),
             timerLifecycle: timerLifecycle,
             livenessTimerLifecycle: livenessTimerLifecycle,
             startupWorkLifecycle: startupWorkLifecycle,
@@ -1138,6 +1144,18 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
               let data = try? JSONSerialization.data(withJSONObject: value)
         else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// Keep the app's two heartbeat consumers consistent. Decoding as Int
+    /// rejects booleans, strings, fractional counts and overflow; a present
+    /// null/negative/malformed value must not silently clear the warning.
+    static func alertWriteFailureCount(from raw: [String: Any]) -> Int? {
+        guard let value = raw["alert_insert_errors_total"] else { return 0 }
+        struct Counter: Decodable { let count: Int }
+        guard let data = try? JSONSerialization.data(withJSONObject: ["count": value]),
+              let decoded = try? JSONDecoder().decode(Counter.self, from: data),
+              decoded.count >= 0 else { return nil }
+        return decoded.count
     }
 }
 

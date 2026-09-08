@@ -1508,6 +1508,9 @@
 "system.metricStale" = "périmé";
 "system.metricTruncations" = "Troncatures";
 "system.notReadyDetail" = "La surveillance n’a pas démarré. Exportez les diagnostics pour inclure l’état du démarrage dans votre signalement.";
+"system.alertWriteFailuresTitle" = "Échecs signalés lors de l’écriture des alertes";
+"system.alertWriteFailuresDetail" = "Ce moteur signale %lld échecs d’écriture d’alertes au cours des dernières 24 heures. Ce nombre correspond aux tentatives d’écriture échouées, et non aux alertes distinctes perdues, et ne signifie pas que le stockage est toujours bloqué.";
+"system.alertWriteFailuresUnknown" = "Le nombre d’échecs d’écriture d’alertes signalé par le moteur est invalide. Ce signal d’activité ne permet pas de vérifier si les alertes récentes ont été enregistrées.";
 "system.notReadyTitle" = "Le moteur n’est pas prêt";
 "system.openPrivacySecurity" = "Ouvrir Confidentialité et sécurité";
 "system.openSettingsDesc" = "Le service d’IA, les notifications, la fréquence d’actualisation, la conservation des données, les réponses et les intégrations se trouvent dans la fenêtre principale Réglages.";

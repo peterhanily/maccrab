@@ -833,6 +833,12 @@
         "type": "@"
       }
     ],
+    "system.alertWriteFailuresDetail": [
+      {
+        "expression": "count",
+        "type": "lld"
+      }
+    ],
     "system.alertEvidenceTransitionDetail": [
       {
         "expression": "liveEvents",

@@ -1508,6 +1508,9 @@
 "system.metricStale" = "nieaktualne";
 "system.metricTruncations" = "Skrócenia";
 "system.notReadyDetail" = "Monitorowanie nie zostało uruchomione. Eksportując diagnostykę podczas zgłaszania problemu, dołączysz stan uruchamiania.";
+"system.alertWriteFailuresTitle" = "Zgłoszono błędy zapisu alertów";
+"system.alertWriteFailuresDetail" = "Liczba błędów zapisu alertów zgłoszonych przez ten silnik w ostatnich 24 godzinach: %lld. To liczba nieudanych prób zapisu, a nie odrębnych utraconych alertów. Nie oznacza ona, że magazyn danych jest nadal zablokowany.";
+"system.alertWriteFailuresUnknown" = "Liczba błędów zapisu alertów zgłaszana przez silnik jest nieprawidłowa. Na podstawie tego sygnału aktywności nie można sprawdzić, czy ostatnie alerty zostały zapisane.";
 "system.notReadyTitle" = "Silnik nie jest gotowy";
 "system.openPrivacySecurity" = "Otwórz Prywatność i ochrona";
 "system.openSettingsDesc" = "Usługa AI, powiadomienia, odpytywanie, okresy przechowywania, działania reagowania i integracje znajdują się w głównym oknie Ustawień.";

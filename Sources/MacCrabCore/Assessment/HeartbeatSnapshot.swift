@@ -197,6 +197,9 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
 
     // MARK: Storage-error accounting
     public let eventInsertErrorsTotal: Int?
+    /// Failed alert write attempts in this engine's hourly-bucketed recent
+    /// 24-hour window. Not a count of distinct lost alerts or a live block.
+    public let alertInsertErrorsTotal: Int?
     /// Written by the daemon as an integer (`ratePerMin: Int`), not a rate float.
     public let eventInsertErrorRatePerMin: Int?
     /// The daemon writes `""` (not JSON null) when no insert error since boot.
@@ -294,6 +297,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case eventsInsertFilterPassedTotal = "events_insert_filter_passed_total"
         case payloadTruncatedTotal = "payload_truncated_total"
         case eventInsertErrorsTotal = "event_insert_errors_total"
+        case alertInsertErrorsTotal = "alert_insert_errors_total"
         case eventInsertErrorRatePerMin = "event_insert_error_rate_per_min"
         case lastEventInsertErrorKind = "last_event_insert_error_kind"
         case esSensorDegraded = "es_sensor_degraded"

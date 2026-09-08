@@ -1468,6 +1468,9 @@
 "system.metricStale" = "desactualizado";
 "system.metricTruncations" = "Truncamientos";
 "system.notReadyDetail" = "La supervisión no se ha iniciado. Exporta los diagnósticos para incluir el estado de inicio al informar de este problema.";
+"system.alertWriteFailuresTitle" = "Se han notificado fallos al guardar alertas";
+"system.alertWriteFailuresDetail" = "Este motor notifica %lld fallos al guardar alertas en las últimas 24 horas. Se cuentan los intentos de escritura fallidos, no las alertas distintas que se hayan perdido, y esto no significa que el almacenamiento siga bloqueado.";
+"system.alertWriteFailuresUnknown" = "El recuento de fallos al guardar alertas del motor no es válido. Este latido no permite verificar si las alertas recientes se han guardado.";
 "system.notReadyTitle" = "El motor no está listo";
 "system.openPrivacySecurity" = "Abrir Privacidad y seguridad";
 "system.openSettingsDesc" = "El servicio de IA, las notificaciones, la frecuencia de actualización, la retención de datos, las respuestas y las integraciones se encuentran en la ventana principal de Ajustes.";

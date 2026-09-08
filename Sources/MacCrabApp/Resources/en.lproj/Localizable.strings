@@ -1890,3 +1890,7 @@
 "ui.finalPrefix.SettingsView.90.days" = "90 days";
 "ui.finalPrefix.SettingsView.180.days" = "180 days";
 "ui.finalPrefix.SettingsView.1.year" = "1 year";
+
+"system.alertWriteFailuresTitle" = "Alert write failures reported";
+"system.alertWriteFailuresDetail" = "This engine reports %lld alert write failures in its recent 24-hour window. This counts failed write attempts, not distinct lost alerts, and does not mean storage is still blocked.";
+"system.alertWriteFailuresUnknown" = "The engine's alert write failure count is invalid. Recent alert persistence cannot be verified from this heartbeat.";

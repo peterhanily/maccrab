@@ -2223,7 +2223,10 @@ public actor EventStore {
     }
 
     private final class TransitionReclaimDeadline {
-        let end = ContinuousClock.now.advanced(by: .seconds(30))
+        let end: ContinuousClock.Instant
+        init(end: ContinuousClock.Instant? = nil) {
+            self.end = end ?? ContinuousClock.now.advanced(by: .seconds(30))
+        }
         var expired: Bool { ContinuousClock.now >= end }
     }
 
@@ -2691,22 +2694,57 @@ public actor EventStore {
             maximumTransactionBytes: storageBudget)
     }
 
+    /// Reused before destructive retention: a later reclaim refusal must not
+    /// be the first discovery that the current VFS cannot shrink safely.
+    nonisolated static func supportsBoundedWALReclaim(on handle: OpaquePointer) throws -> Bool {
+        var journal: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "PRAGMA journal_mode", -1, &journal, nil) == SQLITE_OK,
+              let journal else {
+            sqlite3_finalize(journal)
+            throw EventStoreError.storageNotReady("pre-transition reclaim journal mode unavailable")
+        }
+        let journalStep = sqlite3_step(journal)
+        let isWAL = journalStep == SQLITE_ROW
+            && sqlite3_column_text(journal, 0).map { String(cString: $0).lowercased() == "wal" } == true
+        sqlite3_finalize(journal)
+        guard isWAL else { return false }
+        // Read capability; never force PSOW on. Otherwise sector co-writes
+        // and FULL-sync padding require a different physical-write bound.
+        var powersafe: Int32 = -1
+        guard sqlite3_file_control(handle, "main", SQLITE_FCNTL_POWERSAFE_OVERWRITE, &powersafe) == SQLITE_OK,
+              powersafe == 1 else {
+            throw EventStoreError.storageNotReady("pre-transition reclaim requires verified powersafe-overwrite support")
+        }
+        return true
+    }
+
     /// Recover only unused mode-2 pages before installing the one-way barrier.
     /// Each independent transaction preserves every row and schema object.
     /// A pin, exhausted budget or partial failure leaves resumable SQLite state.
     /// The time deadline is cooperative: VM/statement boundaries cannot interrupt
     /// a blocked filesystem call or one internal b-tree freelist traversal.
-    private static func reclaimLegacyTransitionHeadroom(
+    /// AlertStore also uses this strict primitive on its cold pressure path.
+    /// The default headroom and deadline retain the legacy-transition policy.
+    nonisolated static func reclaimLegacyTransitionHeadroom(
         on handle: OpaquePointer,
         path: String,
         admission: inout SQLitePersistentStoreAdmission,
-        liveMemoryBudget: EventPipelineLiveMemoryBudget
+        liveMemoryBudget: EventPipelineLiveMemoryBudget,
+        minimumHeadroomBytes: Int64? = nil,
+        cooperativeDeadline: ContinuousClock.Instant? = nil,
+        ownedWorkspace: EventPipelineMemoryLease? = nil
     ) throws {
         let policy = admission.policy
         let reserve = policy.transactionReserveBytes
         let cap = policy.maxFootprintBytes
+        let requiredHeadroom = minimumHeadroomBytes ?? reserve
+        guard requiredHeadroom >= reserve,
+              requiredHeadroom <= SQLitePersistentStoreAdmission.saturatingMultiply(reserve, by: 2),
+              requiredHeadroom < cap else {
+            throw EventStoreError.storageNotReady("bounded reclaim headroom is outside the existing reserve policy")
+        }
         let initialFamily = try SQLitePersistentStoreAdmission.measureFamily(path)
-        guard initialFamily > cap - reserve else { return }
+        guard initialFamily > cap - requiredHeadroom else { return }
         guard initialFamily <= cap else {
             throw SQLitePersistentStoreAdmissionError.footprintLimit(
                 footprintBytes: initialFamily, reserveBytes: 0,
@@ -2728,36 +2766,24 @@ public actor EventStore {
             return sqlite3_column_int64(statement, 0)
         }
         guard try scalar("auto_vacuum") == 2 else { return }
-        var journal: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, "PRAGMA journal_mode", -1, &journal, nil) == SQLITE_OK,
-              let journal else {
-            sqlite3_finalize(journal)
-            throw EventStoreError.storageNotReady("pre-transition reclaim journal mode unavailable")
-        }
-        let journalStep = sqlite3_step(journal)
-        let isWAL = journalStep == SQLITE_ROW
-            && sqlite3_column_text(journal, 0).map { String(cString: $0).lowercased() == "wal" } == true
-        sqlite3_finalize(journal)
-        guard isWAL else { return }
-        // Read capability; never force PSOW on. Otherwise sector co-writes
-        // and FULL-sync padding require a different physical-write bound.
-        var powersafe: Int32 = -1
-        guard sqlite3_file_control(handle, "main", SQLITE_FCNTL_POWERSAFE_OVERWRITE, &powersafe) == SQLITE_OK,
-              powersafe == 1 else {
-            throw EventStoreError.storageNotReady("pre-transition reclaim requires verified powersafe-overwrite support")
-        }
-        guard let workspace = liveMemoryBudget.tryAcquire(
+        guard try supportsBoundedWALReclaim(on: handle) else { return }
+        let workspace = ownedWorkspace ?? liveMemoryBudget.tryAcquire(
             bytes: EventJournalCodec.maximumWorkspaceBytes,
             owner: .eventStoreWorkspace
-        ) else {
+        )
+        guard let workspace,
+              workspace.owner == .eventStoreWorkspace,
+              workspace.bytes >= EventJournalCodec.maximumWorkspaceBytes else {
             throw EventStoreError.memoryLeaseUnavailable("pre-transition reclaim is waiting for bounded workspace")
         }
+        // A caller may lend its idle recovery workspace across this synchronous
+        // call; the same reservation remains owned until both scopes return.
         defer { withExtendedLifetime(workspace) {} }
         let savedSpill = try scalar("cache_spill")
         let savedCache = try scalar("cache_size")
         let savedMmap = try scalar("mmap_size")
         let savedTimeout = try scalar("busy_timeout")
-        let deadline = TransitionReclaimDeadline()
+        let deadline = TransitionReclaimDeadline(end: cooperativeDeadline)
         func checkDeadline() throws {
             try Task.checkCancellation()
             guard !deadline.expired else {
@@ -2809,7 +2835,7 @@ public actor EventStore {
             try checkpoint()
             var family = try SQLitePersistentStoreAdmission.measureFamily(path)
             // A stale WAL alone can consume the original headroom.
-            if family > cap - reserve {
+            if family > cap - requiredHeadroom {
                 let target = max(0, cap - min(cap, SQLitePersistentStoreAdmission.saturatingMultiply(reserve, by: 2)))
                 var batches = 0
                 while family > target {
@@ -2831,7 +2857,7 @@ public actor EventStore {
                     }
                     if freelist == 0 {
                         try Self.exec(handle, "ROLLBACK")
-                        if measuredFamily <= cap - reserve { break }
+                        if measuredFamily <= cap - requiredHeadroom { break }
                         throw EventStoreError.storageNotReady("pre-transition reclaim has insufficient reusable pages for transition headroom")
                     }
                     let free = admission.lastFreeSpaceBytes ?? 0

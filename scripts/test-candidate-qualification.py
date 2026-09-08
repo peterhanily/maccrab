@@ -2240,10 +2240,22 @@ class CandidateQualificationTests(unittest.TestCase):
             budget["alerts_family_admission_cap_bytes"],
         )
         budget["alerts_family_footprint_bytes"] = 193 * 1024 * 1024
+        self.rederive_sample(report, 0)
+        self.assertEqual(
+            report["samples"][0]["alert_storage_admission"]["family_footprint_bytes"],
+            193 * 1024 * 1024,
+        )
         with self.assertRaisesRegex(
             qualification.QualificationError, "admission boundary"
         ):
-            self.rederive_sample(report, 0)
+            qualification.validate_runtime_readiness(
+                observation, "fixture alerts", phase="fixture alerts",
+                require_drained=True,
+            )
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "admission boundary"
+        ):
+            self.validate_runtime(report)
 
         report = copy.deepcopy(self.runtime)
         observation = report["recorder_observations"][0]
@@ -2258,6 +2270,43 @@ class CandidateQualificationTests(unittest.TestCase):
                 observation, "fixture alerts", phase="fixture alerts",
                 require_drained=True,
             )
+
+    def test_live_recorder_retains_rejected_alert_pressure_sample(self) -> None:
+        """A failed t0 or later sample must survive in the failed capture."""
+        initial = copy.deepcopy(self.runtime["recorder_observations"][0])
+        for offset in (0, 30):
+            with self.subTest(offset=offset):
+                rejected = copy.deepcopy(self.runtime["recorder_observations"][offset // 30])
+                rejected["heartbeat"]["alert_evidence_budget"]["alerts_family_footprint_bytes"] = 193 * 1024 * 1024
+                self.rebind_observation_heartbeat(rejected)
+                captured = [initial, initial, rejected] if offset == 0 else [initial, initial, initial, rejected]
+                capture_path = self.root / f"failed-alert-pressure-{offset}.capture.json"
+                with mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
+                        mock.patch.object(qualification.os, "geteuid", return_value=0), \
+                        mock.patch.object(qualification, "read_live_heartbeat", return_value=(initial["heartbeat"], {})), \
+                        mock.patch.object(qualification, "installed_runtime_host", return_value=self.runtime["host"]), \
+                        mock.patch.object(qualification, "capture_runtime_observation", side_effect=captured), \
+                        mock.patch.object(qualification, "source_runtime_probe_evidence", return_value={}), \
+                        mock.patch.object(qualification, "mounted_tool_probes", return_value={}), \
+                        mock.patch.object(qualification, "wait_for_runtime_drain", return_value=initial), \
+                        mock.patch.object(qualification, "prewarm_alert_investigation", return_value=({}, initial)), \
+                        mock.patch.object(qualification, "installed_engine_identity", return_value=self.runtime["installed_engine"]["start"]), \
+                        mock.patch.object(qualification, "installed_gui_identity", return_value=self.runtime["installed_gui"]["start"]), \
+                        mock.patch.object(qualification, "installed_alert_database", return_value=self.root / "alerts.db"), \
+                        mock.patch.object(qualification.time, "monotonic", return_value=0), \
+                        mock.patch.object(qualification.time, "sleep"):
+                    with self.assertRaisesRegex(qualification.QualificationError, "admission boundary"):
+                        qualification.live_runtime_recording(
+                            root=ROOT, candidate_manifest=self.manifest,
+                            candidate_manifest_sha256=self.manifest_sha, dmg=self.dmg,
+                            heartbeat_path=self.root / "heartbeat_rich.json",
+                            data_dirs=[self.root], sqlite_overrides={}, capture_path=capture_path,
+                        )
+                failure = qualification.read_json_file(capture_path, "failed alert pressure")
+                self.assertEqual(failure["result"], "failed")
+                self.assertEqual(failure["phase"], "epoch")
+                self.assertEqual([row["offset_seconds"] for row in failure["observations"]], [0] if offset == 0 else [0, 30])
+                self.assertEqual(failure["observations"][-1], rejected)
 
     def test_cumulative_alert_insert_errors_fail_readiness(self) -> None:
         """v1.22.0: alert_insert_errors_total mirrors capture_failures_total."""

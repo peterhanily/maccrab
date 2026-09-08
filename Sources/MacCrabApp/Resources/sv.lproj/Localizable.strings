@@ -1508,6 +1508,9 @@
 "system.metricStale" = "inaktuell";
 "system.metricTruncations" = "Trunkeringar";
 "system.notReadyDetail" = "Övervakningen har inte startat. Exportera diagnostik för att bifoga starttillståndet när du rapporterar problemet.";
+"system.alertWriteFailuresTitle" = "Fel vid skrivning av varningar har rapporterats";
+"system.alertWriteFailuresDetail" = "Den här motorn rapporterar %lld fel vid skrivning av varningar under de senaste 24 timmarna. Antalet avser misslyckade skrivförsök, inte enskilda förlorade varningar, och innebär inte att lagringen fortfarande är blockerad.";
+"system.alertWriteFailuresUnknown" = "Motorns antal fel vid skrivning av varningar är ogiltigt. Det går inte att verifiera om de senaste varningarna har sparats utifrån denna livssignal.";
 "system.notReadyTitle" = "Motorn är inte klar";
 "system.openPrivacySecurity" = "Öppna Integritet och säkerhet";
 "system.openSettingsDesc" = "AI-backend, aviseringar, avläsningsintervall, lagringstider, svarsåtgärder och integrationer finns i det centrala inställningsfönstret.";

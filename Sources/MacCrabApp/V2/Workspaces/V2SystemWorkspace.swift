@@ -224,6 +224,9 @@ public struct V2SystemWorkspace: View {
                     || budget.captureDegraded {
                     alertEvidenceTransitionBanner(budget)
                 }
+                if let heartbeat, heartbeat.alertWritesRequireAttention {
+                    alertWriteFailuresBanner(heartbeat.alertInsertErrorsTotal)
+                }
                 if let storage = heartbeat?.traceGraphStorageAdmission,
                    storage.evidenceUnavailable {
                     traceGraphStorageBanner(storage)
@@ -727,6 +730,35 @@ public struct V2SystemWorkspace: View {
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
+    }
+
+    private func alertWriteFailuresBanner(_ count: Int?) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .foregroundStyle(V2Theme.warning)
+                .scaledSystem(20, weight: .semibold)
+                .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "system.alertWriteFailuresTitle",
+                            defaultValue: "Alert write failures reported"))
+                    .scaledSystem(13, weight: .semibold)
+                if let count {
+                    Text(String(localized: "system.alertWriteFailuresDetail",
+                                defaultValue: "This engine reports \(count) alert write failures in its recent 24-hour window. This counts failed write attempts, not distinct lost alerts, and does not mean storage is still blocked."))
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(String(localized: "system.alertWriteFailuresUnknown",
+                                defaultValue: "The engine's alert write failure count is invalid. Recent alert persistence cannot be verified from this heartbeat."))
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer()
         }

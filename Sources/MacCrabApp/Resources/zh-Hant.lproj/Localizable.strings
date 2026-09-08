@@ -1762,6 +1762,9 @@
 "system.metricStale" = "已過期";
 "system.metricTruncations" = "截斷";
 "system.notReadyDetail" = "監控尚未開始。回報此問題時，請輸出包含啟動狀態的診斷資訊。";
+"system.alertWriteFailuresTitle" = "已回報警報寫入失敗";
+"system.alertWriteFailuresDetail" = "此引擎回報最近24小時內發生了%lld次警報寫入失敗。此數值統計的是失敗的寫入嘗試，而非遺失的不同警報數量，也不代表儲存空間目前仍遭阻擋。";
+"system.alertWriteFailuresUnknown" = "引擎的警報寫入失敗計數無效。無法根據此心跳確認最近的警報是否已儲存。";
 "system.notReadyTitle" = "引擎尚未就緒";
 "system.openPrivacySecurity" = "開啟「隱私權與安全性」";
 "system.openSettingsDesc" = "AI 後端、通知、輪詢、儲存保留期限、回應操作和整合均在統一的設定視窗中管理。";

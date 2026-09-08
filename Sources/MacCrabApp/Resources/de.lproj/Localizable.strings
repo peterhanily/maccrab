@@ -1508,6 +1508,9 @@
 "system.metricStale" = "veraltet";
 "system.metricTruncations" = "Kürzungen";
 "system.notReadyDetail" = "Die Überwachung wurde noch nicht gestartet. Exportieren Sie die Diagnose, um den Startzustand Ihrer Problemmeldung beizufügen.";
+"system.alertWriteFailuresTitle" = "Fehler beim Schreiben von Warnmeldungen gemeldet";
+"system.alertWriteFailuresDetail" = "Diese Engine meldet für die letzten 24 Stunden %lld Fehler beim Schreiben von Warnmeldungen. Gezählt werden fehlgeschlagene Schreibversuche, nicht einzelne verlorene Warnmeldungen. Dies bedeutet nicht, dass der Speicher weiterhin blockiert ist.";
+"system.alertWriteFailuresUnknown" = "Die Anzahl der von der Engine gemeldeten Schreibfehler für Warnmeldungen ist ungültig. Anhand dieses Heartbeats lässt sich nicht überprüfen, ob die letzten Warnmeldungen gespeichert wurden.";
 "system.notReadyTitle" = "Die Engine ist nicht bereit";
 "system.openPrivacySecurity" = "Datenschutz & Sicherheit öffnen";
 "system.openSettingsDesc" = "KI-Backend, Benachrichtigungen, Abrufintervalle, Speicheraufbewahrung, Reaktionsaktionen und Integrationen befinden sich im zentralen Einstellungsfenster.";

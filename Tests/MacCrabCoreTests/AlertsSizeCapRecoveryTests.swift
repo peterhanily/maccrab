@@ -668,9 +668,11 @@ struct AlertsSizeCapRecoveryTests {
         let countAfterMaintenance = try await store.count()
         #expect(countAfterMaintenance < countBefore)
 
-        // Maintenance admission deliberately preserves the pressure latch.
-        // Recovery must be proven through the ordinary gate and writer reopen,
-        // without risking an irreversible first-epoch alert as a test write.
+        // The periodic enforcer performs the real ordinary gate and writer
+        // reopen after recovery, without sacrificing an alert as a probe.
+        let afterMaintenance = try #require(await store.storageAdmissionSnapshot())
+        #expect(afterMaintenance.latchedFailure == nil)
+        #expect(!afterMaintenance.pageLimitPending)
         let recovered = try await store.reprobeStorageAdmissionForWrite()
         #expect(recovered.latchedFailure == nil)
         #expect(!recovered.pageLimitPending)

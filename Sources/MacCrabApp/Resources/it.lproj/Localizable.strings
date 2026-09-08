@@ -1507,6 +1507,9 @@
 "system.metricStale" = "obsoleto";
 "system.metricTruncations" = "Troncamenti";
 "system.notReadyDetail" = "Il monitoraggio non è iniziato. Esporta la diagnostica per includere lo stato di avvio nella segnalazione del problema.";
+"system.alertWriteFailuresTitle" = "Segnalati errori di scrittura degli avvisi";
+"system.alertWriteFailuresDetail" = "Questo motore segnala %lld errori di scrittura degli avvisi nelle ultime 24 ore. Il conteggio riguarda i tentativi di scrittura non riusciti, non i singoli avvisi persi, e non indica che l’archiviazione sia ancora bloccata.";
+"system.alertWriteFailuresUnknown" = "Il conteggio degli errori di scrittura degli avvisi del motore non è valido. Questo segnale di attività non consente di verificare se gli avvisi recenti sono stati salvati.";
 "system.notReadyTitle" = "Il motore non è pronto";
 "system.openPrivacySecurity" = "Apri Privacy e sicurezza";
 "system.openSettingsDesc" = "Il servizio IA, le notifiche, la frequenza di aggiornamento, la conservazione dei dati, le risposte e le integrazioni sono nella finestra principale Impostazioni.";

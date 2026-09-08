@@ -1508,6 +1508,9 @@
 "system.metricStale" = "desatualizado";
 "system.metricTruncations" = "Truncamentos";
 "system.notReadyDetail" = "O monitoramento não começou. Exporte os diagnósticos para incluir o estado de inicialização ao relatar este problema.";
+"system.alertWriteFailuresTitle" = "Falhas relatadas ao gravar alertas";
+"system.alertWriteFailuresDetail" = "Este mecanismo relata %lld falhas ao gravar alertas nas últimas 24 horas. A contagem representa tentativas de gravação malsucedidas, não alertas distintos perdidos, e não significa que o armazenamento continue bloqueado.";
+"system.alertWriteFailuresUnknown" = "A contagem de falhas ao gravar alertas do mecanismo é inválida. Este sinal de atividade não permite verificar se os alertas recentes foram salvos.";
 "system.notReadyTitle" = "O mecanismo não está pronto";
 "system.openPrivacySecurity" = "Abrir Privacidade e Segurança";
 "system.openSettingsDesc" = "Backend de IA, notificações, consulta periódica, retenção de armazenamento, ações de resposta e integrações ficam na janela principal de Ajustes.";

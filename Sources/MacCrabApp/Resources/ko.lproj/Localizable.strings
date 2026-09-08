@@ -1762,6 +1762,9 @@
 "system.metricStale" = "오래됨";
 "system.metricTruncations" = "잘림";
 "system.notReadyDetail" = "모니터링이 시작되지 않았습니다. 이 문제를 보고할 때 시작 상태가 포함되도록 진단 정보를 내보내세요.";
+"system.alertWriteFailuresTitle" = "알림 쓰기 실패가 보고됨";
+"system.alertWriteFailuresDetail" = "이 엔진이 최근 24시간 동안 보고한 알림 쓰기 실패 횟수는 %lld회입니다. 이 값은 서로 다른 손실 알림의 수가 아니라 실패한 쓰기 시도 횟수이며, 저장소가 아직 차단되어 있다는 뜻은 아닙니다.";
+"system.alertWriteFailuresUnknown" = "엔진의 알림 쓰기 실패 횟수가 유효하지 않습니다. 이 하트비트로는 최근 알림이 저장되었는지 확인할 수 없습니다.";
 "system.notReadyTitle" = "엔진이 준비되지 않았습니다";
 "system.openPrivacySecurity" = "개인정보 보호 및 보안 열기";
 "system.openSettingsDesc" = "AI 백엔드, 알림, 갱신 주기, 저장 기간, 대응 작업, 연동은 모두 기본 설정 창에서 관리합니다.";

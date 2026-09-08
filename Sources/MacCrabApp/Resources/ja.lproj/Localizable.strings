@@ -1762,6 +1762,9 @@
 "system.metricStale" = "古い情報";
 "system.metricTruncations" = "切り詰め";
 "system.notReadyDetail" = "監視は開始されていません。この問題を報告する際は、起動状態を含む診断情報を書き出してください。";
+"system.alertWriteFailuresTitle" = "アラートの書き込み失敗が報告されています";
+"system.alertWriteFailuresDetail" = "このエンジンでは、直近24時間にアラートの書き込み失敗が%lld回報告されています。これは書き込み試行の失敗回数であり、失われた個別のアラートの件数ではありません。また、ストレージが現在もブロックされていることを意味するものではありません。";
+"system.alertWriteFailuresUnknown" = "エンジンのアラート書き込み失敗回数が無効です。このハートビートからは、最近のアラートが保存されたかどうかを確認できません。";
 "system.notReadyTitle" = "エンジンは準備できていません";
 "system.openPrivacySecurity" = "「プライバシーとセキュリティ」を開く";
 "system.openSettingsDesc" = "AIバックエンド、通知、更新間隔、保存期間、対応操作、連携は、共通の設定ウインドウで管理します。";

@@ -3725,8 +3725,9 @@ def alert_storage_admission_sample(
         - result["family_transaction_reserve_bytes"]
     ):
         fail(f"{path}.alert_evidence_budget recovery target does not reconcile")
-    if result["family_footprint_bytes"] > result["family_admission_boundary_bytes"]:
-        fail(f"{path}.alert_evidence_budget footprint exceeds alert admission boundary")
+    # A measured over-boundary footprint is a product fault, not malformed
+    # telemetry. Preserve it in the recorder sample so readiness and the final
+    # gate can reject it with the actual budget/counters still available.
     if result["capture_offered_total"] != (
         result["capture_completed_total"]
         + result["capture_failures_total"]
@@ -4693,6 +4694,8 @@ def runtime_readiness_failures(
         sample.get("alert_storage_admission"),
         f"{path}.alert_storage_admission",
     )
+    if alerts["family_footprint_bytes"] > alerts["family_admission_boundary_bytes"]:
+        fatal.append("alert evidence footprint exceeds alert admission boundary")
     if alerts.get("family_blocked") is not False:
         fatal.append(
             "alert family is admission-blocked: "
@@ -7664,6 +7667,7 @@ def live_runtime_recording(
             heartbeat_path=heartbeat_path, candidate=candidate,
             data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
         )
+        observations.append(first)
         validate_runtime_readiness(
             first, "epoch t0", phase="epoch t0", require_drained=True,
             expected_pid=preflight_pid,
@@ -7672,7 +7676,6 @@ def live_runtime_recording(
             fail("GUI process changed before epoch t0")
         if normalized_engine_process(first["process"], "epoch t0 engine") != engine_epoch_identity:
             fail("engine process changed before epoch t0")
-        observations.append(first)
         persist_capture("capturing")
 
         database_path = installed_alert_database(data_dirs)
@@ -7687,15 +7690,20 @@ def live_runtime_recording(
                 heartbeat_path=heartbeat_path, candidate=candidate,
                 data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
             )
+            previous_sample = sample_from_recorder_observation(
+                observations[-1], "previous epoch sample"
+            )
+            # Retain measured failure evidence before readiness or identity
+            # validation can reject it. The exception path marks this entire
+            # capture failed; appending never implies acceptance.
+            observations.append(observation)
             validate_runtime_readiness(
                 observation, f"epoch sample {offset}", phase=f"epoch sample {offset}",
                 require_drained=offset in (
                     BURST_DRAIN_OFFSET_SECONDS, int(MIN_EPOCH_SECONDS)
                 ),
                 expected_pid=preflight_pid,
-                previous_sample=sample_from_recorder_observation(
-                    observations[-1], "previous epoch sample"
-                ),
+                previous_sample=previous_sample,
             )
             validate_gui_candidate_process(observation.get("gui_process"),
                                            candidate_verification=verification, path=f"GUI offset {offset}")
@@ -7703,8 +7711,6 @@ def live_runtime_recording(
                 fail("GUI process identity changed during the epoch")
             if normalized_engine_process(observation["process"], f"engine offset {offset}") != engine_epoch_identity:
                 fail("native engine process identity changed during the epoch")
-            observations.append(observation)
-
             if offset == BURST_START_OFFSET_SECONDS:
                 workload_script = root / "scripts/runtime-qualification-workload.sh"
                 if workload_script.is_symlink() or not workload_script.is_file():

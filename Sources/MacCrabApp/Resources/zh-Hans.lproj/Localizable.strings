@@ -1762,6 +1762,9 @@
 "system.metricStale" = "已过期";
 "system.metricTruncations" = "截断";
 "system.notReadyDetail" = "监控尚未开始。报告此问题时，请导出包含启动状态的诊断信息。";
+"system.alertWriteFailuresTitle" = "报告了警报写入失败";
+"system.alertWriteFailuresDetail" = "此引擎报告最近24小时内发生了%lld次警报写入失败。此数值统计的是失败的写入尝试，而非丢失的不同警报数量，也不表示存储目前仍被阻塞。";
+"system.alertWriteFailuresUnknown" = "引擎的警报写入失败计数无效。无法根据此心跳确认最近的警报是否已保存。";
 "system.notReadyTitle" = "引擎尚未就绪";
 "system.openPrivacySecurity" = "打开“隐私与安全性”";
 "system.openSettingsDesc" = "AI 后端、通知、轮询、存储保留期限、响应操作和集成均在统一的设置窗口中管理。";

@@ -7524,7 +7524,13 @@ func enforceAlertsSizeCap(
         logger.warning("Alerts family admission recovery: pruned \(dropped) oldest alerts (db+wal+shm=\(beforeFamily) bytes > trigger boundary \(triggerBoundary), recovery target \(boundary.recoveryTargetBytes), row target \(dropTarget))")
     }
 
-    guard changed || familyPressure else { return maintenanceRan }
+    guard changed || familyPressure else {
+        // A successful ordinary reprobe (including writer reopen) clears a
+        // previous pressure latch; a low-space or pin failure stays visible.
+        do { _ = try await alertStore.reprobeStorageAdmissionForWrite() }
+        catch { logger.warning("Alerts family admission reprobe remains unready: \(error.localizedDescription, privacy: .public)") }
+        return maintenanceRan
+    }
 
     let postPruneBytes = (try? measureDatabaseFootprintBytes(
         dbPath: dbPath
@@ -7577,6 +7583,10 @@ func enforceAlertsSizeCap(
     } else if familyPressure {
         logger.notice("Alerts size cap: family recovered \(beforeFamily) bytes → \(finalBytes) bytes (write boundary \(boundary.hardAdmissionBoundaryBytes), target \(boundary.recoveryTargetBytes))")
     }
+    if !requiresFamilyRecovery(finalBytes) {
+        do { _ = try await alertStore.reprobeStorageAdmissionForWrite() }
+        catch { logger.warning("Alerts family admission reprobe remains unready: \(error.localizedDescription, privacy: .public)") }
+    }
     return true
 }
 
@@ -7615,6 +7625,7 @@ func alertsFamilyBlocksWrites(state: DaemonState) async -> Bool {
         return false
     }
     return boundary.requiresMaintenance(footprintBytes: footprint)
+        || admission?.latchedFailure != nil
 }
 
 func enforceAlertsSizeCapNow(state: DaemonState) async -> Bool {
