@@ -12,6 +12,7 @@
 
 import Testing
 import Foundation
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("AlertSink contract")
@@ -373,9 +374,10 @@ struct AlertSinkTests {
 
         // Match AlertSink's exact stored representation and severity ordering,
         // then choose a reserve which fits any one row but never two. Truncating
-        // the WAL and setting max == current family + reserve means the first
-        // chunk commits and grows the WAL; the fresh admission probe before the
-        // second chunk deterministically rejects that later chunk.
+        // the WAL and leaving two reserves admits the first chunk while
+        // preserving the next transaction's headroom. A real reader pin then
+        // prevents recovery from clearing that chunk's WAL before the second
+        // chunk. Merely filling the WAL would now recover and finish the batch.
         // This sink intentionally has no journal verifier/ensure closure, so
         // production persists the bounded trigger plus an `.unavailable`
         // journal-context marker. Use that exact representation seam: the old
@@ -421,13 +423,25 @@ struct AlertSinkTests {
         #expect(await store.walCheckpointTruncate())
         let familyBefore = try SQLitePersistentStoreAdmission.measureFamily(path)
         let tight = SQLitePersistentStorePolicy(
-            maxFootprintBytes: familyBefore + oneRowReserve,
+            maxFootprintBytes: familyBefore + 2 * oneRowReserve,
             freeSpaceFloorBytes: 0,
             transactionReserveBytes: oneRowReserve,
             storageVolumePath: dir.path
         )
         let tightened = try await store.updateStorageAdmission(tight)
         #expect(tightened?.latchedFailure == nil)
+
+        var reader: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            path, &reader, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil
+        )
+        defer { sqlite3_close(reader) }
+        try #require(openResult == SQLITE_OK)
+        let pinnedReader = try #require(reader)
+        try #require(sqlite3_exec(pinnedReader, "BEGIN", nil, nil, nil) == SQLITE_OK)
+        try #require(sqlite3_exec(
+            pinnedReader, "SELECT COUNT(*) FROM alerts", nil, nil, nil
+        ) == SQLITE_OK)
 
         let partial: AlertBatchInsertFailure
         do {
@@ -437,6 +451,11 @@ struct AlertSinkTests {
         } catch let failure as AlertBatchInsertFailure {
             partial = failure
         }
+        // Release immediately so the prefix's queued evidence capture and the
+        // later ordinary retry can proceed. Closing also releases it on error.
+        try #require(sqlite3_exec(pinnedReader, "ROLLBACK", nil, nil, nil) == SQLITE_OK)
+        let failureCode = partial.sqliteFailureDetails?.primaryResultCode
+        #expect(failureCode == SQLITE_BUSY || failureCode == SQLITE_LOCKED)
 
         #expect(partial.committedAlerts.map(\.id) == ["critical"])
         #expect(partial.uncommittedAlerts.map(\.id) == ["high", "medium"])

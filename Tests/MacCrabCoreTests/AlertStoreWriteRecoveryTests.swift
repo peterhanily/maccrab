@@ -78,7 +78,11 @@ struct AlertStoreWriteRecoveryTests {
         let dir = try directory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("alerts.db").path
-        let budget = EventPipelineLiveMemoryBudget(maximumBytes: EventJournalCodec.maximumWorkspaceBytes)
+        let budget = EventPipelineLiveMemoryBudget(
+            maximumBytes: EventJournalCodec.maximumWorkspaceBytes,
+            forwardProgressReserveBytes: EventJournalCodec.maximumWorkspaceBytes,
+            eventStoreWorkspaceReserveBytes: EventJournalCodec.maximumWorkspaceBytes
+        )
         let store = try AlertStore(path: path, storagePolicy: policy(dir, cap: 64 * mib), liveMemoryBudget: budget)
         let original = alert("original")
         try await store.insert(alert: original)
@@ -112,7 +116,11 @@ struct AlertStoreWriteRecoveryTests {
         let dir = try directory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("alerts.db").path
-        let budget = EventPipelineLiveMemoryBudget(maximumBytes: EventJournalCodec.maximumWorkspaceBytes)
+        let budget = EventPipelineLiveMemoryBudget(
+            maximumBytes: EventJournalCodec.maximumWorkspaceBytes,
+            forwardProgressReserveBytes: EventJournalCodec.maximumWorkspaceBytes,
+            eventStoreWorkspaceReserveBytes: EventJournalCodec.maximumWorkspaceBytes
+        )
         let store = try AlertStore(path: path, storagePolicy: policy(dir, cap: 64 * mib), liveMemoryBudget: budget)
         let original = alert("pending")
         try await store.insert(alert: original)
@@ -148,7 +156,11 @@ struct AlertStoreWriteRecoveryTests {
         let dir = try directory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("alerts.db").path
-        let budget = EventPipelineLiveMemoryBudget(maximumBytes: EventJournalCodec.maximumWorkspaceBytes)
+        let budget = EventPipelineLiveMemoryBudget(
+            maximumBytes: EventJournalCodec.maximumWorkspaceBytes,
+            forwardProgressReserveBytes: EventJournalCodec.maximumWorkspaceBytes,
+            eventStoreWorkspaceReserveBytes: EventJournalCodec.maximumWorkspaceBytes
+        )
         let store = try AlertStore(path: path, storagePolicy: policy(dir, cap: 64 * mib), liveMemoryBudget: budget)
         let original = alert("owned")
         try await store.insert(alert: original)
@@ -178,7 +190,11 @@ struct AlertStoreWriteRecoveryTests {
         let dir = try directory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("alerts.db").path
-        let budget = EventPipelineLiveMemoryBudget(maximumBytes: EventJournalCodec.maximumWorkspaceBytes)
+        let budget = EventPipelineLiveMemoryBudget(
+            maximumBytes: EventJournalCodec.maximumWorkspaceBytes,
+            forwardProgressReserveBytes: EventJournalCodec.maximumWorkspaceBytes,
+            eventStoreWorkspaceReserveBytes: EventJournalCodec.maximumWorkspaceBytes
+        )
         let store = try AlertStore(path: path, storagePolicy: policy(dir, cap: 64 * mib), liveMemoryBudget: budget)
         let originals = (0..<8).map { alert("pending-\($0)") }
         for value in originals { try await store.insert(alert: value) }

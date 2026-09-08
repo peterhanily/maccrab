@@ -1694,9 +1694,9 @@ struct SQLitePersistentStoreAdmissionTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let alertPath = dir.appendingPathComponent("alerts.db").path
         let campaignPath = dir.appendingPathComponent("campaigns.db").path
-        // One alert transaction's current conservative estimate is slightly
-        // above 2 MiB. This test exercises statement reacquisition, not reserve
-        // rejection, so provision a valid bounded transaction reserve.
+        // Alert batches reserve both their current chunk and the next ordinary
+        // transaction. The pressure ceiling must therefore still fit two
+        // reserves after maintenance compacts the actual seeded alert rows.
         let reserve = 4 * SQLitePersistentStorePolicy.bytesPerMiB
         let roomy = policy(
             directory: dir,
@@ -1705,11 +1705,26 @@ struct SQLitePersistentStoreAdmissionTests {
         )
         let alerts = try AlertStore(path: alertPath, storagePolicy: roomy)
         let campaigns = try CampaignStore(path: campaignPath, storagePolicy: roomy)
+        let seedDescription = String(repeating: "x", count: 64 * 1_024)
 
         for cycle in 0..<4 {
-            if try await alerts.count() == 0 {
-                try await alerts.insert(alerts: (0..<8).map { _ in alert() })
+            // Prepare the next real pressure episode only after the previous
+            // cycle's recovered write proved its unchanged tight cap. Raising
+            // this bootstrap cap never participates in a blocked→write proof.
+            _ = try await alerts.updateStorageAdmission(roomy)
+            for _ in 0..<96 {
+                try await alerts.insert(alert: Alert(
+                    ruleId: "storage-reacquisition-seed",
+                    ruleTitle: "Statement recovery fixture",
+                    severity: .low,
+                    eventId: UUID().uuidString,
+                    description: seedDescription
+                ))
             }
+            #expect(await alerts.walCheckpointTruncate())
+            let seededAlertBytes = try SQLitePersistentStoreAdmission.measureFamily(alertPath)
+            #expect(seededAlertBytes > reserve,
+                    "Actual seeded pages must make the derived cap larger than two alert reserves")
             if try await campaigns.count() == 0 {
                 for _ in 0..<8 { try await campaigns.insert(campaign()) }
             }
@@ -1724,6 +1739,7 @@ struct SQLitePersistentStoreAdmissionTests {
                 databasePath: campaignPath,
                 reserveBytes: reserve
             )
+            #expect(alertPolicy.maxFootprintBytes > 2 * reserve)
             #expect(
                 (try await alerts.updateStorageAdmission(alertPolicy))?
                     .latchedFailure != nil,
@@ -1746,7 +1762,7 @@ struct SQLitePersistentStoreAdmissionTests {
             try await campaigns.vacuum()
             #expect(
                 try SQLitePersistentStoreAdmission.measureFamily(alertPath)
-                    + reserve <= alertPolicy.maxFootprintBytes
+                    + 2 * reserve <= alertPolicy.maxFootprintBytes
             )
             #expect(
                 try SQLitePersistentStoreAdmission.measureFamily(campaignPath)
@@ -1761,6 +1777,9 @@ struct SQLitePersistentStoreAdmissionTests {
             try await campaigns.insert(campaign())
             #expect((await alerts.storageAdmissionSnapshot())?.latchedFailure == nil)
             #expect((await campaigns.storageAdmissionSnapshot())?.latchedFailure == nil)
+            #expect((await alerts.storageAdmissionSnapshot())?.maxFootprintBytes == alertPolicy.maxFootprintBytes,
+                    "Alert statement recovery must succeed under the same cap that latched pressure")
+            #expect((await campaigns.storageAdmissionSnapshot())?.maxFootprintBytes == campaignPolicy.maxFootprintBytes)
             #expect(try await alerts.count() == newAlerts.count)
             #expect(try await campaigns.count() == 1)
         }

@@ -3772,6 +3772,18 @@ public actor AlertStore {
                 throw AlertStoreError.stepFailed("alert pressure recovery reached its cooperative deadline; committed progress is preserved")
             }
         }
+        func requireRecoveredHeadroom() throws {
+            let family = try SQLitePersistentStoreAdmission.measureFamily(databasePath)
+            guard family <= policy.maxFootprintBytes - required else {
+                // Exhausting eligible retention is still an admission refusal.
+                // Preserve its typed contract and report the remaining physical
+                // pressure after any committed recovery progress.
+                throw SQLitePersistentStoreAdmissionError.footprintLimit(
+                    footprintBytes: family, reserveBytes: required,
+                    maxFootprintBytes: policy.maxFootprintBytes
+                )
+            }
+        }
         func restore() throws {
             sqlite3_progress_handler(db, 0, nil, nil)
             if sqlite3_get_autocommit(db) == 0 { try Self.exec(db, "ROLLBACK") }
@@ -3861,15 +3873,20 @@ public actor AlertStore {
                 sqlite3_finalize(statement)
                 let selected = candidates.filter { !protectingAlertIDs.contains($0) }
                 guard !selected.isEmpty else {
-                    throw AlertStoreError.stepFailed("alert pressure has no eligible parent in its bounded retention window")
+                    try requireRecoveredHeadroom()
+                    try restore()
+                    return
                 }
                 let deleted = try deleteAlertsCascadeAware(ids: selected)
                 guard deleted > 0 else {
-                    throw AlertStoreError.stepFailed("alert pressure retention made no progress")
+                    try requireRecoveredHeadroom()
+                    try restore()
+                    return
                 }
                 try checkpointForOrdinaryRecovery()
             }
-            throw AlertStoreError.stepFailed("alert pressure recovery exhausted eight bounded retention windows; committed progress is preserved")
+            try requireRecoveredHeadroom()
+            try restore()
         } catch {
             // A committed deletion followed by checkpoint failure may precede
             // cache accounting. Discard estimates so the next reader measures.

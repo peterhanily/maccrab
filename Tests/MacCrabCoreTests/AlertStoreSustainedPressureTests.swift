@@ -55,7 +55,11 @@ struct AlertStoreSustainedPressureTests {
         let path = directory.appendingPathComponent("alerts.db").path
         // Enough for one ordinary recovery workspace, but never two nested
         // maximum workspaces. This is isolated from unrelated test fixtures.
-        let memory = EventPipelineLiveMemoryBudget(maximumBytes: 12 * 1_048_576)
+        let memory = EventPipelineLiveMemoryBudget(
+            maximumBytes: 12 * 1_048_576,
+            forwardProgressReserveBytes: EventJournalCodec.maximumWorkspaceBytes,
+            eventStoreWorkspaceReserveBytes: EventJournalCodec.maximumWorkspaceBytes
+        )
         let store = try AlertStore(path: path,
             storagePolicy: policy(cap: 64 * mib, directory: directory), liveMemoryBudget: memory)
         #expect(await store.autoVacuumMode() == 2)
@@ -174,7 +178,11 @@ struct AlertStoreSustainedPressureTests {
         let path = directory.appendingPathComponent("alerts.db").path
         let fixedCap = 16 * mib
         let subcap: Int64 = 128 * 1_024
-        let memory = EventPipelineLiveMemoryBudget(maximumBytes: 12 * 1_048_576)
+        let memory = EventPipelineLiveMemoryBudget(
+            maximumBytes: 12 * 1_048_576,
+            forwardProgressReserveBytes: EventJournalCodec.maximumWorkspaceBytes,
+            eventStoreWorkspaceReserveBytes: EventJournalCodec.maximumWorkspaceBytes
+        )
         let store = try AlertStore(path: path,
             storagePolicy: policy(cap: fixedCap, directory: directory), liveMemoryBudget: memory)
         let base = Date(timeIntervalSince1970: 1_780_010_000)
