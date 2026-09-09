@@ -1601,7 +1601,7 @@ def _prune_orphans(output_dir: str, written: set) -> int:
     return pruned
 
 
-def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
+def compile_all(input_dir: str, output_dir: str, *, compact_json: bool = False) -> tuple[int, int, int]:
     """
     Compile all Sigma YAML rules from input_dir and write JSON to output_dir.
 
@@ -1667,7 +1667,9 @@ def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
                 out_path = os.path.join(output_dir, out_name)
 
             with open(out_path, "w", encoding="utf-8") as out_f:
-                json.dump(result, out_f, indent=2, ensure_ascii=False)
+                json.dump(result, out_f, ensure_ascii=False,
+                          indent=None if compact_json else 2,
+                          separators=(",", ":") if compact_json else None)
                 out_f.write("\n")
             written.add(os.path.abspath(out_path))
 
@@ -1700,6 +1702,10 @@ def main():
         required=True,
         help="Directory to write compiled JSON rule files.",
     )
+    parser.add_argument(
+        "--compact-json", action="store_true",
+        help="Omit JSON formatting whitespace for bundled release artifacts.",
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.input_dir):
@@ -1710,7 +1716,9 @@ def main():
     print(f"Output directory: {args.output_dir}")
     print()
 
-    total, compiled, skipped = compile_all(args.input_dir, args.output_dir)
+    total, compiled, skipped = compile_all(
+        args.input_dir, args.output_dir, compact_json=args.compact_json
+    )
 
     print()
     print("=" * 50)

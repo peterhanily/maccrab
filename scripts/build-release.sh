@@ -672,7 +672,7 @@ STAGE_ENV_EOF
     "$SCRIPT_DIR/run-release-python.sh" "$STAGING_DIR/release-python" \
         "$PROJECT_DIR/Compiler/compile_rules.py" \
         --input-dir "$PROJECT_DIR/Rules/" \
-        --output-dir "$STAGING_DIR/compiled_rules" 2>&1 | tail -1
+        --output-dir "$STAGING_DIR/compiled_rules" --compact-json 2>&1 | tail -1
     cp -r Rules/ "$STAGING_DIR/rules_source/"
     # v1.12.0: graph rules (Rules/graph/*.json) are already JSON — no
     # compilation step. Stage them next to the compiled single-event
