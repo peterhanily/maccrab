@@ -12,7 +12,7 @@ struct V2DashboardShell: View {
     @ObservedObject var appState: AppState
     @ObservedObject var sysextManager: SystemExtensionManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.controlActiveState) private var controlActiveState
     // A11y: tri-state, defaulting to "system". Pre-fix this stored only
     // "light"/"dark" and defaulted to "dark", and `resolvedColorScheme` could
     // never return nil — the SwiftUI way of saying "follow the OS" — so
@@ -112,6 +112,9 @@ struct V2DashboardShell: View {
             guard !Task.isCancelled else { return }
             let appearanceID = UUID()
             refreshAppearanceID = appearanceID
+            // A restored window can appear while another app is active, before
+            // any activity change notification arrives.
+            state.setWindowActivity(controlActiveState)
             await state.connectLiveData()
             guard !Task.isCancelled, refreshAppearanceID == appearanceID else { return }
             state.startAutoRefresh()
@@ -135,19 +138,13 @@ struct V2DashboardShell: View {
         .onChange(of: appState.heartbeat?.bootPhase) { newPhase in
             Task { await state.onSysextBootPhase(newPhase) }
         }
-        // Belt-and-suspenders for the above: appState heartbeat polling is
-        // scenePhase-gated (paused while the dashboard window is hidden), so
-        // a sysext reboot that happens while hidden isn't observed as a
-        // bootPhase edge on re-open. When the window returns to the
-        // foreground, opportunistically re-probe — but ONLY when we're not
-        // already on a healthy live provider, so a healthy dashboard pays no
-        // probe cost and this stays a no-op once recovered.
-        .onChange(of: scenePhase) { phase in
-            // Pause the auto-refresh tick while the dashboard isn't frontmost so
-            // a hidden window stops re-rendering / re-querying every 5s; the
-            // hidden→active edge bumps once so it refreshes on return.
-            state.setForegroundActive(phase == .active)
-            guard phase == .active,
+        // LSUIElement scenePhase can remain active after the window loses
+        // activity. Use the same window signal as the mascot to pause this
+        // dashboard's refreshes; global health/notification polling is separate.
+        // On return, re-probe only a missing or failed provider.
+        .onChange(of: controlActiveState) { activity in
+            let becameActive = state.setWindowActivity(activity)
+            guard becameActive,
                   state.provider.mode != .live || state.provider.lastErrorDescription != nil
             else { return }
             Task { await state.reconnectLiveDataIfStale() }

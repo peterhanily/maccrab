@@ -129,6 +129,24 @@ actor BatchedEventWriter {
         let status: EventJournalContextStatus
     }
 
+    private enum AdmissionWaitTarget: Sendable {
+        case receipt(UInt64)
+        case prefix(UInt64)
+    }
+
+    private enum AdmissionWaitResult: Sendable {
+        case receipt(JournalAdmissionResolution)
+        case prefixComplete
+        case timedOut
+    }
+
+    private struct AdmissionWaiter {
+        let target: AdmissionWaitTarget
+        let deadline: ContinuousClock.Instant
+        let continuation: CheckedContinuation<AdmissionWaitResult?, Never>
+        let timeoutTask: Task<Void, Never>
+    }
+
     private final class WeakPreparedHandle: @unchecked Sendable {
         weak var value: EventJournalPreparedHandle?
 
@@ -360,6 +378,12 @@ actor BatchedEventWriter {
     private var canonicalSHA256ByGeneration: [UInt64: Data] = [:]
     private var canonicalByteCountByGeneration: [UInt64: Int] = [:]
     private var admissionResolutions: [UInt64: JournalAdmissionResolution] = [:]
+    /// Notifications retain only scalar receipt outcomes and bounded task state,
+    /// never Event payloads. Overflow callers keep the existing polling path.
+    private let admissionWaiterCapacity: Int
+    private var admissionWaiters: [UUID: AdmissionWaiter] = [:]
+    private var admissionRetryTask: Task<Void, Never>?
+    private var admissionRetryID: UUID?
     private var resolutionOrder: [UInt64] = []
     private var resolutionOrderHead = 0
     /// Enough history for delayed child work while keeping receipt ownership
@@ -801,6 +825,7 @@ actor BatchedEventWriter {
         } else {
             terminalGeneration = admittedGeneration
         }
+        notifyAdmissionPrefixWaiters()
     }
 
     private func markTerminal(
@@ -841,16 +866,18 @@ actor BatchedEventWriter {
         } else {
             terminalGeneration = admittedGeneration
         }
+        notifyAdmissionPrefixWaiters()
     }
 
     private func recordAdmissionResolution(
         _ item: BufferedEvent,
         status: EventJournalContextStatus
     ) {
-        admissionResolutions[item.generation] = JournalAdmissionResolution(
+        let resolution = JournalAdmissionResolution(
             eventID: item.event.id,
             status: status
         )
+        admissionResolutions[item.generation] = resolution
         resolutionOrder.append(item.generation)
         switch status {
         case .verified:
@@ -878,6 +905,14 @@ actor BatchedEventWriter {
             registerRepairPayloadLease(for: item)
         }
         trimAdmissionResolutionHistory()
+        // Deliver the value itself: a large batch can trim this generation's
+        // dictionary entry before its suspended consumer next runs.
+        for (id, waiter) in admissionWaiters {
+            if case .receipt(let generation) = waiter.target,
+               generation == item.generation {
+                finishAdmissionWaiter(id, result: .receipt(resolution))
+            }
+        }
     }
 
     private func registerRepairPayloadLease(for item: BufferedEvent) {
@@ -1050,6 +1085,7 @@ actor BatchedEventWriter {
         hardByteCap: Int = EventPipelineLiveMemoryBudget
             .productionMaximumBytes,
         admissionResolutionCapacity: Int = 65_536,
+        admissionWaiterCapacity: Int = 256,
         repairPayloadLeaseDuration: Duration = .seconds(15 * 60),
         liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared,
         volumePath: String? = nil,
@@ -1072,6 +1108,7 @@ actor BatchedEventWriter {
             1,
             admissionResolutionCapacity
         )
+        self.admissionWaiterCapacity = min(256, max(0, admissionWaiterCapacity))
         // Fifteen minutes exceeds every configured alert barrier, heavy
         // operation, deferred replay, and shutdown completion window. Tests
         // inject a shorter duration to exercise expiry deterministically.
@@ -2427,6 +2464,7 @@ actor BatchedEventWriter {
         defer {
             draining = false
             drainTask = nil
+            scheduleAdmissionRetryIfNeeded()
         }
         while hasPendingStorageWork {
             let terminalWork = detachTerminalRevisionWork()
@@ -2894,6 +2932,27 @@ actor BatchedEventWriter {
 
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
+        if let result = await waitForAdmissionOutcome(
+            .receipt(receipt.generation),
+            deadline: deadline
+        ) {
+            guard case .receipt(let resolution) = result else {
+                return .timedOut
+            }
+            guard resolution.eventID == receipt.eventID else {
+                return .mismatchedReceipt
+            }
+            guard receipt.preparedHandle?.isRepairPayloadExpired != true else {
+                return .repairExpired
+            }
+            return await ensureSecurityRelevantAdmissionIfNeeded(
+                resolution.status,
+                receipt: receipt,
+                securityRelevant: securityRelevant
+            )
+        }
+        // Bounded registration saturation retains the prior wait behavior;
+        // it never rejects otherwise admissible evidence or grows task state.
         if !draining, bufferDepth > 0 { startDrain(reason: .depthThreshold) }
         while admissionResolutions[receipt.generation] == nil {
             guard !Task.isCancelled, clock.now < deadline else {
@@ -2913,6 +2972,115 @@ actor BatchedEventWriter {
             receipt: receipt,
             securityRelevant: securityRelevant
         )
+    }
+
+    /// Register and recheck on this actor before suspension, then let storage
+    /// completion resume the caller immediately instead of imposing a 10 ms
+    /// minimum on every serial event. The timeout never joins/cancels a drain.
+    /// Nil selects the bounded polling compatibility path.
+    private func waitForAdmissionOutcome(
+        _ target: AdmissionWaitTarget,
+        deadline: ContinuousClock.Instant
+    ) async -> AdmissionWaitResult? {
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                switch target {
+                case .receipt(let generation):
+                    if let resolution = admissionResolutions[generation] {
+                        continuation.resume(returning: .receipt(resolution))
+                        return
+                    }
+                case .prefix(let generation):
+                    if terminalGeneration >= generation {
+                        continuation.resume(returning: .prefixComplete)
+                        return
+                    }
+                    // Legacy callers may name a not-yet-admitted prefix.
+                    // Polling also notices its future below-threshold enqueue.
+                    if generation > admittedGeneration {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                }
+                guard !Task.isCancelled, ContinuousClock().now < deadline else {
+                    continuation.resume(returning: .timedOut)
+                    return
+                }
+                guard admissionWaiters.count < admissionWaiterCapacity else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let timeoutTask = Task { [weak self] in
+                    do {
+                        try await ContinuousClock().sleep(until: deadline)
+                    } catch { return }
+                    guard !Task.isCancelled else { return }
+                    await self?.finishAdmissionWaiter(id, result: .timedOut)
+                }
+                admissionWaiters[id] = AdmissionWaiter(
+                    target: target,
+                    deadline: deadline,
+                    continuation: continuation,
+                    timeoutTask: timeoutTask
+                )
+                if !draining, bufferDepth > 0 {
+                    startDrain(reason: .depthThreshold)
+                }
+            }
+        } onCancel: {
+            Task { await self.finishAdmissionWaiter(id, result: .timedOut) }
+        }
+    }
+
+    private func finishAdmissionWaiter(_ id: UUID, result: AdmissionWaitResult) {
+        guard let waiter = admissionWaiters.removeValue(forKey: id) else { return }
+        waiter.timeoutTask.cancel()
+        waiter.continuation.resume(returning:
+            ContinuousClock().now < waiter.deadline ? result : .timedOut
+        )
+        if admissionWaiters.isEmpty {
+            admissionRetryID = nil
+            admissionRetryTask?.cancel()
+            admissionRetryTask = nil
+        }
+    }
+
+    private func notifyAdmissionPrefixWaiters() {
+        for (id, waiter) in admissionWaiters {
+            if case .prefix(let generation) = waiter.target,
+               terminalGeneration >= generation {
+                finishAdmissionWaiter(id, result: .prefixComplete)
+            }
+        }
+    }
+
+    /// A transient drain may requeue work and stop even without a flush timer.
+    /// Keep one retry sleeper for all registered callers, retaining their
+    /// original absolute deadlines and the existing 10 ms contention backoff.
+    private func scheduleAdmissionRetryIfNeeded() {
+        guard !admissionWaiters.isEmpty, bufferDepth > 0,
+              admissionRetryTask == nil else { return }
+        let id = UUID()
+        admissionRetryID = id
+        admissionRetryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(10)) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            await self?.retryAdmissionDrain(id)
+        }
+    }
+
+    private func retryAdmissionDrain(_ id: UUID) {
+        guard admissionRetryID == id else { return }
+        admissionRetryID = nil
+        admissionRetryTask = nil
+        guard !admissionWaiters.isEmpty, !draining, bufferDepth > 0 else { return }
+        startDrain(reason: .depthThreshold)
+    }
+
+    internal func admissionWaiterCountForTesting() -> Int {
+        admissionWaiters.count
     }
 
     private func ensureSecurityRelevantAdmissionIfNeeded(
@@ -2994,6 +3162,13 @@ actor BatchedEventWriter {
         guard target > terminalGeneration else { return true }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
+        if let result = await waitForAdmissionOutcome(
+            .prefix(target),
+            deadline: deadline
+        ) {
+            if case .prefixComplete = result { return true }
+            return false
+        }
         if !draining, bufferDepth > 0 {
             startDrain(reason: .depthThreshold)
         }

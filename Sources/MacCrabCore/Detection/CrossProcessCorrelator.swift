@@ -322,9 +322,9 @@ public actor CrossProcessCorrelator {
     /// Minimum number of distinct PIDs required to emit a FILE chain. Defaults
     /// to 2 so the canonical write→execute handoff fires: process A writes
     /// `/tmp/payload`, another PID executes it. This is the engine's flagship
-    /// cross-PID signal. File chains are already gated on action diversity
-    /// (write+execute, not write+write) and the shell-utility guard, so 2 PID
-    /// values here are useful evidence without making an ancestry claim.
+    /// cross-PID signal. File chains require an observed execution plus another
+    /// action on the same artifact. This does not establish a chronological
+    /// handoff, distinct writer/executor roles, or process ancestry.
     private let minFileChainLength: Int
 
     /// Maximum number of distinct artifacts tracked per map before eviction.
@@ -489,8 +489,8 @@ public actor CrossProcessCorrelator {
         "/dev/ptmx",
         // Homebrew scratch + cellar. `brew install` fires 3,000+ chain
         // events from bash/ruby/curl/git/dirname/readlink touching
-        // /opt/homebrew/var/ and /private/tmp/brew-*/. The shell-utility
-        // gate handles the process side; these handle the path side.
+        // /opt/homebrew/var/ and /private/tmp/brew-*/. These existing path
+        // exclusions are independent of the required execution signal.
         "/private/tmp/homebrew-",
         "/private/tmp/brew-",
         "/private/tmp/d20",                         // mktemp default used by brew + many installer scripts
@@ -678,8 +678,8 @@ public actor CrossProcessCorrelator {
     ///     normal multi-process traffic like browsers + git to same CDN).
     ///   - minFileChainLength: Minimum number of distinct PIDs required to emit
     ///     a FILE chain. Defaults to 2 so the canonical cross-PID write→execute
-    ///     handoff fires; file chains are already gated on action diversity and
-    ///     the shell-utility guard, which hold FP noise down.
+    ///     handoff fires. File chains also require an observed execution and
+    ///     another action; PID diversity alone does not establish a handoff.
     ///   - maxArtifactsPerMap: Hard cap independently enforced for file, IP,
     ///     and domain keys. Values below one are clamped to one.
     ///   - maxEventsPerArtifact: Hard event-list cap for each retained key.
@@ -703,7 +703,8 @@ public actor CrossProcessCorrelator {
     /// Record a file event (write, execute, read, download, create).
     ///
     /// Returns a correlation chain if this event completes a cross-process
-    /// chain involving the same file path.
+    /// chain involving the same file path and an observed execution. Other
+    /// actions remain retained for later correlation within the bounded window.
     @discardableResult
     public func recordFileEvent(
         path: String,
@@ -864,15 +865,18 @@ public actor CrossProcessCorrelator {
         let windowEvents = eventsWithinWindow(events)
 
         // Must involve multiple distinct PIDs. File chains fire at
-        // `minFileChainLength` (2 by default) — the write→execute handoff
-        // across distinct PIDs — while network fan-out needs `minChainLength`
-        // (3) to be meaningful.
+        // `minFileChainLength` (2 by default), while network fan-out needs
+        // `minChainLength` (3). This count does not assign writer/executor roles.
         let distinctPIDs = Set(windowEvents.map(\.pid))
         guard distinctPIDs.count >= minFileChainLength else { return nil }
 
-        // Must span different action types (write+execute, not just write+write).
+        // File co-occurrence alone does not establish an execution signal:
+        // ordinary rename/unlink and write/read pairs previously minted one
+        // attack alert per artifact. Require observed execution plus another
+        // action, independent of tool names. All observations are already
+        // retained above, so a later execution can still complete the chain.
         let actions = Set(windowEvents.map(\.action))
-        guard actions.count >= 2 else { return nil }
+        guard actions.count >= 2, actions.contains("execute") else { return nil }
 
         // Same homogeneity gates that evaluateNetworkChain uses: if every
         // event in the chain comes from the same executable / app bundle /
@@ -890,13 +894,6 @@ public actor CrossProcessCorrelator {
         // with different argv[0] presentations). Log-style fan-out never
         // crosses process identities.
         if allEventsShareProcessName(windowEvents) { return nil }
-        // Shell-utility chain (v1.4.2): `brew install` fires ~3,000 chain
-        // events in 30s from bash + ruby + curl + git + dirname +
-        // readlink + env + locale touching shared tmp dirs. Attackers
-        // don't chain through coreutils. If >=80% of chain participants
-        // are small shell helpers, drop — this is a script, not a
-        // campaign.
-        if chainDominatedByShellUtilities(windowEvents) { return nil }
 
         let severity = computeFileSeverity(events: windowEvents, actions: actions)
         let chain = buildChain(
@@ -1055,82 +1052,6 @@ public actor CrossProcessCorrelator {
         return events.allSatisfy { $0.processName == first.processName }
     }
 
-    /// True when a chain is dominated by a *variety* of shell helpers
-    /// AND doesn't include an `execute` action. That shape — many
-    /// distinct shell utilities, all touching a shared path, no
-    /// execution — is a build/install script (brew, configure, make
-    /// install) not an attack chain. Drops the 3,000+ FP storm the
-    /// v1.4.1 user saw during `brew reinstall`.
-    ///
-    /// Deliberately NARROW: a classic curl→bash two-process attack
-    /// (curl writes payload, bash executes it) has only 2 shell
-    /// utilities AND includes an `execute` action, so it escapes this
-    /// gate. Combined with `minFileChainLength` == 2 (which lets a 2-PID
-    /// file chain through at all), that write→execute handoff now fires end
-    /// to end — the `execute` carve-out below protects it regardless of the
-    /// utility count.
-    private func chainDominatedByShellUtilities(_ events: [ChainEvent]) -> Bool {
-        // Execute is the attack signal. If anything in the chain
-        // executed the shared file, keep the chain — this is exactly
-        // what "download + run" malware looks like.
-        let actions = Set(events.map(\.action))
-        if actions.contains("execute") { return false }
-
-        // Require both coverage (≥80% of events are shell helpers) AND
-        // variety (≥3 distinct utilities). Variety distinguishes a
-        // build/install script from a 2-process attack.
-        //
-        // v1.21.4 (deep-audit corr-campaign-anomaly): lowered the variety
-        // floor from 4 → 3. The ≥4 gate let the very common 3-utility
-        // write-only script shapes (bash/cat/sed, cp/rm/touch) slip through
-        // and mint benign file-chain alerts. This can only ADD suppression to
-        // write-only chains — any chain containing an `execute` still fires via
-        // the carve-out above, so no download-and-run attack is affected.
-        var shellHits = 0
-        var distinctShellNames: Set<String> = []
-        for e in events {
-            let name = (e.processPath as NSString).lastPathComponent.lowercased()
-            if Self.shellUtilityBasenames.contains(name) {
-                shellHits += 1
-                distinctShellNames.insert(name)
-            }
-        }
-        let coverage = Double(shellHits) / Double(events.count)
-        return coverage >= 0.8 && distinctShellNames.count >= 3
-    }
-
-    /// Small shell helpers that legitimately chain through shared paths.
-    /// Intentionally conservative — anything listed here must be a tool
-    /// an attacker wouldn't use as a payload. Full shells (bash/zsh/sh)
-    /// are here because they're script interpreters, not persistence
-    /// mechanisms — an attack uses them AS a shell to run another
-    /// dropped binary, and the binary would fall outside this list and
-    /// keep the percentage below threshold.
-    private static let shellUtilityBasenames: Set<String> = [
-        // Shells + interpreters
-        "bash", "sh", "zsh", "ksh", "dash", "fish",
-        "ruby", "perl", "python", "python3", "node", "npm", "yarn", "pnpm",
-        // Core text / file tools
-        "cat", "cp", "mv", "rm", "ln", "mkdir", "rmdir", "touch",
-        "dirname", "basename", "readlink", "realpath", "pwd",
-        "echo", "printf", "true", "false", "test", "env", "exec",
-        "grep", "egrep", "fgrep", "sed", "awk", "cut", "tr", "tee",
-        "sort", "uniq", "head", "tail", "wc", "od", "xxd",
-        "find", "xargs", "locate", "which", "type",
-        "file", "stat", "chmod", "chown", "chgrp",
-        "locale", "date", "id", "tty", "hostname", "uname",
-        // Archive / hash
-        "tar", "gzip", "gunzip", "zip", "unzip",
-        "md5", "md5sum", "shasum", "openssl",
-        // Network / HTTP helpers used by install scripts
-        "curl", "wget", "nc", "ping", "host", "dig", "nslookup",
-        // Dev-tool wrappers brew/pip/npm invoke constantly
-        "git", "svn", "make", "cmake", "pkg-config",
-        "brew", "pip", "pip3", "gem", "bundle", "cargo", "rustc", "go",
-        // Misc JSON / templating
-        "jq", "yq", "xmllint",
-    ]
-
     /// True when every event's process lives under the same tool-version
     /// directory — i.e. the parent directory of the executable matches, or
     /// they share a common ancestor that looks like `/versions/<ver>`.
@@ -1240,16 +1161,17 @@ public actor CrossProcessCorrelator {
 
     /// Compute severity for a file-based chain.
     ///
-    /// - 2 events, file only: medium
-    /// - 2+ events with both file and network actions: high
-    /// - 3+ events spanning write -> execute -> network: critical
+    /// - Executed artifact with another file action: medium
+    /// - Write/download plus execution, or file plus network actions: high
+    /// - 3+ distinct PIDs with write, execution and network actions: critical
+    /// These are observed action sets, not proof of causal ordering.
     private func computeFileSeverity(events: [ChainEvent], actions: Set<String>) -> Severity {
         let hasWrite = actions.contains("write") || actions.contains("download")
         let hasExecute = actions.contains("execute")
         let hasNetwork = actions.contains("connect")
         let distinctPIDs = Set(events.map(\.pid)).count
 
-        // 3+ events spanning write -> execute -> network: critical
+        // Write, execution and network observations across 3+ PIDs: critical.
         if distinctPIDs >= 3, hasWrite, hasExecute, hasNetwork {
             return .critical
         }
@@ -1259,12 +1181,12 @@ public actor CrossProcessCorrelator {
             return .high
         }
 
-        // write -> execute by different process
+        // Both write/download and execution were observed on the artifact.
         if hasWrite, hasExecute {
             return .high
         }
 
-        // Baseline: two processes touching the same file with different actions
+        // Baseline: an executed artifact with another file action.
         return .medium
     }
 

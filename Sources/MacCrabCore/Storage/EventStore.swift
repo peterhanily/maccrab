@@ -11196,11 +11196,121 @@ public actor EventStore {
         eventID: UUID,
         reviewedMatches: [RuleMatch]
     ) throws -> ProjectionPromotionOutcome {
-        try promoteProjection(
+        if let unchanged = try unchangedUnmaterializedPromotion(
+            eventID: eventID,
+            reviewedMatches: reviewedMatches
+        ) {
+            return unchanged
+        }
+        return try promoteProjection(
             eventID: eventID,
             reviewedMatches: reviewedMatches,
             identityRefreshAttempt: 0
         )
+    }
+
+    /// A compact terminal can already contain every reviewed match while its
+    /// sparse projection is intentionally absent. Reconciliation does not
+    /// recreate such a row, so this case requires no write admission. Prove it
+    /// against one current SQLite snapshot, including the omission ledger;
+    /// cached receipts or an empty match difference alone are insufficient.
+    private func unchangedUnmaterializedPromotion(
+        eventID: UUID,
+        reviewedMatches: [RuleMatch]
+    ) throws -> ProjectionPromotionOutcome? {
+        try withVerifiedExactReadSnapshot { (generation: UInt64) throws -> ProjectionPromotionOutcome? in
+            guard let location = try existingJournalLocations(
+                for: Set([eventID])
+            )[eventID] else { return nil }
+
+            // Existing rows still need the ordinary reconciliation path. Do
+            // this scalar lookup before acquiring any decoded Event graphs.
+            let projection = try prepare(
+                """
+                SELECT
+                  EXISTS(SELECT 1 FROM events WHERE journal_block_id = ?1 AND journal_ordinal = ?2),
+                  EXISTS(SELECT 1 FROM event_journal_payload_poison WHERE block_id = ?1 AND ordinal = ?2),
+                  EXISTS(SELECT 1 FROM event_journal_inherited_loss WHERE block_id = ?1 AND ordinal = ?2)
+                """
+            )
+            sqlite3_bind_int64(projection, 1, location.blockID)
+            sqlite3_bind_int(projection, 2, Int32(location.ordinal))
+            let projectionRC = sqlite3_step(projection)
+            let needsReconciliation = projectionRC == SQLITE_ROW
+                && (sqlite3_column_int(projection, 0) != 0
+                    || sqlite3_column_int(projection, 1) != 0
+                    || sqlite3_column_int(projection, 2) != 0)
+            sqlite3_finalize(projection)
+            guard projectionRC == SQLITE_ROW else {
+                throw EventStoreError.stepFailed(
+                    "reviewed projection presence probe failed"
+                )
+            }
+            if needsReconciliation { return nil }
+
+            // CASE keeps malformed, overlong metadata out of the returned
+            // row. A valid block has at most 128 three-bit dispositions.
+            let disposition = try prepare(
+                """
+                SELECT event_count,
+                  CASE WHEN event_count BETWEEN 1 AND \(EventJournalCodec.maximumEventsPerBlock)
+                    AND length(projection_dispositions) = (event_count * 3 + 7) / 8
+                    THEN projection_dispositions END,
+                  CASE WHEN length(projection_dispositions_sha256) = 32
+                    THEN projection_dispositions_sha256 END
+                FROM event_journal_blocks WHERE block_id = ?1
+                """
+            )
+            defer { sqlite3_finalize(disposition) }
+            sqlite3_bind_int64(disposition, 1, location.blockID)
+            guard sqlite3_step(disposition) == SQLITE_ROW,
+                  let bytes = sqlite3_column_blob(disposition, 1),
+                  let digest = sqlite3_column_blob(disposition, 2) else {
+                throw EventStoreError.decodingFailed(
+                    "reviewed projection disposition is unavailable"
+                )
+            }
+            let count = Int(sqlite3_column_int(disposition, 0))
+            let data = Data(
+                bytes: bytes, count: Int(sqlite3_column_bytes(disposition, 1))
+            )
+            let storedDigest = Data(bytes: digest, count: SHA256.byteCount)
+            guard Data(SHA256.hash(data: data)) == storedDigest else {
+                throw EventStoreError.decodingFailed(
+                    "reviewed projection disposition checksum mismatch"
+                )
+            }
+            let dispositions = try Self.projectionDispositions(
+                from: data, eventCount: count
+            )
+            guard location.ordinal >= 0, location.ordinal < count,
+                  dispositions[location.ordinal] != .materialized else {
+                throw EventStoreError.decodingFailed(
+                    "reviewed projection is missing its materialized row"
+                )
+            }
+
+            let owned = try loadExactJournalEvent(at: location)
+            defer { withExtendedLifetime(owned) {} }
+            guard owned.event.id == eventID else {
+                throw EventStoreError.decodingFailed(
+                    "reviewed projection base identity differs"
+                )
+            }
+            guard !NoiseFilter.isCoverageCanaryProbe(event: owned.event) else {
+                return nil
+            }
+            let prior = ReviewedRuleMatches.normalized(owned.event.ruleMatches)
+            guard Set(ReviewedRuleMatches.normalized(reviewedMatches))
+                .isSubset(of: Set(prior)) else { return nil }
+            return ProjectionPromotionOutcome(
+                eventID: eventID,
+                insertedMatchCount: 0,
+                totalReviewedMatchCount: prior.count,
+                projectionMaterialized: false,
+                storageMutationGeneration: generation
+            )
+        }
     }
 
     private func promoteProjection(

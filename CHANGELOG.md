@@ -9,6 +9,19 @@ Final installed qualification is still pending. Development measurements below
 describe earlier candidates and do not qualify the current source.
 
 ### Fixed
+- **Event processing resumes when its journal admission completes.**
+  Bounded completion notifications remove the fixed polling delay while retaining
+  exact receipt checks, cancellation, deadlines and transient-write retries.
+- **Already-reviewed events with intentionally omitted search rows avoid redundant writes.**
+  A verified read snapshot checks current evidence and omission metadata; new
+  matches, existing rows, coverage probes and integrity gaps retain reconciliation.
+- **Inactive dashboard windows pause their periodic refresh work.**
+  Window activity controls refreshes and triggers one refresh on return; global
+  protection and notification polling continues.
+- **File correlation alerts require an observed execution.** Ordinary cross-process
+  rename, cleanup and read/write activity no longer independently triggers an
+  execution attack-chain alert. Observations remain available for later correlation;
+  write/download plus execution and network correlation retain their existing behavior.
 - **Sequence history expires before live state is evicted under pressure.**
   Count and byte limits remain unchanged. Diagnostics retain the actual eviction
   limit and state size so later recovery does not hide what caused a loss.

@@ -87,18 +87,27 @@ public final class V2DashboardState: ObservableObject {
     /// `.task` modifiers off this so they re-fetch on each tick.
     @Published public var refreshTick: Int = 0
     private(set) var autoRefreshTask: Task<Void, Never>? = nil
-    /// Whether the dashboard is the active (frontmost) scene. Driven by the
-    /// shell's `scenePhase`. The auto-refresh loop keeps sleeping while this is
+    /// Whether the dashboard window is active. Driven by the shell's
+    /// `controlActiveState`. The auto-refresh loop keeps sleeping while this is
     /// false but does NOT bump `refreshTick` — so a hidden / backgrounded
     /// dashboard (the common state for a menubar app) stops re-rendering,
     /// re-laying-out and re-querying every 5s. Not `@Published`: only the loop
     /// and `setForegroundActive` touch it, so it must not invalidate any view.
-    /// Defaults true so refresh runs even if the shell never wires scenePhase.
+    /// The shell initializes this on appearance, then forwards activity edges.
     private var foregroundActive: Bool = true
 
-    /// Wire from the shell's `.onChange(of: scenePhase)`. On the hidden→active
-    /// edge, bump once immediately so the user never sees data frozen at the
-    /// moment the window was hidden.
+    /// Key and non-key windows in the active app both refresh. Moving key focus
+    /// between them must not be mistaken for returning from another app.
+    @discardableResult
+    public func setWindowActivity(_ activity: ControlActiveState) -> Bool {
+        let active = activity != .inactive
+        let becameActive = active && !foregroundActive
+        setForegroundActive(active)
+        return becameActive
+    }
+
+    /// On the inactive→active edge, refresh once immediately so the user never
+    /// sees data frozen at the moment the window became inactive.
     public func setForegroundActive(_ active: Bool) {
         let wasActive = foregroundActive
         foregroundActive = active

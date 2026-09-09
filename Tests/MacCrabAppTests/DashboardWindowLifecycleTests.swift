@@ -10,6 +10,48 @@ struct DashboardWindowLifecycleTests {
             .appendingPathComponent("maccrab-window-lifecycle-\(UUID())").path)
     }
 
+    @Test("an initially inactive dashboard refreshes once on return, not on key-focus changes")
+    func windowActivityEdges() {
+        let state = V2DashboardState(engineSource: source())
+        let initial = state.refreshTick
+        #expect(!state.setWindowActivity(.inactive))
+        #expect(!state.setWindowActivity(.inactive))
+        #expect(state.refreshTick == initial)
+
+        #expect(state.setWindowActivity(.key))
+        #expect(state.refreshTick == initial + 1)
+        #expect(!state.setWindowActivity(.active))
+        #expect(!state.setWindowActivity(.key))
+        #expect(state.refreshTick == initial + 1)
+
+        #expect(!state.setWindowActivity(.inactive))
+        #expect(state.refreshTick == initial + 1)
+        #expect(state.setWindowActivity(.active))
+        #expect(state.refreshTick == initial + 2)
+    }
+
+    @Test("window activity changes preserve independent dashboard refresh edges")
+    func independentWindowActivity() {
+        let first = V2DashboardState(engineSource: source())
+        let second = V2DashboardState(engineSource: source())
+        first.setWindowActivity(.inactive)
+        second.setWindowActivity(.inactive)
+        let firstTick = first.refreshTick
+        let secondTick = second.refreshTick
+
+        first.setWindowActivity(.key)
+        #expect(first.refreshTick == firstTick + 1)
+        #expect(second.refreshTick == secondTick)
+        first.setWindowActivity(.active)
+        second.setWindowActivity(.key)
+        #expect(first.refreshTick == firstTick + 1)
+        #expect(second.refreshTick == secondTick + 1)
+
+        second.setWindowActivity(.inactive)
+        #expect(first.refreshTick == firstTick + 1)
+        #expect(second.refreshTick == secondTick + 1)
+    }
+
     @Test("leaving one Events window preserves the remaining window's incremental poll")
     func overlappingEventsWindows() {
         let app = AppState(engineSource: source(), startBackgroundWork: false)

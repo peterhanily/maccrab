@@ -380,11 +380,9 @@ struct CrossProcessCorrelatorTests {
 
     @Test("Benign write-only shell-utility fan-out stays suppressed (production default)")
     func benignShellWriteChainSuppressedProductionDefault() async {
-        // FP guard: lowering the file floor to 2 must not resurrect the
-        // build-script FP class. A write-only chain dominated by a *variety*
-        // of shell utilities (bash/cat/sed) with NO execute action is a
-        // script, not an attack — chainDominatedByShellUtilities must still
-        // suppress it even though 2 PIDs now suffice to form a file chain.
+        // FP guard: a write-only build-script shape must not form a file
+        // execution chain even though it exceeds the two-PID minimum.
+        // ExecutionSignalTests also checks every intermediate offer.
         let correlator = CrossProcessCorrelator()
         let now = Date()
 
@@ -735,14 +733,13 @@ struct CrossProcessCorrelatorTests {
                 "A chain dominated by shell utilities (bash/ruby/curl/git/…) is script activity, not an attack")
     }
 
-    @Test("Chain with a dropped-to-disk binary still fires (shell-utility gate doesn't over-match)")
+    @Test("Write and execution of a dropped-to-disk binary still form a chain")
     func droppedBinaryChainStillFires() async {
         let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
         let now = Date()
         let payload = "/tmp/attacker-payload"
-        // curl (shell helper) writes the file, then a suspicious
-        // never-seen-before binary executes it. Only 50% shell-utility —
-        // below the 80% threshold, so the chain should fire.
+        // A write and an execution across distinct PIDs retain the
+        // existing positive signal regardless of shell-utility membership.
         await correlator.recordFileEvent(
             path: payload, action: "write",
             pid: 8000, processName: "curl", processPath: "/usr/bin/curl",
@@ -754,17 +751,14 @@ struct CrossProcessCorrelatorTests {
             timestamp: now.addingTimeInterval(2)
         )
         #expect(chain != nil,
-                "A curl→evil-binary chain is below the 80% shell threshold and must still fire")
+                "A cross-PID write and execution must still form a chain")
     }
 
-    @Test("Three-utility write-only script chain is suppressed (≥3 distinct-utility gate)")
+    @Test("Three-utility write-only script chain remains non-alerting")
     func threeUtilityWriteOnlyChainSuppressed() async {
-        // v1.21.4 (deep-audit corr-campaign-anomaly): the shell-utility gate's
-        // distinct-utility floor was lowered 4 → 3. bash + cat + sed all writing
-        // (never executing) the same file is a build/config script shape, not an
-        // attack. Pre-fix the ≥4 gate let this common 3-utility shape through and
-        // minted a benign file chain. The `execute` carve-out is unchanged, so a
-        // write-then-run payload (droppedBinaryChainStillFires) still fires.
+        // bash + cat + sed writing the same file supplies no execution
+        // signal. The separate write-and-execute fixture retains the positive
+        // case; the action requirement does not depend on utility counts.
         let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
         let now = Date()
         let shared = "/Users/me/work/generated.conf"

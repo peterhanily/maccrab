@@ -1610,8 +1610,8 @@ enum EventLoop {
                     // process converged on; keying dedup on the executable (the
                     // AlertSink default) leaves each converging process emitting a
                     // fresh alert as the correlator window re-evaluates — the
-                    // residual the campaign wave's chainDominatedByShellUtilities
-                    // widening missed (field: 1344 mostly-benign alerts). Pass
+                    // residual the earlier shell-utility heuristic
+                    // missed (field: 1344 mostly-benign alerts). Pass
                     // that identity into AlertSink so reservation + commit stay
                     // transactional with the stored alert.
                     let ruleId = "maccrab.correlator.cross-process"
@@ -2633,11 +2633,12 @@ enum EventLoop {
                 // projection promotion for rule-matched events — the exact
                 // thing DeferredEnrichmentIntegrationTests pins with "failed
                 // canonical terminal work must not promote sparse projection".
-                // The write amplification this was chasing is structural: it
-                // needs base+terminal in ONE transaction, which means deferring
-                // the base until after detection, and base-before-detection IS
-                // the evidence-durability guarantee. Not a stability-release
-                // change.
+                // That experiment does not establish a structural lower bound
+                // on writes. Base admission above enqueues bounded ownership;
+                // detection can run before that base commits. The verified
+                // terminal receipt here, and AlertSink's later exact evidence
+                // check, establish the durable proof. Any batching change must
+                // preserve those checks and explicitly report unsettled work.
                 let terminalAdmission = await settleTerminalJournalRevision(
                     enrichedEvent,
                     lane: lane,
