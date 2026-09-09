@@ -3386,6 +3386,30 @@ enum DaemonTimers {
                     ]
                 }
             let sequenceWeight = await state.sequenceEngine.checkpointWeightDiagnostics()
+            let sequencePressure = await state.sequenceEngine.pendingPressureDiagnostics()
+            var sequencePressureDict: [String: Any] = [
+                "per_rule_count_shed_steps_total": sequencePressure.perRuleCountShedTotal,
+                "global_count_shed_steps_total": sequencePressure.globalCountShedTotal,
+                "semantic_weight_shed_steps_total": sequencePressure.semanticWeightShedTotal,
+                "journal_explicitly_shed_total": sequencePressure.journalExplicitlyShedTotal,
+                "classification_conserved": sequencePressure.classificationConserved,
+                "per_rule_count_limit": sequencePressure.perRuleCountLimit,
+                "global_count_limit": sequencePressure.globalCountLimit,
+                "state_weight_limit_bytes": sequencePressure.stateWeightLimitBytes,
+            ]
+            if let pressure = sequencePressure.lastPressure {
+                sequencePressureDict["last_pressure"] = [
+                    "reason": pressure.reason.rawValue,
+                    "observed_at_unix": pressure.observedAt.timeIntervalSince1970,
+                    "pending_count_before": pressure.pendingCountBefore,
+                    "partial_count_before": pressure.partialCountBefore,
+                    "rule_pending_count_before": pressure.rulePendingCountBefore,
+                    "state_weight_bytes_before": pressure.stateWeightBytesBefore,
+                    "removed_pending_steps": pressure.removedPendingSteps,
+                    "representative_fifo_victim_rule_id": pressure.representativeVictimRuleID,
+                    "representative_fifo_victim_step_id": pressure.representativeVictimStepID,
+                ] as [String: Any]
+            }
             let sequencePartialsInFlight = sequenceWeight.partialCount
             let sequencePendingStepsCurrent = sequenceWeight.pendingCount
             let sequenceStateContinuityMaintained: Bool
@@ -4451,6 +4475,9 @@ enum DaemonTimers {
                 "sequence_partials_in_flight": sequencePartialsInFlight,
                 "sequence_pending_steps_current": sequencePendingStepsCurrent,
                 "sequence_pending_steps_evicted_total": sequencePendingStepsEvicted,
+                // Diagnostic attribution only. Retain the actual removal
+                // boundary even after the working set subsequently drains.
+                "sequence_pending_pressure": sequencePressureDict,
                 "sequence_checkpoint_state_weight_bytes": sequenceWeight.cachedWeight,
                 "sequence_checkpoint_state_weight_recomputed_bytes": sequenceWeight.recomputedWeight,
                 "sequence_checkpoint_state_weight_limit_bytes": sequenceWeight.maximumWeight,

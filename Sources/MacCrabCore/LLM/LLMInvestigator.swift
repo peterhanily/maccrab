@@ -173,10 +173,12 @@ extension LLMPrompts {
         1. Start from the alert's rule title, severity, and MITRE tags. Weigh
            process path + signer + command line. Escalate confidence only
            when MULTIPLE independent signals agree.
-        2. Emit evidenceChain entries in the order you consulted them. Each
-           entry MUST reference an explicit alert.id, alert.event_id, or
-           event.id you were shown. Never invent enrichment or threat-intel
-           evidence. MITRE identifiers must be COPIED VERBATIM from the
+        2. Emit evidenceChain entries in the order you consulted them.
+           For kind="alert", copy the supplied alert.id. For kind="event",
+           copy the supplied alert.event_id or event.id. Never pair an alert
+           ID with kind="event", or an event ID with kind="alert". Never invent
+           enrichment or threat-intel evidence. MITRE identifiers must be
+           COPIED VERBATIM from the
            alert's `mitre_tactics` / `mitre_techniques` arrays — those are the
            only admissible values, and they are supplied in Sigma tag form
            (e.g. "attack.defense_evasion", "attack.t1083"). Do not translate

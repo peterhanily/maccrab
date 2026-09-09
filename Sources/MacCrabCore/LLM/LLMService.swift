@@ -521,7 +521,16 @@ public actor LLMService {
         }
 
         let finalSystem = shouldSanitize ? LLMSanitizer.sanitize(systemPrompt) : systemPrompt
-        let finalUser = shouldSanitize ? LLMSanitizer.sanitize(userPrompt) : userPrompt
+        let finalUser: String
+        if shouldSanitize && feature == .alertInvestigation {
+            guard let sanitized = LLMSanitizer.sanitizeAlertInvestigationPrompt(userPrompt) else {
+                telemetryOutcome = .privacyRejection
+                return nil
+            }
+            finalUser = sanitized
+        } else {
+            finalUser = shouldSanitize ? LLMSanitizer.sanitize(userPrompt) : userPrompt
+        }
 
         // Strict no-leak mode: if we're sending to a cloud endpoint and the
         // sanitized prompt STILL has residual high-entropy content the best-effort

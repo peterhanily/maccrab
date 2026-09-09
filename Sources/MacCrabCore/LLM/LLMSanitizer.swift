@@ -269,6 +269,74 @@ public enum LLMSanitizer {
         return result
     }
 
+    /// Preserve the generated investigation context's JSON boundaries while
+    /// applying the same privacy scrubber to its string values. Only this exact
+    /// feature wrapper is recognized; arbitrary/plain prompts use sanitize().
+    /// A malformed recognized context or colliding redacted keys is refused.
+    static func sanitizeAlertInvestigationPrompt(_ text: String) -> String? {
+        let prefix = "UNTRUSTED_ALERT_CONTEXT_JSON:\n"
+        guard text.hasPrefix(prefix) else { return sanitize(text) }
+        let remainder = text.dropFirst(prefix.count)
+        guard let lineEnd = remainder.firstIndex(of: "\n"),
+              let context = try? JSONSerialization.jsonObject(
+                with: Data(remainder[..<lineEnd].utf8)
+              ) as? [String: Any],
+              context["alert"] is [String: Any] else { return nil }
+
+        // Fixed field names from alertInvestigationUser are public schema,
+        // not user data. A coincidentally named local account must not rename
+        // "event", "id" or other constructor fields. Unknown keys are scrubbed.
+        let contextKeys: Set<String> = [
+            "alert", "event", "id", "event_id", "rule_id", "rule_title", "severity",
+            "mitre_tactics", "mitre_techniques", "description", "process_name",
+            "process_path", "campaign_id", "remediation_hint", "category", "action",
+            "process", "executable", "command_line", "user", "ancestors", "name",
+            "code_signature", "signer", "team_id", "is_adhoc", "sha256", "launch_source",
+            "file", "path", "network", "destination_ip", "destination_port", "hostname",
+        ]
+
+        func sanitizeValue(_ value: Any, path: [String]) -> Any? {
+            if let string = value as? String {
+                // These UUIDs are generated identity metadata, not free-form
+                // telemetry. Preserve only the exact grounding paths; arbitrary
+                // identifiers and every other string still receive redaction.
+                let isGroundingID = path == ["alert", "id"]
+                    || path == ["alert", "event_id"] || path == ["event", "id"]
+                if isGroundingID, string.utf8.count == 36,
+                   UUID(uuidString: string) != nil { return string }
+                return sanitize(string)
+            }
+            if let object = value as? [String: Any] {
+                var result: [String: Any] = [:]
+                for (key, child) in object {
+                    let sanitizedKey = contextKeys.contains(key) ? key : sanitize(key)
+                    guard result.index(forKey: sanitizedKey) == nil,
+                          let sanitizedChild = sanitizeValue(child, path: path + [key])
+                    else { return nil }
+                    result[sanitizedKey] = sanitizedChild
+                }
+                return result
+            }
+            if let array = value as? [Any] {
+                var result: [Any] = []
+                for (index, child) in array.enumerated() {
+                    guard let sanitizedChild = sanitizeValue(child, path: path + [String(index)])
+                    else { return nil }
+                    result.append(sanitizedChild)
+                }
+                return result
+            }
+            // JSONSerialization produces only strings, containers, NSNumber
+            // and NSNull. Numeric/null leaves contain no text to redact.
+            return value
+        }
+
+        guard let sanitized = sanitizeValue(context, path: []),
+              let data = try? JSONSerialization.data(withJSONObject: sanitized, options: [.sortedKeys]),
+              let encoded = String(data: data, encoding: .utf8) else { return nil }
+        return sanitize(prefix) + encoded + sanitize(String(remainder[lineEnd...]))
+    }
+
     private static func redactAPIKeys(_ text: String) -> String {
         let replacements: [(NSRegularExpression, String)] = [
             (anthropicKeyRegex, "[ANTHROPIC_KEY]"),

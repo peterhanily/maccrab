@@ -386,6 +386,10 @@ public actor SequenceEngine {
 
     /// Cumulative history items shed by either per-rule or global bounds.
     private var evictedPendingStepCount: Int = 0
+    private var pendingPerRuleCountShedTotal: UInt64 = 0
+    private var pendingGlobalCountShedTotal: UInt64 = 0
+    private var pendingSemanticWeightShedTotal: UInt64 = 0
+    private var lastPendingPressure: PendingPressureSnapshot?
 
     /// Exact admission ledger for the bounded pending-step journal. These are
     /// updated from identity differences in `setPendingBucket`, so a full
@@ -862,8 +866,85 @@ public actor SequenceEngine {
         return reference
     }
 
-    private func recordPendingEvictions(_ count: Int) {
+    public enum PendingPressureReason: String, Sendable {
+        case perRuleCount = "per_rule_count"
+        case globalCount = "global_count"
+        case semanticWeight = "semantic_weight"
+    }
+
+    /// One actual removal boundary, after expiry retirement. The representative
+    /// is the first live FIFO victim, not an estimate of the dominant step.
+    /// Rule/step IDs are trusted definitions; no event identities are retained.
+    public struct PendingPressureSnapshot: Sendable {
+        public let reason: PendingPressureReason
+        public let observedAt: Date
+        public let pendingCountBefore: Int
+        public let partialCountBefore: Int
+        public let rulePendingCountBefore: Int
+        public let stateWeightBytesBefore: Int
+        public let representativeVictimRuleID: String
+        public let representativeVictimStepID: String
+        public fileprivate(set) var removedPendingSteps: UInt64
+    }
+
+    public struct PendingPressureDiagnostics: Sendable {
+        public let perRuleCountShedTotal: UInt64
+        public let globalCountShedTotal: UInt64
+        public let semanticWeightShedTotal: UInt64
+        public let journalExplicitlyShedTotal: UInt64
+        public let classificationConserved: Bool
+        public let perRuleCountLimit: Int
+        public let globalCountLimit: Int
+        public let stateWeightLimitBytes: Int
+        public let lastPressure: PendingPressureSnapshot?
+    }
+
+    /// One actor snapshot prevents interleaved evaluations from making the new
+    /// reason totals appear inconsistent with a separately sampled journal.
+    public func pendingPressureDiagnostics() -> PendingPressureDiagnostics {
+        var classified = pendingPerRuleCountShedTotal
+        Self.addSaturating(pendingGlobalCountShedTotal, to: &classified)
+        Self.addSaturating(pendingSemanticWeightShedTotal, to: &classified)
+        return PendingPressureDiagnostics(
+            perRuleCountShedTotal: pendingPerRuleCountShedTotal,
+            globalCountShedTotal: pendingGlobalCountShedTotal,
+            semanticWeightShedTotal: pendingSemanticWeightShedTotal,
+            journalExplicitlyShedTotal: pendingStepsExplicitlyShedTotal,
+            classificationConserved: classified == pendingStepsExplicitlyShedTotal,
+            perRuleCountLimit: Self.maxPendingPerRule,
+            globalCountLimit: Self.maxPendingTotal,
+            stateWeightLimitBytes: SequenceCheckpointCodec.maximumSemanticStateWeight,
+            lastPressure: lastPendingPressure
+        )
+    }
+
+    private func pendingPressureSnapshot(
+        reason: PendingPressureReason, pendingCount: Int, ruleID: String, stepID: String
+    ) -> PendingPressureSnapshot {
+        PendingPressureSnapshot(
+            reason: reason, observedAt: Date(), pendingCountBefore: pendingCount,
+            partialCountBefore: totalPartialCount,
+            rulePendingCountBefore: pendingLaterSteps[ruleID]?.count ?? 0,
+            stateWeightBytesBefore: checkpointStateWeight,
+            representativeVictimRuleID: ruleID, representativeVictimStepID: stepID,
+            removedPendingSteps: 0
+        )
+    }
+
+    private func recordPendingEvictions(_ count: Int, before: PendingPressureSnapshot) {
         guard count > 0 else { return }
+        let removed = UInt64(count)
+        switch before.reason {
+        case .perRuleCount:
+            Self.addSaturating(removed, to: &pendingPerRuleCountShedTotal)
+        case .globalCount:
+            Self.addSaturating(removed, to: &pendingGlobalCountShedTotal)
+        case .semanticWeight:
+            Self.addSaturating(removed, to: &pendingSemanticWeightShedTotal)
+        }
+        var snapshot = before
+        snapshot.removedPendingSteps = removed
+        lastPendingPressure = snapshot
         evictedPendingStepCount = Self.saturatingTelemetryAdd(
             evictedPendingStepCount,
             count
@@ -906,12 +987,14 @@ public actor SequenceEngine {
     }
 
     private func enforceGlobalPendingCap() {
-        var excess = totalPendingStepCount - Self.maxPendingTotal
+        let pendingCountBefore = totalPendingStepCount
+        var excess = pendingCountBefore - Self.maxPendingTotal
         guard excess > 0 else {
             compactPendingEvictionQueue()
             return
         }
         var removed = 0
+        var pressureBefore: PendingPressureSnapshot?
         while excess > 0, let reference = popOldestPendingReference() {
             let identity = reference.identity
             guard var bucket = pendingLaterSteps[identity.ruleID],
@@ -919,6 +1002,12 @@ public actor SequenceEngine {
                       $0.step.id == identity.stepID
                           && $0.matched.eventId == identity.eventID
                   }) else { continue }
+            if pressureBefore == nil {
+                pressureBefore = pendingPressureSnapshot(
+                    reason: .globalCount, pendingCount: pendingCountBefore,
+                    ruleID: identity.ruleID, stepID: identity.stepID
+                )
+            }
             bucket.remove(at: index)
             setPendingBucket(
                 bucket,
@@ -928,7 +1017,7 @@ public actor SequenceEngine {
             excess -= 1
             removed += 1
         }
-        recordPendingEvictions(removed)
+        if let pressureBefore { recordPendingEvictions(removed, before: pressureBefore) }
         compactPendingEvictionQueue()
     }
 
@@ -1859,14 +1948,20 @@ public actor SequenceEngine {
     /// event mutation is still in progress. Pending replay history is shed
     /// oldest-first before live partials; both losses are explicit telemetry.
     private func enforceCheckpointStateWeightBudget() {
-        var partialsRemoved = 0
+        guard checkpointStateWeight > SequenceCheckpointCodec.maximumSemanticStateWeight else { return }
+        // An entry can expire after the periodic sweep, including while an
+        // evaluation awaits its lineage snapshot. Retire that history as
+        // completed before attributing any removal to the carrier limit.
+        sweepExpiredBeforePressure()
         var pendingRemoved = 0
+        var partialsRemoved = 0
         while checkpointStateWeight > SequenceCheckpointCodec.maximumSemanticStateWeight {
             let before = checkpointStateWeight
             let overage = before - SequenceCheckpointCodec.maximumSemanticStateWeight
             var removedThisPass = 0
 
-            if totalPendingStepCount > 0 {
+            let pendingCountBefore = totalPendingStepCount
+            if pendingCountBefore > 0 {
                 var weights: [SequenceCheckpointPendingIdentity: Int] = [:]
                 for (ruleId, pending) in pendingLaterSteps {
                     for item in pending {
@@ -1874,16 +1969,22 @@ public actor SequenceEngine {
                     }
                 }
                 var selected = Set<SequenceCheckpointPendingIdentity>()
+                var representativeVictim: SequenceCheckpointPendingIdentity?
                 var reduction = 0
                 if pendingEvictionQueueHead < pendingEvictionQueue.count {
                     for reference in pendingEvictionQueue[pendingEvictionQueueHead...] {
                         guard let weight = weights[reference.identity] else { continue }
                         selected.insert(reference.identity)
+                        if representativeVictim == nil { representativeVictim = reference.identity }
                         reduction = Self.saturatingTelemetryAdd(reduction, weight)
                         if reduction >= overage { break }
                     }
                 }
-                if !selected.isEmpty {
+                if let representativeVictim {
+                    let pressureBefore = pendingPressureSnapshot(
+                        reason: .semanticWeight, pendingCount: pendingCountBefore,
+                        ruleID: representativeVictim.ruleID, stepID: representativeVictim.stepID
+                    )
                     for (ruleId, pending) in Array(pendingLaterSteps) {
                         let surviving = pending.filter {
                             !selected.contains(pendingIdentity(ruleId: ruleId, pending: $0))
@@ -1898,6 +1999,7 @@ public actor SequenceEngine {
                     }
                     removedThisPass = selected.count
                     pendingRemoved += selected.count
+                    recordPendingEvictions(selected.count, before: pressureBefore)
                     compactPendingEvictionQueue(force: true)
                 }
             } else {
@@ -1933,7 +2035,6 @@ public actor SequenceEngine {
                 break
             }
         }
-        if pendingRemoved > 0 { recordPendingEvictions(pendingRemoved) }
         if partialsRemoved > 0 {
             evictedPartialCount = Self.saturatingTelemetryAdd(
                 evictedPartialCount,
@@ -2285,7 +2386,7 @@ public actor SequenceEngine {
         // Periodic housekeeping: sweep expired partials and enforce memory cap.
         let now = Date()
         if now.timeIntervalSince(lastSweep) >= sweepInterval {
-            sweepExpired()
+            sweepExpired(now: now)
             lastSweep = now
         }
 
@@ -2298,7 +2399,7 @@ public actor SequenceEngine {
         // can drop a LIVE partial — stays detection-exact. See `lastPreemptiveSweep`.
         if totalPartialCount > maxPartialMatches * 8 / 10,
            now.timeIntervalSince(lastPreemptiveSweep) >= Self.preemptiveSweepInterval {
-            sweepExpired()
+            sweepExpired(now: now)
             lastSweep = now
             lastPreemptiveSweep = now
         }
@@ -2598,7 +2699,7 @@ public actor SequenceEngine {
             // same event before control reached here; the throttle can skip that,
             // so we clear them here to keep eviction's input — and therefore which
             // partials get dropped — identical to the pre-throttle path.
-            sweepExpired()
+            sweepExpiredBeforePressure()
             if totalPartialCount > maxPartialMatches {
                 evictOldest(count: totalPartialCount - maxPartialMatches)
             }
@@ -3089,16 +3190,28 @@ public actor SequenceEngine {
         pendingEvictionQueue.append(PendingStepRef(
             identity: pendingIdentity(ruleId: ruleId, pending: pending)
         ))
+        // Account admission before retirement so an expired item is completed,
+        // and a genuinely displaced live item is shed, in separate mutations.
+        setPendingBucket(buf, for: ruleId)
+        if buf.count > Self.maxPendingPerRule || totalPendingStepCount > Self.maxPendingTotal {
+            sweepExpiredBeforePressure()
+            // The sweep replaces buckets; never write back the stale snapshot.
+            buf = pendingLaterSteps[ruleId] ?? []
+        }
         if buf.count > Self.maxPendingPerRule {
+            let pressureBefore = pendingPressureSnapshot(
+                reason: .perRuleCount, pendingCount: totalPendingStepCount,
+                ruleID: ruleId, stepID: buf[0].step.id
+            )
             let removed = buf.count - Self.maxPendingPerRule
             buf.removeFirst(removed)
-            recordPendingEvictions(removed)
+            setPendingBucket(
+                buf,
+                for: ruleId,
+                removedDisposition: .explicitlyShed
+            )
+            recordPendingEvictions(removed, before: pressureBefore)
         }
-        setPendingBucket(
-            buf,
-            for: ruleId,
-            removedDisposition: .explicitlyShed
-        )
         enforceGlobalPendingCap()
         markCheckpointStateMutation()
     }
@@ -3361,8 +3474,7 @@ public actor SequenceEngine {
     /// Remove partial matches whose creation time exceeds their rule's window.
     ///
     /// Called periodically from `evaluate(_:)` based on `sweepInterval`.
-    private func sweepExpired() {
-        let now = Date()
+    private func sweepExpired(now: Date = Date()) {
         var checkpointStateChanged = false
 
         for (ruleId, partials) in Array(partialMatches) {
@@ -3399,6 +3511,14 @@ public actor SequenceEngine {
         compactEvictionQueue(force: true)
         compactPendingEvictionQueue(force: true)
         if checkpointStateChanged { markCheckpointStateMutation() }
+    }
+
+    /// Called only at an actual count/weight boundary, never for every append.
+    /// There is no await or recursive cap enforcement inside the sweep.
+    private func sweepExpiredBeforePressure() {
+        let cutoff = Date()
+        sweepExpired(now: cutoff)
+        lastSweep = cutoff
     }
 
     /// Evict the oldest partial matches to bring total count back under the cap.

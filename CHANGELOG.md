@@ -9,6 +9,13 @@ Final installed qualification is still pending. Development measurements below
 describe earlier candidates and do not qualify the current source.
 
 ### Fixed
+- **Sequence history expires before live state is evicted under pressure.**
+  Count and byte limits remain unchanged. Diagnostics retain the actual eviction
+  limit and state size so later recovery does not hide what caused a loss.
+- **Investigation privacy redaction preserves structured evidence references.**
+  Credentials are scrubbed within JSON values, preserving field boundaries and
+  generated citation IDs. Malformed structured contexts are refused before a
+  backend request; initial prompts explicitly pair each citation kind with its ID.
 - **Process code hashes now identify the actual running code image.**
   The extractor uses the correct native operation and queries each request instead
   of returning stale PID-cached hashes or unrelated process-identity bytes.
