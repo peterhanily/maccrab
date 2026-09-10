@@ -2,131 +2,173 @@ import Foundation
 import Testing
 @testable import MacCrabCore
 
+/// Pins the wiring fact that makes `actions.contains("execute")` an
+/// unsatisfiable gate on the file-chain tier, and the drop-and-run shape that
+/// actually reaches the correlator in production.
+///
+/// A previous candidate added that gate, every actor-level test passed, and the
+/// tier emitted zero alerts on a real host — because no test drove a
+/// collector-shaped `Event` through the guard the event loop actually applies.
+/// These tests exist so that failure mode announces itself in the suite.
 @Suite("Cross-process file correlation execution signal")
 struct CrossProcessCorrelatorExecutionSignalTests {
-    @Test("Every rename and cleanup offer stays non-alerting without execution")
-    func renameCleanupDoesNotAlert() async {
-        // Include the ordinary two-tool shape and unrelated arbitrary actors.
-        // No tool-name or path trust exception should be needed for either.
-        let actorPairs = [
-            [("mv", "/bin/mv"), ("find", "/usr/bin/find")],
-            [("producer", "/opt/producer/bin/tool"),
-             ("cleaner", "/var/tmp/cleaner/bin/tool")],
-        ]
+    /// The exact `Event` shape `ESCollector.handle(ES_EVENT_TYPE_NOTIFY_EXEC)`
+    /// builds (ESCollector.swift), mirrored by KdebugCollector and
+    /// EsloggerParser. The `file:` argument is absent in all three.
+    private func execEvent(
+        pid: Int32, name: String, executable: String, at timestamp: Date
+    ) -> Event {
+        Event(
+            timestamp: timestamp,
+            eventCategory: .process,
+            eventType: .start,
+            eventAction: "exec",
+            process: MacCrabCore.ProcessInfo(
+                pid: pid, ppid: 1, rpid: 1, name: name,
+                executable: executable,
+                commandLine: executable, args: [executable],
+                workingDirectory: "/", userId: 501, userName: "test",
+                groupId: 20, startTime: timestamp, ancestors: [],
+                isPlatformBinary: false
+            ),
+            severity: .informational
+        )
+    }
+
+    /// `EventLoop`'s correlator call site is `if let file = enrichedEvent.file,
+    /// !CrossProcessCorrelator.shouldIgnoreFilePath(file.path)`. Only events
+    /// that satisfy this reach `recordFileEvent`, so it decides which actions
+    /// the file map can ever contain.
+    private func reachesFileCorrelator(_ event: Event) -> Bool {
+        guard let file = event.file else { return false }
+        return !CrossProcessCorrelator.shouldIgnoreFilePath(file.path)
+    }
+
+    @Test("An exec event carries no file payload, so no execution ever reaches the file map")
+    func execEventsCannotReachTheFileCorrelator() {
+        let event = execEvent(
+            pid: 8001, name: "payload",
+            executable: "/tmp/attacker-payload", at: Date()
+        )
+        // Event.file is `let` and every enricher copies it through verbatim,
+        // so a nil here cannot be filled in downstream.
+        #expect(event.file == nil)
+        #expect(!reachesFileCorrelator(event))
+        // Therefore the "exec" -> "execute" mapping beside the call site is
+        // unreachable, and gating evaluateFileChain on actions.contains(
+        // "execute") silences the whole tier. If this expectation ever fails
+        // because exec events gained a file payload, that gate becomes
+        // legitimate — and computeFileSeverity's escalations wake up with it.
+        #expect(event.eventAction == "exec")
+    }
+
+    @Test("A file event does reach the correlator, and never as an execution")
+    func fileEventsReachTheCorrelatorWithFileActions() {
         let now = Date()
-        for actors in actorPairs {
-            let correlator = CrossProcessCorrelator()
-            for (index, action) in ["rename", "unlink"].enumerated() {
-                let chain = await correlator.recordFileEvent(
-                    path: "/Users/test/correlation/document",
-                    action: action,
-                    pid: Int32(100 + index),
-                    processName: actors[index].0,
-                    processPath: actors[index].1,
-                    timestamp: now.addingTimeInterval(Double(index))
-                )
-                #expect(chain == nil, "Every offer must stay non-alerting, including the second PID")
-            }
-            let snapshot = await correlator.telemetrySnapshot()
-            #expect(snapshot.file.acceptedEvents == 2)
-            #expect(snapshot.file.retainedEvents == 2)
-            #expect(snapshot.file.trackedArtifacts == 1)
-            #expect(snapshot.capacityMaintained)
-            #expect(snapshot.conservationMaintained)
+        for action in ["create", "write", "rename", "unlink", "close_modified", "setmode"] {
+            let event = Event(
+                timestamp: now,
+                eventCategory: .file,
+                eventType: .change,
+                eventAction: action,
+                process: MacCrabCore.ProcessInfo(
+                    pid: 8000, ppid: 1, rpid: 1, name: "curl",
+                    executable: "/usr/bin/curl", commandLine: "curl",
+                    args: ["curl"], workingDirectory: "/", userId: 501,
+                    userName: "test", groupId: 20, startTime: now,
+                    ancestors: [], isPlatformBinary: true
+                ),
+                file: FileInfo(path: "/tmp/attacker-payload", action: .write),
+                severity: .informational
+            )
+            #expect(reachesFileCorrelator(event))
+            // The event loop maps only "exec" to "execute"; every file action
+            // passes through unchanged, so none of them can supply the leg.
+            #expect(action != "exec")
         }
     }
 
-    @Test("Write, read and unlink remain conserved until a later execution")
-    func laterExecutionUsesRetainedObservations() async throws {
-        let correlator = CrossProcessCorrelator()
-        let path = "/Users/test/correlation/shared-artifact"
+    @Test("A drop-and-run forms a chain from the drop's own action pair")
+    func dropAndRunFormsChainWithoutAnExecutionLeg() async throws {
+        // The production shape: NOTIFY_CREATE + NOTIFY_WRITE from the dropper,
+        // then the payload runs. The exec leg never arrives (see above), so the
+        // chain has to form on the drop's action diversity alone.
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
         let now = Date()
-        let actions = ["write", "read", "unlink"]
-        for (index, action) in actions.enumerated() {
-            let chain = await correlator.recordFileEvent(
-                path: path,
-                action: action,
-                pid: Int32(200 + index),
-                processName: "actor-\(index)",
-                processPath: "/opt/actor-\(index)/bin/tool",
-                timestamp: now.addingTimeInterval(Double(index))
-            )
-            #expect(chain == nil)
-            let snapshot = await correlator.telemetrySnapshot()
-            #expect(snapshot.file.acceptedEvents == UInt64(index + 1))
-            #expect(snapshot.file.retainedEvents == index + 1)
-            #expect(snapshot.conservationMaintained)
-        }
+        let payload = "/tmp/attacker-payload"
 
-        let result = await correlator.recordFileEvent(
-            path: path,
-            action: "execute",
-            pid: 204,
-            processName: "runner",
-            processPath: "/opt/runner/bin/tool",
-            timestamp: now.addingTimeInterval(3)
+        let first = await correlator.recordFileEvent(
+            path: payload, action: "create",
+            pid: 8000, processName: "curl", processPath: "/usr/bin/curl",
+            timestamp: now
         )
-        let chain = try #require(result)
-        #expect(chain.events.map(\.action) == actions + ["execute"])
-        #expect(chain.sharedArtifact == path)
-        #expect(chain.distinctPIDCount == 4)
-        #expect(chain.severity == .high)
+        #expect(first == nil, "One PID cannot form a cross-process chain")
+
+        let chain = try #require(await correlator.recordFileEvent(
+            path: payload, action: "write",
+            pid: 8002, processName: "installer", processPath: "/tmp/installer",
+            timestamp: now.addingTimeInterval(1)
+        ), "create+write across distinct PIDs must still raise the chain")
+        #expect(chain.sharedArtifact == payload)
+        #expect(chain.distinctPIDCount == 2)
+        #expect(chain.events.map(\.action) == ["create", "write"])
         let snapshot = await correlator.telemetrySnapshot()
-        #expect(snapshot.file.acceptedEvents == 4)
-        #expect(snapshot.file.retainedEvents == 4)
-        #expect(snapshot.filePIDIndexEntries == 1)
-        #expect(snapshot.file.capacityEventsEvicted == 0)
-        #expect(snapshot.file.perArtifactEventsEvicted == 0)
         #expect(snapshot.capacityMaintained)
         #expect(snapshot.conservationMaintained)
     }
 
-    @Test("Every mixed metadata and write offer remains non-alerting")
-    func metadataWithoutExecutionDoesNotAlert() async {
-        let correlator = CrossProcessCorrelator()
-        let now = Date()
-        for (index, action) in ["create", "write", "close_modified", "setmode", "setowner"].enumerated() {
-            let chain = await correlator.recordFileEvent(
-                path: "/Users/test/correlation/generated-config",
-                action: action,
-                pid: Int32(300 + index),
-                processName: "stage-\(index)",
-                processPath: "/opt/stage-\(index)/bin/tool",
-                timestamp: now.addingTimeInterval(Double(index))
-            )
-            #expect(chain == nil)
-        }
-        let snapshot = await correlator.telemetrySnapshot()
-        #expect(snapshot.file.acceptedEvents == 5)
-        #expect(snapshot.file.retainedEvents == 5)
-        #expect(snapshot.conservationMaintained)
-    }
-
-    @Test("Execution with a read retains the existing medium-severity signal")
-    func executedArtifactWithoutWriteRemainsMedium() async throws {
-        let correlator = CrossProcessCorrelator()
+    @Test("A synthetic execution still escalates, so the tier is ready if the leg is wired in")
+    func syntheticExecutionRetainsItsSignal() async throws {
+        // Not reachable from the live pipeline today. Retained so the intended
+        // behaviour is pinned for whoever wires the exec path in.
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
         let now = Date()
         let first = await correlator.recordFileEvent(
-            path: "/Users/test/correlation/program",
-            action: "read",
-            pid: 400,
-            processName: "reader",
-            processPath: "/opt/reader/bin/tool",
+            path: "/Users/test/correlation/program", action: "read",
+            pid: 400, processName: "reader", processPath: "/opt/reader/bin/tool",
             timestamp: now
         )
         #expect(first == nil)
-        let result = await correlator.recordFileEvent(
-            path: "/Users/test/correlation/program",
-            action: "execute",
-            pid: 401,
-            processName: "executor",
-            processPath: "/opt/executor/bin/tool",
+        let chain = try #require(await correlator.recordFileEvent(
+            path: "/Users/test/correlation/program", action: "execute",
+            pid: 401, processName: "executor", processPath: "/opt/executor/bin/tool",
             timestamp: now.addingTimeInterval(1)
-        )
-        let chain = try #require(result)
+        ))
         #expect(chain.severity == .medium)
         #expect(chain.distinctPIDCount == 2)
         #expect(chain.events.map(\.action) == ["read", "execute"])
         #expect(await correlator.telemetrySnapshot().conservationMaintained)
+    }
+
+    @Test("Benign two-tool rename/cleanup still alerts — the known volume this tier carries")
+    func benignRenameCleanupStillAlerts() async throws {
+        // Documented, not endorsed. Two shell helpers renaming then unlinking a
+        // shared path produce a chain: the variety floor in
+        // chainDominatedByShellUtilities needs three distinct utilities, and
+        // this shape has two. This is the field's 1344-mostly-benign-alerts
+        // class. It is asserted here so that any future attempt to suppress it
+        // has to change this test deliberately rather than silently take the
+        // whole tier down with it.
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        let path = "/Users/test/correlation/document"
+        let first = await correlator.recordFileEvent(
+            path: path, action: "rename",
+            pid: 100, processName: "mv", processPath: "/bin/mv",
+            timestamp: now
+        )
+        #expect(first == nil)
+        let chain = try #require(await correlator.recordFileEvent(
+            path: path, action: "unlink",
+            pid: 101, processName: "find", processPath: "/usr/bin/find",
+            timestamp: now.addingTimeInterval(1)
+        ))
+        #expect(chain.severity == .medium)
+        #expect(chain.distinctPIDCount == 2)
+        let snapshot = await correlator.telemetrySnapshot()
+        #expect(snapshot.file.acceptedEvents == 2)
+        #expect(snapshot.file.retainedEvents == 2)
+        #expect(snapshot.file.trackedArtifacts == 1)
+        #expect(snapshot.conservationMaintained)
     }
 }

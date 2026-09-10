@@ -21122,9 +21122,17 @@ public actor EventStore {
                 "admission fixture requires an idle writable connection"
             )
         }
+        // Latch pressure rather than throwing it, the way every production
+        // construction on an existing database does (`latchOperationalPressure:
+        // existingDatabase` here at open, `true` in updateStorageAdmission and
+        // in the Alert/Campaign stores). Without it a fixture that injects an
+        // at-cap footprint — the whole point of the hook — fails inside this
+        // initializer instead of installing an admission that refuses writes,
+        // so the caller never reaches the path it meant to exercise.
         var admission = try SQLitePersistentStoreAdmission(
             databasePath: databasePath,
             policy: policy,
+            latchOperationalPressure: true,
             footprintProbe: footprint,
             freeSpaceProbe: freeSpace
         )

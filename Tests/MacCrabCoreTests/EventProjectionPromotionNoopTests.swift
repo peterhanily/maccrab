@@ -235,9 +235,19 @@ struct EventProjectionPromotionNoopTests {
         // storage, so the test also excludes relying on a prior verified row.
         _ = try await f.store.exactEventSnapshot(id: f.terminal.id)
         try withDatabase(f.path, writable: true) { (db: OpaquePointer) throws -> Void in
+            // The v8 rollback barrier puts BEFORE INSERT/UPDATE/DELETE guards on
+            // `events` that call maccrab_event_journal_writer_v8(), a function
+            // only the engine's own connection registers. A plain handle cannot
+            // delete the row, which is the barrier working. Drop the delete
+            // guard first so this fixture can reproduce the state that external
+            // corruption or tampering would leave behind — the state the code
+            // under test has to refuse.
             let sql = invalidChecksum
                 ? "UPDATE event_journal_blocks SET projection_dispositions_sha256 = zeroblob(32)"
-                : "DELETE FROM events"
+                : """
+                  DROP TRIGGER IF EXISTS events_rc13_write_guard_bd;
+                  DELETE FROM events;
+                  """
             try #require(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK)
         }
         let before = try await f.store.storageAdmissionConnectionStateForTesting()

@@ -18,10 +18,13 @@ describe earlier candidates and do not qualify the current source.
 - **Inactive dashboard windows pause their periodic refresh work.**
   Window activity controls refreshes and triggers one refresh on return; global
   protection and notification polling continues.
-- **File correlation alerts require an observed execution.** Ordinary cross-process
-  rename, cleanup and read/write activity no longer independently triggers an
-  execution attack-chain alert. Observations remain available for later correlation;
-  write/download plus execution and network correlation retain their existing behavior.
+- **Cross-process file correlation keeps its existing behavior.** An attempt to
+  require an observed execution was withdrawn before release: no event that carries
+  a file path ever carries an execution action, because exec events have no file
+  payload, so the requirement would have silenced the tier entirely rather than
+  reducing its noise. The action-diversity and shell-utility gates are unchanged
+  from the shipped release. The benign-alert volume on shared build paths is a
+  known limit, not fixed here.
 - **Sequence history expires before live state is evicted under pressure.**
   Count and byte limits remain unchanged. Diagnostics retain the actual eviction
   limit and state size so later recovery does not hide what caused a loss.
