@@ -1133,30 +1133,44 @@ public actor CrossProcessCorrelator {
     /// mechanisms — an attack uses them AS a shell to run another
     /// dropped binary, and the binary would fall outside this list and
     /// keep the percentage below threshold.
-    private static let shellUtilityBasenames: Set<String> = [
-        // Shells + interpreters
-        "bash", "sh", "zsh", "ksh", "dash", "fish",
-        "ruby", "perl", "python", "python3", "node", "npm", "yarn", "pnpm",
-        // Core text / file tools
-        "cat", "cp", "mv", "rm", "ln", "mkdir", "rmdir", "touch",
-        "dirname", "basename", "readlink", "realpath", "pwd",
-        "echo", "printf", "true", "false", "test", "env", "exec",
-        "grep", "egrep", "fgrep", "sed", "awk", "cut", "tr", "tee",
-        "sort", "uniq", "head", "tail", "wc", "od", "xxd",
-        "find", "xargs", "locate", "which", "type",
-        "file", "stat", "chmod", "chown", "chgrp",
-        "locale", "date", "id", "tty", "hostname", "uname",
-        // Archive / hash
-        "tar", "gzip", "gunzip", "zip", "unzip",
-        "md5", "md5sum", "shasum", "openssl",
-        // Network / HTTP helpers used by install scripts
-        "curl", "wget", "nc", "ping", "host", "dig", "nslookup",
-        // Dev-tool wrappers brew/pip/npm invoke constantly
-        "git", "svn", "make", "cmake", "pkg-config",
-        "brew", "pip", "pip3", "gem", "bundle", "cargo", "rustc", "go",
-        // Misc JSON / templating
-        "jq", "yq", "xmllint",
-    ]
+    /// One whitespace-separated literal rather than 97 array elements: the
+    /// element-wise form costs enough code and string metadata to push the
+    /// signed app past its fixed footprint budget, and membership is what
+    /// matters here, not the literal's shape. Line grouping below is, in order:
+    /// shells and interpreters; core text and file tools; archive and hash;
+    /// network helpers install scripts use; dev-tool wrappers brew/pip/npm
+    /// invoke constantly; JSON and templating.
+    ///
+    /// `shellUtilityBasenamesAreExactlyTheDocumentedSet` pins the full
+    /// membership element by element, so a typo here fails the suite rather
+    /// than silently widening or narrowing the FP gate.
+    private static let shellUtilityBasenames: Set<String> = Set(
+        """
+        bash sh zsh ksh dash fish
+        ruby perl python python3 node npm yarn pnpm
+        cat cp mv rm ln mkdir rmdir touch
+        dirname basename readlink realpath pwd
+        echo printf true false test env exec
+        grep egrep fgrep sed awk cut tr tee
+        sort uniq head tail wc od xxd
+        find xargs locate which type
+        file stat chmod chown chgrp
+        locale date id tty hostname uname
+        tar gzip gunzip zip unzip
+        md5 md5sum shasum openssl
+        curl wget nc ping host dig nslookup
+        git svn make cmake pkg-config
+        brew pip pip3 gem bundle cargo rustc go
+        jq yq xmllint
+        """.split(whereSeparator: \.isWhitespace).map(String.init)
+    )
+
+    #if DEBUG
+    /// Test-only window onto the set above; the suite pins its exact members.
+    internal static var shellUtilityBasenamesForTesting: Set<String> {
+        shellUtilityBasenames
+    }
+    #endif
 
     /// True when every event's process lives under the same tool-version
     /// directory — i.e. the parent directory of the executable matches, or

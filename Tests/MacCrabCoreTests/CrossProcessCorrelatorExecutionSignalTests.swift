@@ -171,4 +171,31 @@ struct CrossProcessCorrelatorExecutionSignalTests {
         #expect(snapshot.file.trackedArtifacts == 1)
         #expect(snapshot.conservationMaintained)
     }
+
+    @Test("The shell-utility FP gate's membership is exactly the documented set")
+    func shellUtilityBasenamesAreExactlyTheDocumentedSet() {
+        // The source keeps these as one whitespace-separated literal to stay
+        // inside the signed app's footprint budget. This list is the contract;
+        // it lives in the test binary, which is not shipped. A typo in either
+        // direction changes which build-script fan-outs are suppressed, so the
+        // comparison is exact rather than a count or a spot check.
+        let expected: Set<String> = [
+            "awk", "basename", "bash", "brew", "bundle", "cargo", "cat",
+            "chgrp", "chmod", "chown", "cmake", "cp", "curl", "cut",
+            "dash", "date", "dig", "dirname", "echo", "egrep", "env",
+            "exec", "false", "fgrep", "file", "find", "fish", "gem",
+            "git", "go", "grep", "gunzip", "gzip", "head", "host",
+            "hostname", "id", "jq", "ksh", "ln", "locale", "locate",
+            "make", "md5", "md5sum", "mkdir", "mv", "nc", "node",
+            "npm", "nslookup", "od", "openssl", "perl", "ping", "pip",
+            "pip3", "pkg-config", "pnpm", "printf", "pwd", "python", "python3",
+            "readlink", "realpath", "rm", "rmdir", "ruby", "rustc", "sed",
+            "sh", "shasum", "sort", "stat", "svn", "tail", "tar",
+            "tee", "test", "touch", "tr", "true", "tty", "type",
+            "uname", "uniq", "unzip", "wc", "wget", "which", "xargs",
+            "xmllint", "xxd", "yarn", "yq", "zip", "zsh",
+        ]
+        #expect(CrossProcessCorrelator.shellUtilityBasenamesForTesting == expected)
+        #expect(expected.count == 97)
+    }
 }
