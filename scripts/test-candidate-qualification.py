@@ -3987,6 +3987,59 @@ class CandidateQualificationTests(unittest.TestCase):
             self.rederive_sample(report, index)
         self.validate_runtime(report)
 
+    def test_event_journal_index_recurrence_fails_when_appends_stay_flat(
+        self,
+    ) -> None:
+        """The worst case: every refresh took the expensive path, never the cheap one.
+
+        This is the defect at 100% severity, and the gate used to pass it. It
+        required append_refreshes_total to ALSO be climbing before it would
+        fire, which is the engine's own description of HEALTHY operation --
+        DaemonTimers publishes the pair with "full_rebuilds_total should stay
+        flat while append_refreshes_total climbs", and EventStore's slow-refresh
+        log says "rebuilds climbing WITH append refreshes flat means expiry is
+        again forcing full rebuilds". So append_delta == 0 switched the gate off
+        exactly when it mattered most.
+        """
+        report = copy.deepcopy(self.runtime)
+        observations = report["recorder_observations"]
+        last_index = len(observations) - 1
+        for index, observation in enumerate(observations):
+            observation["heartbeat"]["event_journal_index"] = {
+                "full_rebuilds_total": 9 if index == last_index else 0,
+                "append_refreshes_total": 0,
+            }
+            self.rederive_sample(report, index)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "dashboard-starves-expiry recurrence signature",
+        ):
+            self.validate_runtime(report)
+
+    def test_event_journal_index_recurrence_allows_legitimate_rebuilds(
+        self,
+    ) -> None:
+        """A cold start's handful of real rebuilds must not fail the gate.
+
+        Dropping the append conjunct leaves the allowance as the only thing
+        separating a legitimate rebuild from the recurrence signature, so pin
+        that it still carries them.
+        """
+        report = copy.deepcopy(self.runtime)
+        observations = report["recorder_observations"]
+        last_index = len(observations) - 1
+        for index, observation in enumerate(observations):
+            observation["heartbeat"]["event_journal_index"] = {
+                "full_rebuilds_total": (
+                    qualification.EVENT_JOURNAL_INDEX_FULL_REBUILD_ALLOWANCE
+                    if index == last_index
+                    else 0
+                ),
+                "append_refreshes_total": 0,
+            }
+            self.rederive_sample(report, index)
+        self.validate_runtime(report)
+
     def test_missing_journal_index_sample_cannot_build_or_validate_pass(self) -> None:
         report = copy.deepcopy(self.runtime)
         del report["recorder_observations"][12]["heartbeat"]["event_journal_index"]

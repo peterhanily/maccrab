@@ -2258,13 +2258,25 @@ def validate_runtime_report(
     )
     if journal_index_rebuild_delta < 0 or journal_index_append_delta < 0:
         fail("event journal index refresh/rebuild counters moved backwards")
-    if journal_index_rebuild_delta > EVENT_JOURNAL_INDEX_FULL_REBUILD_ALLOWANCE \
-            and journal_index_append_delta > 0:
+    # The signature is rebuilds climbing, full stop. Requiring the append
+    # counter to ALSO be climbing inverted this gate against the engine's own
+    # stated invariant and switched it off for the worst case. EventStore's
+    # slow-refresh log says "rebuilds climbing WITH append refreshes flat means
+    # expiry is again forcing full rebuilds", and DaemonTimers publishes the
+    # pair with "full_rebuilds_total should stay flat while append_refreshes_
+    # total climbs under healthy operation". So an epoch in which every refresh
+    # took the rebuild path and the cheap path was never taken once -- the
+    # defect at 100% severity -- scored append_delta == 0 and passed silently.
+    # The allowance above already carries the legitimate rebuilds (cold start,
+    # index overflow, everything-previously-indexed expired), which is what
+    # keeps an ordinary start from failing here.
+    if journal_index_rebuild_delta > EVENT_JOURNAL_INDEX_FULL_REBUILD_ALLOWANCE:
         fail(
             "event journal index full_rebuilds_total increased by "
-            f"{journal_index_rebuild_delta} while append_refreshes_total "
-            f"also increased by {journal_index_append_delta} -- this is "
-            "the dashboard-starves-expiry recurrence signature (v1.22.0)"
+            f"{journal_index_rebuild_delta} against an allowance of "
+            f"{EVENT_JOURNAL_INDEX_FULL_REBUILD_ALLOWANCE} "
+            f"(append_refreshes_total moved {journal_index_append_delta}) -- "
+            "this is the dashboard-starves-expiry recurrence signature (v1.22.0)"
         )
     probe_evidence = object_value(
         report.get("recorder_probe_evidence"), "runtime.recorder_probe_evidence"
