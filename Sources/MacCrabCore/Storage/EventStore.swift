@@ -5860,7 +5860,10 @@ public actor EventStore {
     /// row and token against the index. A missing posting among otherwise
     /// healthy results must never let `search` return a plausible partial set.
     /// Run this only at the bounded pre-producer finalization boundary.
-    private func validateFTSExternalContentIntegrity() throws {
+    /// One bounded run of the rank=1 command, returning its result code rather
+    /// than a verdict. It mutates no shadow table, so the transaction is ended
+    /// the same way regardless of outcome.
+    private func ftsExternalContentIntegrityResultCode() throws -> Int32 {
         // Vendored FTS5's rank=1 integrity command tokenizes and reconciles
         // external content without changing any shadow table. Serialize it
         // against a cross-process writer, but do not apply a fictitious growth
@@ -5876,23 +5879,98 @@ public actor EventStore {
             )
         }
         try Self.exec(db, "BEGIN IMMEDIATE TRANSACTION")
+        let rc: Int32
         do {
             let statement = try prepare(
                 "INSERT INTO events_fts(events_fts, rank) VALUES('integrity-check', 1)"
             )
-            let rc = sqlite3_step(statement)
+            rc = sqlite3_step(statement)
             sqlite3_finalize(statement)
-            guard rc == SQLITE_DONE else {
-                throw EventStoreError.decodingFailed(
-                    "event projection FTS external-content integrity check failed"
-                )
-            }
-            try execute("COMMIT")
+            try execute(rc == SQLITE_DONE ? "COMMIT" : "ROLLBACK")
         } catch {
             try? execute("ROLLBACK")
             throw error
         }
+        return rc
     }
+
+    /// Rebuild the projection index from its content table. Mirrors the
+    /// segment-ceiling escape at `recoverExhaustedFTSIndexIfNeeded`, including
+    /// its admission, so both FTS repairs are budgeted the same way.
+    private func repairProjectionSearchIndex() throws {
+        guard let db, !isReadOnly else { return }
+        try withSerializedWrite(
+            estimatedBytes: storageTransactionReserveBytes,
+            maintenance: true
+        ) {
+            let rc = sqlite3_exec(
+                db,
+                "INSERT INTO events_fts(events_fts) VALUES('rebuild')",
+                nil, nil, nil
+            )
+            guard rc == SQLITE_OK else {
+                throw EventStoreError.stepFailed(
+                    "events_fts rebuild failed (sqlite rc \(rc)): "
+                        + String(cString: sqlite3_errmsg(db))
+                )
+            }
+        }
+    }
+
+    private func validateFTSExternalContentIntegrity() throws {
+        let rc = try ftsExternalContentIntegrityResultCode()
+        if rc == SQLITE_DONE {
+            projectionSearchIndexDegraded = false
+            return
+        }
+        guard rc == SQLITE_CORRUPT else {
+            throw EventStoreError.decodingFailed(
+                "event projection FTS external-content integrity check failed"
+                    + " (sqlite rc \(rc))"
+            )
+        }
+        let log = Logger(
+            subsystem: "com.maccrab.storage", category: "event-store"
+        )
+        // SQLITE_CORRUPT from this command means the search index disagrees
+        // with `events`. It does NOT mean the database is damaged, and it is
+        // NOT necessarily this version's doing: up to and including v1.21.5,
+        // `prune` and `pruneOldest` deleted FTS postings and their content rows
+        // as two separate autocommit statements, in batches of up to 100,000,
+        // so any interruption between them left that disagreement durably in a
+        // store we are obliged to upgrade. v1.21.5 shipped no equivalent check,
+        // so it ran for months on exactly the state this refuses. HEAD already
+        // fixed the producer (`deleteEventBatchAtomically`), but that is not
+        // retroactive.
+        //
+        // Refusing the boot here costs every detection the engine would have
+        // made, permanently: the daemon exits, sysextd relaunches it, it
+        // measures the same store, and nothing repairs it in between. What a
+        // desynced index actually costs is search fidelity — `events_fts` is
+        // read only by `search`, `searchSnapshot` and `containsProjectedFTSMatch`
+        // (CLI, dashboard, MCP hunt, and the coverage canary). No rule,
+        // sequence, campaign or behavioural path reads it. So the honest
+        // outcome is degraded hunting, reported, not a machine left unmonitored.
+        //
+        // Repair first: a desynced index also fails every later FTS mutation on
+        // this boot (journal expiry's projection delete is the next one), so
+        // tolerating the check alone would move the refusal, not remove it.
+        log.warning("Event search index disagrees with retained events; rebuilding it before producers start.")
+        if (try? repairProjectionSearchIndex()) != nil,
+           (try? ftsExternalContentIntegrityResultCode()) == SQLITE_DONE {
+            projectionSearchIndexDegraded = false
+            return
+        }
+        projectionSearchIndexDegraded = true
+        log.fault("Event search index still disagrees with retained events after a rebuild; search and threat hunting may under-report, so an empty result is not proof of absence. Detection, alerting and response are unaffected and the engine is starting.")
+    }
+
+    /// Set at every pre-producer finalization. True when the FTS projection
+    /// disagrees with `events`, so `search`/`hunt` may under-report and callers
+    /// must not treat an empty result as proof of absence. Deliberately not
+    /// persisted: the condition is re-evaluated on each boot, so a store that
+    /// is repaired stops reporting degraded without needing a migration.
+    private(set) var projectionSearchIndexDegraded: Bool = false
 
     /// Rebuild the exact UUID locator from append-local block rosters. A bad
     /// roster, duplicate UUID, or count mismatch is corruption, never a reason

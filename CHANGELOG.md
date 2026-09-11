@@ -9,6 +9,18 @@ Final installed qualification is still pending. Development measurements below
 describe earlier candidates and do not qualify the current source.
 
 ### Fixed
+- **An upgraded store whose search index disagrees with its events now starts.**
+  Releases up to v1.21.5 removed search-index entries and their events in two
+  separate steps, so an interrupted retention pass could leave the two out of
+  step, permanently and unreported. v1.22.0 began checking that agreement during
+  startup and refused to start when it failed, which turned an inherited and
+  previously harmless condition into a machine that would not start again. One
+  disagreeing entry was enough. Startup now rebuilds the search index from the
+  events it already holds, rechecks, and continues. If the disagreement somehow
+  survives that, the engine still starts and reports that search and threat
+  hunting may return incomplete results, so an empty result is not proof of
+  absence. Detection, alerting and response never read this index and are
+  unaffected either way.
 - **Event processing resumes when its journal admission completes.**
   Bounded completion notifications remove the fixed polling delay while retaining
   exact receipt checks, cancellation, deadlines and transient-write retries.
