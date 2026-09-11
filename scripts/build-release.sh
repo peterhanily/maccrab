@@ -1458,7 +1458,15 @@ ATTESTATION_EOF
         # squeeze is visible long before the gate fires. It fires late and
         # expensively: after the universal build, lipo, strip, and every
         # signature.
-        APP_FOOTPRINT_BUDGET_KIB=184320
+        # v1.22.0: 184320 -> 185344 (180 -> 181 MiB), raised deliberately. The
+        # inherited-FTS-desync boot fix needs roughly 52 KiB: MacCrabCore is
+        # linked into the app, the sysext, maccrabctl and maccrab-mcp, so code
+        # added there is paid for four times over. Trimmed twice first (the
+        # degraded flag is internal, two log sites replace four) and it still
+        # lands at 184344. The line has walked 183756 -> 184112 -> 184256 ->
+        # 184292 across rc5..rc9, so one MiB is a few candidates of room, not a
+        # reset of the ratchet. Shrink before raising this again.
+        APP_FOOTPRINT_BUDGET_KIB=185344
         APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)
         case "$APP_FOOTPRINT_KIB" in
             ''|*[!0-9]*)

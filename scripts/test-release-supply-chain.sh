@@ -426,7 +426,7 @@ if /usr/bin/grep -E 'strip -S -x .*\|\|[[:space:]]*true' \
     exit 1
 fi
 for footprint_marker in \
-        'APP_FOOTPRINT_BUDGET_KIB=184320' \
+        'APP_FOOTPRINT_BUDGET_KIB=185344' \
         'APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)' \
         'APP_FOOTPRINT_KIB" -gt "$APP_FOOTPRINT_BUDGET_KIB'; do
     /usr/bin/grep -Fq "$footprint_marker" "$PROJECT_DIR/scripts/build-release.sh" \
