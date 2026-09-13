@@ -2077,7 +2077,9 @@ func handleGetEvents(_ args: [String: Any]) async -> Any {
             searchOwnership = snapshot
             events = snapshot.events
             if !snapshot.isComplete {
-                searchCoverageWarning = "WARNING: search is partial: "
+                searchCoverageWarning = (snapshot.searchIndexDegraded
+                    ? "WARNING: The full-text index awaits repair; text matches may be incomplete. " : "")
+                    + "WARNING: search is partial: "
                     + "\(snapshot.projectionOmitted) retained events are "
                     + "omitted from the search projection and "
                     + "\(snapshot.gaps.total) exact-evidence gaps remain. "
@@ -2801,6 +2803,8 @@ func handleHunt(_ args: [String: Any]) async -> Any {
                 message = "No results for: \(query)\n\nTry broader terms or check different time ranges."
             } else {
                 message = "No projected results for: \(query)\n\n"
+                    + (snapshot.searchIndexDegraded
+                        ? "The full-text index awaits repair; text matches may be incomplete. " : "")
                     + "Coverage is incomplete: \(snapshot.projectionOmitted) "
                     + "retained events are omitted from the search projection "
                     + "and \(snapshot.gaps.total) exact-evidence gaps remain. "
@@ -2810,6 +2814,9 @@ func handleHunt(_ args: [String: Any]) async -> Any {
         }
 
         var lines: [String] = ["\(results.count) result(s) for: \(query)"]
+        if snapshot.searchIndexDegraded {
+            lines.append("WARNING: The full-text index awaits repair; text matches may be incomplete.")
+        }
         if !snapshot.isComplete {
             lines.append(
                 "WARNING: Partial search coverage ("

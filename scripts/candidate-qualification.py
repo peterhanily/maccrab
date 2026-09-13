@@ -36,6 +36,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Dict, Iterable, List, Mapping, NoReturn, Sequence, Tuple
 
@@ -130,6 +131,36 @@ MAX_ENGINE_AVERAGE_CORES = 0.50
 # The inherited 20% ceiling followed a 14% observation; that alone does not
 # establish an independent product target or a packaged UI acceptance verdict.
 MAX_GUI_P95_PERCENT = 20.0
+RESOURCE_BASELINE_PATH = "docs/RELEASE_RESOURCE_BASELINE.json"
+RESOURCE_BASELINE_SCHEMA = "com.maccrab.release-resource-baseline.v1"
+RESOURCE_REFERENCE_VERSION = "1.21.5"
+RESOURCE_REFERENCE_BUILD_VERSION = "1.21.5.1018"
+RESOURCE_REFERENCE_COMMIT = "4f9ab9b35a80aba3f11cc99e7c60d10cc3e6d6eb"
+# GitHub release asset 489442361, published 2026-07-25; independently downloaded,
+# hash-checked and signature-inspected on 2026-09-12. The tagged release.json
+# predates publication and contains a different pre-publication DMG checksum.
+RESOURCE_REFERENCE_DMG_SHA256 = "9eb6f49389af910e9d1bad14b26d2510aebd2ed2e874bbd2f464f36b664c529b"
+RESOURCE_REFERENCE_IMAGES = {
+    "engine": {
+        "sha256": "00df3a78b47f1bdf33d2ff1d78591a94171ec91d72afd9ea2ef02851fdf25458",
+        "cdhashes": {
+            "arm64": "56559011b02cc5288cdaaf085ed85c55c47cbd3f",
+            "x86_64": "c3db0e7de621f73bb89038ec20b2cf218a933f20",
+        },
+    },
+    "gui": {
+        "sha256": "897d4e426680fe3cbb45bde3ebd0d86d57353e1eb144571074cd9a6447fc66c6",
+        "cdhashes": {
+            "arm64": "5e5fe5674baa8155ade4f66bf705dbb1845c8913",
+            "x86_64": "1130366df7adca47415d1acec364e927c216139b",
+        },
+    },
+}
+RESOURCE_STATISTICS = {
+    "engine_average_write_bytes_per_second": "cumulative-write-delta/captured-epoch-seconds",
+    "engine_max_window_write_bytes_per_second": "maximum-captured-interval-and-sample-aligned-span-up-to-60s",
+    "gui_p95_percent": "nearest-rank-p95-of-ps-pcpu-snapshots",
+}
 # Measured as `ri_phys_footprint`, not `ri_resident_size`.  Resident size on
 # macOS counts clean file-backed and shared pages the process is not charged
 # for -- the stores' 64 MiB SQLite mmap windows and the dyld shared cache --
@@ -178,6 +209,11 @@ READINESS_POLL_SECONDS = 2
 # exercise at least the observed failure-state rate; a conserving idle engine
 # is not a load test.
 MIN_BURST_COMBINED_OFFERED_PER_SECOND = 1_274.0
+# Preserve the previously required minimum amount of offered work (one
+# 30-second interval at the floor) without tying acceptance to timer phase.
+# This is a declared load burden, not an expected events-per-iteration yield.
+MIN_BURST_COMBINED_OFFERED_VOLUME = 38_220
+WORKLOAD_TIMING_SOURCE = "independent-process-waiter-monotonic-v1"
 # The fixed burst size. This is the SAME number the workload script declares as
 # BURST_ITERATIONS; it was previously written out again as a literal inside the
 # output reconciliation, so resizing the burst in the script left the gate
@@ -244,10 +280,12 @@ DEFAULT_HEARTBEAT_PATH = pathlib.Path(
 )
 DEFAULT_DATA_DIR = pathlib.Path("/Library/Application Support/MacCrab")
 HEARTBEAT_MAX_AGE_SECONDS = 75.0
-# Recorder captures can land five seconds on either side of their scheduled
-# boundary.  A heartbeat-backed rate therefore tolerates at most the combined
-# endpoint skew before the two clocks cease to prove the same interval.
-MAX_HEARTBEAT_CAPTURE_INTERVAL_DRIFT_SECONDS = 10.0
+# One briefly delayed publication may repeat, then skip a producer tick. The
+# same freshness bound caps the gap between distinct producer snapshots.
+MAX_DISTINCT_HEARTBEAT_GAP_SECONDS = HEARTBEAT_MAX_AGE_SECONDS
+# The producer's wall clock and monotonic process uptime must describe the
+# same interval. This check is independent of the recorder's polling phase.
+MAX_HEARTBEAT_UPTIME_INTERVAL_DRIFT_SECONDS = 10.0
 
 LLM_FEATURES = (
     "unspecified",
@@ -1369,6 +1407,30 @@ def require_counter_equation(boundary: Mapping[str, Any], path: str) -> None:
         fail(f"{path} does not conserve: offered != completed + queued + in_flight + explicitly_shed")
 
 
+def validate_heartbeat_sequence(samples: Sequence[Mapping[str, Any]]) -> None:
+    """Allow fresh repeated snapshots while bounding producer coverage.
+
+    Process resources still use every independently timed capture. A repeated
+    producer timestamp is valid only for the same immutable heartbeat content;
+    it cannot hide changed counters or restart metadata under an old clock.
+    """
+    for prior, current in zip(samples, samples[1:]):
+        gap = current["heartbeat_written_at_unix"] - prior["heartbeat_written_at_unix"]
+        if gap < 0:
+            fail("runtime heartbeat timestamps moved backwards")
+        if gap == 0 and current["heartbeat_snapshot_sha256"] != prior["heartbeat_snapshot_sha256"]:
+            fail("runtime reused heartbeat timestamp with different content")
+        if gap > MAX_DISTINCT_HEARTBEAT_GAP_SECONDS:
+            fail("runtime distinct heartbeat gap exceeds the freshness bound")
+
+
+def previous_distinct_heartbeat_sample(
+    samples: Sequence[Mapping[str, Any]], current: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    return next((sample for sample in reversed(samples)
+                 if sample["heartbeat_written_at_unix"] < current["heartbeat_written_at_unix"]), None)
+
+
 def runtime_process_epoch(samples: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     """Bind cumulative counters to one boot and expose their actual age."""
     starts = [number_value(row.get("engine_started_at_unix"), "sample.engine_started_at_unix", minimum=1)
@@ -1377,13 +1439,15 @@ def runtime_process_epoch(samples: Sequence[Mapping[str, Any]]) -> Dict[str, Any
                for row in samples]
     if len(set(starts)) != 1:
         fail("engine process start changed during the epoch (PID reuse is not continuity)")
-    if any(later <= earlier for earlier, later in zip(uptimes, uptimes[1:])):
-        fail("engine monotonic uptime did not advance throughout the epoch")
+    if any(later < earlier for earlier, later in zip(uptimes, uptimes[1:])):
+        fail("engine monotonic uptime did not advance: counter moved backwards")
     if uptimes[0] < MIN_ENGINE_UPTIME_AT_EPOCH_SECONDS:
         fail("runtime epoch began before the 250-second engine warmup completed")
     for prior, current, earlier, later in zip(samples, samples[1:], uptimes, uptimes[1:]):
         gap = current["heartbeat_written_at_unix"] - prior["heartbeat_written_at_unix"]
-        if abs((later - earlier) - gap) > MAX_HEARTBEAT_CAPTURE_INTERVAL_DRIFT_SECONDS:
+        if gap > 0 and later <= earlier:
+            fail("engine monotonic uptime did not advance with the heartbeat")
+        if abs((later - earlier) - gap) > MAX_HEARTBEAT_UPTIME_INTERVAL_DRIFT_SECONDS:
             fail("engine monotonic uptime and heartbeat intervals diverge")
     return {"engine_started_at_unix": starts[0],
             "engine_uptime_seconds_at_t0": uptimes[0],
@@ -1733,6 +1797,7 @@ def validate_recorder_probe_evidence(
                 if "--alert-only" not in command or proof.get("phase") != "prewarm":
                     fail("LLM prewarm did not use the fixed alert-only path")
             else:
+                workload_elapsed_seconds(row)
                 if "--alert-only" in command or proof.get("phase") != "epoch":
                     fail("measured workload did not use the full fixed path")
                 if row.get("bulk_path") != bulk_path:
@@ -1755,6 +1820,238 @@ def validate_recorder_probe_evidence(
             if "output" not in row:
                 fail("live rule-reload evidence must embed the complete log transcript")
             validate_live_reload_transcript(full_output, "live rule-reload evidence")
+
+
+def validate_resource_baseline(
+    document: Mapping[str, Any], *, source_root: pathlib.Path,
+    host: Mapping[str, Any] | None = None,
+    require_acceptance: bool = True,
+) -> Dict[str, float]:
+    """Recompute the independent reference measurements before accepting budgets.
+
+    A reviewed baseline is a source input, frozen before candidate construction.
+    The old candidate-derived constants remain useful only for offline fixtures.
+    """
+    if document.get("schema") != RESOURCE_BASELINE_SCHEMA:
+        fail("resource baseline schema is missing or unsupported")
+    if document.get("status") != "accepted" and (require_acceptance
+            or document.get("status") != "measured-awaiting-acceptance"):
+        fail("release qualification incomplete: independently measured v1.21.5 resource baseline is not accepted")
+    reference = object_value(document.get("reference"), "resource baseline.reference")
+    if reference.get("version") != RESOURCE_REFERENCE_VERSION \
+            or reference.get("source_commit") != RESOURCE_REFERENCE_COMMIT:
+        fail("resource baseline must measure the last shipped v1.21.5, not a candidate")
+    for key in ("engine_sha256", "gui_sha256", "dmg_sha256"):
+        require_sha(reference.get(key), f"resource baseline.reference.{key}")
+    if reference["dmg_sha256"] != RESOURCE_REFERENCE_DMG_SHA256:
+        fail("resource baseline must bind the independently verified published v1.21.5 DMG")
+    for role, image in RESOURCE_REFERENCE_IMAGES.items():
+        if reference[role + "_sha256"] != image["sha256"]:
+            fail(f"resource baseline {role} image is not the published v1.21.5 executable")
+    recorder = object_value(document.get("recorder"), "resource baseline.recorder")
+    if recorder != {"path": "scripts/candidate-qualification.py",
+                    "sha256": sha256_file(source_root / "scripts/candidate-qualification.py")}:
+        fail("resource baseline recorder bytes differ from the candidate source")
+    reference_host = object_value(document.get("host"), "resource baseline.host")
+    host_keys = (
+        "machine_id_sha256", "hardware_model", "architecture", "logical_cpu_count",
+        "memory_bytes", "macos_version", "macos_build", "power_source",
+        "sip_enabled", "amfi_enforced",
+    )
+    require_sha(reference_host.get("machine_id_sha256"), "resource baseline.host.machine_id_sha256")
+    for key in ("hardware_model", "architecture", "macos_version", "macos_build", "power_source"):
+        string_value(reference_host.get(key), f"resource baseline.host.{key}")
+    for key in ("logical_cpu_count", "memory_bytes"):
+        int_value(reference_host.get(key), f"resource baseline.host.{key}", minimum=1)
+    for key in ("sip_enabled", "amfi_enforced"):
+        require_true(reference_host.get(key), f"resource baseline.host.{key}")
+    if host is not None and any(reference_host.get(key) != host.get(key) for key in host_keys):
+        fail("resource baseline and candidate must use the same reference host, OS and power configuration")
+    if document.get("host_end") != reference_host:
+        fail("resource baseline host configuration changed during capture")
+    workload = object_value(document.get("workload"), "resource baseline.workload")
+    executors = list_value(workload.get("executors"), "resource baseline.workload.executors", nonempty=True)
+    if len(executors) != len(RUNTIME_WORKLOAD_EXECUTORS):
+        fail("resource baseline must bind the exact transitive workload executor inventory")
+    for index, (relative, raw_executor) in enumerate(zip(RUNTIME_WORKLOAD_EXECUTORS, executors)):
+        executor = object_value(raw_executor, f"resource baseline.workload.executors[{index}]")
+        if set(executor) != {"path", "sha256"} or executor.get("path") != relative:
+            fail("resource baseline must bind the exact transitive workload executor inventory")
+        path = source_root / relative
+        if path.is_symlink() or not path.is_file():
+            fail(f"resource baseline workload executor is missing or redirected: {relative}")
+        if require_sha(executor.get("sha256"), f"resource baseline executor {relative}") != sha256_file(path):
+            fail(f"resource baseline workload executor bytes changed: {relative}")
+    if workload.get("script_sha256") != executors[0]["sha256"]:
+        fail("resource baseline does not bind the current fixed workload")
+    if int_value(workload.get("burst_start_offset_seconds"), "resource baseline burst offset") != BURST_START_OFFSET_SECONDS \
+            or int_value(workload.get("iterations"), "resource baseline workload iterations") != FIXED_WORKLOAD_ITERATIONS \
+            or int_value(workload.get("sample_interval_seconds"), "resource baseline sample interval") != 30:
+        fail("resource baseline must use the prescribed burst and sampling cadence")
+    if document.get("statistics") != RESOURCE_STATISTICS:
+        fail("resource baseline statistics differ from the enforced statistics")
+    samples = list_value(document.get("samples"), "resource baseline.samples", nonempty=True)
+    if len(samples) != 31:
+        fail("resource baseline requires exactly 31 scheduled samples at offsets 0,30,...,900")
+    scheduled_start = parse_time(
+        object_value(samples[0], "resource baseline.samples[0]").get("recorded_at"),
+        "resource baseline first scheduled sample time",
+    )
+    times, totals, gui = [], [], []
+    identities: Dict[str, Mapping[str, Any]] = {}
+    for index, value in enumerate(samples):
+        row = object_value(value, f"resource baseline.samples[{index}]")
+        if int_value(row.get("offset_seconds"), "resource baseline sample offset") != index * 30:
+            fail("resource baseline requires exactly 31 scheduled samples at offsets 0,30,...,900")
+        scheduled = parse_time(row.get("recorded_at"), "resource baseline scheduled sample time")
+        if abs((scheduled - scheduled_start).total_seconds() - index * 30) > 1.0:
+            fail("resource baseline scheduled sample time does not match its epoch offset")
+        captured = parse_time(row.get("captured_at"), "resource baseline sample time")
+        if abs((captured - scheduled).total_seconds()) > 5.0:
+            fail("resource baseline sample was not captured within five seconds of its scheduled boundary")
+        times.append(captured)
+        totals.append(int_value(row.get("engine_disk_write_bytes_total"), "resource baseline cumulative writes"))
+        gui.append(number_value(row.get("gui_background_cpu_percent"), "resource baseline GUI CPU", minimum=0))
+        for role, normalizer in (("engine", normalized_engine_process), ("gui", normalized_gui_process)):
+            identity = normalizer(object_value(row.get(role + "_process"), "resource baseline process"), "resource baseline process")
+            image = RESOURCE_REFERENCE_IMAGES[role]
+            if identity["executable_sha256"] != image["sha256"] \
+                    or identity["running_cdhash"] not in image["cdhashes"].values():
+                fail(f"resource baseline sample does not identify a published v1.21.5 {role} slice")
+            if role in identities and identity != identities[role]:
+                fail("resource baseline process restarted or changed during capture")
+            identities[role] = identity
+        if index and (not 0 < (times[-1] - times[-2]).total_seconds() <= MAX_SAMPLE_GAP_SECONDS
+                      or totals[-1] < totals[-2]):
+            fail("resource baseline sample gap or cumulative counter reset")
+    duration = (times[-1] - times[0]).total_seconds()
+    if duration + 0.001 < MIN_EPOCH_SECONDS or duration > MIN_EPOCH_SECONDS + MAX_SAMPLE_GAP_SECONDS:
+        fail("resource baseline does not cover the prescribed 900-second epoch")
+    number_value(document.get("engine_uptime_at_start_seconds"), "resource baseline warmed engine", minimum=MIN_ENGINE_UPTIME_AT_EPOCH_SECONDS)
+    if document.get("uptime_source") != "mach_absolute_time-ri_proc_start_abstime":
+        fail("resource baseline warmup must use the recorded native Mach uptime source")
+
+    # The native sample identities also need their independently signed
+    # endpoints. Engine and GUI inspections run sequentially, each bounded to
+    # 35 seconds, so allow their combined duration plus capture overhead.
+    endpoint_allowance = 2 * MAX_SAMPLE_GAP_SECONDS + 5.0
+    capture_completed_at = times[-1]
+    for role in ("engine", "gui"):
+        endpoints = object_value(document.get("installed_" + role), f"resource baseline installed {role}")
+        for phase, boundary in (("start", times[0]), ("end", times[-1])):
+            path = f"resource baseline {role} {phase} identity"
+            endpoint = object_value(endpoints.get(phase), path)
+            if resource_reference_process_identity(role, endpoint) != identities[role]:
+                fail(f"{path} does not match the sampled reference process")
+            inspection_started = parse_time(endpoint.get("inspection_started_at"), f"{path}.inspection_started_at")
+            inspection_completed = parse_time(endpoint.get("recorded_at"), f"{path}.recorded_at")
+            if not 0 <= (inspection_completed - inspection_started).total_seconds() <= MAX_SAMPLE_GAP_SECONDS:
+                fail(f"{path} signing inspection exceeds its bounded interval")
+            start_distance = (inspection_started - boundary).total_seconds()
+            end_distance = (inspection_completed - boundary).total_seconds()
+            if (phase == "start" and (start_distance < -endpoint_allowance or end_distance > 1.0)) \
+                    or (phase == "end" and (start_distance < -1.0 or end_distance > endpoint_allowance)):
+                fail(f"{path} signing inspection does not bracket its epoch boundary")
+            capture_completed_at = max(capture_completed_at, inspection_completed)
+
+    # The workload exit receipt is captured independently of resource polling.
+    # Executor hashes bind the same bytes across different checkout locations.
+    completion = object_value(workload.get("completion"), "resource baseline.workload.completion")
+    workload_elapsed_seconds(completion)
+    started_at = parse_time(completion.get("started_at"), "resource baseline workload start")
+    completed_at = parse_time(completion.get("completed_at"), "resource baseline workload completion")
+    if completed_at <= started_at:
+        fail("resource baseline workload completion must follow its start")
+    if abs((started_at - scheduled_start).total_seconds() - BURST_START_OFFSET_SECONDS) > 5.0:
+        fail("resource baseline workload did not start at the prescribed minute-five boundary")
+    if (completed_at - scheduled_start).total_seconds() > BURST_END_OFFSET_SECONDS + 5.0:
+        fail("resource baseline workload was not complete by its scheduled deadline")
+    if int_value(completion.get("deadline_offset_seconds"), "resource baseline workload deadline") != BURST_END_OFFSET_SECONDS:
+        fail("resource baseline workload receipt does not bind the prescribed deadline")
+    if int_value(completion.get("exit_code"), "resource baseline workload exit code") != 0:
+        fail("resource baseline fixed workload did not exit successfully")
+    run_id = string_value(completion.get("run_id"), "resource baseline workload run id")
+    alert_path, bulk_path = workload_paths(run_id)
+    if completion.get("alert_executable") != alert_path or completion.get("bulk_path") != bulk_path:
+        fail("resource baseline workload paths do not bind its unique run id")
+    recording_root_text = string_value(workload.get("recording_source_root"), "resource baseline recording source root")
+    recording_root = pathlib.PurePosixPath(recording_root_text)
+    if not recording_root.is_absolute() or ".." in recording_root.parts \
+            or str(recording_root) != recording_root_text or "\0" in recording_root_text:
+        fail("resource baseline recording source root must be an absolute normalized path")
+    command = list_value(completion.get("command"), "resource baseline workload command", nonempty=True)
+    if any(not isinstance(part, str) for part in command):
+        fail("resource baseline workload command arguments must be strings")
+    # The recorder may drop from root to the original desktop user. No other
+    # wrapper, interpreter arguments, or alert-only path are accepted.
+    if command[:3] == ["/usr/bin/sudo", "-H", "-u"]:
+        if len(command) < 4 or command[3] == "root" or not re.fullmatch(r"[A-Za-z0-9._-]+", command[3]):
+            fail("resource baseline workload command has an invalid desktop user")
+        command = command[4:]
+    if command != ["/bin/bash", str(recording_root / RUNTIME_WORKLOAD_EXECUTORS[0]), "--run-id", run_id]:
+        fail("resource baseline receipt must invoke only the full fixed workload with its run id")
+    output = string_value(completion.get("output"), "resource baseline complete workload output", nonempty=False)
+    if require_sha(completion.get("output_sha256"), "resource baseline workload output SHA") != sha256_bytes(output.encode("utf-8")) \
+            or int_value(completion.get("output_line_count"), "resource baseline workload output line count") != len(output.splitlines()) \
+            or completion.get("output_tail") != output[-4096:]:
+        fail("resource baseline complete workload output does not reconcile with its receipt")
+    lines = output.splitlines()
+    identity_line = f"IDENTITY: run_id={run_id} alert_executable={alert_path} bulk_path={bulk_path}"
+    summary_line = (
+        f"PASS: fixed workload completed run_id={run_id} iterations={FIXED_WORKLOAD_ITERATIONS} "
+        "otlp_spans=1 alert_triggers=1 sequence_probes=1"
+    )
+    if [line for line in lines if line.startswith("IDENTITY:")] != [identity_line] \
+            or [line for line in lines if line.startswith("PASS: fixed")] != [summary_line] \
+            or re.findall(r"(?<!\S)run_id=([^\s]+)", output) != [run_id, run_id]:
+        fail("resource baseline workload output does not prove one completed fixed run")
+    maximum_window = 0.0
+    for start in range(len(samples) - 1):
+        for end in range(start + 1, len(samples)):
+            span = (times[end] - times[start]).total_seconds()
+            if span > 60.001:
+                break
+            maximum_window = max(maximum_window, (totals[end] - totals[start]) / span)
+    measured = {
+        "engine_average_write_bytes_per_second": (totals[-1] - totals[0]) / duration,
+        "engine_max_window_write_bytes_per_second": maximum_window,
+        "gui_p95_percent": percentile_nearest_rank(gui, 0.95),
+    }
+    if document.get("measurements") != measured:
+        fail("resource baseline measurements do not reconcile with raw samples")
+    if not require_acceptance:
+        # The capture command validates its protocol before writing evidence.
+        # Only accepted documents return limits to live release verification.
+        return {}
+    approval = object_value(document.get("acceptance"), "resource baseline.acceptance")
+    string_value(approval.get("reviewer"), "resource baseline acceptance reviewer")
+    string_value(approval.get("rationale"), "resource baseline acceptance rationale")
+    accepted_at = parse_time(approval.get("accepted_at"), "resource baseline acceptance time")
+    if accepted_at < capture_completed_at:
+        fail("resource budgets cannot be accepted before reference measurement completes")
+    limits = object_value(document.get("limits"), "resource baseline.limits")
+    if set(limits) != set(RESOURCE_STATISTICS):
+        fail("resource baseline must supply all three independently reviewed limits")
+    return {key: number_value(limits[key], f"resource baseline limit {key}", minimum=0.000001)
+            for key in RESOURCE_STATISTICS}
+
+
+def release_resource_limits(
+    source_root: pathlib.Path, source_commit: str, *, host: Mapping[str, Any] | None = None,
+) -> Dict[str, float]:
+    path = source_root / RESOURCE_BASELINE_PATH
+    if path.is_symlink() or not path.is_file():
+        fail("release qualification incomplete: reference resource baseline is missing")
+    document = read_json_file(path, "reference resource baseline")
+    limits = validate_resource_baseline(document, source_root=source_root, host=host)
+    # Do not let an untracked or post-build receipt qualify an already-built app.
+    committed = run_checked(
+        ["/usr/bin/git", "-C", str(source_root), "show", f"{source_commit}:{RESOURCE_BASELINE_PATH}"],
+        "candidate-bound resource baseline",
+    ).stdout
+    if committed != path.read_text(encoding="utf-8"):
+        fail("resource baseline was not frozen in the candidate source commit")
+    return limits
 
 
 def validate_runtime_report(
@@ -1803,6 +2100,13 @@ def validate_runtime_report(
     int_value(host.get("memory_bytes"), "runtime.host.memory_bytes", minimum=1)
     require_true(host.get("sip_enabled"), "runtime.host.sip_enabled")
     require_true(host.get("amfi_enforced"), "runtime.host.amfi_enforced")
+
+    resource_limits = ({
+        "engine_average_write_bytes_per_second": MAX_ENGINE_WRITE_BYTES_PER_SECOND,
+        "engine_max_window_write_bytes_per_second": MAX_WINDOW_WRITE_BYTES_PER_SECOND,
+        "gui_p95_percent": MAX_GUI_P95_PERCENT,
+    } if allow_test_fixture and capture_mode == "deterministic-fixture" else
+        release_resource_limits(source_root, candidate["source_commit"], host=host))
 
     workload = object_value(report.get("workload"), "runtime.workload")
     for key in ("id", "version", "description"):
@@ -1943,7 +2247,6 @@ def validate_runtime_report(
     sample_offsets: List[float] = []
     sample_capture_times: List[dt.datetime] = []
     sample_capture_gaps: List[float] = []
-    sample_heartbeat_times: List[float] = []
     sample_rss_values: List[int] = []
     sample_gui_values: List[float] = []
     sample_sequence_evictions: List[int] = []
@@ -1951,10 +2254,6 @@ def validate_runtime_report(
     sample_journal_index_full_rebuilds: List[int] = []
     sample_journal_index_append_refreshes: List[int] = []
     rss_by_offset: Dict[int, int] = {}
-    # Previous sample's conservation block, for the flow tolerance at the fixed
-    # readiness boundaries. None at offset 0, so that boundary stays strict --
-    # nothing has flowed yet and there is no prior `completed` to compare.
-    previous_boundary_conservation: Any = None
     for index, raw_sample in enumerate(samples):
         path = f"runtime.samples[{index}]"
         sample = object_value(raw_sample, path)
@@ -1972,19 +2271,19 @@ def validate_runtime_report(
             abs(offset - boundary) <= 0.001
             for boundary in (0, BURST_DRAIN_OFFSET_SECONDS, MIN_EPOCH_SECONDS)
         ):
-            # Use the recorder's bounded-flow definition against the preceding
-            # epoch sample. t0 remains empty: no earlier epoch sample proves flow.
+            # Compare distinct producer snapshots; repeated fresh publications
+            # cannot erase previously measured flow at a capture boundary.
+            previous = previous_distinct_heartbeat_sample(samples[:index], sample)
             readiness_pending = forgive_flowing_boundary_lanes(
                 readiness_pending,
                 sample.get("conservation"),
-                previous_boundary_conservation,
+                previous.get("conservation") if previous else None,
             )
             if readiness_pending:
                 fail(
                     f"{path} is not drained at a fixed readiness boundary: "
                     + "; ".join(readiness_pending)
                 )
-        previous_boundary_conservation = sample.get("conservation")
         sample_time = parse_time(sample.get("recorded_at"), f"{path}.recorded_at")
         expected_sample_time = started + dt.timedelta(seconds=offset)
         if abs((sample_time - expected_sample_time).total_seconds()) > 1.0:
@@ -2006,20 +2305,6 @@ def validate_runtime_report(
                     f"{MAX_SAMPLE_GAP_SECONDS} seconds"
                 )
             sample_capture_gaps.append(capture_gap)
-        heartbeat_time = number_value(
-            sample.get("heartbeat_written_at_unix"),
-            f"{path}.heartbeat_written_at_unix",
-        )
-        if sample_heartbeat_times:
-            heartbeat_gap = heartbeat_time - sample_heartbeat_times[-1]
-            if heartbeat_gap <= 0:
-                fail("runtime heartbeat timestamps must be strictly increasing")
-            if capture_gap is None or abs(heartbeat_gap - capture_gap) \
-                    > MAX_HEARTBEAT_CAPTURE_INTERVAL_DRIFT_SECONDS:
-                fail(
-                    "runtime heartbeat and capture intervals diverge by more "
-                    f"than {MAX_HEARTBEAT_CAPTURE_INTERVAL_DRIFT_SECONDS} seconds"
-                )
         pid = int_value(sample.get("engine_pid"), f"{path}.engine_pid", minimum=1)
         observed_pids.add(pid)
         cpu_total = number_value(
@@ -2036,7 +2321,6 @@ def validate_runtime_report(
         sample_write_totals.append(write_total)
         sample_offsets.append(offset)
         sample_capture_times.append(capture_time)
-        sample_heartbeat_times.append(heartbeat_time)
         sample_rss_values.append(rss)
         sample_gui_values.append(gui_cpu)
         sample_sequence_evictions.append(
@@ -2110,6 +2394,7 @@ def validate_runtime_report(
         fail("runtime samples do not cover the full reported epoch")
     if abs(observed_gap - max_gap) > 0.001:
         fail("runtime max_sample_gap_seconds does not reconcile with embedded samples")
+    validate_heartbeat_sequence(samples)
     if any(later < earlier for earlier, later in zip(sample_cpu_totals, sample_cpu_totals[1:])):
         fail("engine CPU cumulative samples moved backwards")
     if any(later < earlier for earlier, later in zip(sample_write_totals, sample_write_totals[1:])):
@@ -2204,16 +2489,19 @@ def validate_runtime_report(
         require_zero(priority.get(key), f"runtime.measurements.priority_fidelity.{key}")
 
     file_fidelity = object_value(metrics.get("file_fidelity"), "runtime.measurements.file_fidelity")
+    if set(file_fidelity) != {
+        "unclassified_queue_loss", "source_rule_corpus_sha256", "semantic_validation_scope",
+    }:
+        fail("file fidelity inventory contains missing, legacy, or unsupported semantic claims")
     require_zero(file_fidelity.get("unclassified_queue_loss"), "runtime.measurements.file_fidelity.unclassified_queue_loss")
-    require_true(file_fidelity.get("complete_rule_corpus_evaluated"), "runtime.measurements.file_fidelity.complete_rule_corpus_evaluated")
-    require_sha(file_fidelity.get("rule_corpus_sha256"), "runtime.measurements.file_fidelity.rule_corpus_sha256")
-    reasons = list_value(file_fidelity.get("semantic_reasons"), "runtime.measurements.file_fidelity.semantic_reasons")
-    for index, raw_reason in enumerate(reasons):
-        reason = object_value(raw_reason, f"runtime.measurements.file_fidelity.semantic_reasons[{index}]")
-        string_value(reason.get("reason"), f"semantic_reasons[{index}].reason")
-        int_value(reason.get("count"), f"semantic_reasons[{index}].count")
-        string_value(reason.get("test_id"), f"semantic_reasons[{index}].test_id")
-        require_true(reason.get("conservative_against_rule_corpus"), f"semantic_reasons[{index}].conservative_against_rule_corpus")
+    if file_fidelity.get("semantic_validation_scope") != "source-tests-only":
+        fail("file fidelity semantic validation is limited to source tests")
+    # The source-bound clean-CI receipt covers policy tests and corpus linting.
+    # The current heartbeat has no runtime semantic-reason histogram to attest.
+    if require_sha(file_fidelity.get("source_rule_corpus_sha256"),
+                   "runtime.measurements.file_fidelity.source_rule_corpus_sha256") \
+            != rule_corpus_digest(source_root):
+        fail("file fidelity source rule corpus digest does not match the reviewed source")
 
     correlation = object_value(metrics.get("correlation_continuity"), "runtime.measurements.correlation_continuity")
     coverage = number_value(correlation.get("recovery_coverage_seconds"), "runtime.measurements.correlation_continuity.recovery_coverage_seconds", minimum=0)
@@ -2382,6 +2670,11 @@ def validate_runtime_report(
     if normalized_search_rows != sample_search_rows:
         fail("event-search coverage aggregate does not match raw samples")
     for index, row in enumerate(normalized_search_rows):
+        if bool_value(
+            row.get("search_index_degraded"),
+            f"runtime event-search projection {index}.search_index_degraded",
+        ):
+            fail("event-search index is degraded; qualification requires verified search")
         if int_value(
             row.get("gap_records_total"),
             f"runtime event-search projection {index}.gap_records_total",
@@ -2678,7 +2971,9 @@ def validate_runtime_report(
     workload_ingress = object_value(
         metrics.get("workload_ingress"), "runtime.measurements.workload_ingress"
     )
-    expected_workload_ingress = derive_workload_ingress(samples)
+    expected_workload_ingress = derive_workload_ingress(
+        samples, object_value(report.get("recorder_probe_evidence"), "recorder probes")["workload"],
+    )
     if workload_ingress != expected_workload_ingress:
         fail("workload ingress aggregate does not reconcile with raw counters")
 
@@ -2694,8 +2989,8 @@ def validate_runtime_report(
             "disk write average does not reconcile with engine_bytes / "
             "captured sample duration"
         )
-    if average_bps > MAX_ENGINE_WRITE_BYTES_PER_SECOND:
-        fail("engine disk write average exceeds the derived envelope")
+    if average_bps > resource_limits["engine_average_write_bytes_per_second"]:
+        fail("engine disk write average exceeds the reviewed reference-host budget")
     windows = list_value(writes.get("windows"), "runtime.measurements.disk_writes.windows", nonempty=True)
     if len(windows) != len(samples) - 1:
         fail("disk write windows must contain one interval between every pair of raw samples")
@@ -2724,8 +3019,8 @@ def validate_runtime_report(
             fail("disk write windows do not reconcile with cumulative samples")
         if end <= start or end - start > 60.001:
             fail("disk write sample intervals must be positive and at most 60 seconds")
-        if byte_count / captured_elapsed > MAX_WINDOW_WRITE_BYTES_PER_SECOND:
-            fail(f"disk write window {index} exceeds the derived window envelope")
+        if byte_count / captured_elapsed > resource_limits["engine_max_window_write_bytes_per_second"]:
+            fail(f"disk write window {index} exceeds the reviewed reference-host budget")
         window_bytes_total += byte_count
     if abs(sample_offsets[-1] - duration) > 1.0 or window_bytes_total != engine_bytes:
         fail("disk write windows do not cover/reconcile the complete epoch")
@@ -2737,8 +3032,8 @@ def validate_runtime_report(
             if span > 60.001:
                 break
             rolling_bytes = sample_write_totals[end_index] - sample_write_totals[start_index]
-            if rolling_bytes / span > MAX_WINDOW_WRITE_BYTES_PER_SECOND:
-                fail("cumulative raw samples exceed the derived rolling 60-second disk-write envelope")
+            if rolling_bytes / span > resource_limits["engine_max_window_write_bytes_per_second"]:
+                fail("cumulative raw samples exceed the reviewed sample-aligned disk-write budget")
     require_zero(writes.get("macos_disk_writes_diagnostic_count"), "runtime.measurements.disk_writes.macos_disk_writes_diagnostic_count")
 
     cpu = object_value(metrics.get("cpu"), "runtime.measurements.cpu")
@@ -2760,7 +3055,7 @@ def validate_runtime_report(
     if gui_samples != sample_gui_values:
         fail("GUI CPU samples do not match the embedded full-interval samples")
     recorded_p95 = number_value(cpu.get("gui_background_p95_percent"), "runtime.measurements.cpu.gui_background_p95_percent", minimum=0)
-    if abs(recorded_p95 - gui_p95) > 0.001 or gui_p95 > MAX_GUI_P95_PERCENT:
+    if abs(recorded_p95 - gui_p95) > 0.001 or gui_p95 > resource_limits["gui_p95_percent"]:
         fail(
             "background GUI p95 does not reconcile or exceeds the derived "
             "envelope"
@@ -3225,6 +3520,12 @@ def event_search_projection_sample(
         fail(f"{search_path} is unavailable")
     result = {
         "query_available": available,
+        "search_index_degraded": bool_value(
+            search.get("search_index_degraded"), f"{search_path}.search_index_degraded"
+        ),
+        "search_index_reason": string_value(
+            search.get("search_index_reason"), f"{search_path}.search_index_reason"
+        ),
         "mutation_generation": int_value(
             search.get("mutation_generation"),
             f"{search_path}.mutation_generation",
@@ -3288,6 +3589,9 @@ def event_search_projection_sample(
             search.get("complete"), f"{search_path}.complete"
         ),
     }
+    expected_index_reason = "fts_repair_pending" if result["search_index_degraded"] else "healthy"
+    if result["search_index_reason"] != expected_index_reason:
+        fail(f"{search_path}.search_index_reason does not match index degradation")
     omitted_total = sum(
         result[key]
         for key in (
@@ -3318,6 +3622,7 @@ def event_search_projection_sample(
         fail(f"{search_path}.gap_records_total does not equal its reason ledger")
     expected_complete = (
         result["requested_window_complete"]
+        and not result["search_index_degraded"]
         and gap_total == 0
         and omitted_total == 0
         and result["projection_considered"]
@@ -4202,6 +4507,7 @@ def normalized_runtime_sample(
         "recorded_at": recorded_at,
         "captured_at": captured_at,
         "heartbeat_written_at_unix": heartbeat_written_at_unix,
+        "heartbeat_snapshot_sha256": sha256_bytes(canonical_json_bytes(heartbeat)),
         "engine_pid": pid,
         "engine_started_at_unix": engine_started_at,
         "engine_uptime_seconds": engine_uptime,
@@ -4226,6 +4532,10 @@ def normalized_runtime_sample(
         "event_journal_repair_payload_expired_total":
             terminal_repair_payload_expired_total,
         "conservation": boundaries,
+        "event_persistence_outcomes": {
+            lane: {"persisted": storage_persisted[lane], "filtered": storage_filtered[lane]}
+            for lane in ("priority", "file")
+        },
         "trace_graph_write_accounting": graph_write_accounting,
         "trace_graph_recovery_barrier": graph_recovery_barrier,
         "trace_store_admission": trace_store_admission,
@@ -4607,6 +4917,8 @@ def runtime_readiness_failures(
         sample.get("event_search_projection"),
         f"{path}.event_search_projection",
     )
+    if search_projection["search_index_degraded"]:
+        fatal.append("event-search index is degraded; qualification requires verified search")
     search_gaps = int_value(
         search_projection.get("gap_records_total"),
         f"{path}.event_search_projection.gap_records_total",
@@ -4896,8 +5208,31 @@ def validate_runtime_readiness(
     return sample
 
 
-def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-    """Derive the minute-five load proof only from cumulative raw samples."""
+def workload_elapsed_seconds(workload_timing: Mapping[str, Any]) -> float:
+    if workload_timing.get("timing_source") != WORKLOAD_TIMING_SOURCE:
+        fail("workload requires independent process-exit timing")
+    elapsed = number_value(
+        workload_timing.get("elapsed_monotonic_seconds"),
+        "workload.elapsed_monotonic_seconds", minimum=0.000001,
+    )
+    started = parse_time(workload_timing.get("started_at"), "workload.started_at")
+    completed = parse_time(workload_timing.get("completed_at"), "workload.completed_at")
+    if abs((completed - started).total_seconds() - elapsed) > 1.0:
+        fail("workload wall clock and independent monotonic duration disagree")
+    if elapsed > WORKLOAD_DEADLINE_SECONDS:
+        fail("fixed workload exceeded its independent elapsed deadline")
+    return elapsed
+
+
+def derive_workload_ingress(
+    samples: Sequence[Mapping[str, Any]], workload_timing: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Reconcile host offered volume bracketing the independently timed burst.
+
+    Host counters include ambient traffic: this is measured pressure while the
+    fixed workload ran, not attribution of every offered event to that process.
+    The bracketing slack is reported and bounded by heartbeat freshness.
+    """
     by_offset: Dict[int, Mapping[str, Any]] = {}
     for sample in samples:
         offset = number_value(sample.get("offset_seconds"), "workload sample offset")
@@ -4933,6 +5268,17 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
             if any(later < earlier for earlier, later in zip(values, values[1:])):
                 fail(f"runtime cumulative {boundary}.{key} counter moved backwards")
 
+    def outcome(sample: Mapping[str, Any], lane: str, key: str) -> int:
+        outcomes = object_value(sample.get("event_persistence_outcomes"), "sample.event_persistence_outcomes")
+        row = object_value(outcomes.get(lane), f"sample.event_persistence_outcomes.{lane}")
+        return int_value(row.get(key), f"sample.event_persistence_outcomes.{lane}.{key}")
+
+    for lane in ("priority", "file"):
+        for key in ("persisted", "filtered"):
+            values = [outcome(sample, lane, key) for sample in samples]
+            if any(later < earlier for earlier, later in zip(values, values[1:])):
+                fail(f"runtime cumulative {lane} {key} counter moved backwards")
+
     start = by_offset[BURST_START_OFFSET_SECONDS]
     drain_end = by_offset[BURST_DRAIN_OFFSET_SECONDS]
 
@@ -4954,12 +5300,30 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
     def delta(boundary: str, key: str) -> int:
         return counter(drain_end, boundary, key) - counter(start, boundary, key)
 
-    window_samples = [
-        sample for sample in samples
-        if BURST_START_OFFSET_SECONDS
-        <= number_value(sample.get("offset_seconds"), "workload offset")
-        <= BURST_END_OFFSET_SECONDS
-    ]
+    elapsed = workload_elapsed_seconds(workload_timing)
+    burst_started = parse_time(workload_timing.get("started_at"), "workload.started_at").timestamp()
+    burst_completed = parse_time(workload_timing.get("completed_at"), "workload.completed_at").timestamp()
+    before = [sample for sample in samples if sample["heartbeat_written_at_unix"] <= burst_started]
+    after = [sample for sample in samples if sample["heartbeat_written_at_unix"] >= burst_completed]
+    if not before or not after:
+        fail("runtime heartbeats do not bracket the independently timed workload")
+    bracket_start = max(before, key=lambda sample: sample["heartbeat_written_at_unix"])
+    bracket_end = min(after, key=lambda sample: sample["heartbeat_written_at_unix"])
+    leading_slack = burst_started - bracket_start["heartbeat_written_at_unix"]
+    trailing_slack = bracket_end["heartbeat_written_at_unix"] - burst_completed
+    if max(leading_slack, trailing_slack) > HEARTBEAT_MAX_AGE_SECONDS:
+        fail("workload bracketing heartbeat slack exceeds the freshness bound")
+    offered_volume = sum(
+        counter(bracket_end, f"{lane}-ingress", "offered")
+        - counter(bracket_start, f"{lane}-ingress", "offered")
+        for lane in ("priority", "file")
+    )
+    window_samples = []
+    for sample in samples:
+        tick = sample["heartbeat_written_at_unix"]
+        if bracket_start["heartbeat_written_at_unix"] <= tick <= bracket_end["heartbeat_written_at_unix"] \
+                and (not window_samples or tick != window_samples[-1]["heartbeat_written_at_unix"]):
+            window_samples.append(sample)
     interval_rates: List[float] = []
     for prior, current in zip(window_samples, window_samples[1:]):
         prior_offset = number_value(prior.get("offset_seconds"), "workload prior offset")
@@ -4982,20 +5346,13 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
         )
         if heartbeat_elapsed <= 0:
             fail("workload heartbeat timestamps are not strictly ordered")
-        if abs(heartbeat_elapsed - captured_elapsed) \
-                > MAX_HEARTBEAT_CAPTURE_INTERVAL_DRIFT_SECONDS:
-            fail("workload heartbeat and capture intervals do not reconcile")
         offered_delta = sum(
             counter(current, f"{lane}-ingress", "offered")
             - counter(prior, f"{lane}-ingress", "offered")
             for lane in ("priority", "file")
         )
-        # These counters belong to heartbeat snapshots, while the Darwin
-        # recorder owns captured_at.  The longer reconciled clock is
-        # conservative for the minimum-load gate and cannot overstate rate.
-        interval_rates.append(
-            offered_delta / max(captured_elapsed, heartbeat_elapsed)
-        )
+        # Diagnostic only: a phase-dependent interval peak is not a load gate.
+        interval_rates.append(offered_delta / heartbeat_elapsed)
     if not interval_rates:
         fail("runtime workload window has no measured sample interval")
 
@@ -5044,6 +5401,13 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
             "file-event-terminal-persistence", "explicitly_shed"
         ),
         "combined_peak_offered_per_second": max(interval_rates),
+        "combined_bracketed_offered_volume": offered_volume,
+        "combined_offered_per_burst_second": offered_volume / elapsed,
+        "burst_elapsed_monotonic_seconds": elapsed,
+        "bracket_start_heartbeat_written_at_unix": bracket_start["heartbeat_written_at_unix"],
+        "bracket_end_heartbeat_written_at_unix": bracket_end["heartbeat_written_at_unix"],
+        "bracket_leading_slack_seconds": leading_slack,
+        "bracket_trailing_slack_seconds": trailing_slack,
         "trace_store_offered_delta": delta("trace-store-ingest", "offered"),
         "trace_store_completed_delta": delta("trace-store-ingest", "completed"),
         "trace_store_explicitly_shed_delta": delta(
@@ -5080,6 +5444,11 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
         ),
     }
     for lane in ("priority", "file"):
+        for key in ("persisted", "filtered"):
+            result[f"{lane}_persistence_{key}_delta"] = outcome(drain_end, lane, key) - outcome(start, lane, key)
+            result[f"{lane}_persistence_{key}_epoch_delta"] = outcome(samples[-1], lane, key) - outcome(samples[0], lane, key)
+        if result[f"{lane}_persistence_persisted_delta"] <= 0:
+            fail(f"fixed workload produced no new {lane}-lane persisted base events; filtered completions are not persistence")
         if result[f"{lane}_ingress_offered_delta"] <= 0 \
                 or result[f"{lane}_ingress_completed_delta"] <= 0:
             fail(f"fixed workload produced no measured {lane}-lane ingress/completion")
@@ -5099,11 +5468,15 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
             )
         if result[f"{lane}_terminal_persistence_explicitly_shed_delta"] != 0:
             fail(f"{lane} terminal persistence shed fixed-workload revisions")
-    if result["combined_peak_offered_per_second"] \
-            < MIN_BURST_COMBINED_OFFERED_PER_SECOND:
+    if offered_volume < MIN_BURST_COMBINED_OFFERED_VOLUME:
         fail(
             "fixed workload did not reach the predeclared reference load "
-            f"({MIN_BURST_COMBINED_OFFERED_PER_SECOND:.0f} offered events/s)"
+            f"volume ({MIN_BURST_COMBINED_OFFERED_VOLUME} offered events)"
+        )
+    if result["combined_offered_per_burst_second"] < MIN_BURST_COMBINED_OFFERED_PER_SECOND:
+        fail(
+            "fixed workload did not reach the predeclared reference load "
+            f"mean ({MIN_BURST_COMBINED_OFFERED_PER_SECOND:.0f} offered events/burst second)"
         )
     if result["trace_store_offered_delta"] < MIN_TRACE_STORE_INGEST_DELTA \
             or result["trace_store_completed_delta"] < MIN_TRACE_STORE_INGEST_DELTA:
@@ -5155,10 +5528,7 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
         if number_value(sample.get("offset_seconds"), "workload offset")
         < BURST_DRAIN_OFFSET_SECONDS
     ]
-    previous = max(
-        preceding,
-        key=lambda sample: number_value(sample.get("offset_seconds"), "workload offset"),
-    )
+    previous = previous_distinct_heartbeat_sample(preceding, drain_end)
     pending = []
     for name in sorted(REQUIRED_CONSERVATION_BOUNDARIES):
         queued = counter(drain_end, name, "queued")
@@ -5166,7 +5536,7 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
         if in_flight or (queued and name != "sequence-journal"):
             pending.append(f"{name} queued={queued} in_flight={in_flight}")
     pending = forgive_flowing_boundary_lanes(
-        pending, drain_end.get("conservation"), previous.get("conservation"),
+        pending, drain_end.get("conservation"), previous.get("conservation") if previous else None,
     )
     if pending:
         fail("workload queues are not drained at the fixed boundary: " + "; ".join(pending))
@@ -5232,7 +5602,9 @@ def build_runtime_report_from_observations(
         for earlier, later in zip(search_generations, search_generations[1:])
     ):
         fail("event-search mutation generation regressed during the epoch")
-    workload_ingress = derive_workload_ingress(samples)
+    workload_ingress = derive_workload_ingress(
+        samples, object_value(probes.get("evidence"), "probes.evidence")["workload"],
+    )
     duration = number_value(samples[-1].get("offset_seconds"), "last sample offset", minimum=MIN_EPOCH_SECONDS)
     captured_times = [
         parse_time(sample.get("captured_at"), f"sample {index}.captured_at")
@@ -5249,28 +5621,7 @@ def build_runtime_report_from_observations(
             "runtime captured sample gap exceeds "
             f"{MAX_SAMPLE_GAP_SECONDS} seconds"
         )
-    heartbeat_times = [
-        number_value(
-            sample.get("heartbeat_written_at_unix"),
-            f"sample {index}.heartbeat_written_at_unix",
-        )
-        for index, sample in enumerate(samples)
-    ]
-    heartbeat_gaps = [
-        current - prior
-        for prior, current in zip(heartbeat_times, heartbeat_times[1:])
-    ]
-    if any(gap <= 0 for gap in heartbeat_gaps):
-        fail("runtime heartbeat timestamps must be strictly increasing")
-    if any(
-        abs(heartbeat_gap - capture_gap)
-        > MAX_HEARTBEAT_CAPTURE_INTERVAL_DRIFT_SECONDS
-        for heartbeat_gap, capture_gap in zip(heartbeat_gaps, captured_gaps)
-    ):
-        fail(
-            "runtime heartbeat and capture intervals diverge by more than "
-            f"{MAX_HEARTBEAT_CAPTURE_INTERVAL_DRIFT_SECONDS} seconds"
-        )
+    validate_heartbeat_sequence(samples)
     captured_duration = (captured_times[-1] - captured_times[0]).total_seconds()
     if captured_duration + 0.001 < MIN_EPOCH_SECONDS:
         fail("runtime captured sample duration is below 900 seconds")
@@ -5659,9 +6010,8 @@ def build_runtime_report_from_observations(
             },
             "file_fidelity": {
                 "unclassified_queue_loss": max(number_value(sample["losses"]["unclassified_file_queue_loss"], "file loss") for sample in samples),
-                "complete_rule_corpus_evaluated": bool_value(probes.get("complete_rule_corpus_evaluated"), "probes.complete_rule_corpus_evaluated"),
-                "rule_corpus_sha256": require_sha(probes.get("rule_corpus_sha256"), "probes.rule_corpus_sha256"),
-                "semantic_reasons": copy.deepcopy(list_value(probes.get("semantic_reasons"), "probes.semantic_reasons")),
+                "source_rule_corpus_sha256": require_sha(probes.get("source_rule_corpus_sha256"), "probes.source_rule_corpus_sha256"),
+                "semantic_validation_scope": "source-tests-only",
             },
             "correlation_continuity": {
                 "recovery_coverage_seconds": duration,
@@ -5710,6 +6060,7 @@ def build_runtime_report_from_observations(
                     row["query_available"] is True
                     and row["complete"] is (
                         row["requested_window_complete"]
+                        and not row["search_index_degraded"]
                         and row["gap_records_total"] == 0
                         and row["projection_omitted_total"] == 0
                     )
@@ -7169,6 +7520,69 @@ def terminate_process_group(process: subprocess.Popen[str]) -> Tuple[str, str]:
         fail("runtime workload process group could not be reaped")
 
 
+class TimedWorkload:
+    """Drain pipes and timestamp exit independently of telemetry polling."""
+
+    def __init__(self, command: Sequence[str], *, cwd: pathlib.Path,
+                 deadline_seconds: float = WORKLOAD_DEADLINE_SECONDS) -> None:
+        self.started_at = dt.datetime.now(dt.timezone.utc)
+        self.started_monotonic = time.monotonic()
+        self.completed_at: dt.datetime | None = None
+        self.elapsed_monotonic_seconds: float | None = None
+        self.stdout = ""
+        self.stderr = ""
+        self.error: BaseException | None = None
+        self.finished = threading.Event()
+        self.process = subprocess.Popen(
+            list(command), cwd=str(cwd), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        self.thread = threading.Thread(
+            target=self._wait, args=(deadline_seconds,), daemon=True,
+            name="maccrab-workload-exit",
+        )
+        self.thread.start()
+
+    def _wait(self, deadline_seconds: float) -> None:
+        try:
+            remaining = max(0.001, deadline_seconds - (time.monotonic() - self.started_monotonic))
+            self.stdout, self.stderr = self.process.communicate(timeout=remaining)
+            self.elapsed_monotonic_seconds = time.monotonic() - self.started_monotonic
+            self.completed_at = dt.datetime.now(dt.timezone.utc)
+        except subprocess.TimeoutExpired:
+            self.error = QualificationError("fixed burst workload missed its independent elapsed deadline")
+            try:
+                self.stdout, self.stderr = terminate_process_group(self.process)
+            except BaseException as exc:
+                self.error = exc
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            self.finished.set()
+
+    def close(self) -> None:
+        # Only this thread owns communicate(). Cancellation signals the group
+        # and joins it, avoiding concurrent reads/reaping on the same pipes.
+        if self.finished.is_set():
+            if self.process.poll() is None:
+                terminate_process_group(self.process)
+            return
+        if not self.finished.is_set():
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            self.thread.join(timeout=5)
+        if not self.finished.is_set():
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.thread.join(timeout=5)
+        if not self.finished.is_set():
+            fail("runtime workload exit waiter could not be reaped")
+
+
 # v1.22.0: mirror of MacCrabCore `LLMBatchTriage.representative`
 # (Sources/MacCrabCore/LLM/LLMBatchTriage.swift:15-35).
 #
@@ -7545,6 +7959,7 @@ def live_runtime_recording(
     observations: List[Dict[str, Any]] = []
     readiness_observations: List[Dict[str, Any]] = []
     workload_process: subprocess.Popen[str] | None = None
+    timed_workload: TimedWorkload | None = None
     workload_command: List[str] | None = None
     workload_stdout = ""
     workload_stderr = ""
@@ -7585,6 +8000,10 @@ def live_runtime_recording(
                 "completed_at": (
                     workload_completed_at.isoformat().replace("+00:00", "Z")
                     if workload_completed_at is not None else None
+                ),
+                "timing_source": WORKLOAD_TIMING_SOURCE,
+                "elapsed_monotonic_seconds": (
+                    timed_workload.elapsed_monotonic_seconds if timed_workload else None
                 ),
                 "stdout_tail": workload_stdout[-4096:],
                 "stderr_tail": workload_stderr[-4096:],
@@ -7702,9 +8121,12 @@ def live_runtime_recording(
                 heartbeat_path=heartbeat_path, candidate=candidate,
                 data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
             )
+            current_heartbeat = observation["heartbeat"]["written_at_unix"]
+            previous_observation = next((item for item in reversed(observations)
+                                         if item["heartbeat"]["written_at_unix"] < current_heartbeat), None)
             previous_sample = sample_from_recorder_observation(
-                observations[-1], "previous epoch sample"
-            )
+                previous_observation, "previous distinct epoch sample"
+            ) if previous_observation else None
             # Retain measured failure evidence before readiness or identity
             # validation can reject it. The exception path marks this entire
             # capture failed; appending never implies acceptance.
@@ -7746,19 +8168,17 @@ def live_runtime_recording(
                         "minute-five workload baseline LLM",
                     )
                 )
-                workload_trigger_started_at = dt.datetime.now(dt.timezone.utc)
-                workload_process = subprocess.Popen(
-                    workload_command, cwd=str(root), stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, text=True, start_new_session=True,
-                )
+                timed_workload = TimedWorkload(workload_command, cwd=root)
+                workload_process = timed_workload.process
+                workload_trigger_started_at = timed_workload.started_at
 
-            if workload_process is not None \
+            if timed_workload is not None \
                     and workload_completed_at is None \
-                    and workload_process.poll() is not None:
-                workload_stdout, workload_stderr = workload_process.communicate(
-                    timeout=5
-                )
-                workload_completed_at = dt.datetime.now(dt.timezone.utc)
+                    and timed_workload.finished.is_set():
+                if timed_workload.error is not None:
+                    raise timed_workload.error
+                workload_stdout, workload_stderr = timed_workload.stdout, timed_workload.stderr
+                workload_completed_at = timed_workload.completed_at
                 if workload_process.returncode != 0:
                     fail(
                         "fixed burst workload failed: "
@@ -7817,18 +8237,18 @@ def live_runtime_recording(
                 "capturing" if offset < MIN_EPOCH_SECONDS else "captured"
             )
     except BaseException as exc:
-        if workload_process is not None and workload_process.poll() is None:
-            terminate_process_group(workload_process)
+        if timed_workload is not None:
+            timed_workload.close()
         try:
             persist_capture("failed", reason=str(exc))
         except BaseException:
             pass
         raise
     finally:
-        if workload_process is not None and workload_process.poll() is None:
-            terminate_process_group(workload_process)
+        if timed_workload is not None:
+            timed_workload.close()
 
-    if workload_process is None or workload_command is None \
+    if workload_process is None or workload_command is None or timed_workload is None \
             or workload_completed_at is None or workload_trigger_started_at is None \
             or workload_run_id is None or workload_alert_path is None \
             or workload_bulk_path is None or workload_isolation is None \
@@ -7930,6 +8350,8 @@ def live_runtime_recording(
             "completed_at": workload_completed_at.isoformat().replace(
                 "+00:00", "Z"
             ),
+            "timing_source": WORKLOAD_TIMING_SOURCE,
+            "elapsed_monotonic_seconds": timed_workload.elapsed_monotonic_seconds,
             "deadline_offset_seconds": BURST_END_OFFSET_SECONDS,
             "drain_offset_seconds": BURST_DRAIN_OFFSET_SECONDS,
             "sequence_path_isolation": workload_isolation,
@@ -7948,9 +8370,7 @@ def live_runtime_recording(
         "installed_gui_end": installed_gui_end,
         "crash_count": 0,
         "watchdog_exit_count": 0,
-        "complete_rule_corpus_evaluated": True,
-        "rule_corpus_sha256": rule_corpus_digest(root),
-        "semantic_reasons": [],
+        "source_rule_corpus_sha256": rule_corpus_digest(root),
         "prune_vacuum_refill_loop_count": vacuum_events,
         "macos_disk_writes_diagnostic_count": disk_diagnostics,
         "rules": {
@@ -8852,7 +9272,7 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
                         "crash_count": 0, "watchdog_exit_count": 0, "relaunch_count": 0},
             "conservation": {"all_samples_reconciled": False, "boundaries": []},
             "priority_fidelity": {"priority_lane_loss": 0, "kernel_loss": 0, "callback_copy_loss": 0, "upstream_collector_loss": 0},
-            "file_fidelity": {"unclassified_queue_loss": 0, "complete_rule_corpus_evaluated": False, "rule_corpus_sha256": "REPLACE", "semantic_reasons": []},
+            "file_fidelity": {"unclassified_queue_loss": 0, "source_rule_corpus_sha256": "REPLACE", "semantic_validation_scope": "source-tests-only"},
             "correlation_continuity": {
                 "recovery_coverage_seconds": 0,
                 "checkpoint_shed": 0,
@@ -9027,6 +9447,247 @@ def command_record_candidate(args: argparse.Namespace) -> None:
     print(f"candidate manifest written: {args.output}")
 
 
+def resource_reference_process_identity(
+    role: str, identity: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Require the published reference bytes and running signed architecture."""
+    normalizer = normalized_engine_process if role == "engine" else normalized_gui_process
+    process = normalizer(identity, f"resource reference {role}")
+    expected_identifier = EXPECTED_AGENT_IDENTIFIER if role == "engine" else EXPECTED_APP_IDENTIFIER
+    require_maccrab_signing_identity(
+        identity, expected_identifier=expected_identifier, path=f"resource reference {role}",
+    )
+    bundle_key = "system_extension_bundle_identifier" if role == "engine" else "bundle_identifier"
+    pinned = RESOURCE_REFERENCE_IMAGES[role]
+    if identity.get(bundle_key) != expected_identifier \
+            or identity.get("bundle_version") != RESOURCE_REFERENCE_VERSION \
+            or identity.get("build_version") != RESOURCE_REFERENCE_BUILD_VERSION \
+            or process["executable_sha256"] != pinned["sha256"] \
+            or pinned["cdhashes"].get(identity.get("architecture")) != process["running_cdhash"] \
+            or identity.get("cdhash") != process["running_cdhash"]:
+        fail(f"resource capture requires the signed published v1.21.5 {role}, not a candidate")
+    return process
+
+
+def resource_baseline_executor_inventory(root: pathlib.Path) -> List[Dict[str, str]]:
+    """Freeze the tracked recorder and complete fixed-workload executor set."""
+    relatives = ("scripts/candidate-qualification.py", *RUNTIME_WORKLOAD_EXECUTORS)
+    if pathlib.Path(__file__).resolve() != root / relatives[0]:
+        fail("resource capture must execute the recorder from its supplied source root")
+    git = [fixed_tool("/usr/bin/git"), "-C", str(root)]
+    toplevel = run_checked(original_user_command([*git, "rev-parse", "--show-toplevel"]),
+                          "resource capture source root").stdout.strip()
+    if pathlib.Path(toplevel).resolve() != root:
+        fail("resource capture source root must be the Git worktree root")
+    run_checked(original_user_command([*git, "ls-files", "--error-unmatch", "--", *relatives]),
+                "resource capture tracked executors")
+    rows = []
+    for relative in relatives:
+        path = root / relative
+        if path.is_symlink() or not path.is_file() or path.resolve() != path:
+            fail(f"resource capture executor is missing or redirected: {relative}")
+        rows.append({"path": relative, "sha256": sha256_file(path)})
+    return rows
+
+
+def resource_baseline_native_uptime_seconds(process_start_abstime: int) -> float:
+    """Measure warmed process age in its native Mach absolute-time domain."""
+    start = int_value(process_start_abstime, "resource reference process start", minimum=1)
+    try:
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        absolute_time = library.mach_absolute_time
+    except (OSError, AttributeError) as exc:
+        fail(f"resource capture cannot measure native engine uptime: {exc}")
+    absolute_time.argtypes = []
+    absolute_time.restype = ctypes.c_uint64
+    now = int(absolute_time())
+    if now < start:
+        fail("resource reference process start is later than native monotonic time")
+    return mach_absolute_ticks_to_seconds(now - start)
+
+
+def command_record_resource_baseline(args: argparse.Namespace) -> None:
+    """Capture reference measurements without manufacturing budget acceptance."""
+    if platform.system() != "Darwin":
+        fail("resource baseline recording requires an installed macOS reference host")
+    root = pathlib.Path(args.source_root).resolve()
+    output = absolute_path(args.output)
+    if output.exists() or output.is_symlink():
+        fail("resource baseline output already exists; choose a fresh evidence path")
+    pid = int_value(args.engine_pid, "resource reference engine PID", minimum=1)
+    inventory = resource_baseline_executor_inventory(root)
+    host = installed_runtime_host(pid)
+    installed_start = installed_engine_identity(pid)
+    engine_identity = resource_reference_process_identity("engine", installed_start)
+    gui = gui_process_observation()
+    gui_start = installed_gui_identity(gui["process"]["pid"])
+    gui_identity = resource_reference_process_identity("gui", gui_start)
+    if gui["process"] != gui_identity:
+        fail("resource reference GUI changed during preflight")
+    uptime = resource_baseline_native_uptime_seconds(engine_identity["process_start_abstime"])
+    if uptime < MIN_ENGINE_UPTIME_AT_EPOCH_SECONDS:
+        fail("resource reference engine has not warmed for at least 250 seconds")
+
+    run_id = secrets.token_hex(16)
+    alert_path, bulk_path = workload_paths(run_id)
+    workload_command = original_user_command([
+        "/bin/bash", str(root / RUNTIME_WORKLOAD_EXECUTORS[0]), "--run-id", run_id,
+    ])
+    # Align to the next whole second, preserving the candidate recorder's
+    # timestamp precision without assigning a scheduled time to a late capture.
+    wall_now = dt.datetime.now(dt.timezone.utc)
+    start_wall = wall_now.replace(microsecond=0) + dt.timedelta(seconds=1)
+    start_monotonic = time.monotonic() + (start_wall - wall_now).total_seconds()
+    workload_state: Dict[str, Any] = {}
+    launch_finished = threading.Event()
+
+    def launch_workload() -> None:
+        try:
+            if abs(time.monotonic() - (start_monotonic + BURST_START_OFFSET_SECONDS)) > 5:
+                fail("resource workload launch missed its monotonic schedule")
+            workload_state["capture"] = TimedWorkload(
+                workload_command, cwd=root,
+                deadline_seconds=max(0.001, start_monotonic + BURST_END_OFFSET_SECONDS - time.monotonic()),
+            )
+        except BaseException as exc:
+            workload_state["error"] = exc
+        finally:
+            launch_finished.set()
+
+    # Native process probes and signing inspections cannot delay burst launch.
+    timer = threading.Timer(max(0, start_monotonic + BURST_START_OFFSET_SECONDS - time.monotonic()),
+                            launch_workload)
+    timer.daemon = True
+    samples: List[Dict[str, Any]] = []
+    completion: Dict[str, Any] | None = None
+    timer.start()
+    try:
+        for offset in range(0, int(MIN_EPOCH_SECONDS) + 1, 30):
+            remaining = start_monotonic + offset - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            captured = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+            scheduled = start_wall + dt.timedelta(seconds=offset)
+            if abs((captured - scheduled).total_seconds()) > 5:
+                fail("resource sample missed its capture schedule")
+            engine = engine_process_observation(pid)
+            gui = gui_process_observation()
+            if normalized_engine_process(engine, "resource sample engine") != engine_identity \
+                    or gui["process"] != gui_identity:
+                fail("resource reference process restarted or changed during capture")
+            samples.append({
+                "offset_seconds": offset,
+                "recorded_at": scheduled.isoformat().replace("+00:00", "Z"),
+                "captured_at": captured.isoformat().replace("+00:00", "Z"),
+                "engine_disk_write_bytes_total": engine["engine_disk_write_bytes_total"],
+                "gui_background_cpu_percent": gui["cpu_percent"],
+                "engine_process": normalized_engine_process(engine, "resource sample engine"),
+                "gui_process": gui["process"],
+            })
+            if len(samples) > 1:
+                previous = samples[-2]
+                gap = (captured - parse_time(previous["captured_at"], "resource previous capture")).total_seconds()
+                if not 0 < gap <= MAX_SAMPLE_GAP_SECONDS \
+                        or engine["engine_disk_write_bytes_total"] < previous["engine_disk_write_bytes_total"]:
+                    fail("resource samples contain a clock gap or cumulative counter reset")
+            if offset >= BURST_END_OFFSET_SECONDS and completion is None:
+                if not launch_finished.is_set():
+                    fail("resource workload did not launch by its completion boundary")
+                if "error" in workload_state:
+                    raise workload_state["error"]
+                timed = workload_state["capture"]
+                if not timed.finished.is_set():
+                    fail("resource workload did not complete by its fixed deadline")
+                if timed.error is not None:
+                    raise timed.error
+                if timed.process.returncode != 0 or timed.completed_at is None:
+                    fail("resource workload did not return a successful completion")
+                combined = timed.stdout + timed.stderr
+                expected_lines = (
+                    f"IDENTITY: run_id={run_id} alert_executable={alert_path} bulk_path={bulk_path}",
+                    f"PASS: fixed workload completed run_id={run_id} iterations={FIXED_WORKLOAD_ITERATIONS} "
+                    "otlp_spans=1 alert_triggers=1 sequence_probes=1",
+                )
+                if any(combined.splitlines().count(line) != 1 for line in expected_lines):
+                    fail("resource workload transcript does not prove the prescribed completed burst")
+                completion = {
+                    **process_probe_evidence(workload_command, timed.process.returncode, timed.stdout, timed.stderr),
+                    "output": combined, "run_id": run_id,
+                    "alert_executable": alert_path, "bulk_path": bulk_path,
+                    "started_at": timed.started_at.isoformat().replace("+00:00", "Z"),
+                    "completed_at": timed.completed_at.isoformat().replace("+00:00", "Z"),
+                    "timing_source": WORKLOAD_TIMING_SOURCE,
+                    "elapsed_monotonic_seconds": timed.elapsed_monotonic_seconds,
+                    "deadline_offset_seconds": BURST_END_OFFSET_SECONDS,
+                }
+        installed_end = installed_engine_identity(pid)
+        gui_end = installed_gui_identity(gui_identity["pid"])
+        if resource_reference_process_identity("engine", installed_end) != engine_identity \
+                or resource_reference_process_identity("gui", gui_end) != gui_identity:
+            fail("resource reference signing identities changed across capture")
+        host_end = installed_runtime_host(pid)
+        if host_end != host:
+            fail("resource reference host or power configuration changed during capture")
+        if resource_baseline_executor_inventory(root) != inventory:
+            fail("resource recorder or fixed-workload executor bytes changed during capture")
+    finally:
+        timer.cancel()
+        timer.join(timeout=5)
+        if timer.is_alive():
+            fail("resource workload launcher could not be reaped")
+        if "capture" in workload_state:
+            workload_state["capture"].close()
+
+    times = [parse_time(row["captured_at"], "resource capture time") for row in samples]
+    duration = (times[-1] - times[0]).total_seconds()
+    if not MIN_EPOCH_SECONDS <= duration <= MIN_EPOCH_SECONDS + MAX_SAMPLE_GAP_SECONDS:
+        fail("resource capture did not cover a complete measured 900-second epoch")
+    maximum_window = 0.0
+    for start in range(len(samples) - 1):
+        for end in range(start + 1, len(samples)):
+            span = (times[end] - times[start]).total_seconds()
+            if span > 60.001:
+                break
+            maximum_window = max(maximum_window,
+                (samples[end]["engine_disk_write_bytes_total"] - samples[start]["engine_disk_write_bytes_total"]) / span)
+    document = {
+        "schema": RESOURCE_BASELINE_SCHEMA, "status": "measured-awaiting-acceptance",
+        "reference": {
+            "version": RESOURCE_REFERENCE_VERSION, "source_commit": RESOURCE_REFERENCE_COMMIT,
+            "dmg_sha256": RESOURCE_REFERENCE_DMG_SHA256,
+            "engine_sha256": engine_identity["executable_sha256"],
+            "gui_sha256": gui_identity["executable_sha256"],
+        },
+        "host": host, "host_end": host_end,
+        "installed_engine": {"start": installed_start, "end": installed_end},
+        "installed_gui": {"start": gui_start, "end": gui_end},
+        "engine_uptime_at_start_seconds": uptime,
+        "uptime_source": "mach_absolute_time-ri_proc_start_abstime",
+        "recorder": inventory[0],
+        "workload": {
+            "recording_source_root": str(root), "executors": inventory[1:],
+            "script_sha256": inventory[1]["sha256"],
+            "burst_start_offset_seconds": BURST_START_OFFSET_SECONDS,
+            "iterations": FIXED_WORKLOAD_ITERATIONS, "sample_interval_seconds": 30,
+            "completion": completion,
+        },
+        "statistics": dict(RESOURCE_STATISTICS), "samples": samples,
+        "measurements": {
+            "engine_average_write_bytes_per_second":
+                (samples[-1]["engine_disk_write_bytes_total"] - samples[0]["engine_disk_write_bytes_total"]) / duration,
+            "engine_max_window_write_bytes_per_second": maximum_window,
+            "gui_p95_percent": percentile_nearest_rank(
+                [row["gui_background_cpu_percent"] for row in samples], 0.95),
+        },
+        "limits": None, "acceptance": None,
+    }
+    validate_resource_baseline(document, source_root=root, require_acceptance=False)
+    if output.exists() or output.is_symlink():
+        fail("resource baseline output appeared during capture; existing evidence is preserved")
+    write_json_exclusive(output, document)
+    print(f"Reference measurements written for independent budget review (not accepted): {output}")
+
+
 def command_runtime_template(args: argparse.Namespace) -> None:
     path = pathlib.Path(args.candidate_manifest)
     document = read_json_file(path, "candidate manifest")
@@ -9069,6 +9730,9 @@ def command_record_runtime(args: argparse.Namespace) -> None:
         source_tree=source_tree,
         label="runtime recorder pre-capture",
     )
+    # Fail before spending the installed epoch when independent acceptance is
+    # missing. Host equivalence is checked again against the actual capture.
+    release_resource_limits(root, source_commit)
     heartbeat_path = absolute_path(args.heartbeat_path)
     data_dirs = [
         absolute_path(value)
@@ -9516,6 +10180,15 @@ def parser() -> argparse.ArgumentParser:
     record.add_argument("--clean-ci-completed-at", required=True)
     record.add_argument("--artifact-checks", choices=("full", "digest"), default="full", help=argparse.SUPPRESS)
     record.set_defaults(func=command_record_candidate)
+
+    baseline = commands.add_parser(
+        "record-resource-baseline",
+        help="measure the separately provisioned, signed v1.21.5 reference host for 900 seconds",
+    )
+    baseline.add_argument("--engine-pid", required=True, type=int)
+    baseline.add_argument("--source-root", required=True)
+    baseline.add_argument("--output", required=True)
+    baseline.set_defaults(func=command_record_resource_baseline)
 
     template = commands.add_parser("runtime-template", help="write an intentionally incomplete report template")
     template.add_argument("--candidate-manifest", required=True)

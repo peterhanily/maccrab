@@ -54,6 +54,10 @@ extension MacCrabCtl {
             print("Hunt could not run: the selected local database is unavailable.")
             print("This is not evidence that no matching activity exists.")
             return
+        case .searchIndexDegraded:
+            print("Full-text hunting is unavailable while the search index awaits repair.")
+            print("No results is not proof of absence; typed event queries remain available.")
+            return
         case .timedOut:
             print("Hunt timed out before completion.")
             print("Partial rows, if any, are not a complete absence-of-findings result.")

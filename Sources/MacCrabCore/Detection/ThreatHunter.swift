@@ -274,6 +274,7 @@ public enum ThreatHuntExecutionStatus: String, Sendable, Equatable {
     case timedOut
     case rejected
     case databaseUnavailable
+    case searchIndexDegraded
 }
 
 struct ThreatHuntSQLExecution: Sendable, Equatable {
@@ -293,9 +294,12 @@ private final class ThreatHuntDeadlineContext {
 
 private final class ThreatHuntAuthorizationContext {
     let store: ThreatHuntQueryStore
+    let searchIndexDegraded: Bool
+    var deniedDegradedIndex = false
 
-    init(store: ThreatHuntQueryStore) {
+    init(store: ThreatHuntQueryStore, searchIndexDegraded: Bool) {
         self.store = store
+        self.searchIndexDegraded = searchIndexDegraded
     }
 }
 
@@ -327,11 +331,21 @@ private let threatHuntAuthorizerCallback: @convention(c) (
         let table = String(cString: first).lowercased()
         switch context.store {
         case .events:
-            return table == "events" || table == "events_fts"
-                || table.hasPrefix("events_fts_") ? SQLITE_OK : SQLITE_DENY
+            let isFTS = table == "events_fts" || table.hasPrefix("events_fts_")
+            if isFTS, context.searchIndexDegraded {
+                context.deniedDegradedIndex = true
+                return SQLITE_DENY
+            }
+            return table == "events" || isFTS ? SQLITE_OK : SQLITE_DENY
         case .alerts:
             return table == "alerts" ? SQLITE_OK : SQLITE_DENY
         }
+    case SQLITE_PRAGMA:
+        // FTS5 checks its read-only data_version while stepping MATCH.
+        // Caller PRAGMA statements remain rejected by ThreatHuntSQLPolicy.
+        return context.store == .events && !context.searchIndexDegraded
+            && first.map({ String(cString: $0).lowercased() }) == "data_version"
+            && second == nil ? SQLITE_OK : SQLITE_DENY
     case SQLITE_FUNCTION:
         guard let functionPointer = second ?? first else { return SQLITE_DENY }
         let function = String(cString: functionPointer).lowercased()
@@ -721,43 +735,70 @@ public actor ThreatHunter {
         sqlite3_limit(handle, SQLITE_LIMIT_FUNCTION_ARG, 16)
         sqlite3_limit(handle, SQLITE_LIMIT_ATTACHED, 0)
         sqlite3_limit(handle, SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 1_024)
-        sqlite3_limit(handle, SQLITE_LIMIT_VARIABLE_NUMBER, 0)
+        // FTS5's internal index/content reads bind up to two parameters.
+        // A zero cap turns healthy MATCH queries into SQLITE_CORRUPT; caller
+        // placeholders remain forbidden by the statement check below.
+        sqlite3_limit(handle, SQLITE_LIMIT_VARIABLE_NUMBER, 2)
         sqlite3_limit(handle, SQLITE_LIMIT_TRIGGER_DEPTH, 0)
         sqlite3_limit(handle, SQLITE_LIMIT_WORKER_THREADS, 0)
         sqlite3_limit(handle, SQLITE_LIMIT_PARSER_DEPTH, 64)
         sqlite3_enable_load_extension(handle, 0)
-
-        let authorization = ThreatHuntAuthorizationContext(store: store)
-        let authorizationPointer = Unmanaged.passRetained(authorization).toOpaque()
-        defer {
-            Unmanaged<ThreatHuntAuthorizationContext>
-                .fromOpaque(authorizationPointer).release()
-        }
-        guard sqlite3_set_authorizer(
-            handle,
-            threatHuntAuthorizerCallback,
-            authorizationPointer
-        ) == SQLITE_OK else {
-            return ThreatHuntSQLExecution(rows: [], status: .rejected)
-        }
 
         let deadline = ThreatHuntDeadlineContext(
             milliseconds: limits.deadlineMilliseconds
         )
         let deadlinePointer = Unmanaged.passRetained(deadline).toOpaque()
         defer {
+            sqlite3_progress_handler(handle, 0, nil, nil)
             Unmanaged<ThreatHuntDeadlineContext>
                 .fromOpaque(deadlinePointer).release()
         }
         sqlite3_progress_handler(
-            handle,
-            limits.progressSteps,
-            threatHuntProgressCallback,
-            deadlinePointer
+            handle, limits.progressSteps,
+            threatHuntProgressCallback, deadlinePointer
         )
+        // Bind mode discovery and the caller's query to one read snapshot.
+        // The trusted schema probe precedes the authorizer, which continues
+        // to deny caller-controlled schema inspection and transaction SQL.
+        guard sqlite3_exec(handle, "BEGIN DEFERRED TRANSACTION", nil, nil, nil) == SQLITE_OK else {
+            return ThreatHuntSQLExecution(rows: [], status: deadline.interrupted ? .timedOut : .databaseUnavailable)
+        }
         defer {
             sqlite3_progress_handler(handle, 0, nil, nil)
             sqlite3_set_authorizer(handle, nil, nil)
+            sqlite3_exec(handle, "ROLLBACK", nil, nil, nil)
+        }
+        var searchIndexDegraded = false
+        if store == .events {
+            var probe: OpaquePointer?
+            let rc = sqlite3_prepare_v2(handle,
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='event_projection_search_degradation')",
+                -1, &probe, nil)
+            guard rc == SQLITE_OK, let probe else {
+                sqlite3_finalize(probe)
+                return ThreatHuntSQLExecution(rows: [], status: deadline.interrupted ? .timedOut : .databaseUnavailable)
+            }
+            let first = sqlite3_step(probe)
+            searchIndexDegraded = first == SQLITE_ROW && sqlite3_column_int(probe, 0) != 0
+            let last = first == SQLITE_ROW ? sqlite3_step(probe) : first
+            sqlite3_finalize(probe)
+            guard first == SQLITE_ROW, last == SQLITE_DONE else {
+                return ThreatHuntSQLExecution(rows: [], status: deadline.interrupted ? .timedOut : .databaseUnavailable)
+            }
+        }
+        let authorization = ThreatHuntAuthorizationContext(
+            store: store, searchIndexDegraded: searchIndexDegraded
+        )
+        let authorizationPointer = Unmanaged.passRetained(authorization).toOpaque()
+        defer {
+            sqlite3_set_authorizer(handle, nil, nil)
+            Unmanaged<ThreatHuntAuthorizationContext>
+                .fromOpaque(authorizationPointer).release()
+        }
+        guard sqlite3_set_authorizer(
+            handle, threatHuntAuthorizerCallback, authorizationPointer
+        ) == SQLITE_OK else {
+            return ThreatHuntSQLExecution(rows: [], status: .rejected)
         }
 
         var stmt: OpaquePointer?
@@ -766,10 +807,13 @@ public actor ThreatHunter {
             return ThreatHuntSQLExecution(
                 rows: [],
                 status: deadline.interrupted || prepareResult == SQLITE_INTERRUPT
-                    ? .timedOut : .rejected
+                    ? .timedOut : (authorization.deniedDegradedIndex ? .searchIndexDegraded : .rejected)
             )
         }
         defer { sqlite3_finalize(statement) }
+        guard sqlite3_bind_parameter_count(statement) == 0 else {
+            return ThreatHuntSQLExecution(rows: [], status: .rejected)
+        }
 
         var results: [[String: String]] = []
         let columnCount = Int(sqlite3_column_count(statement))
@@ -787,7 +831,7 @@ public actor ThreatHunter {
                 return ThreatHuntSQLExecution(
                     rows: results,
                     status: deadline.interrupted || stepResult == SQLITE_INTERRUPT
-                        ? .timedOut : .rejected
+                        ? .timedOut : (authorization.deniedDegradedIndex ? .searchIndexDegraded : .rejected)
                 )
             }
             guard results.count < limits.maxRows else {

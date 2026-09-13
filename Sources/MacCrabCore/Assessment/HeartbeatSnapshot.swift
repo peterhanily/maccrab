@@ -356,6 +356,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
 
     public struct EventSearchProjection: Codable, Sendable, Equatable {
         public let queryAvailable: Bool?
+        public let searchIndexDegraded: Bool?
+        public let searchIndexReason: String?
         public let mutationGeneration: UInt64?
         public let requestedDurationSeconds: Int?
         public let effectiveDurationSeconds: Int?
@@ -378,6 +380,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
 
         private enum CodingKeys: String, CodingKey {
             case queryAvailable = "query_available"
+            case searchIndexDegraded = "search_index_degraded"
+            case searchIndexReason = "search_index_reason"
             case mutationGeneration = "mutation_generation"
             case requestedDurationSeconds = "requested_duration_seconds"
             case effectiveDurationSeconds = "effective_duration_seconds"

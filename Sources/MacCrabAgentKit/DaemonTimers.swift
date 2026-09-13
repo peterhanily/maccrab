@@ -2926,6 +2926,8 @@ enum DaemonTimers {
                 )
                 eventSearchProjection = [
                     "query_available": true,
+                    "search_index_degraded": snapshot.searchIndexDegraded,
+                    "search_index_reason": snapshot.searchIndexDegraded ? "fts_repair_pending" : "healthy",
                     "mutation_generation": Int64(clamping:
                         snapshot.mutationGeneration),
                     "requested_duration_seconds": max(0, Int(
@@ -2969,6 +2971,7 @@ enum DaemonTimers {
             } catch {
                 eventSearchProjection = [
                     "query_available": false,
+                    "search_index_reason": "query_unavailable",
                     "requested_duration_seconds": 3600,
                     "effective_duration_seconds": 0,
                     "requested_window_complete": false,
@@ -5297,7 +5300,7 @@ enum DaemonTimers {
                 // they do not identify which omission, if any, affected this
                 // probe. The existing probe makes at most four query attempts.
                 Logger(subsystem: "com.maccrab", category: "coverage-canary")
-                    .warning("Coverage canary store query incomplete-empty; retained projection totals (not probe-specific): quota=\(snapshot.projectionOmittedQuota, privacy: .public), replaced=\(snapshot.projectionOmittedReplaced, privacy: .public), physical=\(snapshot.projectionOmittedPhysical, privacy: .public), external=\(snapshot.projectionOmittedExternal, privacy: .public), migration=\(snapshot.projectionOmittedMigration, privacy: .public), pending=\(snapshot.projectionPending, privacy: .public); requested_window_complete=\(snapshot.requestedWindowComplete ? 1 : 0, privacy: .public); gaps: poison=\(snapshot.gaps.canonicalPoisonRecords, privacy: .public), corrupt_legacy=\(snapshot.gaps.corruptLegacyRecords, privacy: .public), inherited_legacy_loss=\(snapshot.gaps.inheritedLegacyLossRecords, privacy: .public), resource_limited=\(snapshot.gaps.resourceLimitedRecords, privacy: .public). Presence remains unknown.")
+                    .warning("Coverage canary store query incomplete-empty; retained projection totals (not probe-specific): quota=\(snapshot.projectionOmittedQuota, privacy: .public), replaced=\(snapshot.projectionOmittedReplaced, privacy: .public), physical=\(snapshot.projectionOmittedPhysical, privacy: .public), external=\(snapshot.projectionOmittedExternal, privacy: .public), migration=\(snapshot.projectionOmittedMigration, privacy: .public), pending=\(snapshot.projectionPending, privacy: .public); search_index_degraded=\(snapshot.searchIndexDegraded ? 1 : 0, privacy: .public); requested_window_complete=\(snapshot.requestedWindowComplete ? 1 : 0, privacy: .public); gaps: poison=\(snapshot.gaps.canonicalPoisonRecords, privacy: .public), corrupt_legacy=\(snapshot.gaps.corruptLegacyRecords, privacy: .public), inherited_legacy_loss=\(snapshot.gaps.inheritedLegacyLossRecords, privacy: .public), resource_limited=\(snapshot.gaps.resourceLimitedRecords, privacy: .public). Presence remains unknown.")
             }
             return snapshot.isComplete ? .absent : .coverageUnknown
         } catch {

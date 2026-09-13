@@ -58,6 +58,9 @@ extension MacCrabCtl {
             let events = snapshot.events
 
             print("Search results for '\(query)' (\(events.count) projected matches):")
+            if snapshot.searchIndexDegraded {
+                print("WARNING: The full-text index awaits repair; text matches may be incomplete.")
+            }
             if !snapshot.isComplete {
                 print(
                     "WARNING: Search coverage is incomplete "

@@ -322,6 +322,82 @@ struct ThreatHunterSQLSafetyTests {
         #expect(boundedHunt.results.isEmpty)
     }
 
+    @Test("FTS hunts reject a persisted degraded index while typed hunts survive and verified repair restores FTS")
+    func degradedFTSHuntStatus() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-hunt-fts-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("events.db").path
+        let store = try EventStore(path: path)
+        _ = try await store.recoverJournalBeforeProducers()
+        let now = Date()
+        for pid: Int32 in [4242, 4243] {
+            _ = try await store.insert(event: Event(
+                timestamp: now, eventCategory: .process, eventType: .start,
+                eventAction: "exec",
+                process: MacCrabCore.ProcessInfo(
+                    pid: pid, ppid: 1, rpid: 1, name: "sshprobe",
+                    executable: "/usr/bin/sshprobe", commandLine: "sshprobe", args: [],
+                    workingDirectory: "/", userId: 501, userName: "fixture", groupId: 20,
+                    startTime: now, ancestors: [], isPlatformBinary: false
+                )
+            ))
+        }
+        let ftsSQL = "SELECT process_name FROM events_fts WHERE events_fts MATCH 'sshprobe' LIMIT 10"
+        let service = LLMService(
+            backend: ThreatHunterLLMBackend(response: ftsSQL),
+            config: LLMConfig(), minInterval: 0
+        )
+        let hunter = ThreatHunter(databasePath: path, llmService: service)
+        let healthy = await hunter.executeSQL(ftsSQL)
+        #expect(healthy.status == .completed)
+        #expect(healthy.rows.count == 2)
+        for placeholder in ["?", "?1", "?2", ":needle", "@needle", "$needle"] {
+            let parameterized = await hunter.executeSQL(
+                "SELECT process_name FROM events_fts WHERE events_fts MATCH \(placeholder) LIMIT 10"
+            )
+            #expect(parameterized.status == .rejected)
+            #expect(parameterized.rows.isEmpty)
+        }
+        #expect(await hunter.executeSQL(
+            "SELECT '?1 :needle @needle $needle' AS literal FROM events LIMIT 1"
+        ).status == .completed)
+
+        try executeFixtureSQL(at: path, sql:
+            "DELETE FROM events_fts WHERE rowid IN (SELECT MIN(rowid) FROM events)")
+        try await store.setStorageAdmissionProbesForTesting(
+            footprint: { _ in 1_048_576 }, freeSpace: { _ in 16 * 1_048_576 }
+        )
+        #expect(try await store.recoverJournalBeforeProducers().complete)
+        let degraded = await hunter.executeSQL(ftsSQL)
+        #expect(degraded.status == .searchIndexDegraded)
+        #expect(degraded.rows.isEmpty)
+        #expect(await hunter.huntEnhanced("search sshprobe")?.status == .searchIndexDegraded)
+        #expect(await hunter.executeSQL(
+            "SELECT count(*) FROM events_fts_data LIMIT 1"
+        ).status == .searchIndexDegraded)
+        let typed = await hunter.executeSQL("SELECT process_name FROM events LIMIT 10")
+        #expect(typed.status == .completed)
+        #expect(typed.rows.count == 2)
+        #expect(await hunter.executeSQL(
+            "SELECT 'events_fts' AS label FROM events LIMIT 1"
+        ).status == .completed)
+        #expect(await hunter.executeSQL("PRAGMA data_version").status == .rejected)
+        #expect(await hunter.executeSQL(
+            "SELECT name FROM sqlite_schema LIMIT 1"
+        ).status == .rejected)
+
+        try await store.setStorageAdmissionProbesForTesting(
+            footprint: { try SQLitePersistentStoreAdmission.measureFamily($0) },
+            freeSpace: { try SQLitePersistentStoreAdmission.measureFreeSpace($0) }
+        )
+        #expect(try await store.recoverJournalBeforeProducers().complete)
+        let recovered = await hunter.executeSQL(ftsSQL)
+        #expect(recovered.status == .completed)
+        #expect(recovered.rows.count == 2)
+    }
+
     @Test("LLM hunt prompt matches the production SQL policy")
     func promptPolicyDoesNotDrift() {
         let prompt = LLMPrompts.threatHuntSystem

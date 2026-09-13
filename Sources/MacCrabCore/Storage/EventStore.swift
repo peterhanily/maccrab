@@ -557,6 +557,7 @@ public struct EventSearchSnapshot: Sendable, Equatable {
     public let projectionPending: Int
     public let requestedWindowComplete: Bool
     public let gaps: EventQueryGapCounts
+    public let searchIndexDegraded: Bool
     private let ownershipLeases: [EventPipelineMemoryLease]
 
     fileprivate init(
@@ -580,6 +581,7 @@ public struct EventSearchSnapshot: Sendable, Equatable {
         projectionPending: Int,
         requestedWindowComplete: Bool,
         gaps: EventQueryGapCounts,
+        searchIndexDegraded: Bool = false,
         ownershipLeases: [EventPipelineMemoryLease]
     ) {
         self.events = events
@@ -602,6 +604,7 @@ public struct EventSearchSnapshot: Sendable, Equatable {
         self.projectionPending = projectionPending
         self.requestedWindowComplete = requestedWindowComplete
         self.gaps = gaps
+        self.searchIndexDegraded = searchIndexDegraded
         self.ownershipLeases = ownershipLeases
     }
 
@@ -629,6 +632,7 @@ public struct EventSearchSnapshot: Sendable, Equatable {
             && lhs.projectionPending == rhs.projectionPending
             && lhs.requestedWindowComplete == rhs.requestedWindowComplete
             && lhs.gaps == rhs.gaps
+            && lhs.searchIndexDegraded == rhs.searchIndexDegraded
     }
 
     public var projectionOmitted: Int {
@@ -647,6 +651,7 @@ public struct EventSearchSnapshot: Sendable, Equatable {
 
     public var isComplete: Bool {
         requestedWindowComplete
+            && !searchIndexDegraded
             && gaps.total == 0
             && projectionConsidered == projectionMaterialized
             && projectionOmitted == 0
@@ -1318,6 +1323,41 @@ public actor EventStore {
     /// bypass filtering. The daemon's bootstrap installs the default filter
     /// + any operator-extended patterns.
     private var insertFilter: EventInsertFilter?
+
+    /// FTS is derived data. During a persisted degraded interval these triggers
+    /// are absent; the same transaction that verifies a rebuild restores them.
+    private nonisolated static let projectionFTSTriggerSQLs: [String] = [
+        """
+        CREATE TRIGGER IF NOT EXISTS events_ai AFTER INSERT ON events BEGIN
+            INSERT INTO events_fts(rowid, process_name, process_path, process_commandline,
+                file_path, network_dest_ip, tcc_service, tcc_client)
+            VALUES (new.rowid, new.process_name, new.process_path, new.process_commandline,
+                new.file_path, new.network_dest_ip, new.tcc_service, new.tcc_client);
+        END
+        """,
+        // events_au AFTER UPDATE (audit corr-storage): keep the external-
+        // content FTS index in sync when an existing event row is UPDATED
+        // directly. Normal event insertion treats duplicate immutable ids
+        // as no-ops, but maintenance or future SQL UPDATE surfaces must not
+        // orphan old FTS postings. This trigger removes the stale postings
+        // (via the FTS5 'delete' command with old.* values, which does not
+        // depend on the content row) and re-adds the fresh ones. The prune
+        // paths delete FTS rows explicitly (while the content row is still
+        // present) and are unaffected — no AFTER DELETE trigger exists, so
+        // there is no double-delete.
+        """
+        CREATE TRIGGER IF NOT EXISTS events_au AFTER UPDATE ON events BEGIN
+            INSERT INTO events_fts(events_fts, rowid, process_name, process_path, process_commandline,
+                file_path, network_dest_ip, tcc_service, tcc_client)
+            VALUES ('delete', old.rowid, old.process_name, old.process_path, old.process_commandline,
+                old.file_path, old.network_dest_ip, old.tcc_service, old.tcc_client);
+            INSERT INTO events_fts(rowid, process_name, process_path, process_commandline,
+                file_path, network_dest_ip, tcc_service, tcc_client)
+            VALUES (new.rowid, new.process_name, new.process_path, new.process_commandline,
+                new.file_path, new.network_dest_ip, new.tcc_service, new.tcc_client);
+        END
+        """,
+    ]
 
     // MARK: - Schema migrations
 
@@ -3703,7 +3743,7 @@ public actor EventStore {
         }
 
         // Create schema
-        let schemaSQLs = [
+        var schemaSQLs = [
             """
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY, timestamp REAL NOT NULL,
@@ -3733,45 +3773,24 @@ public actor EventStore {
                 content=events, content_rowid=rowid
             )
             """,
-            """
-            CREATE TRIGGER IF NOT EXISTS events_ai AFTER INSERT ON events BEGIN
-                INSERT INTO events_fts(rowid, process_name, process_path, process_commandline,
-                    file_path, network_dest_ip, tcc_service, tcc_client)
-                VALUES (new.rowid, new.process_name, new.process_path, new.process_commandline,
-                    new.file_path, new.network_dest_ip, new.tcc_service, new.tcc_client);
-            END
-            """,
-            // events_au AFTER UPDATE (audit corr-storage): keep the external-
-            // content FTS index in sync when an existing event row is UPDATED
-            // directly. Normal event insertion treats duplicate immutable ids
-            // as no-ops, but maintenance or future SQL UPDATE surfaces must not
-            // orphan old FTS postings. This trigger removes the stale postings
-            // (via the FTS5 'delete' command with old.* values, which does not
-            // depend on the content row) and re-adds the fresh ones. The prune
-            // paths delete FTS rows explicitly (while the content row is still
-            // present) and are unaffected — no AFTER DELETE trigger exists, so
-            // there is no double-delete.
-            """
-            CREATE TRIGGER IF NOT EXISTS events_au AFTER UPDATE ON events BEGIN
-                INSERT INTO events_fts(events_fts, rowid, process_name, process_path, process_commandline,
-                    file_path, network_dest_ip, tcc_service, tcc_client)
-                VALUES ('delete', old.rowid, old.process_name, old.process_path, old.process_commandline,
-                    old.file_path, old.network_dest_ip, old.tcc_service, old.tcc_client);
-                INSERT INTO events_fts(rowid, process_name, process_path, process_commandline,
-                    file_path, network_dest_ip, tcc_service, tcc_client)
-                VALUES (new.rowid, new.process_name, new.process_path, new.process_commandline,
-                    new.file_path, new.network_dest_ip, new.tcc_service, new.tcc_client);
-            END
-            """,
         ]
         if writerInitializationAllowed {
-            try admitSchemaWork(
-                SchemaMigrator.pendingStorageWork(
-                    on: handle,
-                    statements: schemaSQLs
+            // Inspect the durable FTS mode under the same lock as trigger
+            // creation: another writer may be disabling or repairing it.
+            try Self.exec(handle, "BEGIN IMMEDIATE TRANSACTION")
+            do {
+                if try Self.schemaObject(on: handle, named: "event_projection_search_degradation") == nil {
+                    schemaSQLs += Self.projectionFTSTriggerSQLs
+                }
+                try admitSchemaWork(
+                    SchemaMigrator.pendingStorageWork(on: handle, statements: schemaSQLs)
                 )
-            )
-            for sql in schemaSQLs { try Self.exec(handle, sql) }
+                for sql in schemaSQLs { try Self.exec(handle, sql) }
+                try Self.exec(handle, "COMMIT")
+            } catch {
+                try? Self.exec(handle, "ROLLBACK")
+                throw error
+            }
         }
 
         // Sparse FTS maintenance is never allowed to turn one admitted row
@@ -3843,6 +3862,7 @@ public actor EventStore {
             let needsFTSConfig = ftsConfig("automerge") != 4
                 || ftsConfig("crisismerge") != 16
             if needsFTSConfig,
+               try Self.schemaObject(on: handle, named: "event_projection_search_degradation") == nil,
                (try? admission?.admitWrite(
                     estimatedTransactionBytes:
                         SQLitePersistentStoreAdmission.conservativeRowMutationBytes,
@@ -5873,12 +5893,8 @@ public actor EventStore {
                 "FTS integrity validation has no database handle"
             )
         }
-        guard sqlite3_get_autocommit(db) != 0 else {
-            throw EventStoreError.stepFailed(
-                "FTS integrity validation entered inside a transaction"
-            )
-        }
-        try Self.exec(db, "BEGIN IMMEDIATE TRANSACTION")
+        let ownsTransaction = sqlite3_get_autocommit(db) != 0
+        if ownsTransaction { try Self.exec(db, "BEGIN IMMEDIATE TRANSACTION") }
         let rc: Int32
         do {
             let statement = try prepare(
@@ -5886,91 +5902,110 @@ public actor EventStore {
             )
             rc = sqlite3_step(statement)
             sqlite3_finalize(statement)
-            try execute(rc == SQLITE_DONE ? "COMMIT" : "ROLLBACK")
+            if ownsTransaction {
+                try execute(rc == SQLITE_DONE ? "COMMIT" : "ROLLBACK")
+            }
         } catch {
-            try? execute("ROLLBACK")
+            if ownsTransaction { try? execute("ROLLBACK") }
             throw error
         }
         return rc
     }
 
-    /// Rebuild the projection index from its content table. Mirrors the
-    /// segment-ceiling escape at `recoverExhaustedFTSIndexIfNeeded`, including
-    /// its admission, so both FTS repairs are budgeted the same way.
+    /// The marker and disabled triggers are one small admitted transaction.
+    /// Readers check the schema inside their own snapshot, including handles
+    /// opened before the writer discovered damage. No canonical content is
+    /// removed, and normal healthy stores need no extra persistent schema.
+    private func projectionSearchIsDegraded() throws -> Bool {
+        guard let db else { throw EventStoreError.storageNotReady("search index has no database") }
+        return try Self.schemaObject(on: db, named: "event_projection_search_degradation") != nil
+    }
+
+    private(set) var projectionSearchIndexDegraded: Bool = false
+
+    private func disableProjectionSearchIndex(after error: any Error) throws {
+        let reason = Self.boundIndexedText(error.localizedDescription, maxBytes: 4096)
+        // Reserve covers the marker page, sqlite_schema trigger changes, and
+        // mutation generation. A failed full-index rebuild must not require
+        // the same 32-MiB reservation merely to record its degraded state.
+        try withSerializedWrite(
+            estimatedBytes: SchemaStorageWork(
+                boundedMetadataStatementCount: 8, rebuildStatementCount: 0
+            ).boundedTransactionEstimateBytes,
+            maintenance: true
+        ) {
+            try execute("""
+                CREATE TABLE IF NOT EXISTS event_projection_search_degradation (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    reason TEXT NOT NULL CHECK(length(CAST(reason AS BLOB)) <= 4096)
+                )
+                """)
+            let statement = try prepare("INSERT OR REPLACE INTO event_projection_search_degradation VALUES (1, ?1)")
+            bindText(statement, index: 1, value: reason)
+            let rc = sqlite3_step(statement)
+            sqlite3_finalize(statement)
+            guard rc == SQLITE_DONE else {
+                throw EventStoreError.stepFailed("search degradation marker failed")
+            }
+            try execute("DROP TRIGGER IF EXISTS events_ai")
+            try execute("DROP TRIGGER IF EXISTS events_au")
+            try advanceStorageMutationGeneration()
+        }
+        projectionSearchIndexDegraded = true
+    }
+
+    /// Rebuild, verify, and re-enable FTS atomically. A reader sees either the
+    /// durable degraded marker or a complete index with working write triggers.
     private func repairProjectionSearchIndex() throws {
         guard let db, !isReadOnly else { return }
         try withSerializedWrite(
             estimatedBytes: storageTransactionReserveBytes,
             maintenance: true
         ) {
-            let rc = sqlite3_exec(
-                db,
-                "INSERT INTO events_fts(events_fts) VALUES('rebuild')",
-                nil, nil, nil
-            )
-            guard rc == SQLITE_OK else {
-                throw EventStoreError.stepFailed(
-                    "events_fts rebuild failed (sqlite rc \(rc)): "
-                        + String(cString: sqlite3_errmsg(db))
-                )
+            try execute("INSERT INTO events_fts(events_fts) VALUES('rebuild')")
+            let rc = try ftsExternalContentIntegrityResultCode()
+            guard rc == SQLITE_DONE else {
+                throw EventStoreError.decodingFailed("rebuilt search index failed integrity (sqlite rc \(rc))")
             }
+            for sql in Self.projectionFTSTriggerSQLs { try Self.exec(db, sql) }
+            try execute("DROP TABLE IF EXISTS event_projection_search_degradation")
+            try advanceStorageMutationGeneration()
         }
+        projectionSearchIndexDegraded = false
+        projectionOwnedUpperBoundBytes = nil
     }
 
     private func validateFTSExternalContentIntegrity() throws {
         let rc = try ftsExternalContentIntegrityResultCode()
-        if rc == SQLITE_DONE {
+        if rc == SQLITE_DONE, try !projectionSearchIsDegraded() {
             projectionSearchIndexDegraded = false
             return
         }
-        guard rc == SQLITE_CORRUPT else {
+        guard rc == SQLITE_CORRUPT || rc == SQLITE_DONE else {
             throw EventStoreError.decodingFailed(
-                "event projection FTS external-content integrity check failed"
-                    + " (sqlite rc \(rc))"
+                "event projection FTS external-content integrity check failed (sqlite rc \(rc))"
             )
         }
-        let log = Logger(
-            subsystem: "com.maccrab.storage", category: "event-store"
-        )
-        // SQLITE_CORRUPT from this command means the search index disagrees
-        // with `events`. It does NOT mean the database is damaged, and it is
-        // NOT necessarily this version's doing: up to and including v1.21.5,
-        // `prune` and `pruneOldest` deleted FTS postings and their content rows
-        // as two separate autocommit statements, in batches of up to 100,000,
-        // so any interruption between them left that disagreement durably in a
-        // store we are obliged to upgrade. v1.21.5 shipped no equivalent check,
-        // so it ran for months on exactly the state this refuses. HEAD already
-        // fixed the producer (`deleteEventBatchAtomically`), but that is not
-        // retroactive.
-        //
-        // Refusing the boot here costs every detection the engine would have
-        // made, permanently: the daemon exits, sysextd relaunches it, it
-        // measures the same store, and nothing repairs it in between. What a
-        // desynced index actually costs is search fidelity — `events_fts` is
-        // read only by `search`, `searchSnapshot` and `containsProjectedFTSMatch`
-        // (CLI, dashboard, MCP hunt, and the coverage canary). No rule,
-        // sequence, campaign or behavioural path reads it. So the honest
-        // outcome is degraded hunting, reported, not a machine left unmonitored.
-        //
-        // Repair first: a desynced index also fails every later FTS mutation on
-        // this boot (journal expiry's projection delete is the next one), so
-        // tolerating the check alone would move the refusal, not remove it.
-        log.warning("Event search index disagrees with retained events; rebuilding it before producers start.")
-        if (try? repairProjectionSearchIndex()) != nil,
-           (try? ftsExternalContentIntegrityResultCode()) == SQLITE_DONE {
-            projectionSearchIndexDegraded = false
-            return
+        let log = Logger(subsystem: "com.maccrab.storage", category: "event-store")
+        // v1.21.5's separate autocommit FTS/content prune statements can leave
+        // inherited disagreement after an interruption. FTS is a hunting index;
+        // rules and behavioural detection consume the canonical event stream.
+        log.warning("Event search index needs repair before producers start.")
+        do {
+            try repairProjectionSearchIndex()
+        } catch {
+            log.fault("Event search repair failed: \(error.localizedDescription, privacy: .public). Disabling FTS writes and reporting incomplete search until a verified rebuild succeeds.")
+            // If even this small durable transition cannot commit, surface the
+            // storage error. Never claim a safe fallback with triggers active.
+            let repairError = error
+            do {
+                try disableProjectionSearchIndex(after: repairError)
+            } catch {
+                log.fault("Search degradation could not be committed: \(error.localizedDescription, privacy: .public)")
+                throw repairError
+            }
         }
-        projectionSearchIndexDegraded = true
-        log.fault("Event search index still disagrees with retained events after a rebuild; search and threat hunting may under-report, so an empty result is not proof of absence. Detection, alerting and response are unaffected and the engine is starting.")
     }
-
-    /// Set at every pre-producer finalization. True when the FTS projection
-    /// disagrees with `events`, so `search`/`hunt` may under-report and callers
-    /// must not treat an empty result as proof of absence. Deliberately not
-    /// persisted: the condition is re-evaluated on each boot, so a store that
-    /// is repaired stops reporting degraded without needing a migration.
-    private(set) var projectionSearchIndexDegraded: Bool = false
 
     /// Rebuild the exact UUID locator from append-local block rosters. A bad
     /// roster, duplicate UUID, or count mismatch is corruption, never a reason
@@ -9350,9 +9385,11 @@ public actor EventStore {
             }
             if !legacyRowIDs.isEmpty {
                 let rowList = legacyRowIDs.map(String.init).joined(separator: ",")
-                try execute(
-                    "DELETE FROM events_fts WHERE rowid IN (\(rowList))"
-                )
+                if try !projectionSearchIsDegraded() {
+                    try execute(
+                        "DELETE FROM events_fts WHERE rowid IN (\(rowList))"
+                    )
+                }
                 try execute(
                     "DELETE FROM events WHERE rowid IN (\(rowList))"
                 )
@@ -10030,15 +10067,17 @@ public actor EventStore {
     private func evictProjection(
         _ victim: WorstProjectionRow
     ) throws {
-        let deleteFTS = try prepare(
-            "DELETE FROM events_fts WHERE rowid = ?1"
-        )
-        sqlite3_bind_int64(deleteFTS, 1, victim.rowID)
-        let ftsRC = sqlite3_step(deleteFTS)
-        sqlite3_finalize(deleteFTS)
-        guard ftsRC == SQLITE_DONE,
-              sqlite3_changes(db) == 1 else {
-            throw EventStoreError.stepFailed("projection FTS eviction failed")
+        if try !projectionSearchIsDegraded() {
+            let deleteFTS = try prepare(
+                "DELETE FROM events_fts WHERE rowid = ?1"
+            )
+            sqlite3_bind_int64(deleteFTS, 1, victim.rowID)
+            let ftsRC = sqlite3_step(deleteFTS)
+            sqlite3_finalize(deleteFTS)
+            guard ftsRC == SQLITE_DONE,
+                  sqlite3_changes(db) == 1 else {
+                throw EventStoreError.stepFailed("projection FTS eviction failed")
+            }
         }
         let deleteRow = try prepare("DELETE FROM events WHERE rowid = ?1")
         sqlite3_bind_int64(deleteRow, 1, victim.rowID)
@@ -14702,7 +14741,9 @@ public actor EventStore {
             }
             let rowIDs = sources.map(\.rowID)
             let rowList = rowIDs.map(String.init).joined(separator: ",")
-            try execute("DELETE FROM events_fts WHERE rowid IN (\(rowList))")
+            if try !projectionSearchIsDegraded() {
+                try execute("DELETE FROM events_fts WHERE rowid IN (\(rowList))")
+            }
             try execute("DELETE FROM events WHERE rowid IN (\(rowList))")
             guard sqlite3_changes(db) == Int32(sources.count) else {
                 throw EventStoreError.stepFailed(
@@ -15811,16 +15852,18 @@ public actor EventStore {
                 }
                 sqlite3_finalize(gap)
 
-                let deleteFTS = try prepare(
-                    "DELETE FROM events_fts WHERE rowid IN (SELECT rowid FROM events WHERE journal_block_id = ?1)"
-                )
-                sqlite3_bind_int64(deleteFTS, 1, blockID)
-                let ftsRC = sqlite3_step(deleteFTS)
-                sqlite3_finalize(deleteFTS)
-                guard ftsRC == SQLITE_DONE else {
-                    throw EventStoreError.stepFailed(
-                        "journal expiry projection FTS delete failed"
+                if try !projectionSearchIsDegraded() {
+                    let deleteFTS = try prepare(
+                        "DELETE FROM events_fts WHERE rowid IN (SELECT rowid FROM events WHERE journal_block_id = ?1)"
                     )
+                    sqlite3_bind_int64(deleteFTS, 1, blockID)
+                    let ftsRC = sqlite3_step(deleteFTS)
+                    sqlite3_finalize(deleteFTS)
+                    guard ftsRC == SQLITE_DONE else {
+                        throw EventStoreError.stepFailed(
+                            "journal expiry projection FTS delete failed"
+                        )
+                    }
                 }
                 let deleteProjection = try prepare(
                     "DELETE FROM events WHERE journal_block_id = ?1"
@@ -17289,6 +17332,9 @@ public actor EventStore {
         guard !trimmed.isEmpty else { return false }
         let phrase = "\"" + trimmed.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         return try withVerifiedExactReadSnapshot { _ in
+            guard try !projectionSearchIsDegraded() else {
+                throw EventStoreError.storageNotReady("projection FTS is degraded; presence is unknown")
+            }
             let statement = try prepare(
                 """
                 SELECT 1 FROM events e
@@ -17329,6 +17375,7 @@ public actor EventStore {
         // J/result lease safely covers the compact 100-row page.
         let boundedLimit = Int32(min(requestedLimit, 100))
         return try withVerifiedExactReadSnapshot { generation in
+            let searchIndexDegraded = try projectionSearchIsDegraded()
             let truth = try retainedWindowTruth(
                 requestedSince: since,
                 requestedUntil: until,
@@ -17422,6 +17469,7 @@ public actor EventStore {
                             resourceLimitedRecords:
                                 truth.gaps.resourceLimitedRecords + 1
                         ),
+                        searchIndexDegraded: searchIndexDegraded,
                         ownershipLeases: []
                     )
                 }
@@ -17440,22 +17488,24 @@ public actor EventStore {
                     ORDER BY e.timestamp DESC
                     LIMIT ?4
                     """
-                rows = try queryEventsStrict(sql: ftsSQL, bindings: [
-                    (1, .text(phraseQuery)),
-                    (2, .double(sinceTs)),
-                    (3, .double(untilTs)),
-                    (4, .int(boundedLimit)),
-                ])
-                if rows.isEmpty,
-                   !trimmed.contains(where: {
-                       !$0.isLetter && !$0.isNumber
-                   }) {
+                if !searchIndexDegraded {
                     rows = try queryEventsStrict(sql: ftsSQL, bindings: [
-                        (1, .text(trimmed)),
+                        (1, .text(phraseQuery)),
                         (2, .double(sinceTs)),
                         (3, .double(untilTs)),
                         (4, .int(boundedLimit)),
                     ])
+                    if rows.isEmpty,
+                       !trimmed.contains(where: {
+                           !$0.isLetter && !$0.isNumber
+                       }) {
+                        rows = try queryEventsStrict(sql: ftsSQL, bindings: [
+                            (1, .text(trimmed)),
+                            (2, .double(sinceTs)),
+                            (3, .double(untilTs)),
+                            (4, .int(boundedLimit)),
+                        ])
+                    }
                 }
                 if rows.isEmpty {
                     let likePattern = "%"
@@ -17514,6 +17564,7 @@ public actor EventStore {
                     resourceLimitedRecords:
                         truth.gaps.resourceLimitedRecords + resourceGap
                 ),
+                searchIndexDegraded: searchIndexDegraded,
                 ownershipLeases: rows.isEmpty
                     ? [] : resultLease.map { [$0] } ?? []
             )
@@ -17951,15 +18002,17 @@ public actor EventStore {
                     }
                 }
 
-                let fts = try prepare(ftsSQL)
-                bind(fts)
-                let ftsRC = sqlite3_step(fts)
-                sqlite3_finalize(fts)
-                guard ftsRC == SQLITE_DONE else {
-                    try throwLatchedStoragePressureIfPresent(resultCode: ftsRC)
-                    throw EventStoreError.stepFailed("event FTS delete failed")
-                }
+                if try !projectionSearchIsDegraded() {
+                    let fts = try prepare(ftsSQL)
+                    bind(fts)
+                    let ftsRC = sqlite3_step(fts)
+                    sqlite3_finalize(fts)
+                    guard ftsRC == SQLITE_DONE else {
+                        try throwLatchedStoragePressureIfPresent(resultCode: ftsRC)
+                        throw EventStoreError.stepFailed("event FTS delete failed")
+                    }
 
+                }
                 let events = try prepare(eventsSQL)
                 bind(events)
                 let eventsRC = sqlite3_step(events)
@@ -19714,17 +19767,19 @@ public actor EventStore {
                     )
                 }
 
-                let fts = try prepare(deleteFTS)
-                bindChunk(fts)
-                let ftsRC = sqlite3_step(fts)
-                sqlite3_finalize(fts)
-                guard ftsRC == SQLITE_DONE else {
-                    try throwLatchedStoragePressureIfPresent(resultCode: ftsRC)
-                    throw EventStoreError.stepFailed(
-                        "rollUp FTS prune failed: \(String(cString: sqlite3_errmsg(db)))"
-                    )
-                }
+                if try !projectionSearchIsDegraded() {
+                    let fts = try prepare(deleteFTS)
+                    bindChunk(fts)
+                    let ftsRC = sqlite3_step(fts)
+                    sqlite3_finalize(fts)
+                    guard ftsRC == SQLITE_DONE else {
+                        try throwLatchedStoragePressureIfPresent(resultCode: ftsRC)
+                        throw EventStoreError.stepFailed(
+                            "rollUp FTS prune failed: \(String(cString: sqlite3_errmsg(db)))"
+                        )
+                    }
 
+                }
                 let events = try prepare(deleteEvents)
                 bindChunk(events)
                 let eventsRC = sqlite3_step(events)
@@ -20306,6 +20361,7 @@ public actor EventStore {
     @discardableResult
     func recoverExhaustedFTSIndexIfNeeded() throws -> Bool {
         guard let db = db, !isReadOnly else { return false }
+        guard (try? projectionSearchIsDegraded()) == false else { return false }
         guard let segments = liveFTSSegmentCount(),
               segments >= Self.ftsSegmentRecoveryThreshold else { return false }
 
@@ -20316,6 +20372,9 @@ public actor EventStore {
             estimatedBytes: storageTransactionReserveBytes,
             maintenance: true
         ) {
+            guard try !projectionSearchIsDegraded() else {
+                throw EventStoreError.storageNotReady("projection FTS is disabled")
+            }
             let rc = sqlite3_exec(
                 db,
                 "INSERT INTO events_fts(events_fts) VALUES('rebuild')",
@@ -20357,6 +20416,7 @@ public actor EventStore {
     @discardableResult
     public func mergeFTS(pages: Int = 1000) async -> Bool {
         guard let db = db, !isReadOnly else { return false }
+        guard (try? projectionSearchIsDegraded()) == false else { return false }
         // rc.34: bounded merge cannot rescue an index that has already run out
         // of segids — it needs one itself and fails with SQLITE_FULL. Measured
         // against the real schema, ordinary batched ingestion produces roughly
@@ -20384,6 +20444,9 @@ public actor EventStore {
                 estimatedBytes: plan.estimatedTransactionBytes,
                 maintenance: true
             ) {
+                guard try !projectionSearchIsDegraded() else {
+                    throw EventStoreError.storageNotReady("projection FTS is disabled")
+                }
                 let rc = sqlite3_exec(db, sql, nil, nil, nil)
                 guard rc == SQLITE_OK else {
                     _ = latchStoragePressureIfPresent(resultCode: rc)
@@ -20427,6 +20490,7 @@ public actor EventStore {
     @discardableResult
     public func optimizeFTS() async -> Bool {
         guard let db = db, !isReadOnly else { return false }
+        guard (try? projectionSearchIsDegraded()) == false else { return false }
         // Rate-limit the larger maintenance quantum so ordinary bounded merges
         // retain their normal cadence without monopolizing the actor.
         let now = Date()
@@ -20452,6 +20516,9 @@ public actor EventStore {
                 estimatedBytes: plan.estimatedTransactionBytes,
                 maintenance: true
             ) {
+                guard try !projectionSearchIsDegraded() else {
+                    throw EventStoreError.storageNotReady("projection FTS is disabled")
+                }
                 let sql = "INSERT INTO events_fts(events_fts, rank) VALUES('merge', \(plan.pages))"
                 let rc = sqlite3_exec(db, sql, nil, nil, nil)
                 guard rc == SQLITE_OK else {

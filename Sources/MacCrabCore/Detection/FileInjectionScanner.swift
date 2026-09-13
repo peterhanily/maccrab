@@ -9,8 +9,9 @@
 import Foundation
 import os.log
 
-/// Scans UTF-8 text files for invisible Unicode, bidi overrides, and Unicode
-/// tag characters. This is not a PDF/Office parser and does not claim to find
+/// Scans UTF-8 text files for suspicious invisible Unicode, bidi overrides, and
+/// Unicode tags outside supported emoji sequences. Findings identify structural
+/// carriers, not malicious intent. This is not a PDF/Office parser or a detector of
 /// image, archive, metadata, homoglyph, base64, or split-token obfuscation.
 public actor FileInjectionScanner {
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "file-injection")
@@ -54,8 +55,10 @@ public actor FileInjectionScanner {
 
     public struct ScanResult: Sendable {
         public let filePath: String
+        /// Compatibility name: true means suspicious structure was found, not
+        /// that prompt injection or malicious intent has been confirmed.
         public let isInjected: Bool
-        public let confidence: Int  // 0-99
+        public let confidence: Int  // Uncalibrated heuristic score, not a probability.
         public let threats: [String]
         public let severity: Severity
     }
@@ -91,7 +94,7 @@ public actor FileInjectionScanner {
         return scanEligibleFile(path: path)
     }
 
-    /// Scan a file for hidden prompt injection.
+    /// Scan a file for possible hidden-text carriers.
     /// Direct/manual entry point. Returns nil if the file should not be scanned,
     /// is unchanged since its last complete scan, or carries no supported signal.
     public func scanFile(path: String) async -> ScanResult? {
@@ -123,31 +126,66 @@ public actor FileInjectionScanner {
         guard !snapshot.data.isEmpty,
               let content = String(data: snapshot.data, encoding: .utf8) else { return nil }
 
-        // Native structural checks. These used to sit behind a
-        // `guard isAvailable else { return nil }` that probed for an external
-        // `forensicate` CLI — a package that does not exist on PyPI under any
-        // name — so all three of these correct, self-contained detections were
-        // unreachable on every install. They are now the whole scanner.
+        // Unicode controls also carry ordinary emoji and multilingual text.
+        // Exempt their bounded, recognized contexts before counting signals.
         var quickThreats: [String] = []
-
-        // Check for invisible unicode (zero-width chars)
-        let invisibleScalars: Set<UInt32> = [0x200B, 0x200C, 0x200D, 0xFEFF, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064]
-        let invisibleCount = content.unicodeScalars.filter { invisibleScalars.contains($0.value) }.count
+        let scalars = content.unicodeScalars
+        var invisibleCount = 0
+        var bidiCount = 0
+        var tagCount = 0
+        // false = embedding, true = isolate. This is a bounded pairing check,
+        // not an implementation of the Unicode bidirectional display algorithm.
+        var bidiStack: [Bool] = []
+        var index = scalars.startIndex
+        while index < scalars.endIndex {
+            let value = scalars[index].value
+            if value == 0x1F3F4, let end = Self.flagTagEnd(in: scalars, at: index) {
+                index = end
+                continue
+            }
+            switch value {
+            case 0x200C, 0x200D:
+                if !(value == 0x200D && Self.isEmojiJoiner(in: scalars, at: index)),
+                   !Self.isShapingJoiner(in: scalars, at: index) {
+                    invisibleCount += 1
+                }
+            case 0xFEFF:
+                if index != scalars.startIndex { invisibleCount += 1 }
+            case 0x200B, 0x2060...0x2064:
+                invisibleCount += 1
+            case 0x202A, 0x202B, 0x202D, 0x202E, 0x2066...0x2068:
+                if value == 0x202D || value == 0x202E { bidiCount += 1 }
+                if bidiStack.count < 125 {
+                    bidiStack.append(value >= 0x2066)
+                } else {
+                    bidiCount += 1
+                }
+            case 0x202C:
+                if bidiStack.last == false { bidiStack.removeLast() }
+                else { bidiCount += 1 }
+            case 0x2069:
+                if let isolate = bidiStack.lastIndex(of: true) {
+                    bidiStack.removeSubrange(isolate...)
+                } else { bidiCount += 1 }
+            case 0x0A, 0x0D, 0x2029:
+                bidiCount += bidiStack.count
+                bidiStack.removeAll(keepingCapacity: true)
+            case 0xE0000...0xE007F:
+                tagCount += 1
+            default:
+                break
+            }
+            scalars.formIndex(after: &index)
+        }
+        bidiCount += bidiStack.count
         if invisibleCount >= 3 {
-            quickThreats.append("invisible-unicode: \(invisibleCount) zero-width characters detected")
+            quickThreats.append("invisible-unicode: \(invisibleCount) zero-width characters outside recognized text contexts")
         }
-
-        // Check for bidi overrides (Trojan Source)
-        let bidiScalars: Set<UInt32> = [0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069]
-        let bidiCount = content.unicodeScalars.filter { bidiScalars.contains($0.value) }.count
         if bidiCount > 0 {
-            quickThreats.append("bidi-override: \(bidiCount) bidirectional control characters (Trojan Source)")
+            quickThreats.append("bidi-override: \(bidiCount) override or unbalanced directional controls")
         }
-
-        // Check for tag characters (U+E0000-E007F range for ASCII smuggling)
-        let hasTagChars = content.unicodeScalars.contains { $0.value >= 0xE0000 && $0.value <= 0xE007F }
-        if hasTagChars {
-            quickThreats.append("tag-chars: Unicode tag characters detected (ASCII smuggling)")
+        if tagCount > 0 {
+            quickThreats.append("tag-chars: \(tagCount) Unicode tags outside supported emoji flags")
         }
 
         // Cache only after a complete, stable, UTF-8 snapshot was evaluated.
@@ -156,13 +194,12 @@ public actor FileInjectionScanner {
 
         guard !quickThreats.isEmpty else { return nil }
 
-        // Confidence scales with how many independent structural signals agree.
-        // Tag chars and bidi overrides have no legitimate use in these file types,
-        // so two or more concurrent signals is a strong result.
-        let confidence = quickThreats.count > 2 ? 80 : (quickThreats.count > 1 ? 65 : 50)
-        let severity: Severity = confidence >= 80 ? .critical : confidence >= 50 ? .high : .medium
+        // Co-occurring structural signals raise an uncalibrated score; neither
+        // scalar presence nor this score establishes an instruction or intent.
+        let confidence = quickThreats.count > 2 ? 65 : (quickThreats.count > 1 ? 50 : 35)
+        let severity: Severity = quickThreats.count > 1 ? .high : .medium
 
-        logger.warning("File injection detected in \(path): \(quickThreats.joined(separator: "; "))")
+        logger.warning("Possible hidden-text carrier in \(path): \(quickThreats.joined(separator: "; "))")
 
         return ScanResult(
             filePath: path,
@@ -171,6 +208,79 @@ public actor FileInjectionScanner {
             threats: quickThreats,
             severity: severity
         )
+    }
+
+    /// UTS #51 ED-16: a ZWJ joins emoji elements. Recognize native Unicode
+    /// emoji properties, optional VS16, and valid modifier bases, with constant
+    /// lookaround. This checks element syntax, not the full RGI sequence list;
+    /// ASCII keycap bases, regional indicators, and tags are not exempted here.
+    private static func isEmojiJoiner(in scalars: String.UnicodeScalarView, at index: String.Index) -> Bool {
+        let after = scalars.index(after: index)
+        guard index > scalars.startIndex, after < scalars.endIndex else { return false }
+        func isBase(_ scalar: Unicode.Scalar) -> Bool {
+            scalar.value > 0x7F && scalar.properties.isEmoji && !scalar.properties.isEmojiModifier
+                && !(0x1F1E6...0x1F1FF).contains(scalar.value)
+        }
+        guard isBase(scalars[after]) else { return false }
+        var before = scalars.index(before: index)
+        let suffix = scalars[before]
+        if suffix.value == 0xFE0F || suffix.properties.isEmojiModifier {
+            guard before > scalars.startIndex else { return false }
+            scalars.formIndex(before: &before)
+            if suffix.properties.isEmojiModifier {
+                return scalars[before].properties.isEmojiModifierBase
+            }
+        }
+        return isBase(scalars[before])
+    }
+
+    /// Joiners within common shaping scripts are typography, not evidence of
+    /// injection. Support Arabic/Syriac, Indic, Myanmar, Khmer, and Mongolian
+    /// letters, with at most eight combining marks on either side. Isolated,
+    /// repeated, and ASCII-interleaved joiners still contribute to the signal.
+    private static func isShapingJoiner(in scalars: String.UnicodeScalarView, at index: String.Index) -> Bool {
+        func hasLetter(direction: Int) -> Bool {
+            var cursor = index
+            for _ in 0...8 {
+                if direction < 0 {
+                    guard cursor > scalars.startIndex else { return false }
+                    scalars.formIndex(before: &cursor)
+                } else {
+                    scalars.formIndex(after: &cursor)
+                    guard cursor < scalars.endIndex else { return false }
+                }
+                let scalar = scalars[cursor]
+                switch scalar.properties.generalCategory {
+                case .nonspacingMark, .spacingMark, .enclosingMark:
+                    continue
+                default:
+                    let value = scalar.value
+                    return scalar.properties.isAlphabetic && (
+                        (0x0600...0x0DFF).contains(value) || (0x1000...0x109F).contains(value)
+                        || (0x1780...0x18AF).contains(value)
+                    )
+                }
+            }
+            return false
+        }
+        return hasLetter(direction: -1) && hasLetter(direction: 1)
+    }
+
+    /// Unicode 17 RGI_Emoji_Tag_Sequence contains exactly gbeng, gbsct, gbwls:
+    /// https://www.unicode.org/Public/17.0.0/emoji/emoji-sequences.txt
+    /// Consume only BLACK FLAG + five exact tag letters + CANCEL TAG. A flag
+    /// prefix never grants an exemption to an arbitrary hidden tag payload.
+    private static func flagTagEnd(in scalars: String.UnicodeScalarView, at index: String.Index) -> String.Index? {
+        var cursor = scalars.index(after: index)
+        var word: UInt64 = 0
+        for _ in 0..<5 {
+            guard cursor < scalars.endIndex, (0xE0061...0xE007A).contains(scalars[cursor].value) else { return nil }
+            word = (word << 8) | UInt64(scalars[cursor].value - 0xE0000)
+            scalars.formIndex(after: &cursor)
+        }
+        guard word == 0x6762656E67 || word == 0x6762736374 || word == 0x6762776C73,
+              cursor < scalars.endIndex, scalars[cursor].value == 0xE007F else { return nil }
+        return scalars.index(after: cursor)
     }
 
     private func touchCache(path: String, identity: SnapshotIdentity) {

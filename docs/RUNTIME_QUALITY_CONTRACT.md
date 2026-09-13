@@ -15,7 +15,12 @@ thresholds, not independently accepted workstation budgets. Earlier write and
 GUI thresholds were changed using observations of the candidate series; a
 passing result cannot validate that choice. Release acceptance still requires
 a recorded workload, independently justified user-facing resource targets, and
-measurements of the actual statistics the validator enforces.
+measurements of the actual statistics the validator enforces. Live qualification
+now requires an accepted, candidate-source-bound
+[`RELEASE_RESOURCE_BASELINE.json`](RELEASE_RESOURCE_BASELINE.json). Its initial
+state is explicitly unmeasured and cannot pass. The three candidate-derived
+write/GUI constants are retained only for deterministic offline fixtures.
+See [the reference measurement procedure](RESOURCE_BASELINE.md).
 
 ## Feature contract
 
@@ -49,8 +54,9 @@ Features without a complete contract remain experimental and off by default.
   bounded lanes. Queue overflow is a last-resort fault, not an ordinary form of
   file-event sampling.
 - Repeated low-value observations are coalesced only after any rule that needs
-  their individual order/count has evaluated them. Every semantic admission or
-  coalescing reason has fixed-cardinality source, class, and reason counters.
+  their individual order/count has evaluated them. Source tests check
+  conservative admission and coalescing policies. The installed gate currently
+  has no complete histogram of semantic admission or coalescing reasons.
 - Detection continues in memory when optional persistence is unavailable. The
   product must say which history/evidence features degraded; it must not report
   the detector as wholly healthy.
@@ -224,15 +230,15 @@ reference Mac using the recorded normal-plus-burst workload:
 |---|---|
 | Process | One engine PID and boot identity for the epoch; monotonic engine uptime at least 250 seconds at t0 and consistent with captured heartbeat intervals. Every observation also binds the native process-start identity and running CDHash to an attested arm64 or x86_64 system-extension slice, with an unchanged executable path and candidate file hash. Signed version/build checks use actual bounded endpoint inspection times. No crash, watchdog exit, or relaunch. |
 | Conservation | Offered equals completed + queued + in-flight + explicitly shed at every lane and persistence boundary. |
-| Fixed workload | The minute-5 burst must move and fully drain both ingress and event-persistence lanes with zero persistence shed. The drain deadline is offset 780 seconds. At flow-through boundaries, a queue may remain at most 512, non-growing, with positive completions and zero in-flight work; transient queues must be empty at t0. Its measured peak must reach at least 1,274 combined offered events/s, the previously observed failure-state rate; a conserving idle collector does not pass. |
+| Fixed workload | The minute-5 burst must move and fully drain both ingress and event-persistence lanes with zero persistence shed and positive new persisted outcomes in each lane. The drain deadline is offset 780 seconds. At flow-through boundaries, a queue may remain at most 512, non-growing, with positive completions and zero in-flight work; transient queues must be empty at t0. The nearest heartbeats bracketing actual process execution must show at least 38,220 combined offered events and a mean of at least 1,274/s over independently measured workload duration. Bracketing counts include ambient traffic; leading/trailing slack and the heartbeat peak remain reported evidence. |
 | Priority fidelity | Zero priority-lane, kernel, callback-copy, or upstream collector loss. |
-| File fidelity | Zero unclassified queue loss. Semantic rejects/coalesces must be attributable to a tested reason that is conservative against the complete enabled rule corpus. |
+| File fidelity | Zero unclassified queue loss. Semantic policy coverage is source-test-only, bound to the successful preinstall clean-CI receipt and a recomputed source rule-corpus digest. Installed semantic rejects/coalesces are not certified by this gate. |
 | Correlation continuity | At least 900 seconds of sequence recovery coverage and zero checkpoint/journal shed. The source-bound phase-1 clean CI exercises restart, rule reload, expiry, and rule-hash mismatch semantics; the installed engine must also log a successful non-empty SIGHUP reload with no rejection/error and survive later samples. The runtime report does not claim a live restart it did not perform. |
-| Event storage | No unreachable-budget fault and no prune/VACUUM/refill loop. Search-tier gaps, if any, reconcile exactly and are visible. |
+| Event storage | No unreachable-budget fault and no prune/VACUUM/refill loop. Search-tier gaps, if any, reconcile exactly and are visible. The search index must be verified healthy at every sample: `search_index_degraded=false` and `search_index_reason=healthy`. Pending FTS repair remains visible as incomplete search evidence and cannot qualify a release. |
 | TraceGraph | Hard-writable and foreground-mutation-accepting at every captured observation (the 99% sample-fraction floors permit no failed sample in the fixed 31-sample epoch), no mutation/ingest shed, no failed event/batch/row epoch delta, and no recovery oscillation. The bounded recovery-writer ledger must conserve at every sample; its high-watermark stays within the fixed limit, saturation is false and its cumulative counter remains zero throughout, completed and live waits never exceed five seconds, and the final waiter count/oldest wait are zero. Batch/row/observation/coalescing/physical-suppression accounting remains exact. The rule-neutral minute-5 burst must produce positive equal physical-suppressed event and row deltas. Proof-safe suppression is separate from loss and monotonic; no unmeasured coalescing-bound assertion is accepted. |
 | TraceStore | Agent Traces and the loopback receiver are enabled. `traces.db` is available, unblocked, below its writer-admission threshold and free-space floor, and not recovering at every sample. A fixed OTLP span must increase and fully drain the real TraceStore ingest ledger with zero shed. |
-| Disk writes | Provisional engine average at most 8 MiB/s over the epoch; every captured interval and every sample-aligned span up to 60 seconds at most 48 MiB/s; no macOS disk-writes diagnostic. |
-| CPU | Engine average at most 0.50 CPU core over the epoch. Provisional background GUI nearest-rank p95 of `ps pcpu` snapshots at most 20% of one core, including the prescribed burst. Exactly one running candidate GUI must be present at every sample with unchanged PID, native process-start identity, executable path, candidate file hash and kernel-reported running CDHash. The running CDHash must identify an attested arm64 or x86_64 candidate slice; signed version/build identity is checked at the epoch boundaries using actual bounded inspection timestamps. Missing or ambiguous GUI presence fails; measured zero CPU from a verified present GUI is valid. |
+| Disk writes | Engine epoch-average writes and the maximum of every captured interval and sample-aligned span up to 60 seconds must remain within independently reviewed reference-host budgets; no macOS disk-writes diagnostic. Both baseline and candidate use these same statistics. Missing reference measurements fail release qualification. |
+| CPU | Engine average at most 0.50 CPU core over the epoch. Background GUI nearest-rank p95 of `ps pcpu` snapshots, including the prescribed burst, must remain within its independently reviewed reference-host budget. Exactly one running candidate GUI must be present at every sample with unchanged PID, native process-start identity, executable path, candidate file hash and kernel-reported running CDHash. The running CDHash must identify an attested arm64 or x86_64 candidate slice; signed version/build identity is checked at the epoch boundaries using actual bounded inspection timestamps. Missing or ambiguous GUI presence fails; measured zero CPU from a verified present GUI is valid. |
 | Memory | Engine physical footprint (phys_footprint) at most 450 MiB and growth from minute 5 to minute 15 at most 64 MiB. |
 | Disk safety | Every SQLite family stays beneath its exact DB+WAL+SHM cap and preserves the configured free-space floor. |
 | Rules | Sealed rules synchronize before readers, corpus parity holds, and ordinary launch produces no administrator-password flow. |
@@ -241,6 +247,14 @@ reference Mac using the recorded normal-plus-burst workload:
 | Evidence | Candidate report binds source commit/tree, DMG SHA-256, signing/notarization, payload inventory, and the complete host measurements above. |
 
 ### Machine-readable evidence
+
+The file-fidelity row declares `semantic_validation_scope: source-tests-only`.
+Its `source_rule_corpus_sha256` binds the reviewed checkout's `Rules` tree and
+is recomputed during verification. The preinstall clean-CI receipt covers the
+source policy tests and corpus linting; running/sealed corpus identity is
+checked separately by the Rules row. No runtime semantic-reason histogram is
+produced or inferred. Legacy `complete_rule_corpus_evaluated` and
+`semantic_reasons` attestations are rejected, including an empty reason list.
 
 `scripts/candidate-qualification.py` is the executable form of this table. GUI CPU percentages are sampled `ps` observations, not interval CPU-counter deltas. Per-sample native running-image identity, file hashes and endpoint signing checks bind the GUI evidence to the candidate. This also distinguishes an older process still running after its app was replaced on disk. The checks do not attest which screen is visible or prove interaction, continuous between-sample presence, or sub-interval CPU/write peaks. The operator must also exercise the packaged dashboard as prescribed. Sample-aligned rolling write checks reuse the captured cumulative deltas; they are not arbitrary continuous sliding windows.
 `release.sh` records the inspected candidate at

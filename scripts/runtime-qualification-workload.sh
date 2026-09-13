@@ -4,48 +4,23 @@ set -euo pipefail
 
 RUN_ID=""
 ALERT_ONLY=0
-# Sized from MEASURED loop throughput, not arithmetic.
+# Retained bounded workload: prior-host measurements put 3,000 iterations at
+# about 49,200 offered events and 22 seconds. That is provenance, not a promise
+# of candidate throughput or a fixed events-per-iteration conversion.
 #
-# Measured on this host: 500 iterations take 2.26s (221 iterations/s), and one
-# iteration offers ~7 events -- an exec of /usr/bin/true, an exec of /bin/mv,
-# and the create/write/close/rename file path. That is ~1,546 offered events/s,
-# already above the 1,274/s floor the gate requires.
+# The recorder now requires at least 38,220 offered events across the nearest
+# heartbeats bracketing actual process execution, and at least 1,274 offered
+# events per independently measured burst second. The volume preserves the
+# old 1,274/s x 30s minimum burden without making success depend on heartbeat
+# phase. The heartbeat interval peak is reported, not used for acceptance.
+# Bracketing counters include ambient host traffic; the report exposes the
+# leading and trailing heartbeat slack rather than claiming exact attribution.
 #
-# The floor is a rate measured over ONE 30s sample interval, so what matters is
-# how much of that interval the burst SPANS, not how fast it runs. The previous
-# 2,000 iterations finished in 9.1s and offered ~14,000 events, which the 30s
-# window averages down to ~467/s -- comfortably under the floor despite the loop
-# running above it the whole time. Confirmed against the recorder capture:
-# file+10,621 priority+3,556 = 14,177 events, a 473/s interval rate.
-#
-# The ~7 events/iteration above was wrong, and 6,000 iterations did NOT offer
-# ~42,000 events. Measured on an installed host (build 1.22.0.1788459825) by
-# reading offered_by_lane across the burst:
-#   N=6000 -> ~98,290 offered   N=3600 -> 58,998   N=2700 -> 44,931
-# That is a steady 16.4 events/iteration, not 7 -- so 6,000 offered 2.3x its
-# intended load and took ~690s to drain.
-#
-# THE UPPER BOUND IS DRAINABILITY, NOT CAPACITY. (This paragraph was deleted
-# when the count went 2,000 -> 6,000; that deletion is what let the two
-# constants drift apart.) Every lane must be drained at the fixed boundary
-# BURST_DRAIN_OFFSET_SECONDS after the burst starts, so offering more than the
-# engine can retire in that window fails the run no matter how much headroom
-# the stream caps have. Measured post-burst retirement is ~196 ev/s (the tail is
-# priority-bound; the ~400 ev/s seen mid-burst is the fast file lane and does
-# not govern time-to-empty).
-#
-# Prior-host measurements put 3,000 iterations at ~49,200 offered events and
-# ~22 seconds. Concentrated in one 30-second interval that is ~1,640/s; this
-# does not guarantee the 1,274/s floor when workload timing or heartbeat phase
-# splits the burst across intervals. N=2,700 previously measured only 1,119/s.
-# The current checkpoint is offset 780: 480 seconds after launch at 300, or
-# 390 seconds after the maximum workload deadline at 390. The older ~196 ev/s
-# retirement observation is provenance, not a guaranteed current service rate.
-# Measure actual interval offered rates and each lane's backlog/completions on
-# the candidate; the retained count and checkpoint are provisional load policy.
-#
-# These two bounds are one budget. If either the floor or the engine's write
-# path changes, re-measure BOTH this and BURST_DRAIN_OFFSET_SECONDS together.
+# Load and retirement are one budget: every lane must be drained at offset 780,
+# 480 seconds after launch at 300. Prior 6,000-iteration runs offered ~98,290
+# events and took ~690 seconds to drain; increasing the load count alone can
+# therefore make this prescribed workload impossible to retire on time.
+# Re-measure both load and drainability before changing this count or boundary.
 BURST_ITERATIONS=3000
 
 usage() {

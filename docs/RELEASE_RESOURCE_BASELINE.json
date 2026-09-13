@@ -1,0 +1,12 @@
+{
+  "schema": "com.maccrab.release-resource-baseline.v1",
+  "status": "awaiting-reference-measurement",
+  "reference": {
+    "version": "1.21.5",
+    "source_commit": "4f9ab9b35a80aba3f11cc99e7c60d10cc3e6d6eb"
+  },
+  "reason": "No installed v1.21.5 reference-host resource capture has been completed. Candidate-derived ceilings cannot certify this release.",
+  "measurements": null,
+  "limits": null,
+  "acceptance": null
+}

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import ctypes
 import datetime as dt
 import hashlib
@@ -17,6 +18,7 @@ import pathlib
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -469,6 +471,8 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
             },
             "event_search_projection": {
                 "query_available": True,
+                "search_index_degraded": False,
+                "search_index_reason": "healthy",
                 "mutation_generation": counter_value,
                 "requested_duration_seconds": 3_600,
                 "effective_duration_seconds": min(
@@ -804,7 +808,9 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
             "alert_executable": workload_alert_path,
             "bulk_path": workload_bulk_path,
             "started_at": iso(qualification.BURST_START_OFFSET_SECONDS),
-            "completed_at": iso(360),
+            "completed_at": iso(322),
+            "timing_source": qualification.WORKLOAD_TIMING_SOURCE,
+            "elapsed_monotonic_seconds": 22.0,
             "deadline_offset_seconds": qualification.BURST_END_OFFSET_SECONDS,
             "drain_offset_seconds": qualification.BURST_DRAIN_OFFSET_SECONDS,
             "sequence_path_isolation":
@@ -834,9 +840,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
         "installed_gui_end": {**gui_identity, "inspection_started_at": iso(900), "recorded_at": iso(900)},
         "crash_count": 0,
         "watchdog_exit_count": 0,
-        "complete_rule_corpus_evaluated": True,
-        "rule_corpus_sha256": "c" * 64,
-        "semantic_reasons": [],
+        "source_rule_corpus_sha256": qualification.rule_corpus_digest(ROOT),
         "prune_vacuum_refill_loop_count": 0,
         "macos_disk_writes_diagnostic_count": 0,
         "rules": {
@@ -1235,6 +1239,561 @@ class CandidateQualificationTests(unittest.TestCase):
             allow_test_fixture=True,
         )
 
+    def resource_baseline_fixture(self) -> dict:
+        # A 1 KiB/s background, one extra 60 KiB in the 300..330 interval,
+        # and two GUI CPU outliers distinguish mean/window/p95 statistics.
+        identities = {}
+        endpoints = {}
+        for role in ("engine", "gui"):
+            image = qualification.RESOURCE_REFERENCE_IMAGES[role]
+            identities[role] = copy.deepcopy(self.runtime["samples"][0][role + "_process"])
+            identities[role].update(
+                executable_sha256=image["sha256"], running_cdhash=image["cdhashes"]["arm64"]
+            )
+            endpoints[role] = copy.deepcopy(self.runtime["installed_" + role])
+            for endpoint in endpoints[role].values():
+                endpoint.update(
+                    **identities[role], cdhash=image["cdhashes"]["arm64"],
+                    cdhashes=copy.deepcopy(image["cdhashes"]),
+                    bundle_version="1.21.5", build_version="1.21.5.1018",
+                )
+        completion = copy.deepcopy(self.runtime["recorder_probe_evidence"]["workload"])
+        completion["output"] = completion["output_tail"]
+        return {
+            "schema": qualification.RESOURCE_BASELINE_SCHEMA,
+            "status": "accepted",
+            "reference": {
+                "version": "1.21.5", "source_commit": qualification.RESOURCE_REFERENCE_COMMIT,
+                "dmg_sha256": qualification.RESOURCE_REFERENCE_DMG_SHA256,
+                "engine_sha256": qualification.RESOURCE_REFERENCE_IMAGES["engine"]["sha256"],
+                "gui_sha256": qualification.RESOURCE_REFERENCE_IMAGES["gui"]["sha256"],
+            },
+            "host": copy.deepcopy(self.runtime["host"]),
+            "host_end": copy.deepcopy(self.runtime["host"]),
+            "recorder": {
+                "path": "scripts/candidate-qualification.py",
+                "sha256": qualification.sha256_file(MODULE_PATH),
+            },
+            "installed_engine": endpoints["engine"], "installed_gui": endpoints["gui"],
+            "engine_uptime_at_start_seconds": 600.0,
+            "uptime_source": "mach_absolute_time-ri_proc_start_abstime",
+            "workload": {
+                "recording_source_root": str(ROOT),
+                "script_sha256": qualification.sha256_file(ROOT / qualification.RUNTIME_WORKLOAD_EXECUTORS[0]),
+                "executors": copy.deepcopy(self.runtime["workload"]["executors"]),
+                "burst_start_offset_seconds": 300, "iterations": 3000,
+                "sample_interval_seconds": 30, "completion": completion,
+            },
+            "statistics": copy.deepcopy(qualification.RESOURCE_STATISTICS),
+            "samples": [
+                {
+                    "offset_seconds": offset, "recorded_at": iso(offset), "captured_at": iso(offset),
+                    "engine_disk_write_bytes_total": 1_000_000 + offset * 1024 + (61_440 if offset >= 330 else 0),
+                    "gui_background_cpu_percent": {300: 7.0, 330: 20.0}.get(offset, 2.0),
+                    "engine_process": copy.deepcopy(identities["engine"]),
+                    "gui_process": copy.deepcopy(identities["gui"]),
+                } for offset in range(0, 901, 30)
+            ],
+            "measurements": {
+                "engine_average_write_bytes_per_second": 983_040 / 900,
+                "engine_max_window_write_bytes_per_second": 3072.0,
+                "gui_p95_percent": 7.0,
+            },
+            "acceptance": {
+                "reviewer": "fixture release owner", "accepted_at": iso(960),
+                "rationale": "Reviewed reference-host budgets before candidate construction.",
+            },
+            "limits": {
+                "engine_average_write_bytes_per_second": 1500.0,
+                "engine_max_window_write_bytes_per_second": 4096.0,
+                "gui_p95_percent": 10.0,
+            },
+        }
+
+    def validate_resource_baseline(self, baseline: dict, *, source_root: pathlib.Path = ROOT) -> dict:
+        return qualification.validate_resource_baseline(
+            baseline, source_root=source_root, host=self.runtime["host"]
+        )
+
+    def run_resource_recorder_control(self, fault: str = "healthy") -> dict:
+        """Run the full recorder with a virtual clock and no native execution."""
+        baseline = self.resource_baseline_fixture()
+        endpoint = {role: copy.deepcopy(baseline["installed_" + role]["start"])
+                    for role in ("engine", "gui")}
+        identity = {role: copy.deepcopy(baseline["samples"][0][role + "_process"])
+                    for role in ("engine", "gui")}
+        if fault == "old_engine_version":
+            endpoint["engine"]["bundle_version"] = "1.21.4"
+        elif fault == "candidate_engine_image":
+            endpoint["engine"]["executable_sha256"] = "a" * 64
+        elif fault == "candidate_gui_image":
+            endpoint["gui"]["executable_sha256"] = "a" * 64
+        original_datetime = dt.datetime
+        base = qualification.parse_time(iso(0), "virtual resource epoch")
+        clock = {"now": 0.0, "timers": []}
+        state = {"workload_started": 0, "workload_closed": 0, "samples": 0}
+        output = self.root / ("recorder-control-" + fault + ".json")
+
+        class VirtualDateTime(original_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return (base + dt.timedelta(seconds=clock["now"])).astimezone(tz)
+
+        class VirtualTimer:
+            def __init__(self, delay, callback):
+                self.deadline = clock["now"] + delay
+                self.callback = callback
+                self.cancelled = False
+
+            def start(self):
+                clock["timers"].append(self)
+
+            def cancel(self):
+                self.cancelled = True
+
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return False
+
+        def advance(seconds):
+            target = clock["now"] + seconds
+            for timer in list(clock["timers"]):
+                if not timer.cancelled and timer.deadline <= target:
+                    clock["now"] = timer.deadline
+                    timer.cancelled = True
+                    timer.callback()
+            clock["now"] = target
+
+        class VirtualWorkload:
+            def __init__(self, command, *, cwd, deadline_seconds):
+                state["workload_started"] += 1
+                state["workload_command"] = list(command)
+                self.started_at = VirtualDateTime.now(dt.timezone.utc)
+                self.completed_at = self.started_at + dt.timedelta(seconds=22)
+                self.elapsed_monotonic_seconds = 22.0
+                self.finished = mock.Mock()
+                self.finished.is_set.side_effect = lambda: VirtualDateTime.now(dt.timezone.utc) >= self.completed_at
+                self.process = mock.Mock(returncode=1 if fault == "workload_failure" else 0)
+                self.error = None
+                run_id = command[-1]
+                alert_path, bulk_path = qualification.workload_paths(run_id)
+                self.stdout = (
+                    f"IDENTITY: run_id={run_id} alert_executable={alert_path} bulk_path={bulk_path}\n"
+                    f"PASS: fixed workload completed run_id={run_id} iterations={qualification.FIXED_WORKLOAD_ITERATIONS} "
+                    "otlp_spans=1 alert_triggers=1 sequence_probes=1\n"
+                )
+                self.stderr = ""
+                if fault == "workload_transcript":
+                    self.stdout += self.stdout.splitlines()[-1] + "\n"
+
+            def close(self):
+                state["workload_closed"] += 1
+
+        def engine_observation(pid):
+            state["samples"] += 1
+            offset = round(clock["now"] - 1)
+            value = {
+                **identity["engine"],
+                "engine_disk_write_bytes_total": 1_000_000 + offset * 1024 + (61_440 if offset >= 330 else 0),
+            }
+            if fault == "process_restart" and offset >= 330:
+                value["process_start_abstime"] += 1
+            return value
+
+        def gui_observation():
+            offset = round(clock["now"] - 1)
+            return {"process": copy.deepcopy(identity["gui"]),
+                    "cpu_percent": {300: 7.0, 330: 20.0}.get(offset, 2.0)}
+
+        def signed_endpoint(role):
+            result = copy.deepcopy(endpoint[role])
+            recorded = VirtualDateTime.now(dt.timezone.utc).isoformat()
+            result.update(inspection_started_at=recorded, recorded_at=recorded)
+            return result
+
+        inventory = [baseline["recorder"], *baseline["workload"]["executors"]]
+        final_inventory = copy.deepcopy(inventory)
+        if fault == "executor_changed":
+            final_inventory[-1]["sha256"] = "f" * 64
+        host_end = copy.deepcopy(baseline["host"])
+        if fault == "host_changed":
+            host_end["power_source"] = "different power source"
+        with contextlib.ExitStack() as stack:
+            patches = (
+                (qualification.platform, "system", {"return_value": "Darwin"}),
+                (qualification, "resource_baseline_executor_inventory", {"side_effect": [inventory, final_inventory]}),
+                (qualification, "installed_runtime_host", {"side_effect": [baseline["host"], host_end]}),
+                (qualification, "installed_engine_identity", {"side_effect": lambda pid: signed_endpoint("engine")}),
+                (qualification, "installed_gui_identity", {"side_effect": lambda pid: signed_endpoint("gui")}),
+                (qualification, "engine_process_observation", {"side_effect": engine_observation}),
+                (qualification, "gui_process_observation", {"side_effect": gui_observation}),
+                (qualification, "resource_baseline_native_uptime_seconds", {"return_value": 249.0 if fault == "cold_engine" else 600.0}),
+                (qualification, "original_user_command", {"side_effect": lambda command: command}),
+                (qualification.secrets, "token_hex", {"return_value": "d" * 32}),
+                (qualification.time, "monotonic", {"side_effect": lambda: clock["now"]}),
+                (qualification.time, "sleep", {"side_effect": advance}),
+                (qualification.threading, "Timer", {"new": VirtualTimer}),
+                (qualification, "TimedWorkload", {"new": VirtualWorkload}),
+                (qualification.dt, "datetime", {"new": VirtualDateTime}),
+            )
+            for owner, name, kwargs in patches:
+                stack.enter_context(mock.patch.object(owner, name, **kwargs))
+            stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
+            try:
+                qualification.command_record_resource_baseline(qualification.argparse.Namespace(
+                    engine_pid=identity["engine"]["pid"], source_root=str(ROOT), output=str(output),
+                ))
+            except qualification.QualificationError as exc:
+                state["failure"] = str(exc)
+        state["document"] = json.loads(output.read_text()) if output.exists() else None
+        state["virtual_elapsed"] = clock["now"]
+        return state
+
+    def test_reference_recorder_produces_only_unaccepted_measurements(self) -> None:
+        state = self.run_resource_recorder_control()
+        self.assertNotIn("failure", state)
+        document = state["document"]
+        self.assertEqual(document["status"], "measured-awaiting-acceptance")
+        self.assertIsNone(document["limits"])
+        self.assertIsNone(document["acceptance"])
+        self.assertEqual([row["offset_seconds"] for row in document["samples"]], list(range(0, 901, 30)))
+        self.assertEqual(document["measurements"], self.resource_baseline_fixture()["measurements"])
+        self.assertEqual(state["virtual_elapsed"], 901)
+        self.assertEqual(state["workload_started"], 1)
+        self.assertEqual(state["workload_closed"], 1)
+        self.assertEqual(qualification.validate_resource_baseline(
+            document, source_root=ROOT, require_acceptance=False), {})
+        with self.assertRaisesRegex(qualification.QualificationError, "not accepted"):
+            qualification.validate_resource_baseline(document, source_root=ROOT)
+
+    def test_reference_recorder_refuses_wrong_installed_images_and_cold_engine_before_workload(self) -> None:
+        for fault in ("old_engine_version", "candidate_engine_image", "candidate_gui_image", "cold_engine"):
+            with self.subTest(fault=fault):
+                state = self.run_resource_recorder_control(fault)
+                self.assertIn("failure", state)
+                self.assertIsNone(state["document"])
+                self.assertEqual(state["samples"], 0)
+                self.assertEqual(state["workload_started"], 0)
+                self.assertEqual(state["virtual_elapsed"], 0)
+
+    def test_reference_recorder_rejects_process_source_host_and_workload_failures(self) -> None:
+        cases = {
+            "process_restart": "process restarted or changed",
+            "executor_changed": "executor bytes changed",
+            "host_changed": "host or power configuration changed",
+            "workload_failure": "successful completion",
+            "workload_transcript": "prescribed completed burst",
+        }
+        for fault, reason in cases.items():
+            with self.subTest(fault=fault):
+                state = self.run_resource_recorder_control(fault)
+                self.assertIn(reason, state.get("failure", ""))
+                self.assertIsNone(state["document"])
+                self.assertEqual(state["workload_started"], 1)
+                self.assertEqual(state["workload_closed"], 1)
+                if fault in ("process_restart", "workload_failure", "workload_transcript"):
+                    self.assertLess(state["samples"], 31)
+
+    def test_reference_recorder_warmup_uses_native_mach_units_and_rejects_future_start(self) -> None:
+        library = mock.Mock()
+        library.mach_absolute_time.return_value = 48_000_000_000
+        with mock.patch.object(qualification.ctypes, "CDLL", return_value=library), \
+                mock.patch.object(qualification, "darwin_mach_timebase", return_value=(125, 3)):
+            self.assertEqual(qualification.resource_baseline_native_uptime_seconds(24_000_000_000), 1000.0)
+            self.assertEqual(library.mach_absolute_time.argtypes, [])
+            self.assertIs(library.mach_absolute_time.restype, ctypes.c_uint64)
+            with self.assertRaisesRegex(qualification.QualificationError, "later than native monotonic"):
+                qualification.resource_baseline_native_uptime_seconds(48_000_000_001)
+
+    def resource_baseline_source(self) -> pathlib.Path:
+        directory = self.root / "baseline-source"
+        for relative in (*qualification.RUNTIME_WORKLOAD_EXECUTORS, "scripts/candidate-qualification.py"):
+            path = directory / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((ROOT / relative).read_bytes())
+        return directory
+
+    @staticmethod
+    def rebind_resource_workload_output(baseline: dict, output: str) -> None:
+        receipt = baseline["workload"]["completion"]
+        receipt.update(
+            output=output, output_tail=output[-4096:],
+            output_line_count=len(output.splitlines()),
+            output_sha256=hashlib.sha256(output.encode()).hexdigest(),
+        )
+
+    def test_resource_baseline_accepts_measured_reference_and_portable_checkout_path(self) -> None:
+        baseline = self.resource_baseline_fixture()
+        self.assertEqual(self.validate_resource_baseline(baseline), baseline["limits"])
+        baseline["workload"]["recording_source_root"] = "/Users/reference/release-source"
+        command = baseline["workload"]["completion"]["command"]
+        command[1] = "/Users/reference/release-source/scripts/runtime-qualification-workload.sh"
+        baseline["workload"]["completion"]["command"] = ["/usr/bin/sudo", "-H", "-u", "reference", *command]
+        self.assertEqual(self.validate_resource_baseline(baseline), baseline["limits"])
+
+    def test_resource_baseline_requires_signed_endpoint_pairs_and_native_uptime_source(self) -> None:
+        for role in ("engine", "gui"):
+            with self.subTest(missing="installed_" + role):
+                baseline = self.resource_baseline_fixture()
+                del baseline["installed_" + role]
+                with self.assertRaisesRegex(qualification.QualificationError, "must be an object"):
+                    self.validate_resource_baseline(baseline)
+            for phase in ("start", "end"):
+                with self.subTest(role=role, missing=phase):
+                    baseline = self.resource_baseline_fixture()
+                    del baseline["installed_" + role][phase]
+                    with self.assertRaisesRegex(qualification.QualificationError, "must be an object"):
+                        self.validate_resource_baseline(baseline)
+        for source in (None, "heartbeat_uptime_seconds", ""):
+            with self.subTest(uptime_source=source):
+                baseline = self.resource_baseline_fixture()
+                if source is None:
+                    del baseline["uptime_source"]
+                else:
+                    baseline["uptime_source"] = source
+                with self.assertRaisesRegex(qualification.QualificationError, "native Mach uptime source"):
+                    self.validate_resource_baseline(baseline)
+
+    def test_resource_baseline_signed_endpoints_must_match_sampled_reference_processes(self) -> None:
+        for role in ("engine", "gui"):
+            for phase in ("start", "end"):
+                for field in ("pid", "process_start_abstime", "build_version"):
+                    with self.subTest(role=role, phase=phase, field=field):
+                        baseline = self.resource_baseline_fixture()
+                        endpoint = baseline["installed_" + role][phase]
+                        if field == "build_version":
+                            endpoint[field] = "1.22.0.1137"
+                            reason = "requires the signed published v1.21.5"
+                        else:
+                            endpoint[field] += 1
+                            reason = "does not match the sampled reference process"
+                        with self.assertRaisesRegex(qualification.QualificationError, reason):
+                            self.validate_resource_baseline(baseline)
+
+    def test_resource_baseline_endpoint_timing_allows_sequential_inspections_and_rejects_stale_proof(self) -> None:
+        baseline = self.resource_baseline_fixture()
+        for role, phase, start, end in (
+            ("engine", "start", -70, -35), ("gui", "start", -35, 0),
+            ("engine", "end", 900, 935), ("gui", "end", 935, 970),
+        ):
+            baseline["installed_" + role][phase].update(
+                inspection_started_at=iso(start), recorded_at=iso(end),
+            )
+        baseline["acceptance"]["accepted_at"] = iso(990)
+        self.assertEqual(self.validate_resource_baseline(baseline), baseline["limits"])
+        early_approval = copy.deepcopy(baseline)
+        early_approval["acceptance"]["accepted_at"] = iso(960)
+        with self.assertRaisesRegex(qualification.QualificationError, "before reference measurement completes"):
+            self.validate_resource_baseline(early_approval)
+        for phase, start, end, reason in (
+            ("start", -90, -70, "epoch boundary"),
+            ("start", 1, 2, "epoch boundary"),
+            ("end", 880, 890, "epoch boundary"),
+            ("end", 960, 980, "epoch boundary"),
+            ("end", 900, 936, "bounded interval"),
+            ("end", 910, 905, "bounded interval"),
+        ):
+            with self.subTest(phase=phase, start=start, end=end):
+                changed = copy.deepcopy(baseline)
+                changed["installed_engine"][phase].update(
+                    inspection_started_at=iso(start), recorded_at=iso(end),
+                )
+                with self.assertRaisesRegex(qualification.QualificationError, reason):
+                    self.validate_resource_baseline(changed)
+    def test_live_runtime_requires_baseline_even_when_fixture_support_is_enabled(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        report["evidence"]["capture_mode"] = "live-installed-root"
+        path = self.root / "missing-resource-baseline.json"
+        with mock.patch.object(qualification, "RESOURCE_BASELINE_PATH", str(path)):
+            with self.assertRaisesRegex(qualification.QualificationError, "baseline is missing"):
+                self.validate_runtime(report)
+            pending = self.resource_baseline_fixture()
+            pending["status"] = "measured-awaiting-acceptance"
+            path.write_text(json.dumps(pending), encoding="utf-8")
+            with self.assertRaisesRegex(qualification.QualificationError, "baseline is not accepted"):
+                self.validate_runtime(report)
+
+    def test_resource_baseline_must_exist_unchanged_in_candidate_source_commit(self) -> None:
+        baseline = self.resource_baseline_fixture()
+        directory = self.resource_baseline_source()
+        path = directory / qualification.RESOURCE_BASELINE_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        serialized = json.dumps(baseline, indent=2) + "\n"
+        path.write_text(serialized, encoding="utf-8")
+        expected_command = ["/usr/bin/git", "-C", str(directory), "show", f"{COMMIT}:{qualification.RESOURCE_BASELINE_PATH}"]
+        with mock.patch.object(qualification.subprocess, "run", return_value=subprocess.CompletedProcess(expected_command, 0, serialized, "")) as git:
+            self.assertEqual(qualification.release_resource_limits(directory, COMMIT, host=self.runtime["host"]), baseline["limits"])
+            git.assert_called_once_with(expected_command, check=True, capture_output=True, text=True)
+        with mock.patch.object(qualification.subprocess, "run", side_effect=subprocess.CalledProcessError(128, expected_command, stderr="path does not exist in source commit")):
+            with self.assertRaisesRegex(qualification.QualificationError, "candidate-bound resource baseline failed"):
+                qualification.release_resource_limits(directory, COMMIT, host=self.runtime["host"])
+        with mock.patch.object(qualification.subprocess, "run", return_value=subprocess.CompletedProcess(expected_command, 0, "{}\n", "")):
+            with self.assertRaisesRegex(qualification.QualificationError, "not frozen in the candidate source commit"):
+                qualification.release_resource_limits(directory, COMMIT, host=self.runtime["host"])
+
+    def test_resource_baseline_cannot_substitute_candidate_or_invent_reference_images(self) -> None:
+        baseline = self.resource_baseline_fixture()
+        baseline["reference"].update(version=VERSION, source_commit=COMMIT)
+        with self.assertRaisesRegex(qualification.QualificationError, "last shipped"):
+            self.validate_resource_baseline(baseline)
+        for role in ("engine", "gui"):
+            with self.subTest(role=role, alteration="self-consistent wrong image"):
+                baseline = self.resource_baseline_fixture()
+                baseline["reference"][role + "_sha256"] = "f" * 64
+                for sample in baseline["samples"]:
+                    sample[role + "_process"]["executable_sha256"] = "f" * 64
+                with self.assertRaisesRegex(qualification.QualificationError, "published v1.21.5 executable"):
+                    self.validate_resource_baseline(baseline)
+            with self.subTest(role=role, alteration="wrong running slice"):
+                baseline = self.resource_baseline_fixture()
+                for sample in baseline["samples"]:
+                    sample[role + "_process"]["running_cdhash"] = "f" * 40
+                with self.assertRaisesRegex(qualification.QualificationError, "published v1.21.5 .* slice"):
+                    self.validate_resource_baseline(baseline)
+        baseline = self.resource_baseline_fixture()
+        baseline["reference"]["dmg_sha256"] = "f" * 64
+        with self.assertRaisesRegex(qualification.QualificationError, "published v1.21.5 DMG"):
+            self.validate_resource_baseline(baseline)
+
+    def test_resource_baseline_preserves_sample_cadence_and_capture_boundaries(self) -> None:
+        baseline = self.resource_baseline_fixture()
+        baseline["samples"] = [
+            {**copy.deepcopy(baseline["samples"][0]), "offset_seconds": index * 7.5,
+             "recorded_at": iso(index * 7.5), "captured_at": iso(index * 7.5)}
+            for index in range(121)
+        ]
+        with self.assertRaisesRegex(qualification.QualificationError, "exactly 31"):
+            self.validate_resource_baseline(baseline)
+        for key, value, reason in (
+            ("offset_seconds", 301, "exactly 31"),
+            ("recorded_at", iso(307), "scheduled sample time"),
+            ("captured_at", iso(306), "five seconds"),
+        ):
+            with self.subTest(key=key):
+                baseline = self.resource_baseline_fixture()
+                baseline["samples"][10][key] = value
+                with self.assertRaisesRegex(qualification.QualificationError, reason):
+                    self.validate_resource_baseline(baseline)
+
+    def test_resource_baseline_must_match_candidate_host_and_stable_capture_host(self) -> None:
+        for key, value in (("machine_id_sha256", "b" * 64), ("power_source", "Battery")):
+            with self.subTest(key=key):
+                baseline = self.resource_baseline_fixture()
+                baseline["host"][key] = value
+                baseline["host_end"][key] = value
+                with self.assertRaisesRegex(qualification.QualificationError, "same reference host"):
+                    self.validate_resource_baseline(baseline)
+        baseline = self.resource_baseline_fixture()
+        baseline["host_end"]["power_source"] = "Battery"
+        with self.assertRaises(qualification.QualificationError):
+            self.validate_resource_baseline(baseline)
+
+    def test_resource_baseline_binds_transitive_workload_and_recorder_bytes(self) -> None:
+        baseline = self.resource_baseline_fixture()
+        baseline["workload"]["executors"].pop()
+        with self.assertRaisesRegex(qualification.QualificationError, "transitive workload executor inventory"):
+            self.validate_resource_baseline(baseline)
+        directory = self.resource_baseline_source()
+        child = directory / "scripts/test-otlp-curl.sh"
+        child.write_bytes(child.read_bytes() + b"\n# changed after reference capture\n")
+        with self.assertRaisesRegex(qualification.QualificationError, "executor bytes changed"):
+            self.validate_resource_baseline(self.resource_baseline_fixture(), source_root=directory)
+        baseline = self.resource_baseline_fixture()
+        baseline["recorder"]["sha256"] = "f" * 64
+        with self.assertRaises(qualification.QualificationError):
+            self.validate_resource_baseline(baseline)
+
+    def test_resource_baseline_requires_successful_full_workload_and_matching_run_identity(self) -> None:
+        baseline = self.resource_baseline_fixture()
+        baseline["workload"].pop("completion")
+        with self.assertRaisesRegex(qualification.QualificationError, "completion"):
+            self.validate_resource_baseline(baseline)
+        for key, value, reason in (
+            ("exit_code", 1, "exit successfully"),
+            ("run_id", "d" * 32, "unique run id"),
+            ("command", ["/bin/bash", str(ROOT / qualification.RUNTIME_WORKLOAD_EXECUTORS[0]), "--alert-only"], "full fixed workload"),
+        ):
+            with self.subTest(key=key):
+                baseline = self.resource_baseline_fixture()
+                baseline["workload"]["completion"][key] = value
+                with self.assertRaisesRegex(qualification.QualificationError, reason):
+                    self.validate_resource_baseline(baseline)
+
+    def test_resource_baseline_rejects_polling_timestamps_and_forged_workload_duration(self) -> None:
+        for changes, reason in (
+            ({"timing_source": "heartbeat-poll"}, "independent process-exit timing"),
+            ({"elapsed_monotonic_seconds": 0}, "elapsed_monotonic_seconds"),
+            ({"elapsed_monotonic_seconds": 91, "completed_at": iso(391)}, "independent elapsed deadline"),
+            ({"completed_at": iso(330)}, "wall clock.*monotonic duration disagree"),
+            ({"started_at": iso(330), "completed_at": iso(352)}, "minute-five boundary"),
+            ({"elapsed_monotonic_seconds": 0.5, "completed_at": iso(299.5)}, "completion must follow"),
+        ):
+            with self.subTest(changes=changes):
+                baseline = self.resource_baseline_fixture()
+                baseline["workload"]["completion"].update(changes)
+                with self.assertRaisesRegex(qualification.QualificationError, reason):
+                    self.validate_resource_baseline(baseline)
+
+    def test_resource_baseline_requires_complete_hashed_output_and_exact_success_summary(self) -> None:
+        baseline = self.resource_baseline_fixture()
+        baseline["workload"]["completion"].pop("output")
+        with self.assertRaisesRegex(qualification.QualificationError, "complete workload output"):
+            self.validate_resource_baseline(baseline)
+        baseline = self.resource_baseline_fixture()
+        baseline["workload"]["completion"]["output"] += "unbound transcript bytes\n"
+        with self.assertRaisesRegex(qualification.QualificationError, "output does not reconcile"):
+            self.validate_resource_baseline(baseline)
+        for alteration in ("iterations", "duplicate-run", "other-run"):
+            with self.subTest(alteration=alteration):
+                baseline = self.resource_baseline_fixture()
+                receipt = baseline["workload"]["completion"]
+                output = receipt["output"]
+                if alteration == "iterations":
+                    output = output.replace("iterations=3000", "iterations=2999")
+                elif alteration == "duplicate-run":
+                    output += output
+                else:
+                    output = output.replace(receipt["run_id"], "d" * 32)
+                self.rebind_resource_workload_output(baseline, output)
+                with self.assertRaisesRegex(qualification.QualificationError, "one completed fixed run"):
+                    self.validate_resource_baseline(baseline)
+
+    def test_resource_baseline_recomputes_the_statistics_used_by_candidate_gates(self) -> None:
+        baseline = self.resource_baseline_fixture()
+        baseline["statistics"]["gui_p95_percent"] = "arithmetic-mean"
+        with self.assertRaisesRegex(qualification.QualificationError, "statistics differ"):
+            self.validate_resource_baseline(baseline)
+        for index, key, value in (
+            (30, "engine_disk_write_bytes_total", 1_984_064),
+            (11, "engine_disk_write_bytes_total", 1_400_384),
+            (29, "gui_background_cpu_percent", 8.0),
+        ):
+            with self.subTest(index=index, key=key):
+                baseline = self.resource_baseline_fixture()
+                baseline["samples"][index][key] = value
+                with self.assertRaisesRegex(qualification.QualificationError, "measurements do not reconcile"):
+                    self.validate_resource_baseline(baseline)
+
+    def test_live_runtime_enforces_each_reviewed_resource_ceiling(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        report["evidence"]["capture_mode"] = "live-installed-root"
+        generous = {key: 1_000_000_000.0 for key in qualification.RESOURCE_STATISTICS}
+        with mock.patch.object(qualification, "release_resource_limits", return_value=generous) as budgets:
+            self.validate_runtime(report)
+            budgets.assert_called_once_with(ROOT, COMMIT, host=self.runtime["host"])
+        for key, reason in (
+            ("engine_average_write_bytes_per_second", "disk write average exceeds"),
+            ("engine_max_window_write_bytes_per_second", "disk write window .* exceeds"),
+            ("gui_p95_percent", "background GUI p95"),
+        ):
+            with self.subTest(key=key):
+                strict = {**generous, key: 1.0}
+                with mock.patch.object(qualification, "release_resource_limits", return_value=strict):
+                    with self.assertRaisesRegex(qualification.QualificationError, reason):
+                        self.validate_runtime(report)
+
     def test_runtime_template_tracks_exact_trace_graph_aggregate_schema(self) -> None:
         """The deliberately failing template must still name every live field.
 
@@ -1264,15 +1823,9 @@ class CandidateQualificationTests(unittest.TestCase):
             ),
             "crash_count": process["crash_count"],
             "watchdog_exit_count": process["watchdog_exit_count"],
-            "complete_rule_corpus_evaluated": measurements["file_fidelity"][
-                "complete_rule_corpus_evaluated"
+            "source_rule_corpus_sha256": measurements["file_fidelity"][
+                "source_rule_corpus_sha256"
             ],
-            "rule_corpus_sha256": measurements["file_fidelity"][
-                "rule_corpus_sha256"
-            ],
-            "semantic_reasons": copy.deepcopy(
-                measurements["file_fidelity"]["semantic_reasons"]
-            ),
             "prune_vacuum_refill_loop_count": measurements["event_storage"][
                 "prune_vacuum_refill_loop_count"
             ],
@@ -1688,7 +2241,7 @@ class CandidateQualificationTests(unittest.TestCase):
         self.assertEqual(drained, current)
         report = self.rebuild_runtime_from_observations(observations)
         self.validate_runtime(report)
-        window = qualification.derive_workload_ingress(report["samples"])
+        window = qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
         self.assertEqual(
             window["file_persistence_offered_delta"]
             - window["file_persistence_completed_delta"], 1,
@@ -1722,6 +2275,46 @@ class CandidateQualificationTests(unittest.TestCase):
 
     def test_complete_report_passes_every_threshold(self) -> None:
         self.validate_runtime()
+
+    def test_file_fidelity_claims_source_test_coverage_with_recomputed_corpus_binding(self) -> None:
+        fidelity = self.runtime["measurements"]["file_fidelity"]
+        self.assertEqual(fidelity, {
+            "unclassified_queue_loss": 0,
+            "source_rule_corpus_sha256": qualification.rule_corpus_digest(ROOT),
+            "semantic_validation_scope": "source-tests-only",
+        })
+        template = qualification.make_runtime_template(self.manifest, self.manifest_sha)
+        self.assertEqual(set(template["measurements"]["file_fidelity"]), set(fidelity))
+        self.validate_runtime()
+
+    def test_file_fidelity_rejects_forged_source_digest_and_runtime_semantic_scope(self) -> None:
+        for key, value, message in (
+            ("source_rule_corpus_sha256", "c" * 64, "source rule corpus digest"),
+            ("semantic_validation_scope", "runtime-reason-histogram", "limited to source tests"),
+        ):
+            with self.subTest(key=key):
+                report = copy.deepcopy(self.runtime)
+                report["measurements"]["file_fidelity"][key] = value
+                with self.assertRaisesRegex(qualification.QualificationError, message):
+                    self.validate_runtime(report)
+
+    def test_file_fidelity_rejects_legacy_empty_semantic_attestation(self) -> None:
+        legacy = {
+            "unclassified_queue_loss": 0,
+            "complete_rule_corpus_evaluated": True,
+            "rule_corpus_sha256": qualification.rule_corpus_digest(ROOT),
+            "semantic_reasons": [],
+        }
+        report = copy.deepcopy(self.runtime)
+        report["measurements"]["file_fidelity"] = legacy
+        with self.assertRaisesRegex(qualification.QualificationError, "file fidelity inventory"):
+            self.validate_runtime(report)
+        for key in ("complete_rule_corpus_evaluated", "semantic_reasons", "rule_corpus_sha256"):
+            with self.subTest(key=key):
+                report = copy.deepcopy(self.runtime)
+                report["measurements"]["file_fidelity"][key] = legacy[key]
+                with self.assertRaisesRegex(qualification.QualificationError, "file fidelity inventory"):
+                    self.validate_runtime(report)
 
     def test_darwin_rusage_v4_layout_covers_native_write(self) -> None:
         self.assertEqual(ctypes.sizeof(qualification.DarwinRUsageInfoV4), 296)
@@ -3449,7 +4042,7 @@ class CandidateQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(qualification.QualificationError, "epoch start"):
             self.validate_runtime(report)
 
-    def test_legal_capture_jitter_cannot_false_pass_workload_rate(self) -> None:
+    def test_legal_capture_jitter_does_not_change_burst_mean_verdict(self) -> None:
         samples = copy.deepcopy(self.runtime["samples"])
         for sample in samples:
             offset = sample["offset_seconds"]
@@ -3478,10 +4071,11 @@ class CandidateQualificationTests(unittest.TestCase):
             captured_rate,
             qualification.MIN_BURST_COMBINED_OFFERED_PER_SECOND,
         )
-        with self.assertRaisesRegex(
-            qualification.QualificationError, "predeclared reference load"
-        ):
-            qualification.derive_workload_ingress(samples)
+        result = qualification.derive_workload_ingress(
+            samples, self.runtime["recorder_probe_evidence"]["workload"],
+        )
+        self.assertEqual(result["combined_bracketed_offered_volume"], offered_delta)
+        self.assertAlmostEqual(result["combined_offered_per_burst_second"], offered_delta / 22)
 
     def test_unconfigured_llm_host_can_be_recorded_and_validated(self) -> None:
         """Graceful degradation has to be able to produce evidence, not crash.
@@ -3536,7 +4130,7 @@ class CandidateQualificationTests(unittest.TestCase):
         ):
             self.rebuild_runtime_from_observations(observations)
 
-    def test_builder_rejects_reused_heartbeat_tick(self) -> None:
+    def test_builder_rejects_changed_content_with_reused_heartbeat_tick(self) -> None:
         observations = copy.deepcopy(self.runtime["recorder_observations"])
         observations[5]["heartbeat"]["written_at_unix"] = observations[4][
             "heartbeat"
@@ -3544,11 +4138,187 @@ class CandidateQualificationTests(unittest.TestCase):
         self.rebind_observation_heartbeat(observations[5])
         with self.assertRaisesRegex(
             qualification.QualificationError,
-            "heartbeat timestamps must be strictly increasing",
+            "reused heartbeat timestamp with different content",
         ):
             self.rebuild_runtime_from_observations(observations)
 
-    def test_builder_rejects_skipped_heartbeat_tick(self) -> None:
+    def test_fresh_repeated_heartbeat_and_next_two_tick_jump_qualify(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        # A producer publication slips just past one recorder poll. The exact
+        # prior snapshot repeats; the next independent poll sees a two-tick jump.
+        observations[5]["heartbeat"] = copy.deepcopy(observations[4]["heartbeat"])
+        self.rebind_observation_heartbeat(observations[5])
+        report = self.rebuild_runtime_from_observations(observations)
+        self.validate_runtime(report)
+        self.assertEqual(report["samples"][4]["heartbeat_snapshot_sha256"],
+                         report["samples"][5]["heartbeat_snapshot_sha256"])
+        self.assertGreater(report["samples"][5]["engine_cpu_seconds_total"],
+                           report["samples"][4]["engine_cpu_seconds_total"])
+
+    def test_repeated_heartbeat_cannot_hide_staleness_or_excessive_producer_gap(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for index in (5, 6, 7):
+            observations[index]["heartbeat"] = copy.deepcopy(observations[4]["heartbeat"])
+            self.rebind_observation_heartbeat(observations[index])
+        with self.assertRaisesRegex(qualification.QualificationError, "stale or future"):
+            self.rebuild_runtime_from_observations(observations)
+
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for index, observation in enumerate(observations):
+            lag = 45 if index < 5 else -5
+            heartbeat = observation["heartbeat"]
+            heartbeat["written_at_unix"] -= lag
+            heartbeat["engine_uptime_seconds"] -= lag
+            self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(qualification.QualificationError, "distinct heartbeat gap"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_fresh_repeated_workload_snapshot_still_measures_complete_burst(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[11]["heartbeat"] = copy.deepcopy(observations[10]["heartbeat"])
+        self.rebind_observation_heartbeat(observations[11])
+        report = self.rebuild_runtime_from_observations(observations)
+        self.validate_runtime(report)
+        self.assertGreaterEqual(report["measurements"]["workload_ingress"]["combined_bracketed_offered_volume"],
+                                qualification.MIN_BURST_COMBINED_OFFERED_VOLUME)
+
+    def test_zero_new_base_persistence_with_prewarm_history_fails_builder_and_verifier(self) -> None:
+        for frozen_lanes in (("priority",), ("file",), ("priority", "file")):
+            with self.subTest(frozen_lanes=frozen_lanes):
+                report = copy.deepcopy(self.runtime)
+                for index, observation in enumerate(report["recorder_observations"]):
+                    heartbeat = observation["heartbeat"]
+                    for lane in frozen_lanes:
+                        completed = heartbeat["events_storage_write_persisted_by_lane"][lane]
+                        heartbeat["events_storage_write_offered_by_lane"][lane] += 1
+                        heartbeat["events_storage_write_persisted_by_lane"][lane] = 1
+                        heartbeat["events_storage_write_filtered_by_lane"][lane] = completed
+                    self.rederive_sample(report, index)
+                # Reconcile unrelated aggregates so the verifier reaches the
+                # actual missing-persistence assertion, not a stale fixture hash.
+                final = report["samples"][-1]["conservation"]
+                for row in report["measurements"]["conservation"]["boundaries"]:
+                    row.update(final[row["name"]])
+                with self.assertRaisesRegex(qualification.QualificationError, "persisted base events"):
+                    self.rebuild_runtime_from_observations(report["recorder_observations"])
+                with self.assertRaisesRegex(qualification.QualificationError, "persisted base events"):
+                    self.validate_runtime(report)
+
+    def test_healthy_persistence_and_filtering_remain_separate_measured_outcomes(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            heartbeat = observation["heartbeat"]
+            for lane in ("priority", "file"):
+                completed = heartbeat["events_storage_write_persisted_by_lane"][lane]
+                heartbeat["events_storage_write_persisted_by_lane"][lane] = completed - completed // 2
+                heartbeat["events_storage_write_filtered_by_lane"][lane] = completed // 2
+            self.rebind_observation_heartbeat(observation)
+        report = self.rebuild_runtime_from_observations(observations)
+        self.validate_runtime(report)
+        window = report["measurements"]["workload_ingress"]
+        for lane in ("priority", "file"):
+            self.assertGreater(window[f"{lane}_persistence_persisted_delta"], 0)
+            self.assertGreater(window[f"{lane}_persistence_filtered_delta"], 0)
+            self.assertEqual(window[f"{lane}_persistence_completed_delta"],
+                             window[f"{lane}_persistence_persisted_delta"]
+                             + window[f"{lane}_persistence_filtered_delta"])
+
+    def test_persistence_outcome_reset_cannot_hide_in_constant_completion_total(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            if observation["offset_seconds"] >= 450:
+                heartbeat = observation["heartbeat"]
+                heartbeat["events_storage_write_filtered_by_lane"]["file"] = heartbeat["events_storage_write_persisted_by_lane"]["file"]
+                heartbeat["events_storage_write_persisted_by_lane"]["file"] = 0
+                self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(qualification.QualificationError, "file persisted counter moved backwards"):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_burst_load_verdict_is_independent_of_all_300_heartbeat_phases(self) -> None:
+        timing = self.runtime["recorder_probe_evidence"]["workload"]
+        epoch = qualification.parse_time(iso(0), "fixture epoch").timestamp()
+        peaks = []
+        for tenth in range(300):
+            samples = copy.deepcopy(self.runtime["samples"])
+            phase = tenth / 10
+            for sample in samples:
+                tick = sample["offset_seconds"] - phase
+                sample["heartbeat_written_at_unix"] = epoch + tick
+                volume = round(49_200 * min(1, max(0, (tick - 300) / 22)))
+                for lane in ("priority", "file"):
+                    boundary = sample["conservation"][f"{lane}-ingress"]
+                    boundary["offered"] = boundary["completed"] = 1_000 + round(tick) + volume // 2
+            result = qualification.derive_workload_ingress(samples, timing)
+            self.assertGreaterEqual(result["combined_bracketed_offered_volume"], 49_200)
+            self.assertGreater(result["combined_offered_per_burst_second"], 2_200)
+            peaks.append(result["combined_peak_offered_per_second"])
+        self.assertLess(min(peaks), qualification.MIN_BURST_COMBINED_OFFERED_PER_SECOND)
+        self.assertGreater(max(peaks), qualification.MIN_BURST_COMBINED_OFFERED_PER_SECOND)
+
+    def test_burst_mean_and_volume_are_independent_required_load_controls(self) -> None:
+        timing = copy.deepcopy(self.runtime["recorder_probe_evidence"]["workload"])
+        timing["completed_at"] = iso(370)
+        timing["elapsed_monotonic_seconds"] = 70
+        with self.assertRaisesRegex(qualification.QualificationError, "reference load mean"):
+            qualification.derive_workload_ingress(self.runtime["samples"], timing)
+        samples = copy.deepcopy(self.runtime["samples"])
+        for sample in samples:
+            if sample["offset_seconds"] >= 330:
+                for lane in ("priority", "file"):
+                    boundary = sample["conservation"][f"{lane}-ingress"]
+                    boundary["offered"] -= 35_000
+                    boundary["completed"] -= 35_000
+        timing["completed_at"] = iso(301)
+        timing["elapsed_monotonic_seconds"] = 1
+        with self.assertRaisesRegex(qualification.QualificationError, "reference load volume"):
+            qualification.derive_workload_ingress(samples, timing)
+
+    def test_workload_exit_receipt_requires_independent_reconciled_timing(self) -> None:
+        for changes, message in (
+            ({"timing_source": "thirty-second-poll"}, "independent process-exit"),
+            ({"elapsed_monotonic_seconds": 1}, "duration disagree"),
+            ({"completed_at": iso(391), "elapsed_monotonic_seconds": 91}, "elapsed deadline"),
+        ):
+            with self.subTest(changes=changes):
+                evidence = copy.deepcopy(self.runtime["recorder_probe_evidence"])
+                evidence["workload"].update(changes)
+                with self.assertRaisesRegex(qualification.QualificationError, message):
+                    qualification.validate_recorder_probe_evidence(
+                        evidence, source_root=ROOT,
+                        expected_preinstall_clean_ci=self.manifest["preinstall_clean_ci"],
+                    )
+
+    def test_workload_waiter_records_exit_before_delayed_telemetry_poll(self) -> None:
+        job = qualification.TimedWorkload(
+            [sys.executable, "-c", "import time; time.sleep(0.05); print('completed')"], cwd=self.root,
+        )
+        try:
+            self.assertTrue(job.finished.wait(timeout=5))
+            self.assertIsNone(job.error)
+            time.sleep(0.12)  # The telemetry consumer discovers exit later.
+            discovered_at = dt.datetime.now(dt.timezone.utc)
+            self.assertGreater((discovered_at - job.completed_at).total_seconds(), 0.1)
+            self.assertEqual(job.stdout.strip(), "completed")
+            self.assertEqual(job.process.returncode, 0)
+            self.assertAlmostEqual((job.completed_at - job.started_at).total_seconds(),
+                                   job.elapsed_monotonic_seconds, delta=0.1)
+        finally:
+            job.close()
+
+    def test_workload_waiter_enforces_deadline_without_a_telemetry_poll(self) -> None:
+        job = qualification.TimedWorkload(
+            [sys.executable, "-c", "import time; time.sleep(30)"], cwd=self.root,
+            deadline_seconds=0.05,
+        )
+        try:
+            self.assertTrue(job.finished.wait(timeout=5))
+            self.assertIn("independent elapsed deadline", str(job.error))
+            self.assertIsNotNone(job.process.returncode)
+            self.assertIsNone(job.completed_at)
+        finally:
+            job.close()
+
+    def test_builder_rejects_heartbeat_and_uptime_clock_disagreement(self) -> None:
         observations = copy.deepcopy(self.runtime["recorder_observations"])
         for index, observation in enumerate(observations):
             offset = observation["offset_seconds"]
@@ -3561,7 +4331,7 @@ class CandidateQualificationTests(unittest.TestCase):
             self.rebind_observation_heartbeat(observation)
         with self.assertRaisesRegex(
             qualification.QualificationError,
-            "heartbeat and capture intervals diverge",
+            "engine monotonic uptime and heartbeat intervals diverge",
         ):
             self.rebuild_runtime_from_observations(observations)
 
@@ -3835,6 +4605,68 @@ class CandidateQualificationTests(unittest.TestCase):
             qualification.sample_from_recorder_observation(
                 observation, "fixture unavailable search projection"
             )
+
+    def test_healthy_complete_search_index_remains_verified_in_report(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        search = observations[0]["heartbeat"]["event_search_projection"]
+        search.update(requested_window_complete=True, effective_duration_seconds=3_600, complete=True)
+        search.update(projection_materialized=search["projection_considered"],
+                      projection_omitted_quota=0, projection_omitted_total=0)
+        self.rebind_observation_heartbeat(observations[0])
+        report = self.rebuild_runtime_from_observations(observations)
+        row = report["samples"][0]["event_search_projection"]
+        self.assertTrue(row["complete"])
+        self.assertFalse(row["search_index_degraded"])
+        self.assertEqual(row["search_index_reason"], "healthy")
+        self.assertEqual(row, report["measurements"]["event_storage"]["event_search_projections"][0])
+        self.validate_runtime(report)
+
+    def test_degraded_search_index_is_preserved_as_incomplete_and_refuses_qualification(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        search = observations[0]["heartbeat"]["event_search_projection"]
+        # All coverage is otherwise complete. Index degradation alone must
+        # account for complete=False without discarding the measured evidence.
+        search.update(requested_window_complete=True, effective_duration_seconds=3_600,
+                      search_index_degraded=True, search_index_reason="fts_repair_pending", complete=False)
+        search.update(projection_materialized=search["projection_considered"],
+                      projection_omitted_quota=0, projection_omitted_total=0)
+        self.rebind_observation_heartbeat(observations[0])
+        report = self.rebuild_runtime_from_observations(observations)
+        row = report["samples"][0]["event_search_projection"]
+        self.assertFalse(row["complete"])
+        self.assertTrue(row["search_index_degraded"])
+        self.assertEqual(row["search_index_reason"], "fts_repair_pending")
+        self.assertEqual(row, report["measurements"]["event_storage"]["event_search_projections"][0])
+        self.assertTrue(report["measurements"]["event_storage"]["search_tier_gaps_visible"])
+        with self.assertRaisesRegex(qualification.QualificationError, "index is degraded"):
+            qualification.validate_runtime_readiness(
+                observations[0], "degraded reference observation", phase="preflight",
+                require_drained=True, expected_pid=4321,
+            )
+        with self.assertRaisesRegex(qualification.QualificationError, "index is degraded"):
+            self.validate_runtime(report)
+
+    def test_search_index_completeness_reason_and_required_fields_cannot_be_forged(self) -> None:
+        mutations = (
+            ({"search_index_degraded": True, "search_index_reason": "fts_repair_pending", "complete": True}, None, "complete hides"),
+            ({"search_index_degraded": True, "search_index_reason": "healthy", "complete": False}, None, "reason does not match"),
+            ({"search_index_reason": "fts_repair_pending"}, None, "reason does not match"),
+            ({}, "search_index_degraded", "must be a boolean"),
+            ({}, "search_index_reason", "must be a non-empty string"),
+        )
+        for changes, missing, reason in mutations:
+            with self.subTest(changes=changes, missing=missing):
+                observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+                search = observation["heartbeat"]["event_search_projection"]
+                search.update(requested_window_complete=True, effective_duration_seconds=3_600, complete=True)
+                search.update(projection_materialized=search["projection_considered"],
+                              projection_omitted_quota=0, projection_omitted_total=0)
+                search.update(changes)
+                if missing is not None:
+                    del search[missing]
+                self.rebind_observation_heartbeat(observation)
+                with self.assertRaisesRegex(qualification.QualificationError, reason):
+                    qualification.sample_from_recorder_observation(observation, "forged search index evidence")
 
     def test_event_search_projection_omission_ledger_must_reconcile(self) -> None:
         observation = copy.deepcopy(self.runtime["recorder_observations"][1])
@@ -4291,12 +5123,12 @@ class CandidateQualificationTests(unittest.TestCase):
         # The recorder derives this block from the same samples; the
         # reconciliation exists to catch a forged aggregate, not a moved host.
         report["measurements"]["workload_ingress"] = (
-            qualification.derive_workload_ingress(report["samples"])
+            qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
         )
 
         self.validate_runtime(report)
 
-        window = qualification.derive_workload_ingress(report["samples"])
+        window = qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
         self.assertEqual(
             window["sequence_journal_queued_drain"],
             window["sequence_journal_queued_start"] + 2,
@@ -4330,7 +5162,7 @@ class CandidateQualificationTests(unittest.TestCase):
                     qualification.QualificationError,
                     "in-flight work across a fixed boundary",
                 ):
-                    qualification.derive_workload_ingress(samples)
+                    qualification.derive_workload_ingress(samples, self.runtime["recorder_probe_evidence"]["workload"])
 
     def test_memory_growth_above_64_mib_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)

@@ -2544,7 +2544,9 @@ final class AppState: ObservableObject, EventQueryReading {
                 searchOwnership = snapshot
                 raw = snapshot.events
                 if !snapshot.isComplete {
-                    warning = "Search is partial: \(snapshot.projectionOmitted) "
+                    warning = (snapshot.searchIndexDegraded
+                        ? "The full-text index awaits repair; text matches may be incomplete. " : "")
+                        + "Search is partial: \(snapshot.projectionOmitted) "
                         + "retained events are outside the search projection "
                         + "and \(snapshot.gaps.total) evidence gaps remain. "
                         + "No match is not proof of absence."

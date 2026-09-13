@@ -2099,12 +2099,12 @@ enum EventLoop {
                     ) {
                         let alert = Alert(
                             ruleId: "maccrab.ai-guard.file-injection",
-                            ruleTitle: "Prompt Injection in File: \((filePath as NSString).lastPathComponent)",
+                            ruleTitle: "Possible Hidden Text in File: \((filePath as NSString).lastPathComponent)",
                             severity: scanResult.severity,
                             eventId: scanEvent.id.uuidString,
                             processPath: scanEvent.process.executable,
                             processName: scanEvent.process.name,
-                            description: "Hidden prompt injection detected in \(filePath) (\(scanResult.confidence)% confidence). Threats: \(scanResult.threats.joined(separator: "; "))",
+                            description: "Possible hidden-text carrier in \(filePath) (uncalibrated heuristic score: \(scanResult.confidence)/99). Signals: \(scanResult.threats.joined(separator: "; ")). Structural signals do not confirm prompt injection or malicious intent.",
                             mitreTactics: "attack.initial_access",
                             mitreTechniques: "attack.t1195.002",
                             suppressed: false
