@@ -729,6 +729,24 @@ if [ "$CANDIDATE_READY" = "1" ]; then
     fi
     echo "  ✓ Preserved candidate copied unchanged (${QUALIFIED_CANDIDATE_SHA:0:16}...)"
     if [ "$VERSION_IS_RC" != "1" ]; then
+        if [ "${SKIP_APPCAST:-0}" != "1" ]; then
+            # This fresh export never built SwiftPM dependencies. Carry only
+            # the pinned appcast tools from the just-validated CI checkout;
+            # authenticate both ends before publisher credentials or tags.
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
+                /bin/bash "$SCRIPT_DIR/check-release-dependencies.sh"
+            /bin/mkdir -p "$BUILD_WORKSPACE/.build/checkouts/Sparkle" \
+                "$BUILD_WORKSPACE/.build/artifacts/sparkle/Sparkle/bin"
+            for sparkle_input in \
+                .build/checkouts/Sparkle/Package.swift \
+                .build/artifacts/sparkle/Sparkle/bin/sign_update \
+                .build/artifacts/sparkle/Sparkle/bin/generate_keys; do
+                /bin/cp -p "$PROJECT_DIR/$sparkle_input" "$BUILD_WORKSPACE/$sparkle_input"
+            done
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
+                /bin/bash "$BUILD_WORKSPACE/scripts/check-release-dependencies.sh"
+            echo "  ✓ Pinned Sparkle appcast tools verified in the publication export"
+        fi
         /usr/bin/python3 -I "$SCRIPT_DIR/candidate-qualification.py" emit-release-json \
             --version "$VERSION" \
             --source-root "$BUILD_WORKSPACE" \

@@ -458,7 +458,7 @@ struct EventsSizeCapIntervalTests {
         backoff.observeConfiguration("420:64:30:60")
         #expect(backoff.mayFire())
 
-        _ = backoff.recordSweep(stillOver: true)
+        _ = backoff.recordSweep(observedFootprintBytes: 101, targetBytes: 100)
         #expect(!backoff.mayFire())
         backoff.observeConfiguration("420:64:30:60")
         #expect(!backoff.mayFire(),
@@ -466,10 +466,181 @@ struct EventsSizeCapIntervalTests {
 
         backoff.observeConfiguration("512:64:30:60")
         #expect(backoff.mayFire(), "a material budget change invalidates the old conclusion")
-        _ = backoff.recordSweep(stillOver: true)
+        _ = backoff.recordSweep(observedFootprintBytes: 101, targetBytes: 100)
         #expect(!backoff.mayFire())
-        _ = backoff.recordSweep(stillOver: false)
+        _ = backoff.recordSweep(observedFootprintBytes: 100, targetBytes: 100)
         #expect(backoff.mayFire(), "only an actual converged sweep re-arms immediately")
+    }
+
+    @Test("bounded incremental reclaim continues without erasing ineffective history")
+    func boundedReclaimContinuesWhileLowWaterImproves() {
+        let backoff = SizeCapWatchdogBackoff()
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: 320)
+        let now = Date(timeIntervalSince1970: 1000)
+        let plan = SQLitePersistentStoreAdmission.boundedPageOperationPlan(
+            requestedPages: 200_000,
+            reserveBytes: SQLitePersistentStorePolicy.eventTransactionReserveBytes,
+            pageSizeBytes: 4096
+        )
+        #expect(plan.pages == 4090)
+        #expect(Int64(plan.pages) * 4096 < 16 * 1_048_576,
+                "a legitimate full quantum is slightly smaller than 16 MiB")
+        #expect(backoff.recordSweep(observedFootprintBytes: 280_000_000,
+            targetBytes: boundary.targetBytes, now: now) == 120)
+        #expect(backoff.recordSweep(observedFootprintBytes: 280_000_000,
+            targetBytes: boundary.targetBytes, now: now) == 240)
+
+        for (index, after) in [253_980_672, 237_207_552].enumerated() {
+            let at = now.addingTimeInterval(Double(index) * 60)
+            let family = Int64(after) + 557_056
+            #expect(backoff.recordSweep(
+                observedFootprintBytes: family, targetBytes: boundary.targetBytes,
+                progress: SizeCapSweepProgress(
+                    incrementalVacuumReclaimedPages: plan.pages,
+                    mainFileBytesBefore: Int64(after) + 16_773_120,
+                    mainFileBytesAfter: Int64(after),
+                    reclaimableSlackBytesAfter: 180_000_000
+                ), now: at
+            ) == 60)
+            #expect(!backoff.mayFire(now: at.addingTimeInterval(59)))
+            #expect(backoff.mayFire(now: at.addingTimeInterval(60)))
+            let health = EventRetentionBudgetHealth()
+            health.recordSweep(observedFootprintBytes: family, boundary: boundary)
+            #expect(health.snapshot().state == "degraded_budget_unmet")
+        }
+        #expect(backoff.recordSweep(observedFootprintBytes: 240_000_000,
+            targetBytes: boundary.targetBytes, now: now) == 480,
+                "productive partial passes must not erase the two prior ineffective passes")
+    }
+
+    @Test("unknown probes, exhausted slack and failed reclaim keep ordinary backoff")
+    func unprovenReclaimCannotEarnFastContinuation() {
+        let valid = SizeCapSweepProgress(
+            incrementalVacuumReclaimedPages: 4090,
+            mainFileBytesBefore: 270_000_000,
+            mainFileBytesAfter: 253_000_000,
+            reclaimableSlackBytesAfter: 100_000_000
+        )
+        var cases: [(Int64?, SizeCapSweepProgress)] = [(nil, valid), (-1, valid)]
+        var missing = valid
+        missing.mainFileBytesBefore = nil
+        cases.append((254_000_000, missing))
+        missing = valid; missing.mainFileBytesAfter = nil
+        cases.append((254_000_000, missing))
+        missing = valid; missing.reclaimableSlackBytesAfter = nil
+        cases.append((254_000_000, missing))
+        missing = valid; missing.reclaimableSlackBytesAfter = 0
+        cases.append((254_000_000, missing))
+        missing = valid; missing.incrementalVacuumReclaimedPages = 0
+        // EventStore.incrementalVacuum throws if its required post-checkpoint
+        // fails; the sweep reports zero successful pages for that outcome.
+        cases.append((254_000_000, missing))
+        missing = valid; missing.mainFileBytesBefore = missing.mainFileBytesAfter
+        cases.append((254_000_000, missing))
+        for (family, progress) in cases {
+            let now = Date(timeIntervalSince1970: 1000)
+            let backoff = SizeCapWatchdogBackoff()
+            #expect(backoff.recordSweep(observedFootprintBytes: family,
+                targetBytes: 234_881_024, progress: progress, now: now) == 120)
+            #expect(!backoff.mayFire(now: now.addingTimeInterval(60)))
+            #expect(backoff.mayFire(now: now.addingTimeInterval(120)))
+        }
+    }
+
+    @Test("WAL sawtooth and main-file regrowth cannot repeatedly earn fast retries")
+    func reclaimContinuationRequiresEpisodeLowWater() {
+        let backoff = SizeCapWatchdogBackoff()
+        var progress = SizeCapSweepProgress(
+            incrementalVacuumReclaimedPages: 4090,
+            mainFileBytesBefore: 270_000_000,
+            mainFileBytesAfter: 250_000_000,
+            reclaimableSlackBytesAfter: 100_000_000
+        )
+        #expect(backoff.recordSweep(observedFootprintBytes: 260_000_000,
+            targetBytes: 234_881_024, progress: progress) == 60)
+        progress.incrementalVacuumReclaimedPages = 0
+        progress.mainFileBytesBefore = 250_000_000
+        #expect(backoff.recordSweep(observedFootprintBytes: 251_000_000,
+            targetBytes: 234_881_024, progress: progress) == 120,
+                "a lower family from WAL checkpointing alone is not reclaim progress")
+        progress.incrementalVacuumReclaimedPages = 4090
+        progress.mainFileBytesBefore = 270_000_000
+        #expect(backoff.recordSweep(observedFootprintBytes: 251_000_000,
+            targetBytes: 234_881_024, progress: progress) == 240,
+                "regrowth back to the same post-sweep main size is not a new low-water")
+        progress.mainFileBytesAfter = 260_000_000
+        #expect(backoff.recordSweep(observedFootprintBytes: 261_000_000,
+            targetBytes: 234_881_024, progress: progress) == 480)
+        progress.incrementalVacuumReclaimedPages = 0
+        progress.mainFileBytesAfter = 240_000_000
+        #expect(backoff.recordSweep(observedFootprintBytes: 241_000_000,
+            targetBytes: 234_881_024, progress: progress) == 960,
+                "a full VACUUM alone cannot authorize incremental continuation")
+        progress.incrementalVacuumReclaimedPages = 4090
+        progress.mainFileBytesAfter = 245_000_000
+        #expect(backoff.recordSweep(observedFootprintBytes: 246_000_000,
+            targetBytes: 234_881_024, progress: progress) == 1920,
+                "no-progress observations may lower, but never raise, the episode low-water")
+    }
+
+    @Test("an unconverged episode continues below proactive but above target")
+    func watchdogContinuesWithinTargetToProactiveInterval() {
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: 700)
+        let family = boundary.targetBytes + 1
+        let backoff = SizeCapWatchdogBackoff()
+        #expect(family <= boundary.proactiveSweepBoundaryBytes)
+        #expect(!backoff.requiresMaintenance(footprintBytes: family, boundary: boundary))
+        #expect(backoff.recordSweep(observedFootprintBytes: family,
+            targetBytes: boundary.targetBytes) == 120)
+        #expect(backoff.requiresMaintenance(footprintBytes: family, boundary: boundary))
+        #expect(!backoff.requiresMaintenance(footprintBytes: boundary.targetBytes,
+            boundary: boundary))
+        #expect(backoff.requiresMaintenance(footprintBytes: family, boundary: boundary),
+                "an ordinary below-target sample must not reset the episode")
+        _ = backoff.recordSweep(observedFootprintBytes: boundary.targetBytes,
+            targetBytes: boundary.targetBytes)
+        #expect(!backoff.requiresMaintenance(footprintBytes: family, boundary: boundary))
+    }
+
+    @Test("convergence and configuration changes reset continuation low-water")
+    func newRecoveryEpisodeHasItsOwnLowWater() {
+        let backoff = SizeCapWatchdogBackoff()
+        backoff.observeConfiguration("320:100:15")
+        let progress = SizeCapSweepProgress(
+            incrementalVacuumReclaimedPages: 4090,
+            mainFileBytesBefore: 270_000_000,
+            mainFileBytesAfter: 250_000_000,
+            reclaimableSlackBytesAfter: 100_000_000
+        )
+        #expect(backoff.recordSweep(observedFootprintBytes: 251_000_000,
+            targetBytes: 234_881_024, progress: progress) == 60)
+        #expect(backoff.recordSweep(observedFootprintBytes: 251_000_000,
+            targetBytes: 234_881_024, progress: progress) == 120)
+        backoff.observeConfiguration("320:100:15")
+        #expect(backoff.recordSweep(observedFootprintBytes: 251_000_000,
+            targetBytes: 234_881_024, progress: progress) == 240)
+        backoff.observeConfiguration("420:100:15")
+        #expect(backoff.recordSweep(observedFootprintBytes: 251_000_000,
+            targetBytes: 234_881_024, progress: progress) == 60)
+        _ = backoff.recordSweep(observedFootprintBytes: 234_881_024,
+            targetBytes: 234_881_024)
+        #expect(backoff.recordSweep(observedFootprintBytes: 251_000_000,
+            targetBytes: 234_881_024, progress: progress) == 60)
+    }
+
+    @Test("an unavailable sweep family reports no successful incremental reclaim")
+    func incompleteSweepDoesNotReportReclaimProgress() async throws {
+        let (store, directory) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let before = try await store.count()
+        let pages = await runAdaptiveRollupSweep(
+            eventStore: store,
+            dbPath: directory.path,
+            targetSizeBytes: 234_881_024,
+            capSizeBytes: 234_881_024
+        )
+        #expect(pages == 0)
+        #expect(try await store.count() == before)
     }
 
     @Test("retention telemetry names a forensic floor, never a SequenceEngine rebuild")

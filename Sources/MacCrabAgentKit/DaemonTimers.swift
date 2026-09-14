@@ -825,6 +825,15 @@ final class EventRetentionBudgetHealth: @unchecked Sendable {
     }
 }
 
+/// Post-sweep measurements captured while the shared maintenance guard is held.
+/// Missing probes and unsuccessful checkpointed reclaim do not imply progress.
+struct SizeCapSweepProgress: Sendable {
+    var incrementalVacuumReclaimedPages: Int = 0
+    var mainFileBytesBefore: Int64?
+    var mainFileBytesAfter: Int64?
+    var reclaimableSlackBytesAfter: Int64?
+}
+
 /// v1.21.6 (audit DL-03): back-off state for the early-fire size-cap watchdog.
 ///
 /// The watchdog is a BURST catcher, not a second scheduler: it exists to react
@@ -836,8 +845,10 @@ final class EventRetentionBudgetHealth: @unchecked Sendable {
 /// fires/hour for 7 consecutive hours, 1.9M page rewrites (7.3 GiB) in 12 h,
 /// sysext pinned at 151-241% CPU, footprint parked at ~2x cap the whole time.
 /// Doubling the minimum interval after each INEFFECTIVE fire caps that at
-/// ~32 min while leaving the burst response at the original 60 s on a healthy
-/// host (any fire that clears the threshold resets the streak).
+/// ~32 min. Verified bounded incremental progress can continue after 60 s while
+/// preserving that streak; only convergence or a changed configuration resets
+/// it. Main-file low-water tracking prevents WAL sawtooth or repeated regrowth
+/// from keeping an unconverged store on the fast cadence.
 ///
 /// LOCAL to `DaemonTimers.start` (captured by the watchdog closure), lock-
 /// guarded because DispatchSourceTimer handlers can overlap. NOT a DaemonState
@@ -847,6 +858,8 @@ final class SizeCapWatchdogBackoff: @unchecked Sendable {
     private var ineffectiveStreak = 0
     private var nextEligible = Date.distantPast
     private var configurationToken: String?
+    private var targetUnmet = false
+    private var mainFileLowWaterBytes: Int64?
 
     /// Base cadence — matches the timer's `repeating:` interval.
     private static let baseInterval: TimeInterval = 60
@@ -855,9 +868,20 @@ final class SizeCapWatchdogBackoff: @unchecked Sendable {
     private static let maxDoublings = 5
 
     /// True when enough back-off has elapsed for another early fire.
-    func mayFire() -> Bool {
+    func mayFire(now: Date = Date()) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return Date() >= nextEligible
+        return now >= nextEligible
+    }
+
+    /// Continue an actual unconverged sweep even when a later sample falls
+    /// below the wider proactive boundary. Sampling never clears the episode.
+    func requiresMaintenance(
+        footprintBytes: Int64,
+        boundary: EventsSizeCapBoundary
+    ) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return boundary.requiresMaintenance(footprintBytes: footprintBytes)
+            || (targetUnmet && footprintBytes > boundary.targetBytes)
     }
 
     /// A materially changed budget invalidates the prior convergence result.
@@ -869,21 +893,52 @@ final class SizeCapWatchdogBackoff: @unchecked Sendable {
         configurationToken = token
         ineffectiveStreak = 0
         nextEligible = .distantPast
+        targetUnmet = false
+        mainFileLowWaterBytes = nil
     }
 
     /// Record a fired sweep's outcome. Returns the seconds until the next
-    /// eligible fire (for logging). `stillOver == false` resets the streak.
+    /// eligible fire. A successful bounded reclaim may continue in one minute
+    /// without clearing the ineffective streak or declaring convergence. Its
+    /// main-file low-water must improve, so WAL sawtooth and repeated regrowth
+    /// cannot keep an ineffective store on the fast cadence indefinitely.
     @discardableResult
-    func recordSweep(stillOver: Bool) -> Int {
+    func recordSweep(
+        observedFootprintBytes: Int64?,
+        targetBytes: Int64,
+        progress: SizeCapSweepProgress = SizeCapSweepProgress(),
+        now: Date = Date()
+    ) -> Int {
         lock.lock(); defer { lock.unlock() }
-        guard stillOver else {
+        let footprint = observedFootprintBytes.flatMap { $0 >= 0 ? $0 : nil }
+        if let footprint, targetBytes >= 0, footprint <= targetBytes {
             ineffectiveStreak = 0
             nextEligible = .distantPast
+            targetUnmet = false
+            mainFileLowWaterBytes = nil
+            return Int(Self.baseInterval)
+        }
+        if let footprint, targetBytes >= 0, footprint > targetBytes {
+            targetUnmet = true
+        }
+        let previousLowWater = mainFileLowWaterBytes
+        if let after = progress.mainFileBytesAfter, after > 0 {
+            mainFileLowWaterBytes = min(previousLowWater ?? after, after)
+        }
+        if let footprint, targetBytes >= 0, footprint > targetBytes,
+           progress.incrementalVacuumReclaimedPages > 0,
+           let before = progress.mainFileBytesBefore,
+           let after = progress.mainFileBytesAfter,
+           after > 0, before > after,
+           let slack = progress.reclaimableSlackBytesAfter,
+           slack > 0, slack <= after,
+           previousLowWater.map({ after < $0 }) ?? true {
+            nextEligible = now.addingTimeInterval(Self.baseInterval)
             return Int(Self.baseInterval)
         }
         ineffectiveStreak = min(ineffectiveStreak + 1, Self.maxDoublings)
         let delay = Self.baseInterval * pow(2.0, Double(ineffectiveStreak))
-        nextEligible = Date().addingTimeInterval(delay)
+        nextEligible = now.addingTimeInterval(delay)
         return Int(delay)
     }
 }
@@ -2258,6 +2313,46 @@ enum DaemonTimers {
             ].map(String.init).joined(separator: ":")
         }
 
+        // Both callers hold beginSizeCapPrune through these probes. A WAL
+        // checkpoint can lower family bytes without reclaiming the main file;
+        // only successful incremental work plus a new main-file low-water can
+        // earn a bounded continuation. Unknown/slack-zero remains conservative.
+        @Sendable func recordSizeCapSweep(
+            context: String,
+            boundary: EventsSizeCapBoundary,
+            mainFileBytesBefore: Int64?,
+            incrementalVacuumReclaimedPages: Int
+        ) async {
+            let afterBytes = try? measureDatabaseFootprintBytes(dbPath: dbFilePath)
+            let afterMain = try? SQLitePersistentStoreAdmission
+                .measureMainFile(dbFilePath)
+            let remainingSlack = await state.eventStore.reclaimableFreelistBytes()
+            state.eventRetentionBudgetHealth.recordSweep(
+                observedFootprintBytes: afterBytes,
+                boundary: boundary
+            )
+            let retrySeconds = watchdogBackoff.recordSweep(
+                observedFootprintBytes: afterBytes,
+                targetBytes: boundary.targetBytes,
+                progress: SizeCapSweepProgress(
+                    incrementalVacuumReclaimedPages: incrementalVacuumReclaimedPages,
+                    mainFileBytesBefore: mainFileBytesBefore,
+                    mainFileBytesAfter: afterMain,
+                    reclaimableSlackBytesAfter: remainingSlack
+                )
+            )
+            guard let afterBytes else {
+                logger.fault("Tier-rollup \(context, privacy: .public): post-sweep family measurement unavailable; backing off to \(retrySeconds)s without a convergence verdict.")
+                return
+            }
+            guard afterBytes > boundary.targetBytes else { return }
+            if retrySeconds == 60 {
+                logger.notice("Tier-rollup \(context, privacy: .public): bounded incremental reclaim made progress (\(incrementalVacuumReclaimedPages) pages, \(remainingSlack) bytes of slack remain); family \(afterBytes) bytes still exceeds target \(boundary.targetBytes). Continuing in \(retrySeconds)s; retention remains degraded.")
+            } else {
+                logger.fault("Tier-rollup \(context, privacy: .public): family \(afterBytes) bytes still exceeds target \(boundary.targetBytes), without verified bounded-reclaim continuation. Backing off to \(retrySeconds)s; budget convergence remains unproven.")
+            }
+        }
+
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
         sizeCapTimer.schedule(
             deadline: .now() + 60,
@@ -2288,7 +2383,9 @@ enum DaemonTimers {
                     return
                 }
                 await { () async -> Void in
-                await runAdaptiveRollupSweep(
+                let beforeMain = try? SQLitePersistentStoreAdmission
+                    .measureMainFile(dbFilePath)
+                let reclaimedPages = await runAdaptiveRollupSweep(
                     eventStore: state.eventStore,
                     dbPath: dbFilePath,
                     targetSizeBytes: boundary.targetBytes,
@@ -2308,20 +2405,11 @@ enum DaemonTimers {
                             refreshedTransition.appliedReserveMiB
                     )
                 )
-                let afterBytes = try? measureDatabaseFootprintBytes(
-                    dbPath: dbFilePath
-                )
-                state.eventRetentionBudgetHealth.recordSweep(
-                    observedFootprintBytes: afterBytes,
-                    boundary: postSweepBoundary
-                )
-                // Only an actual sweep at/below TARGET proves enough headroom
-                // to re-arm the one-minute burst catcher. A transient ordinary
-                // tick below the wider proactive boundary proves nothing.
-                watchdogBackoff.recordSweep(
-                    stillOver: afterBytes.map {
-                        $0 > postSweepBoundary.targetBytes
-                    } ?? true
+                await recordSizeCapSweep(
+                    context: "scheduled sweep",
+                    boundary: postSweepBoundary,
+                    mainFileBytesBefore: beforeMain,
+                    incrementalVacuumReclaimedPages: reclaimedPages
                 )
                 }()
                 await state.eventStore.endSizeCapPrune()
@@ -2502,7 +2590,10 @@ enum DaemonTimers {
                     logger.fault("Tier-rollup early-fire watchdog: authoritative events.db family probe failed; refusing maintenance: \(error.localizedDescription, privacy: .public)")
                     return
                 }
-                guard boundary.requiresMaintenance(footprintBytes: nowBytes) else {
+                guard watchdogBackoff.requiresMaintenance(
+                    footprintBytes: nowBytes,
+                    boundary: boundary
+                ) else {
                     // A sampling tick can catch the sawtooth just after prune /
                     // checkpoint and before the firehose refills it. Do NOT reset
                     // sticky backoff here; only a fired sweep at/below TARGET or
@@ -2510,11 +2601,9 @@ enum DaemonTimers {
                     return
                 }
                 // v1.21.6 (audit DL-03): over threshold is NOT sufficient to
-                // fire. When the last fire failed to clear the threshold this
-                // gate holds us off for 2/4/8/16/32 min, because re-running the
-                // sweep every 60 s on a host whose budget is unreachable buys
-                // nothing and costs a full FTS `optimize` + incremental_vacuum
-                // each time (measured: 1.9M page rewrites / 7.3 GiB in 12 h).
+                // fire. Verified bounded reclaim can continue after one minute;
+                // absent progress retains the 2/4/8/16/32-minute backoff so an
+                // irreducible store cannot recreate the full rewrite loop.
                 guard watchdogBackoff.mayFire() else { return }
                 guard await state.eventStore.beginSizeCapPrune() else {
                     // A scheduled sweep is already running. The
@@ -2529,8 +2618,10 @@ enum DaemonTimers {
                 )
                 let aggregateDays = max(1, state.storage.aggregateDays)
                 let alertsRetention = max(1, state.storage.alertsRetentionDays)
-                logger.warning("Tier-rollup early-fire watchdog: events.db family \(nowBytes) bytes exceeds proactive boundary \(boundary.proactiveSweepBoundaryBytes) bytes (hard admission at \(boundary.hardAdmissionBoundaryBytes), nominal cap \(boundary.nominalCapBytes)) — running sweep now.")
-                await runAdaptiveRollupSweep(
+                logger.warning("Tier-rollup early-fire watchdog: events.db family \(nowBytes) bytes requires maintenance toward target \(boundary.targetBytes) (proactive boundary \(boundary.proactiveSweepBoundaryBytes), hard admission \(boundary.hardAdmissionBoundaryBytes), nominal cap \(boundary.nominalCapBytes)) — running sweep now.")
+                let beforeMain = try? SQLitePersistentStoreAdmission
+                    .measureMainFile(dbFilePath)
+                let reclaimedPages = await runAdaptiveRollupSweep(
                     eventStore: state.eventStore,
                     dbPath: dbFilePath,
                     targetSizeBytes: boundary.targetBytes,
@@ -2550,38 +2641,12 @@ enum DaemonTimers {
                             refreshedTransition.appliedReserveMiB
                     )
                 )
-                // v1.21.6 (audit DL-03): did the sweep actually achieve
-                // anything? Feed the answer back into the back-off, and when it
-                // did not, say so ONCE per back-off window at fault level with
-                // the knobs named. Before this the operator got a `warning` that
-                // said 'running sweep now' every minute for hours and never a
-                // single line explaining that the configured budget is not
-                // reachable on this host.
-                let afterBytes: Int64
-                do {
-                    afterBytes = try measureDatabaseFootprintBytes(dbPath: dbFilePath)
-                } catch {
-                    let backoffSeconds = watchdogBackoff.recordSweep(stillOver: true)
-                    state.eventRetentionBudgetHealth.recordSweep(
-                        observedFootprintBytes: nil,
-                        boundary: postSweepBoundary
-                    )
-                    logger.fault("Tier-rollup early-fire watchdog: post-sweep events.db family probe failed; treating the sweep as ineffective and backing off to \(backoffSeconds)s: \(error.localizedDescription, privacy: .public)")
-                    return
-                }
-                let stillOver = postSweepBoundary.requiresMaintenance(
-                    footprintBytes: afterBytes
+                await recordSizeCapSweep(
+                    context: "early-fire watchdog",
+                    boundary: postSweepBoundary,
+                    mainFileBytesBefore: beforeMain,
+                    incrementalVacuumReclaimedPages: reclaimedPages
                 )
-                state.eventRetentionBudgetHealth.recordSweep(
-                    observedFootprintBytes: afterBytes,
-                    boundary: postSweepBoundary
-                )
-                let backoffSeconds = watchdogBackoff.recordSweep(
-                    stillOver: afterBytes > postSweepBoundary.targetBytes
-                )
-                if stillOver {
-                    logger.fault("Tier-rollup early-fire watchdog: sweep left events.db at \(afterBytes) bytes — still over the live proactive \(postSweepBoundary.proactiveSweepBoundaryBytes)-byte boundary. The event-family budget is NOT reachable on this host. New alert evidence no longer grows events.db; the applied legacy transition reserve is \(refreshedTransition.appliedReserveMiB) MiB (pending \(refreshedTransition.pendingReserveMiB ?? -1) MiB). Backing the watchdog off to \(backoffSeconds)s to stop the prune+VACUUM rewrite loop.")
-                }
                 }()
                 await state.eventStore.endSizeCapPrune()
             }
@@ -6960,8 +7025,9 @@ enum StorageReclaimDecision {
 /// 3 kicks in: pruneOldest() to bring file size under cap by sheer row count,
 /// followed by VACUUM if disk has the headroom.
 ///
-/// All steps are best-effort; failures log + continue. The next 6-hourly
-/// tick retries the same logic from scratch — idempotent by design.
+/// Best-effort maintenance returns only successfully checkpointed incremental
+/// reclaim pages. Unknown/early-return outcomes earn no fast continuation.
+@discardableResult
 func runAdaptiveRollupSweep(
     eventStore: EventStore,
     dbPath: String,
@@ -6992,7 +7058,8 @@ func runAdaptiveRollupSweep(
     evidencePerAlertCap: Int = 16,
     evidenceMaxSizeMB: Int = 100,
     processFloorMinutes: Int = 0
-) async {
+) async -> Int {
+    var incrementalVacuumReclaimedPages = 0
     // v1.21.4 per-category retention floor. When > 0, spare process/exec rows
     // newer than this cutoff from BOTH the time-based rollup (Layer 2) and the
     // oldest-first row-count fallback (Layer 3) so a cheap file-write flood
@@ -7013,7 +7080,7 @@ func runAdaptiveRollupSweep(
     }
     // Probe before the first DELETE. Unsafe/partial families and stat failures
     // must never be converted into a zero-byte reading that authorizes mutation.
-    guard let startSizeBytes = currentFootprint("start") else { return }
+    guard let startSizeBytes = currentFootprint("start") else { return 0 }
     // v1.8.0-rc6: Prune oversized alert_evidence FIRST. On the field test
     // host, a single sweep found 802K evidence rows / 2.4 GB — the storage
     // split decoupled evidence (in events.db) from its parent alerts (now
@@ -7049,7 +7116,7 @@ func runAdaptiveRollupSweep(
 
     for minutes in cutoffsMinutes {
         guard let beforeBytes = currentFootprint("before adaptive cutoff") else {
-            return
+            return 0
         }
         if beforeBytes <= targetSizeBytes && minutes != cutoffsMinutes.first {
             // Don't tighten further than needed. Only the first cutoff
@@ -7074,7 +7141,7 @@ func runAdaptiveRollupSweep(
             }
             // Re-check size after each tighter pass.
             guard let afterBytes = currentFootprint("after adaptive cutoff") else {
-                return
+                return 0
             }
             if afterBytes <= targetSizeBytes {
                 logger.notice("Adaptive rollup: DB \(beforeBytes) bytes → \(afterBytes) bytes at \(Int(minutes))m cutoff (target \(targetSizeBytes) bytes) — done.")
@@ -7089,7 +7156,7 @@ func runAdaptiveRollupSweep(
     // the DB still exceeds the hard ceiling, prune by row count until it
     // fits. Last-resort guarantee that the user's disk-budget is honored.
     guard let sizeAfterAdaptiveBytes = currentFootprint("after adaptive passes") else {
-        return
+        return 0
     }
     if sizeAfterAdaptiveBytes > capSizeBytes {
         logger.warning("Adaptive rollup left DB at \(sizeAfterAdaptiveBytes) bytes (proactive boundary \(capSizeBytes) bytes) — engaging Layer 3 row-count cap.")
@@ -7100,7 +7167,7 @@ func runAdaptiveRollupSweep(
                 total = try await eventStore.maintenanceRetainedRecordCount()
             } catch {
                 logger.fault("Layer 3 cap: retained-record count unavailable; refusing zero-derived prune: \(error.localizedDescription, privacy: .public)")
-                return
+                return 0
             }
             let overFraction = Double(sizeAfterAdaptiveBytes - capSizeBytes)
                 / Double(sizeAfterAdaptiveBytes)
@@ -7193,7 +7260,7 @@ func runAdaptiveRollupSweep(
     // full `optimize` (frees its pages to the freelist), then let the
     // incremental_vacuum / VACUUM below return them to the OS.
     guard let footprintBeforeReclaimBytes = currentFootprint("before reclaim") else {
-        return
+        return 0
     }
     let overCap = footprintBeforeReclaimBytes > targetSizeBytes
     // v1.21.7: `overCap` deliberately REMOVED from the optimize condition.
@@ -7215,7 +7282,7 @@ func runAdaptiveRollupSweep(
     // battery pressure.
     if !walPinned && !underPowerPressure {
         guard let ftsStart = currentFootprint("before FTS optimize") else {
-            return
+            return 0
         }
         if await eventStore.optimizeFTS() {
             _ = await eventStore.walCheckpoint()   // move optimize's freed pages out of the WAL
@@ -7265,11 +7332,12 @@ func runAdaptiveRollupSweep(
         walPinned: walPinned
     ) {
         guard let dbSizeBeforePrune = currentFootprint("before incremental vacuum") else {
-            return
+            return 0
         }
         let reclaimed = (try? await eventStore.incrementalVacuum(maxPages: 200_000)) ?? 0
+        incrementalVacuumReclaimedPages = reclaimed
         guard let dbSizeAfterIncremental = currentFootprint("after incremental vacuum") else {
-            return
+            return 0
         }
         if reclaimed > 0 {
             logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages, \(dbSizeBeforePrune) bytes → \(dbSizeAfterIncremental) bytes")
@@ -7322,7 +7390,7 @@ func runAdaptiveRollupSweep(
                     logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
                 }
                 guard let afterVacuumBytes = currentFootprint("after full vacuum") else {
-                    return
+                    return 0
                 }
                 if SizeCapConvergence.record(converged: afterVacuumBytes <= targetSizeBytes) {
                     logger.error("Tier-rollup: events.db size cap is UNREACHABLE — \(SizeCapConvergence.failureLimit) consecutive full VACUUMs left the footprint at \(afterVacuumBytes) bytes against a \(targetSizeBytes)-byte target. The measured floor (schema + legacy alert_evidence + events_fts + retained rows + WAL) exceeds the effective event-family target, so rebuilding cannot converge and was rewriting the whole file every sweep. Full VACUUM suppressed for \(Int(SizeCapConvergence.backoffSeconds / 3600)) h. Adjust the legacy events envelope/evidence allocation or reduce indexed event bytes.")
@@ -7376,12 +7444,13 @@ func runAdaptiveRollupSweep(
     // mergeFTS() so the merge's own WAL frames are drained too, and before the
     // endMB measurement so the log reflects the reclaimed sidecar. Best-effort;
     // degrades to RESTART-like progress under an active reader.
-    await eventStore.walCheckpointTruncate()
+    guard await eventStore.walCheckpointTruncate() else { return 0 }
 
-    guard let endBytes = currentFootprint("finish") else { return }
+    guard let endBytes = currentFootprint("finish") else { return 0 }
     if startSizeBytes != endBytes || totalPruned > 0 {
         logger.notice("Tier-rollup sweep complete: DB \(startSizeBytes) bytes → \(endBytes) bytes, pruned \(totalPruned) events total.")
     }
+    return incrementalVacuumReclaimedPages
 }
 
 /// Free disk space at the volume containing `path`, in megabytes.

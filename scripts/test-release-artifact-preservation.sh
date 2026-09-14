@@ -1411,6 +1411,57 @@ run_release_control() {
     set -e
 }
 
+make_qualified_ga_sparkle_fixture() {
+    local fixture="$1"
+    make_release_fixture "$fixture"
+    # Exercise the real provenance checker with explicit fixture-only tool
+    # hashes. No Apple signing tool, private key, or network service is used.
+    cp "$SCRIPT_DIR/check-release-dependencies.sh" "$fixture/scripts/check-release-dependencies.sh"
+    cp "$SCRIPT_DIR/release-dependencies.lock" "$fixture/scripts/release-dependencies.lock"
+    cp "$PROJECT_DIR/Package.swift" "$PROJECT_DIR/Package.resolved" "$fixture/"
+    mkdir -p "$fixture/.build/checkouts/Sparkle" "$fixture/.build/artifacts/sparkle/Sparkle/bin"
+    /usr/bin/python3 -I -B - "$fixture" <<'PYTHON'
+import hashlib
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+lock_path = root / "scripts/release-dependencies.lock"
+lock_text = lock_path.read_text()
+lock = dict(line.split("=", 1) for line in lock_text.splitlines() if line and not line.startswith("#"))
+(root / ".build/checkouts/Sparkle/Package.swift").write_text(
+    f'let version = "{lock["sparkle_version"]}"\n'
+    f'let checksum = "{lock["sparkle_binary_artifact_sha256"]}"\n'
+)
+for name in ("sign_update", "generate_keys"):
+    tool = root / ".build/artifacts/sparkle/Sparkle/bin" / name
+    tool.write_text(f"#!/bin/bash\n# Fixture-only {name}: provenance is checked, never executed.\nexit 92\n")
+    tool.chmod(0o755)
+    key = f"sparkle_{name}_sha256"
+    lock_text = lock_text.replace(f"{key}={lock[key]}", f"{key}={hashlib.sha256(tool.read_bytes()).hexdigest()}")
+lock_path.write_text(lock_text)
+# A whole-directory copy would import this ignored file; the production path
+# must copy only the three fixed, verified inputs.
+(root / ".build/artifacts/sparkle/Sparkle/bin/unrelated-private-input").write_text("fixture poison\n")
+generator = root / "scripts/generate-appcast-entry.sh"
+body = generator.read_text()
+needle = "dmg=; previous=\n"
+assert body.count(needle) == 1
+body = body.replace(needle, '''export_root="$(cd "$(dirname "$0")/.." && pwd)"
+/bin/bash "$export_root/scripts/check-release-dependencies.sh" >/dev/null || exit 91
+[ ! -e "$export_root/.build/artifacts/sparkle/Sparkle/bin/unrelated-private-input" ] || exit 93
+dmg=; previous=
+''')
+generator.write_text(body)
+PYTHON
+    /usr/bin/git -C "$fixture" add Package.swift Package.resolved scripts/check-release-dependencies.sh \
+        scripts/release-dependencies.lock scripts/generate-appcast-entry.sh
+    /usr/bin/git -C "$fixture" -c core.hooksPath=.no-hooks commit -q -m 'pin fixture-only Sparkle provenance'
+    printf 'preserved qualified GA candidate\n' > "$fixture/.build/MacCrab-v9.9.11.dmg"
+    printf '{}\n' > "$fixture/.qualification-evidence/MacCrab-v9.9.11.candidate.json"
+    printf '{}\n' > "$fixture/.qualification-evidence/MacCrab-v9.9.11.runtime.json"
+}
+
 assert_retained_ci_transcript() {
     /usr/bin/python3 -I -B - "$1" "$2" <<'PYTHON'
 import hashlib
@@ -1632,6 +1683,47 @@ printf '{}\n' > "$qualified_reuse/.qualification-evidence/MacCrab-v9.9.11-rc.1.r
     || fail "qualified second phase did not report preserved-candidate reuse"
 /usr/bin/grep -q 'release create' "$qualified_reuse/gh.log" \
     || fail "qualified second phase did not reach the isolated RC publisher"
+
+qualified_ga_sparkle="$TEST_ROOT/release-qualified-ga-sparkle"
+make_qualified_ga_sparkle_fixture "$qualified_ga_sparkle"
+run_release_control "$qualified_ga_sparkle" SITE_REPO_TOKEN='fixture token' TAP_REPO_TOKEN='fixture token'
+[ "$release_control_status" -eq 0 ] || fail "qualified GA reuse did not publish with verified copied appcast tools"
+[ ! -s "$qualified_ga_sparkle/build.log" ] || fail "qualified GA reuse rebuilt the tested artifact"
+[ "$(/usr/bin/grep -c 'release tools match Package.resolved + checked hashes' "$qualified_ga_sparkle/output.log")" -eq 2 ] \
+    || fail "qualified GA reuse did not authenticate both original and exported Sparkle tools"
+for publisher in appcast-generate appcast-publish release-json cask; do
+    /usr/bin/grep -qx "$publisher" "$qualified_ga_sparkle/publish.log" \
+        || fail "qualified GA reuse omitted $publisher"
+done
+/usr/bin/grep -q 'MacCrab v9.9.11 Released!' "$qualified_ga_sparkle/output.log" \
+    || fail "qualified GA reuse did not complete the publication fixture"
+
+for sparkle_fault in missing corrupt; do
+    qualified_ga_bad="$TEST_ROOT/release-qualified-ga-sparkle-$sparkle_fault"
+    make_qualified_ga_sparkle_fixture "$qualified_ga_bad"
+    before_head=$(/usr/bin/git -C "$qualified_ga_bad" rev-parse HEAD)
+    before_dmg=$(/usr/bin/shasum -a 256 "$qualified_ga_bad/.build/MacCrab-v9.9.11.dmg")
+    case "$sparkle_fault" in
+        missing)
+            rm "$qualified_ga_bad/.build/artifacts/sparkle/Sparkle/bin/generate_keys"
+            expected_failure='generate_keys is missing, linked, or non-executable' ;;
+        corrupt)
+            printf 'corrupted fixture bytes\n' >> "$qualified_ga_bad/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+            expected_failure='sign_update hash mismatch' ;;
+    esac
+    run_release_control "$qualified_ga_bad" SITE_REPO_TOKEN='fixture token' TAP_REPO_TOKEN='fixture token'
+    [ "$release_control_status" -ne 0 ] || fail "qualified GA reuse accepted $sparkle_fault appcast tools"
+    /usr/bin/grep -q "$expected_failure" "$qualified_ga_bad/output.log" \
+        || fail "qualified GA reuse did not diagnose $sparkle_fault appcast tools"
+    [ ! -s "$qualified_ga_bad/gh.log" ] || fail "$sparkle_fault appcast tools reached GitHub"
+    [ ! -s "$qualified_ga_bad/publish.log" ] || fail "$sparkle_fault appcast tools reached a publisher"
+    [ ! -s "$qualified_ga_bad/build.log" ] || fail "$sparkle_fault appcast tools rebuilt the tested artifact"
+    [ -z "$(/usr/bin/git -C "$qualified_ga_bad" tag -l)" ] || fail "$sparkle_fault appcast tools created a tag"
+    [ "$(/usr/bin/git -C "$qualified_ga_bad" rev-parse HEAD)" = "$before_head" ] \
+        || fail "$sparkle_fault appcast tools changed release metadata"
+    [ "$(/usr/bin/shasum -a 256 "$qualified_ga_bad/.build/MacCrab-v9.9.11.dmg")" = "$before_dmg" ] \
+        || fail "$sparkle_fault appcast tools changed the qualified artifact"
+done
 
 # Artifact construction starts only from a fully committed source snapshot, and
 # every entitlement used by codesign must be represented by that commit.
