@@ -50,9 +50,11 @@ import os.log
 // MARK: - ESCollectorError
 
 /// Errors that can occur when creating or configuring the ES client.
-public enum ESCollectorError: Error, CustomStringConvertible {
+public enum ESCollectorError: LocalizedError, CustomStringConvertible {
     /// The calling process is not running as root (euid 0).
     case notRunningAsRoot
+    /// The calling process lacks the user's TCC approval (Full Disk Access).
+    case missingUserAuthorization
     /// The binary does not have the required
     /// `com.apple.developer.endpoint-security.client` entitlement.
     case missingEntitlement
@@ -65,10 +67,14 @@ public enum ESCollectorError: Error, CustomStringConvertible {
     /// The client was already stopped or never started.
     case notRunning
 
+    public var errorDescription: String? { description }
+
     public var description: String {
         switch self {
         case .notRunningAsRoot:
             return "Endpoint Security requires root privileges (euid 0)."
+        case .missingUserAuthorization:
+            return "Endpoint Security lacks user TCC approval (Full Disk Access). For the installed app, enable MacCrab Endpoint Security Extension in System Settings."
         case .missingEntitlement:
             return "Binary is missing the com.apple.developer.endpoint-security.client entitlement."
         case .tooManyClients:
@@ -1361,9 +1367,10 @@ public final class ESCollector: @unchecked Sendable {
 
     /// Map an `es_new_client` failure code to a typed error (extracted so both
     /// the first-client and degraded-fallback paths report identically).
-    private static func mapClientError(_ result: es_new_client_result_t) -> ESCollectorError {
+    static func mapClientError(_ result: es_new_client_result_t) -> ESCollectorError {
         switch result {
-        case ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED:    return .notRunningAsRoot
+        case ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED:    return .missingUserAuthorization
+        case ES_NEW_CLIENT_RESULT_ERR_NOT_PRIVILEGED:   return .notRunningAsRoot
         case ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED:     return .missingEntitlement
         case ES_NEW_CLIENT_RESULT_ERR_TOO_MANY_CLIENTS: return .tooManyClients
         default:                                        return .clientCreationFailed(result)

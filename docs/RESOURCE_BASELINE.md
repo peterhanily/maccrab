@@ -1,20 +1,39 @@
 # Reference resource measurements
 
-Release qualification requires measurements from the published v1.21.5 app and
-engine, followed by reviewed resource limits. The initial
-[`RELEASE_RESOURCE_BASELINE.json`](RELEASE_RESOURCE_BASELINE.json) records that
-these measurements are missing. Neither a passing source suite nor candidate
-measurements can change that status.
+[`RELEASE_RESOURCE_BASELINE.json`](RELEASE_RESOURCE_BASELINE.json) contains the
+accepted published-v1.21.5 reference measured on September 14, 2026: 31 samples
+over 900 seconds on the qualification Mac. The three limits are 9 MiB/s average
+engine writes, 164 MiB/s maximum sampled write window, and 19% background GUI p95
+CPU (percent of one core).
+
+The engineering allowance is 25% above each measured reference statistic,
+rounded upward to whole MiB/s or CPU percentage points. It was selected before
+measurements of the next candidate. One reference epoch cannot estimate
+run-to-run variation or a false-failure probability. The document retains the
+raw samples, including the workload-bracketing write spike, and the written
+acceptance rationale. These limits govern the resource comparison; full
+installed qualification remains separately required.
+
+The committed record is an explicitly labelled publication derivative. It uses
+`reference-user` and `/REFERENCE_SOURCE` in three account/path fields; these are
+aliases, not the command or source path captured on the reference host. Its
+`publication_redaction` metadata identifies the exact fields and pins the
+unchanged private capture, accepted record and acceptance decision by SHA-256.
+Measurements, workload output, executor hashes, acceptance and limits are
+unchanged. Both records pass the same production baseline validator.
 
 ## Capture
 
-Use a separately provisioned reference Mac already running the published
-v1.21.5 app and system extension. Keep the GUI running in the background and
-allow the engine at least 250 seconds of uptime. Enable the loopback OTLP
-receiver used by the fixed workload. Use this same machine, macOS build, power
-source and workload when subsequently qualifying the candidate. The recorder
-checks the running images against independently verified published executable
-hashes and architecture-specific CodeDirectory hashes.
+For a new baseline, provision the published v1.21.5 app and system extension on
+the chosen qualification Mac. An isolated reference profile permits using the
+same Mac while preserving its operational profile separately; restore that
+profile before candidate qualification. Older software must never open stores
+created by a newer format. Keep the GUI running in the background and allow the
+engine at least 250 seconds of uptime. Enable the loopback OTLP receiver used by
+the fixed workload. Use this same machine, macOS build, power source and workload
+when subsequently qualifying the candidate. The recorder checks the running
+images against independently verified published executable hashes and
+architecture-specific CodeDirectory hashes.
 
 From the source checkout, run the resource recorder with the actual running
 engine PID and a fresh output path:

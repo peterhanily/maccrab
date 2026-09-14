@@ -962,6 +962,8 @@ grep -q 'push one release tag at a time' "$real_hook_multi/output.log" \
 
 make_release_fixture() {
     local fixture="$1"
+    local baseline_state="${2:-accepted}"
+    local stop_after_candidate="${3:-0}"
     mkdir -p "$fixture/.githooks" "$fixture/scripts" "$fixture/fake-bin" "$fixture/home" "$fixture/tmp" \
         "$fixture/Casks" "$fixture/homebrew" "$fixture/docs" "$fixture/RELEASE_NOTES" \
         "$fixture/Xcode/Resources" "$fixture/Sources/MacCrabCore/Resources"
@@ -996,7 +998,15 @@ make_release_fixture() {
         '    exit 86' \
         'fi' \
         'printf "%s\n" "$*" >> "${MACCRAB_TEST_CI_LOG:-ci.log}"' \
-        'exit 0'
+        'if [ -f .fixture-ci-output ]; then cat .fixture-ci-output; else printf "fixture clean CI stdout\n"; fi' \
+        'printf "fixture clean CI stderr\n" >&2' \
+        'exit "${MACCRAB_TEST_CI_STATUS:-0}"'
+    write_executable "$fixture/fake-bin/df" \
+        '#!/bin/bash' \
+        'printf "%s\n" "$*" >> "${MACCRAB_TEST_DF_LOG:-.fixture-df.log}"' \
+        '[ "$*" = "-Pk /private/tmp" ] || exit 88' \
+        'printf "Filesystem 1024-blocks Used Available Capacity Mounted\n"' \
+        'printf "fixture 20971520 0 %s 0%% /private/tmp\n" "${MACCRAB_TEST_FREE_KIB:-10485760}"'
     write_executable "$fixture/fake-bin/gh" \
         '#!/bin/bash' \
         'printf "gh invocation: %s\n" "$*" >> "$MACCRAB_TEST_GH_LOG"' \
@@ -1212,6 +1222,7 @@ make_release_fixture() {
         'fixture_root=$(dirname "$MACCRAB_TEST_GH_LOG")' \
         'build_log=${MACCRAB_TEST_BUILD_LOG:-$fixture_root/build.log}' \
         'printf "%s\n" "$stage" >> "$build_log"' \
+        'if [ "${MACCRAB_TEST_BUILD_FAIL_STAGE:-}" = "$stage" ]; then echo "fixture controlled build failure" >&2; exit 78; fi' \
         'printf "%s\n" "$PWD" >> "$fixture_root/build-pwd.log"' \
         '[[ "$PWD" == /private/tmp/maccrab-release-build.* ]] || exit 80' \
         '[ ! -e .git ] && [ ! -e .swiftpm ] || exit 81' \
@@ -1241,27 +1252,81 @@ make_release_fixture() {
         '        esac ;;' \
         'esac'
 
-    # Python stub for the copied release flow. It models the gate boundary and
-    # lets individual fixtures force a qualification failure; the real verifier
-    # has its own deterministic threshold/mutation suite.
-    printf '%s\n' \
-        'import hashlib, json, os, pathlib, sys' \
-        'args = sys.argv[1:]' \
-        'command = args[0] if args else ""' \
-        'def value(flag): return args[args.index(flag) + 1]' \
-        'if command == "verify-release":' \
-        '    if os.environ.get("MACCRAB_TEST_QUALIFICATION_FAIL") == "1": print("fixture qualification mismatch", file=sys.stderr); raise SystemExit(74)' \
-        '    for flag in ("--dmg", "--candidate-manifest", "--runtime-report", "--containment-report"):' \
-        '        path = pathlib.Path(value(flag)); assert path.is_file() and path.stat().st_size > 0' \
-        'elif command in ("record-candidate", "runtime-template"):' \
-        '    path = pathlib.Path(value("--output")); path.parent.mkdir(parents=True, exist_ok=True); path.write_text("{}\\n")' \
-        'elif command == "emit-release-json":' \
-        '    version = value("--version"); dmg = pathlib.Path.cwd() / ".build" / ("MacCrab-v" + version + ".dmg")' \
-        '    sha = hashlib.sha256(dmg.read_bytes()).hexdigest(); pathlib.Path(value("--output")).write_text(json.dumps({"version": version, "sha256": sha}) + "\\n")' \
-        'raise SystemExit(0)' \
-        > "$fixture/scripts/candidate-qualification.py"
-    /bin/chmod 0755 "$fixture/scripts/candidate-qualification.py"
     install_missing_critical_executor_fixtures "$fixture"
+    # Keep the real resource-baseline functions in the disposable module.
+    # Only its guarded CLI dispatcher is replaced: runpy imports must neither
+    # exit successfully nor bypass the production accepted/committed check.
+    # The existing deterministic reference receipt supplies genuine protocol
+    # controls without accessing an installed process or running a workload.
+    /usr/bin/python3 -I -B - "$PROJECT_DIR" "$fixture" "$baseline_state" <<'PYTHON'
+import hashlib
+import importlib.util
+import json
+import pathlib
+import shutil
+import sys
+
+source_root, fixture = map(pathlib.Path, sys.argv[1:3])
+state = sys.argv[3]
+module = fixture / "scripts/candidate-qualification.py"
+source = (source_root / "scripts/candidate-qualification.py").read_text()
+entry = 'if __name__ == "__main__":\n    raise SystemExit(main())\n'
+assert source.count(entry) == 1
+fixture_cli = '''def _release_fixture_main():
+    args = sys.argv[1:]
+    command = args[0] if args else ""
+    def value(flag): return args[args.index(flag) + 1]
+    if command == "verify-release":
+        if os.environ.get("MACCRAB_TEST_QUALIFICATION_FAIL") == "1":
+            print("fixture qualification mismatch", file=sys.stderr)
+            return 74
+        for flag in ("--dmg", "--candidate-manifest", "--runtime-report", "--containment-report"):
+            path = pathlib.Path(value(flag))
+            assert path.is_file() and path.stat().st_size > 0
+    elif command in ("record-candidate", "runtime-template"):
+        path = pathlib.Path(value("--output"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\\n")
+    elif command == "emit-release-json":
+        version = value("--version")
+        dmg = pathlib.Path.cwd() / ".build" / ("MacCrab-v" + version + ".dmg")
+        digest = hashlib.sha256(dmg.read_bytes()).hexdigest()
+        pathlib.Path(value("--output")).write_text(json.dumps({"version": version, "sha256": digest}) + "\\n")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(_release_fixture_main())
+'''
+module.write_text(source.replace(entry, fixture_cli))
+module.chmod(0o755)
+spec = importlib.util.spec_from_file_location(
+    "release_baseline_fixture", source_root / "scripts/test-candidate-qualification.py"
+)
+fixtures = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixtures)
+test = fixtures.CandidateQualificationTests()
+test.setUp()
+try:
+    baseline = test.resource_baseline_fixture()
+finally:
+    test.tearDown()
+baseline["recorder"]["sha256"] = hashlib.sha256(module.read_bytes()).hexdigest()
+for executor in baseline["workload"]["executors"]:
+    path = fixture / executor["path"]
+    shutil.copy2(source_root / executor["path"], path)
+    executor["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+baseline["workload"]["script_sha256"] = baseline["workload"]["executors"][0]["sha256"]
+if state == "pending":
+    baseline.update(status="pending-reference-measurement", acceptance=None, limits=None)
+elif state == "forged-measurement":
+    baseline["measurements"]["engine_average_write_bytes_per_second"] += 1
+elif state == "changed-executor":
+    baseline["workload"]["executors"][1]["sha256"] = "0" * 64
+elif state not in ("accepted", "missing"):
+    raise ValueError("unsupported fixture baseline state: " + state)
+if state != "missing":
+    (fixture / "docs/RELEASE_RESOURCE_BASELINE.json").write_text(json.dumps(baseline, indent=2) + "\n")
+PYTHON
     write_executable "$fixture/.githooks/pre-commit" \
         '#!/bin/bash' \
         ': > .fixture-commit-hook-ran' \
@@ -1288,14 +1353,17 @@ make_release_fixture() {
         -e "s#GIT_BIN=/usr/bin/git#GIT_BIN=${fixture}/fake-bin/git#" \
         -e "s#GH_BIN=/opt/homebrew/bin/gh#GH_BIN=${fixture}/fake-bin/gh#" \
         -e "s#CURL_BIN=/usr/bin/curl#CURL_BIN=${fixture}/fake-bin/curl#" \
+        -e "s#/bin/df -Pk /private/tmp#${fixture}/fake-bin/df -Pk /private/tmp#" \
         -e "s#PATH=/usr/bin:/bin:/usr/sbin:/sbin#PATH=${fixture}/fake-bin:/usr/bin:/bin:/usr/sbin:/sbin#" \
         "$fixture/scripts/release.sh"
     # Production exits here unconditionally. Only this disposable, committed
     # fixture copy continues so the existing post-boundary attack simulations
     # can exercise tag/push/upload behavior without a 15-minute host run.
-    /usr/bin/sed -i '' \
-        's@^    exit 3 # exact-candidate-phase-boundary: fixture tests patch only their disposable copy$@    CANDIDATE_READY=1; QUALIFIED_CANDIDATE_SHA=$(shasum -a 256 "$DMG_PATH" | awk '\''{print $1}'\''); QUALIFIED_MANIFEST_SHA=$(shasum -a 256 "$CANDIDATE_MANIFEST" | awk '\''{print $1}'\''); QUALIFIED_RUNTIME_SHA=$(shasum -a 256 "$RUNTIME_REPORT" | awk '\''{print $1}'\''); QUALIFIED_CONTAINMENT_SHA=$(shasum -a 256 "$CONTAINMENT_REPORT" | awk '\''{print $1}'\'')@' \
-        "$fixture/scripts/release.sh"
+    if [ "$stop_after_candidate" != "1" ]; then
+        /usr/bin/sed -i '' \
+            's@^    exit 3 # exact-candidate-phase-boundary: fixture tests patch only their disposable copy$@    CANDIDATE_READY=1; QUALIFIED_CANDIDATE_SHA=$(shasum -a 256 "$DMG_PATH" | awk '\''{print $1}'\''); QUALIFIED_MANIFEST_SHA=$(shasum -a 256 "$CANDIDATE_MANIFEST" | awk '\''{print $1}'\''); QUALIFIED_RUNTIME_SHA=$(shasum -a 256 "$RUNTIME_REPORT" | awk '\''{print $1}'\''); QUALIFIED_CONTAINMENT_SHA=$(shasum -a 256 "$CONTAINMENT_REPORT" | awk '\''{print $1}'\'')@' \
+            "$fixture/scripts/release.sh"
+    fi
     /usr/bin/sed -i '' "s#__FIXTURE_ROOT__#${fixture}#g" \
         "$fixture/scripts/generate-appcast-entry.sh" \
         "$fixture/scripts/publish-appcast-entry.sh" \
@@ -1326,6 +1394,141 @@ make_release_fixture() {
     printf '{}\n' > "$fixture/.qualification-evidence/MacCrab-v9.9.11.containment.json"
     printf '{}\n' > "$fixture/.qualification-evidence/MacCrab-v9.9.11-rc.1.containment.json"
 }
+
+run_release_control() {
+    local fixture="$1"
+    shift
+    set +e
+    (
+        cd "$fixture"
+        env PATH="$fixture/fake-bin:/usr/bin:/bin" HOME="$fixture/home" TMPDIR="$fixture/tmp" \
+            DEVELOPER_ID="fixture identity" RELEASE_BRANCH=main \
+            MACCRAB_TEST_GH_LOG="$fixture/gh.log" MACCRAB_TEST_GIT_LOG="$fixture/git.log" \
+            MACCRAB_TEST_PUBLISH_LOG="$fixture/publish.log" \
+            "$@" ./scripts/release.sh 9.9.11 --skip-prerelease-check
+    ) > "$fixture/output.log" 2>&1
+    release_control_status=$?
+    set -e
+}
+
+assert_retained_ci_transcript() {
+    /usr/bin/python3 -I -B - "$1" "$2" <<'PYTHON'
+import hashlib
+import pathlib
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1])
+expected_count = int(sys.argv[2])
+transcripts = list((root / ".qualification-evidence").glob("MacCrab-v9.9.11.clean-ci.*"))
+assert len(transcripts) == expected_count, (root, transcripts)
+body = root / ".fixture-ci-output"
+expected = (body.read_bytes() if body.exists() else b"fixture clean CI stdout\n") + b"fixture clean CI stderr\n"
+for transcript in transcripts:
+    assert not transcript.is_symlink()
+    assert stat.S_IMODE(transcript.stat().st_mode) == 0o600
+    assert transcript.read_bytes() == expected
+    assert hashlib.sha256(transcript.read_bytes()).digest() == hashlib.sha256(expected).digest()
+print("PASS: retained full private clean-CI transcript(s):", expected_count)
+PYTHON
+}
+
+# Baseline controls run the actual validator from an import-safe fixture
+# module, including raw-statistic/executor checks and real committed bytes.
+for baseline_state in missing pending forged-measurement changed-executor; do
+    baseline_fixture="$TEST_ROOT/release-baseline-$baseline_state"
+    make_release_fixture "$baseline_fixture" "$baseline_state" 1
+    run_release_control "$baseline_fixture"
+    [ "$release_control_status" -eq 1 ] \
+        || fail "release baseline $baseline_state did not reject before construction"
+    case "$baseline_state" in
+        missing) expected_baseline_error='reference resource baseline is missing' ;;
+        pending) expected_baseline_error='resource baseline is not accepted' ;;
+        forged-measurement) expected_baseline_error='measurements do not reconcile with raw samples' ;;
+        changed-executor) expected_baseline_error='workload executor bytes changed' ;;
+    esac
+    grep -q "$expected_baseline_error" "$baseline_fixture/output.log" \
+        || fail "release baseline $baseline_state did not reach the real baseline validator"
+    [ ! -s "$baseline_fixture/ci.log" ] && [ ! -s "$baseline_fixture/build.log" ] \
+        && [ ! -s "$baseline_fixture/gh.log" ] && [ ! -s "$baseline_fixture/publish.log" ] \
+        || fail "rejected baseline reached CI, construction, or publication"
+done
+echo "PASS: real missing, pending, forged-statistic, and changed-executor baselines fail before CI"
+
+ci_failure="$TEST_ROOT/release-retained-ci-failure"
+make_release_fixture "$ci_failure" accepted 1
+/usr/bin/python3 -I -B - "$ci_failure/.fixture-ci-output" <<'PYTHON'
+import pathlib
+import sys
+pathlib.Path(sys.argv[1]).write_text("".join(f"full aggregate line {index:04d}\n" for index in range(400)))
+PYTHON
+for attempt in 1 2; do
+    run_release_control "$ci_failure" MACCRAB_TEST_CI_STATUS=73
+    [ "$release_control_status" -eq 1 ] || fail "controlled CI failure did not stop release"
+    grep -q 'clean local CI failed' "$ci_failure/output.log" || fail "release did not report controlled CI failure"
+    [ ! -s "$ci_failure/build.log" ] && [ ! -s "$ci_failure/.fixture-df.log" ] \
+        || fail "failed CI reached capacity checking or construction"
+    assert_retained_ci_transcript "$ci_failure" "$attempt"
+done
+
+# Capacity is sampled on the export filesystem even when CI produced no
+# reclaimable architecture tree. Exactly the floor permits construction.
+for architecture_count in 0 2; do
+    for free_kib in 3145727 3145728 invalid; do
+        capacity_fixture="$TEST_ROOT/release-capacity-$architecture_count-$free_kib"
+        make_release_fixture "$capacity_fixture" accepted 1
+        mkdir -p "$capacity_fixture/.build"
+        printf 'retain unrelated artifact\n' > "$capacity_fixture/.build/preserved.dmg"
+        if [ "$architecture_count" = 2 ]; then
+            mkdir -p "$capacity_fixture/.build/arm64-apple-macosx" "$capacity_fixture/.build/x86_64-apple-macosx"
+            printf 'owned fixture product\n' > "$capacity_fixture/.build/arm64-apple-macosx/product"
+            printf 'owned fixture product\n' > "$capacity_fixture/.build/x86_64-apple-macosx/product"
+        fi
+        run_release_control "$capacity_fixture" "MACCRAB_TEST_FREE_KIB=$free_kib" MACCRAB_TEST_BUILD_FAIL_STAGE=unsigned-build
+        [ "$(cat "$capacity_fixture/.fixture-df.log")" = '-Pk /private/tmp' ] \
+            || fail "release did not measure the export filesystem exactly once"
+        [ "$(cat "$capacity_fixture/.build/preserved.dmg")" = 'retain unrelated artifact' ] \
+            || fail "architecture reclamation removed an unrelated retained artifact"
+        [ ! -e "$capacity_fixture/.build/arm64-apple-macosx" ] \
+            && [ ! -e "$capacity_fixture/.build/x86_64-apple-macosx" ] \
+            || fail "release did not reclaim its architecture products"
+        if [ "$free_kib" = 3145728 ]; then
+            [ "$release_control_status" -eq 78 ] \
+                || { tail -40 "$capacity_fixture/output.log" >&2; fail "exactly 3 GiB did not permit construction"; }
+            [ "$(cat "$capacity_fixture/build.log")" = unsigned-build ] \
+                || fail "accepted capacity did not reach precisely the controlled build failure"
+            grep -q 'fixture controlled build failure' "$capacity_fixture/output.log" \
+                || fail "release stopped before the controlled later build failure"
+        else
+            [ "$release_control_status" -eq 1 ] && [ ! -s "$capacity_fixture/build.log" ] \
+                || fail "insufficient or invalid capacity reached construction"
+            case "$free_kib" in
+                invalid) grep -q 'could not measure free space for the exact release build' "$capacity_fixture/output.log" ;;
+                *) grep -q 'requires at least 3 GiB' "$capacity_fixture/output.log" ;;
+            esac || fail "release capacity rejection did not identify its cause"
+        fi
+        assert_retained_ci_transcript "$capacity_fixture" 1
+    done
+done
+echo "PASS: zero/two reclaimed trees enforce the same capacity floor and preserve later-failure transcripts"
+
+# This copy preserves the real first-phase boundary, including the final GA
+# version string. It constructs only fake artifacts and must stop before the
+# fixture publisher, local tag creation, or simulated push.
+first_phase="$TEST_ROOT/release-real-first-phase-boundary"
+make_release_fixture "$first_phase" accepted 1
+first_phase_source=$(/usr/bin/git -C "$first_phase" rev-parse HEAD)
+run_release_control "$first_phase"
+[ "$release_control_status" -eq 3 ] \
+    || { tail -50 "$first_phase/output.log" >&2; fail "successful first phase did not stop at its real exit-3 boundary"; }
+[ "$(tr '\n' ' ' < "$first_phase/build.log")" = 'unsigned-build assemble sign publish ' ] \
+    || fail "accepted baseline failed to allow all isolated construction phases"
+[ "$first_phase_source" = "$(/usr/bin/git -C "$first_phase" rev-parse HEAD)" ] \
+    && [ -z "$(/usr/bin/git -C "$first_phase" tag -l)" ] \
+    && [ ! -s "$first_phase/gh.log" ] && [ ! -s "$first_phase/publish.log" ] \
+    || fail "first-phase boundary allowed a source/ref or publication change"
+assert_retained_ci_transcript "$first_phase" 1
+echo "PASS: accepted committed baseline reaches the real unpublished GA first-phase boundary"
 
 run_release_attack() {
     local attack="$1"
@@ -1424,6 +1627,7 @@ printf '{}\n' > "$qualified_reuse/.qualification-evidence/MacCrab-v9.9.11-rc.1.r
 ) > "$qualified_reuse/output.log" 2>&1 \
     || fail "qualified second phase did not publish the preserved RC fixture"
 [ ! -s "$qualified_reuse/build.log" ] || fail "qualified second phase rebuilt the installed-host-tested candidate"
+[ ! -s "$qualified_reuse/.fixture-df.log" ] || fail "qualified candidate reuse ran the first-phase build headroom check"
 /usr/bin/grep -q 'Reusing exact installed-host-qualified candidate' "$qualified_reuse/output.log" \
     || fail "qualified second phase did not report preserved-candidate reuse"
 /usr/bin/grep -q 'release create' "$qualified_reuse/gh.log" \

@@ -2746,7 +2746,7 @@ enum DaemonSetup {
                 logger.info("ES collector started successfully (native client)")
                 esMode = "native client"
             } catch {
-                logger.warning("ES entitlement unavailable: \(error)")
+                logger.warning("Native ES collector startup failed: \(error.localizedDescription, privacy: .public)")
                 // Fallback: use eslogger proxy (same kernel events, no entitlement)
                 if let preflightError = EsloggerCollector.preflightCheck() {
                     logger.warning("eslogger preflight failed: \(preflightError)")

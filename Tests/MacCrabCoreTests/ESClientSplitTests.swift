@@ -124,6 +124,58 @@ struct ESClientSplitTests {
         #expect(ESCollector.shouldDegradeToSingleClient(secondClientResult: ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED) == true)
     }
 
+    // MARK: - Startup error diagnostics (no live ES client required)
+
+    @Test("client creation distinguishes user approval, root privileges and entitlement")
+    func clientCreationAuthorizationDiagnostics() {
+        let approval = ESCollector.mapClientError(ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED)
+        if case .missingUserAuthorization = approval {} else {
+            Issue.record("NOT_PERMITTED must identify missing user TCC approval")
+        }
+        #expect(approval.description.contains("Full Disk Access"))
+        #expect(approval.description.contains("MacCrab Endpoint Security Extension"))
+        let privilege = ESCollector.mapClientError(ES_NEW_CLIENT_RESULT_ERR_NOT_PRIVILEGED)
+        if case .notRunningAsRoot = privilege {} else {
+            Issue.record("NOT_PRIVILEGED must identify missing root privileges")
+        }
+        let entitlement = ESCollector.mapClientError(ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED)
+        if case .missingEntitlement = entitlement {} else {
+            Issue.record("NOT_ENTITLED must identify the missing signing entitlement")
+        }
+    }
+
+    @Test("unmapped client failures retain the actual Apple result code")
+    func clientCreationUnmappedResultDiagnostics() {
+        for result in [ES_NEW_CLIENT_RESULT_ERR_INVALID_ARGUMENT,
+                       ES_NEW_CLIENT_RESULT_ERR_INTERNAL,
+                       es_new_client_result_t(rawValue: UInt32.max)] {
+            let error = ESCollector.mapClientError(result)
+            guard case .clientCreationFailed(let recorded) = error else {
+                Issue.record("Unmapped client error lost its actual result code")
+                continue
+            }
+            #expect(recorded.rawValue == result.rawValue)
+            #expect(error.description.contains(String(result.rawValue)))
+        }
+        if case .tooManyClients = ESCollector.mapClientError(ES_NEW_CLIENT_RESULT_ERR_TOO_MANY_CLIENTS) {} else {
+            Issue.record("Client limit error must retain its existing classification")
+        }
+    }
+
+    @Test("startup descriptions survive Error and NSError bridging")
+    func clientCreationLocalizedErrorBridge() {
+        let errors: [ESCollectorError] = [
+            .missingUserAuthorization, .notRunningAsRoot, .missingEntitlement,
+            .tooManyClients, .clientCreationFailed(ES_NEW_CLIENT_RESULT_ERR_INTERNAL),
+            .subscriptionFailed, .notRunning,
+        ]
+        for typed in errors {
+            let erased: any Error = typed
+            #expect(erased.localizedDescription == typed.description)
+            #expect((erased as NSError).localizedDescription == typed.description)
+        }
+    }
+
     // MARK: - Read-path merge (union of two disjoint per-queue trackers)
 
     @Test("count-map merge is a union for disjoint keys and a sum for shared keys")

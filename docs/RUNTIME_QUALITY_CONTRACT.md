@@ -281,8 +281,9 @@ process epoch it is about to qualify.
 The command verifies the installed process identity, executes both shipped
 tools from a read-only `/Volumes` mount, prewarms the exact alert-investigation
 path, records 31 samples, runs the fixed bounded burst at minute 5, and sends
-the live rule-reload probe at minute 7.5. The prewarm and burst each execute a
-harmless `/dev/tcp` command-line token (they open no network connection) from a
+the live rule-reload probe at minute 13 (offset 780 seconds). The prewarm and
+burst each execute a harmless `/dev/tcp` command-line token (they open no
+network connection) from a
 per-run unique copy of `/bin/echo`, avoiding the one-hour rule/executable
 deduplication window while triggering the stable high-severity reverse-shell
 rule and its real installed alert-investigation path. The recorder opens the

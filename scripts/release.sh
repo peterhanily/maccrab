@@ -490,6 +490,24 @@ release_fail() {
     echo "  ✗ $1" >&2
 }
 
+# An accepted resource baseline must already be part of the source commit.
+# Reject an unqualifiable first-phase artifact before CI, signing or Apple upload.
+if [ "$CANDIDATE_READY" != "1" ]; then
+    /usr/bin/python3 -I -B - "$SCRIPT_DIR/candidate-qualification.py" \
+        "$PROJECT_DIR" "$SOURCE_COMMIT" <<'PYTHON'
+import pathlib
+import runpy
+import sys
+
+qualification = runpy.run_path(sys.argv[1])
+try:
+    qualification["release_resource_limits"](pathlib.Path(sys.argv[2]), sys.argv[3])
+except qualification["QualificationError"] as exc:
+    print(f"ERROR: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PYTHON
+fi
+
 # A first-phase candidate build needs the signing/notary projection but must not
 # touch publisher credentials or GitHub. A second-phase publication reuses
 # already signed/notarized bytes and therefore does not need Apple credentials.
@@ -548,15 +566,17 @@ echo "Step 0b/6: Architectural audit..."
 # from freshly resolved release outputs. Credentials remain unexported here.
 echo "Step 1/6: Running clean local CI before the release build..."
 require_clean_release_source
-CI_TRANSCRIPT=$(/usr/bin/mktemp /private/tmp/maccrab-release-clean-ci.XXXXXX)
+# Retain the complete aggregate transcript on success and failure. Candidate
+# manifests store only its digest/tail; private build cleanup must not remove it.
+if [ -L "$QUALIFICATION_DIR" ] \
+        || { [ -e "$QUALIFICATION_DIR" ] && [ ! -d "$QUALIFICATION_DIR" ]; }; then
+    echo "ERROR: refusing redirected/non-directory qualification evidence: $QUALIFICATION_DIR" >&2
+    exit 1
+fi
+(umask 077; /bin/mkdir -p "$QUALIFICATION_DIR")
+CI_TRANSCRIPT=$(/usr/bin/mktemp "$QUALIFICATION_DIR/MacCrab-v$VERSION.clean-ci.XXXXXX")
 /bin/chmod 600 "$CI_TRANSCRIPT"
-cleanup_preinstall_ci_transcript() {
-    local status=$?
-    trap - EXIT
-    [ -z "$CI_TRANSCRIPT" ] || /bin/rm -f "$CI_TRANSCRIPT"
-    exit "$status"
-}
-trap cleanup_preinstall_ci_transcript EXIT
+echo "Aggregate clean-CI transcript retained at: $CI_TRANSCRIPT"
 CI_STARTED_AT=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')
 if ! ./scripts/ci-local.sh --clean 2>&1 | /usr/bin/tee "$CI_TRANSCRIPT"; then
     echo "ERROR: clean local CI failed; no candidate will be recorded" >&2
@@ -600,23 +620,21 @@ reclaim_clean_ci_architecture_products() {
 
 if [ "$CANDIDATE_READY" != "1" ]; then
     reclaim_clean_ci_architecture_products
-    if [ "$reclaimed_architecture_products" -gt 0 ]; then
-        release_free_kib=$(/bin/df -Pk "$PROJECT_DIR" | /usr/bin/awk 'NR == 2 { print $4 }')
-        case "$release_free_kib" in
-            ''|*[!0-9]*)
-                echo "ERROR: could not measure free space for the exact release build" >&2
-                exit 1
-                ;;
-        esac
-        minimum_release_free_kib=$((3 * 1024 * 1024))
-        if [ "$release_free_kib" -lt "$minimum_release_free_kib" ]; then
-            echo "ERROR: exact dual-architecture release build requires at least 3 GiB free after CI-product reclamation; found $release_free_kib KiB" >&2
+    # Every new build needs headroom on the private export's filesystem, even
+    # when CI produced no architecture directory that required reclamation.
+    release_free_kib=$(/bin/df -Pk /private/tmp | /usr/bin/awk 'NR == 2 { print $4 }')
+    case "$release_free_kib" in
+        ''|*[!0-9]*)
+            echo "ERROR: could not measure free space for the exact release build" >&2
             exit 1
-        fi
-        echo "Clean CI products reclaimed ($reclaimed_architecture_products architecture tree(s)); exact release build headroom: $release_free_kib KiB"
-    else
-        echo "No clean-CI architecture products required reclamation."
+            ;;
+    esac
+    minimum_release_free_kib=$((3 * 1024 * 1024))
+    if [ "$release_free_kib" -lt "$minimum_release_free_kib" ]; then
+        echo "ERROR: exact dual-architecture release build requires at least 3 GiB free after CI-product reclamation; found $release_free_kib KiB" >&2
+        exit 1
     fi
+    echo "Clean CI products reclaimed ($reclaimed_architecture_products architecture tree(s)); exact release build headroom: $release_free_kib KiB"
 fi
 
 # All build stages run from an exact Git-object export, never from the live
@@ -633,7 +651,6 @@ cleanup_release_private_state() {
     [ -z "$METADATA_INDEX" ] || /bin/rm -f "$METADATA_INDEX"
     [ -z "$BUILD_WORKSPACE" ] || /bin/rm -rf "$BUILD_WORKSPACE"
     [ -z "$UPLOAD_SNAPSHOT_DIR" ] || /bin/rm -rf "$UPLOAD_SNAPSHOT_DIR"
-    [ -z "$CI_TRANSCRIPT" ] || /bin/rm -f "$CI_TRANSCRIPT"
     exit "$status"
 }
 trap cleanup_release_private_state EXIT
