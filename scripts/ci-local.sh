@@ -38,6 +38,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/_release_env.py
     scripts/export-release-source.py
     scripts/candidate-qualification.py
+    scripts/resource-baseline-provenance.py
     scripts/runtime-qualification-workload.sh
     scripts/test-otlp-curl.sh
     scripts/check-release-dependencies.sh
@@ -778,6 +779,7 @@ check "Architectural audit (deterministic)" \
 check "Release dependency provenance" ./scripts/check-release-dependencies.sh
 check "Release supply-chain fixtures" ./scripts/test-release-supply-chain.sh
 check "Exact-candidate qualification fixtures" /usr/bin/python3 -I ./scripts/test-candidate-qualification.py
+check "Resource baseline provenance fixtures" /usr/bin/python3 -I ./scripts/test-resource-baseline-provenance.py
 check "Installer/DMG payload fixtures" ./scripts/test-install-payload.sh
 check "SQLCipher provenance fixtures" ./scripts/test-sqlcipher-provenance.sh
 

@@ -520,6 +520,8 @@ for executor_surface in \
 done
 [ "$(/usr/bin/wc -l < "$EXECUTOR_BASELINE" | /usr/bin/tr -d ' ')" -ge 18 ] \
     || { echo "  ✗ critical executor list is unexpectedly incomplete" >&2; exit 1; }
+/usr/bin/grep -qx 'scripts/resource-baseline-provenance.py' "$EXECUTOR_BASELINE" \
+    || { echo "  ✗ resource provenance verifier is missing from critical executors" >&2; exit 1; }
 pass "release source retains all provenance/isolation/parse boundaries"
 
 echo "PASS: $pass_count release supply-chain adversarial checks"

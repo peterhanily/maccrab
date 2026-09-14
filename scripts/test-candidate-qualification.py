@@ -196,6 +196,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                     "coalesced_noop_rows_total": 0,
                     "pending_entity_rows": 0,
                     "pending_edge_rows": 0,
+                    "oldest_outstanding_age_seconds": 0.0,
                 },
                 "trace_graph_recovery_barrier": {
                     "accepting_mutations": True,
@@ -344,6 +345,15 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 lane: boundaries[f"{lane}-event-persistence"]["in_flight"]
                 for lane in ("priority", "file")
             },
+            "events_storage_write_admitted_generation": sum(
+                boundaries[f"{lane}-event-persistence"]["offered"] for lane in ("priority", "file")
+            ),
+            "events_storage_write_terminal_generation": sum(
+                boundaries[f"{lane}-event-persistence"]["completed"]
+                + boundaries[f"{lane}-event-persistence"]["explicitly_shed"]
+                for lane in ("priority", "file")
+            ),
+            "events_storage_write_poisoned_total": 0,
             "event_terminal_revision_offered_total": sum(
                 boundaries[f"{lane}-event-terminal-persistence"]["offered"]
                 for lane in ("priority", "file")
@@ -2108,7 +2118,18 @@ class CandidateQualificationTests(unittest.TestCase):
         )
 
     @staticmethod
-    def rebind_observation_heartbeat(observation: dict) -> None:
+    def rebind_observation_heartbeat(observation: dict, *, reconcile_writer_prefix: bool = True) -> None:
+        # Ordinary synthetic fixtures settle admissions in order. Tests of an
+        # old stuck prefix opt out and preserve their explicit watermark data.
+        if reconcile_writer_prefix:
+            heartbeat = observation["heartbeat"]
+            heartbeat["events_storage_write_admitted_generation"] = sum(
+                heartbeat["events_storage_write_offered_by_lane"].values()
+            )
+            heartbeat["events_storage_write_terminal_generation"] = sum(
+                sum(heartbeat[f"events_storage_write_{key}_by_lane"].values())
+                for key in ("persisted", "filtered", "dropped")
+            )
         heartbeat_raw_json = qualification.canonical_json_bytes(
             observation["heartbeat"]
         ).decode("utf-8")
@@ -2249,29 +2270,215 @@ class CandidateQualificationTests(unittest.TestCase):
 
     def test_flowing_queue_never_forgives_unproven_or_unbounded_work(self) -> None:
         name = "file-event-persistence"
-        previous = {name: {
+        previous = copy.deepcopy(self.runtime["samples"][24])
+        healthy = copy.deepcopy(self.runtime["samples"][25])
+        previous["conservation"][name] = {
             "offered": 101, "completed": 100, "queued": 1,
             "in_flight": 0, "explicitly_shed": 0,
-        }}
-        healthy = {name: {
+        }
+        healthy["conservation"][name] = {
             "offered": 201, "completed": 200, "queued": 1,
             "in_flight": 0, "explicitly_shed": 0,
-        }}
+        }
         pending = [f"{name} queued=1 in_flight=0"]
         self.assertEqual(
             qualification.forgive_flowing_boundary_lanes(pending, healthy, previous), [],
         )
         for changes in (
-            {"completed": 100}, {"queued": 2}, {"in_flight": 1},
+            {"completed": 100}, {"in_flight": 1},
             {"queued": qualification.RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT + 1},
         ):
             with self.subTest(changes=changes):
                 current = copy.deepcopy(healthy)
-                current[name].update(changes)
+                current["conservation"][name].update(changes)
                 self.assertEqual(
                     qualification.forgive_flowing_boundary_lanes(pending, current, previous),
                     pending,
                 )
+
+    def fresh_boundary_work_observations(self, *, boundary_offset: int | None = None) -> list[dict]:
+        """Synthetic new work shaped like GA3's failure, with real prefix proof.
+
+        GA3 did not publish that proof; this fixture does not repair its receipt.
+        """
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        drain = qualification.BURST_DRAIN_OFFSET_SECONDS if boundary_offset is None else boundary_offset
+        for observation in observations:
+            offset = observation["offset_seconds"]
+            if offset < drain:
+                continue
+            heartbeat = observation["heartbeat"]
+            for lane, count in (("file", 63), ("priority", 1)):
+                heartbeat["events_storage_write_offered_by_lane"][lane] += count
+                key = "buffer_depth" if offset == drain else "persisted"
+                heartbeat[f"events_storage_write_{key}_by_lane"][lane] += count
+            graph = heartbeat["tracegraph_storage_admission"]
+            graph["ingest_events_total"] += 1
+            graph["entity_observations_total"] += 2
+            graph["edge_observations_total"] += 1
+            if offset == drain:
+                graph["ingest_events_pending"] += 1
+                graph["pending_entity_rows"] += 2
+                graph["pending_edge_rows"] += 1
+                graph["oldest_outstanding_age_seconds"] = 0.05
+            else:
+                graph["ingest_events_committed_total"] += 1
+                for key in ("write_attempts_total", "write_batches_committed_total"):
+                    graph[key] += 1
+                for key in ("write_rows_attempted_total", "write_rows_committed_total"):
+                    graph[key] += 3
+            self.rebind_observation_heartbeat(observation)
+        return observations
+
+    def test_new_boundary_work_requires_prefix_and_graph_age_in_all_paths(self) -> None:
+        observations = self.fresh_boundary_work_observations()
+        index = qualification.BURST_DRAIN_OFFSET_SECONDS // 30
+        current = observations[index]
+        previous = qualification.sample_from_recorder_observation(observations[index - 1], "prior")
+        qualification.validate_runtime_readiness(
+            current, "new work", phase="drain", require_drained=True, previous_sample=previous,
+        )
+        report = self.rebuild_runtime_from_observations(observations)
+        self.validate_runtime(report)
+        qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+        with self.assertRaisesRegex(qualification.QualificationError, "not drained"):
+            qualification.validate_runtime_readiness(current, "new work", phase="t0", require_drained=True)
+        # Drain polling must use the same proof, including a repeated current
+        # heartbeat; it cannot invent a predecessor from the same publication.
+        prior_observation = copy.deepcopy(observations[index - 1])
+        prior_heartbeat = prior_observation["heartbeat"]
+        prior_heartbeat["events_storage_write_offered_by_lane"]["file"] += 1
+        prior_heartbeat["events_storage_write_buffer_depth_by_lane"]["file"] += 1
+        self.rebind_observation_heartbeat(prior_observation)
+        with mock.patch.object(qualification, "capture_runtime_observation", return_value=current), \
+                mock.patch.object(qualification.time, "sleep"):
+            self.assertEqual(qualification.wait_for_runtime_drain(
+                initial=prior_observation, phase="new work", heartbeat_path=self.root / "unused",
+                candidate=self.manifest["candidate"], data_dirs=[self.root], sqlite_overrides={}, expected_pid=4321,
+            ), current)
+
+    def test_increasing_completions_cannot_hide_an_older_unsettled_prefix(self) -> None:
+        observations = self.fresh_boundary_work_observations()
+        index = qualification.BURST_DRAIN_OFFSET_SECONDS // 30
+        before = observations[index - 1]["heartbeat"]
+        before["events_storage_write_offered_by_lane"]["file"] += 1
+        before["events_storage_write_buffer_depth_by_lane"]["file"] += 1
+        self.rebind_observation_heartbeat(observations[index - 1])
+        current = observations[index]
+        current["heartbeat"]["events_storage_write_terminal_generation"] = before["events_storage_write_terminal_generation"]
+        self.rebind_observation_heartbeat(current, reconcile_writer_prefix=False)
+        previous = qualification.sample_from_recorder_observation(observations[index - 1], "prior stuck admission")
+        with self.assertRaisesRegex(qualification.QualificationError, "not drained"):
+            qualification.validate_runtime_readiness(current, "stuck prefix", phase="drain", require_drained=True, previous_sample=previous)
+        with self.assertRaisesRegex(qualification.QualificationError, "not drained"):
+            self.rebuild_runtime_from_observations(observations)
+        report = self.rebuild_runtime_from_observations(self.fresh_boundary_work_observations())
+        report["recorder_observations"] = observations
+        report["samples"] = [qualification.sample_from_recorder_observation(row, "stuck prefix") for row in observations]
+        self.rehash_samples(report)
+        with self.assertRaisesRegex(qualification.QualificationError, "not drained"):
+            self.validate_runtime(report)
+
+    def test_writer_prefix_metadata_is_required_reconciled_and_unsigned(self) -> None:
+        base = self.runtime["recorder_observations"][20]
+        for key, value in (
+            ("events_storage_write_admitted_generation", None),
+            ("events_storage_write_terminal_generation", True),
+            ("events_storage_write_terminal_generation", -1),
+            ("events_storage_write_admitted_generation", 1 << 64),
+            ("events_storage_write_terminal_generation", 1 << 64),
+            ("events_storage_write_admitted_generation", 0),
+        ):
+            with self.subTest(key=key, value=value):
+                changed = copy.deepcopy(base)
+                if value is None:
+                    del changed["heartbeat"][key]
+                else:
+                    changed["heartbeat"][key] = value
+                self.rebind_observation_heartbeat(changed, reconcile_writer_prefix=False)
+                with self.assertRaises(qualification.QualificationError):
+                    qualification.sample_from_recorder_observation(changed, "invalid prefix")
+        current = self.fresh_boundary_work_observations()[26]
+        current["heartbeat"]["events_storage_write_terminal_generation"] = current["heartbeat"]["events_storage_write_admitted_generation"]
+        self.rebind_observation_heartbeat(current, reconcile_writer_prefix=False)
+        with self.assertRaisesRegex(qualification.QualificationError, "settled base events|unresolved base admissions"):
+            qualification.sample_from_recorder_observation(current, "forged settlement")
+
+    def test_prefix_regression_is_rejected_between_adjacent_repeated_captures(self) -> None:
+        previous = copy.deepcopy(self.runtime["samples"][20])
+        current = copy.deepcopy(previous)
+        current["event_writer_admission_prefix"]["terminal_generation"] -= 1
+        with self.assertRaisesRegex(qualification.QualificationError, "regressed"):
+            qualification.validate_event_writer_prefix_sequence([previous, current])
+        observation = copy.deepcopy(self.runtime["recorder_observations"][20])
+        observation["heartbeat"]["events_storage_write_terminal_generation"] -= 1
+        self.rebind_observation_heartbeat(observation, reconcile_writer_prefix=False)
+        with self.assertRaisesRegex(qualification.QualificationError, "regressed"):
+            qualification.validate_runtime_readiness(observation, "repeated capture", phase="sample", require_drained=False, adjacent_sample=previous)
+
+    def test_prefix_never_excuses_poison_or_repairable_gaps(self) -> None:
+        for key in ("events_storage_write_poisoned_total", "event_journal_repairable_gap_count"):
+            with self.subTest(key=key):
+                observation = copy.deepcopy(self.runtime["recorder_observations"][20])
+                observation["heartbeat"][key] = 1
+                self.rebind_observation_heartbeat(observation)
+                with self.assertRaisesRegex(qualification.QualificationError, "poisoned_total|repairable_gap_count"):
+                    qualification.validate_runtime_readiness(observation, "unsafe prefix", phase="sample", require_drained=False)
+                samples = copy.deepcopy(self.runtime["samples"])
+                samples[20] = qualification.sample_from_recorder_observation(observation, "unsafe prefix")
+                with self.assertRaisesRegex(qualification.QualificationError, "poisoned_total|repairable_gap_count"):
+                    qualification.derive_workload_ingress(samples, self.runtime["recorder_probe_evidence"]["workload"])
+
+    def test_graph_age_is_required_finite_and_bounded_before_drain(self) -> None:
+        observations = self.fresh_boundary_work_observations(boundary_offset=600)
+        current = observations[20]
+        for value in (None, -1, True, float("nan"), float("inf"), 10.251):
+            with self.subTest(value=value):
+                observation = copy.deepcopy(current)
+                graph = observation["heartbeat"]["tracegraph_storage_admission"]
+                if value is None:
+                    del graph["oldest_outstanding_age_seconds"]
+                else:
+                    graph["oldest_outstanding_age_seconds"] = value
+                self.rebind_observation_heartbeat(observation)
+                with self.assertRaises(qualification.QualificationError):
+                    qualification.validate_runtime_readiness(observation, "graph age", phase="ordinary sample", require_drained=False)
+        idle = copy.deepcopy(self.runtime["recorder_observations"][20])
+        idle["heartbeat"]["tracegraph_storage_admission"]["oldest_outstanding_age_seconds"] = 0.1
+        self.rebind_observation_heartbeat(idle)
+        with self.assertRaisesRegex(qualification.QualificationError, "idle TraceGraph"):
+            qualification.sample_from_recorder_observation(idle, "idle age")
+        report = self.rebuild_runtime_from_observations(observations)
+        observation = report["recorder_observations"][20]
+        observation["heartbeat"]["tracegraph_storage_admission"]["oldest_outstanding_age_seconds"] = 10.251
+        self.rebind_observation_heartbeat(observation)
+        report["samples"][20] = qualification.sample_from_recorder_observation(observation, "stale non-boundary graph")
+        self.rehash_samples(report)
+        with self.assertRaisesRegex(qualification.QualificationError, "oldest outstanding write age"):
+            self.validate_runtime(report)
+        with self.assertRaisesRegex(qualification.QualificationError, "oldest outstanding write age"):
+            qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+
+    def test_graph_flow_requires_fresh_bounded_work_and_no_inflight(self) -> None:
+        observations = self.fresh_boundary_work_observations()
+        sample = qualification.sample_from_recorder_observation(observations[26], "graph flow")
+        previous = qualification.sample_from_recorder_observation(observations[25], "previous graph flow")
+        pending = ["trace-graph-mutation queued=1 in_flight=0", "TraceGraph pending_entity_rows=2", "TraceGraph pending_edge_rows=1"]
+        self.assertEqual(qualification.forgive_flowing_boundary_lanes(pending, sample, previous), [])
+        for kind in ("event flight", "batch flight", "row flight", "rows", "queue", "no progress", "old heartbeat", "same heartbeat"):
+            with self.subTest(kind=kind):
+                current = copy.deepcopy(sample)
+                row = current["conservation"]["trace-graph-mutation"]
+                graph = current["trace_graph_write_accounting"]
+                if kind == "event flight": row["in_flight"] = 1
+                elif kind == "batch flight": graph["write_batches_in_flight"] = 1
+                elif kind == "row flight": graph["write_rows_in_flight"] = 1
+                elif kind == "rows": graph["pending_entity_rows"] = 1024
+                elif kind == "queue": row["queued"] = 513
+                elif kind == "no progress": row["completed"] = previous["conservation"]["trace-graph-mutation"]["completed"]
+                elif kind == "old heartbeat": current["captured_at"] = iso(791)
+                elif kind == "same heartbeat": current["heartbeat_written_at_unix"] = previous["heartbeat_written_at_unix"]
+                self.assertEqual(qualification.forgive_flowing_boundary_lanes(pending, current, previous), pending)
 
     def test_complete_report_passes_every_threshold(self) -> None:
         self.validate_runtime()

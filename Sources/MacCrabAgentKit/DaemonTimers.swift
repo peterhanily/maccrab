@@ -4575,6 +4575,8 @@ enum DaemonTimers {
                 "detection_input_dropped_total": detectionInputDroppedTotal,
                 "events_storage_write_dropped_total": eventWriterTelemetry.droppedCount,
                 "events_storage_write_offered_by_lane": eventWriterTelemetry.offeredByLane,
+                "events_storage_write_admitted_generation": eventWriterTelemetry.admittedGeneration,
+                "events_storage_write_terminal_generation": eventWriterTelemetry.terminalGeneration,
                 "events_storage_write_dropped_by_lane": eventWriterTelemetry.droppedByLane,
                 "events_storage_write_persisted_total": eventWriterTelemetry.persistedCount,
                 "events_storage_write_persisted_by_lane": eventWriterTelemetry.persistedByLane,

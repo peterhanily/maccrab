@@ -32,6 +32,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/_release_env.py
     scripts/export-release-source.py
     scripts/candidate-qualification.py
+    scripts/resource-baseline-provenance.py
     scripts/runtime-qualification-workload.sh
     scripts/test-otlp-curl.sh
     scripts/check-release-dependencies.sh
@@ -185,6 +186,7 @@ make_ci_fixture() {
         write_executable "$fixture/scripts/$stub" '#!/bin/bash' 'exit 0'
     done
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-candidate-qualification.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-resource-baseline-provenance.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-ci-phase.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-swift-toolchain.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/check-localizations.py"
