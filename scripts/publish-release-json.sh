@@ -1,4 +1,6 @@
 #!/bin/bash
+# Disable tracing before any credential or private build-input expansion.
+set +x
 # publish-release-json.sh — Push the locally-generated release.json into
 # the maccrab-site repo so https://maccrab.com/release.json serves
 # authoritative version + rule + test counts.
@@ -29,12 +31,27 @@ BRANCH="${BRANCH:-main}"
     exit 1;
 }
 
+
+# The credential never appears in an external command's argument list.
+umask 077
+WORK_DIR=$(/usr/bin/mktemp -d /private/tmp/maccrab-publisher.XXXXXX)
+trap '/bin/rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+AUTH_CONFIG="$WORK_DIR/curl-auth"
+[[ "$SITE_REPO_TOKEN" =~ ^[A-Za-z0-9_]+$ ]] || { echo "ERROR: publisher token malformed" >&2; exit 2; }
+printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\n' \
+    "$SITE_REPO_TOKEN" > "$AUTH_CONFIG"
+
+publisher_curl() {
+    /usr/bin/curl -q --proto '=https' --noproxy '*' \
+        --connect-timeout 10 --max-time 30 --config "$AUTH_CONFIG" "$@"
+}
+
 echo "Publishing $JSON_PATH to ${SITE_REPO}/release.json on $BRANCH..."
 
 API="https://api.github.com/repos/${SITE_REPO}/contents/release.json?ref=${BRANCH}"
 
 # Get current SHA if file exists (PUT requires it for updates).
-CURRENT=$(curl -sS -H "Authorization: Bearer $SITE_REPO_TOKEN" "$API" \
+CURRENT=$(publisher_curl -fsS "$API" \
           | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("sha", ""))' 2>/dev/null || echo "")
 
 VERSION=$(python3 -c "import json; print(json.load(open('$JSON_PATH'))['version'])")
@@ -54,9 +71,7 @@ if sha:
 print(json.dumps(payload))
 ")
 
-RESPONSE=$(curl -sS -X PUT \
-    -H "Authorization: Bearer $SITE_REPO_TOKEN" \
-    -H "Accept: application/vnd.github+json" \
+RESPONSE=$(publisher_curl -fsS -X PUT \
     -d "$PAYLOAD" \
     "https://api.github.com/repos/${SITE_REPO}/contents/release.json")
 

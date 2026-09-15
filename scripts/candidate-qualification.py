@@ -133,6 +133,8 @@ MAX_ENGINE_AVERAGE_CORES = 0.50
 MAX_GUI_P95_PERCENT = 20.0
 RESOURCE_BASELINE_PATH = "docs/RELEASE_RESOURCE_BASELINE.json"
 RESOURCE_BASELINE_SCHEMA = "com.maccrab.release-resource-baseline.v1"
+RESOURCE_POLICY_SCHEMA = "com.maccrab.release-resource-policy.v1"
+PRIVATE_RESOURCE_BASELINE_DIRECTORY = ".qualification-evidence/resource-baseline"
 RESOURCE_REFERENCE_VERSION = "1.21.5"
 RESOURCE_REFERENCE_BUILD_VERSION = "1.21.5.1018"
 RESOURCE_REFERENCE_COMMIT = "4f9ab9b35a80aba3f11cc99e7c60d10cc3e6d6eb"
@@ -2038,21 +2040,160 @@ def validate_resource_baseline(
             for key in RESOURCE_STATISTICS}
 
 
+def resource_policy_summary(document: Mapping[str, Any]) -> Dict[str, Any]:
+    """Construct a nested allowlist; never copy arbitrary private subobjects."""
+    result: Dict[str, Any] = {}
+    for name, keys in (
+        ("reference", ("version", "source_commit", "dmg_sha256", "engine_sha256", "gui_sha256")),
+        ("recorder", ("path", "sha256")),
+        ("statistics", tuple(RESOURCE_STATISTICS)),
+        ("measurements", tuple(RESOURCE_STATISTICS)),
+        ("limits", tuple(RESOURCE_STATISTICS)),
+    ):
+        value = object_value(document.get(name), "resource " + name)
+        result[name] = {key: copy.deepcopy(value.get(key)) for key in keys}
+    workload = object_value(document.get("workload"), "resource workload")
+    result["workload"] = {key: copy.deepcopy(workload.get(key)) for key in (
+        "script_sha256", "burst_start_offset_seconds", "iterations", "sample_interval_seconds",
+    )}
+    result["workload"]["executors"] = [
+        {key: copy.deepcopy(object_value(row, "resource executor").get(key)) for key in ("path", "sha256")}
+        for row in list_value(workload.get("executors"), "resource executors", nonempty=True)
+    ]
+    return result
+
+
+def validate_resource_policy(document: Mapping[str, Any], *, source_root: pathlib.Path) -> Dict[str, float]:
+    """A public policy binds private evidence; it is not an installed-host verdict."""
+    if document.get("status") != "accepted":
+        fail("release qualification incomplete: reference resource baseline is not accepted")
+    if document.get("schema") != RESOURCE_POLICY_SCHEMA or set(document) != {
+        "schema", "status", "acceptance_basis", "reference", "recorder", "workload",
+        "statistics", "measurements", "limits", "private_evidence",
+    }:
+        fail("public resource policy has an unsupported schema or unknown fields")
+    if document.get("acceptance_basis") != "independent-reference-engineering-review":
+        fail("public resource policy requires an independent reference review")
+    reference = object_value(document.get("reference"), "public resource reference")
+    expected_reference = {
+        "version": RESOURCE_REFERENCE_VERSION, "source_commit": RESOURCE_REFERENCE_COMMIT,
+        "dmg_sha256": RESOURCE_REFERENCE_DMG_SHA256,
+        **{role + "_sha256": image["sha256"] for role, image in RESOURCE_REFERENCE_IMAGES.items()},
+    }
+    if reference != expected_reference:
+        fail("public resource policy must identify only the pinned published reference images")
+    if document.get("statistics") != RESOURCE_STATISTICS:
+        fail("public resource policy statistics differ from the enforced statistics")
+    for name in ("measurements", "limits"):
+        values = object_value(document.get(name), "public resource " + name)
+        if set(values) != set(RESOURCE_STATISTICS):
+            fail("public resource policy requires exactly three measurements and limits")
+        for key, value in values.items():
+            number_value(value, "public resource " + name + "." + key,
+                         minimum=0 if name == "measurements" else 0.000001)
+    evidence = object_value(document.get("private_evidence"), "private resource evidence commitment")
+    if set(evidence) != {"sha256", "canonical_sha256"}:
+        fail("public resource policy requires only the two private evidence commitments")
+    for key, value in evidence.items():
+        require_sha(value, "private resource evidence " + key)
+    recorder = object_value(document.get("recorder"), "public resource recorder")
+    if set(recorder) != {"path", "sha256"} or recorder.get("path") != "scripts/candidate-qualification.py":
+        fail("public resource policy recorder inventory is invalid")
+    require_sha(recorder.get("sha256"), "public resource recorder SHA")
+    workload = object_value(document.get("workload"), "public resource workload")
+    if set(workload) != {"executors", "script_sha256", "burst_start_offset_seconds", "iterations", "sample_interval_seconds"}:
+        fail("public resource policy workload inventory has unknown or missing fields")
+    if workload.get("burst_start_offset_seconds") != BURST_START_OFFSET_SECONDS \
+            or workload.get("iterations") != FIXED_WORKLOAD_ITERATIONS \
+            or workload.get("sample_interval_seconds") != 30:
+        fail("public resource policy must use the prescribed fixed workload")
+    for key in ("burst_start_offset_seconds", "iterations", "sample_interval_seconds"):
+        int_value(workload.get(key), "public resource workload " + key)
+    executors = list_value(workload.get("executors"), "public resource workload executors", nonempty=True)
+    if len(executors) != len(RUNTIME_WORKLOAD_EXECUTORS):
+        fail("public resource policy must bind both workload executors")
+    for relative, row in zip(RUNTIME_WORKLOAD_EXECUTORS, executors):
+        row = object_value(row, "public resource executor")
+        path = source_root / relative
+        if set(row) != {"path", "sha256"} or row.get("path") != relative \
+                or path.is_symlink() or not path.is_file() \
+                or require_sha(row.get("sha256"), "public resource executor SHA") != sha256_file(path):
+            fail("public resource policy workload executor is missing, redirected or changed")
+    if workload.get("script_sha256") != executors[0]["sha256"]:
+        fail("public resource policy workload hash does not match its executor inventory")
+    if recorder["sha256"] != sha256_file(source_root / recorder["path"]):
+        run_checked(
+            [sys.executable, "-I", "-B", str(source_root / "scripts/resource-baseline-provenance.py"),
+             "--source-root", str(source_root), "--document-sha256", evidence["canonical_sha256"],
+             "--public-policy-document-sha256", sha256_bytes(canonical_json_bytes(document))],
+            "resource baseline recorder provenance",
+        )
+    return {key: float(document["limits"][key]) for key in RESOURCE_STATISTICS}
+
+
+def read_private_resource_baseline(source_root: pathlib.Path, commitment: Mapping[str, Any]) -> Dict[str, Any]:
+    """Read the exact private receipt without exposing host data in source or errors."""
+    root = source_root.resolve()
+    directory = root / PRIVATE_RESOURCE_BASELINE_DIRECTORY
+    path = directory / (require_sha(commitment.get("sha256"), "private resource evidence SHA") + ".json")
+    try:
+        allowed_owners = {os.geteuid()}
+        # Installed qualification runs as root against the desktop user's
+        # checkout. Ordinary users never inherit this other-owner exception.
+        if os.geteuid() == 0:
+            allowed_owners.add(root.stat().st_uid)
+        parent = directory.lstat()
+        if directory.resolve() != directory or not stat.S_ISDIR(parent.st_mode) \
+                or stat.S_IMODE(parent.st_mode) != 0o700 or parent.st_uid not in allowed_owners:
+            fail("private resource evidence directory must be private and owned by the permitted user")
+        if path.resolve() != path:
+            fail("private resource evidence cannot be redirected")
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o600 \
+                    or before.st_uid not in allowed_owners or before.st_nlink != 1 \
+                    or not 0 < before.st_size <= 2 * 1024 * 1024:
+                fail("private resource evidence must be a single private file owned by the permitted user")
+            raw = handle.read(2 * 1024 * 1024 + 1)
+            after = os.fstat(handle.fileno())
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+        if any(getattr(before, key) != getattr(after, key) for key in fields) or len(raw) != before.st_size:
+            fail("private resource evidence changed while being read")
+        if sha256_bytes(raw) != commitment["sha256"]:
+            fail("private resource evidence bytes differ from the public commitment")
+        document = object_value(json.loads(raw), "private resource evidence")
+        if sha256_bytes(canonical_json_bytes(document)) != commitment.get("canonical_sha256"):
+            fail("private resource evidence canonical content differs from the public commitment")
+        return dict(document)
+    except (OSError, ValueError, UnicodeError):
+        fail("release qualification incomplete: exact private resource evidence is unavailable or invalid")
+
+
 def release_resource_limits(
     source_root: pathlib.Path, source_commit: str, *, host: Mapping[str, Any] | None = None,
 ) -> Dict[str, float]:
     path = source_root / RESOURCE_BASELINE_PATH
     if path.is_symlink() or not path.is_file():
         fail("release qualification incomplete: reference resource baseline is missing")
-    document = read_json_file(path, "reference resource baseline")
-    limits = validate_resource_baseline(document, source_root=source_root, host=host)
-    # Do not let an untracked or post-build receipt qualify an already-built app.
+    try:
+        serialized = path.read_text(encoding="utf-8")
+        document = object_value(json.loads(serialized), "public reference resource policy")
+    except (OSError, ValueError, UnicodeError):
+        fail("public reference resource policy is unavailable or invalid")
+    limits = validate_resource_policy(document, source_root=source_root)
+    # The public policy, rather than host-rich raw evidence, is frozen in source.
     committed = run_checked(
         ["/usr/bin/git", "-C", str(source_root), "show", f"{source_commit}:{RESOURCE_BASELINE_PATH}"],
         "candidate-bound resource baseline",
     ).stdout
-    if committed != path.read_text(encoding="utf-8"):
+    if committed != serialized:
         fail("resource baseline was not frozen in the candidate source commit")
+    if host is not None:
+        private = read_private_resource_baseline(source_root, document["private_evidence"])
+        if resource_policy_summary(private) != resource_policy_summary(document):
+            fail("private resource evidence summaries differ from the committed public policy")
+        if validate_resource_baseline(private, source_root=source_root, host=host) != limits:
+            fail("private resource evidence limits differ from the committed public policy")
     return limits
 
 

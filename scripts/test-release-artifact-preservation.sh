@@ -187,6 +187,8 @@ make_ci_fixture() {
     done
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-candidate-qualification.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-resource-baseline-provenance.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-release-privacy.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-secret-guard.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-ci-phase.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-swift-toolchain.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/check-localizations.py"
@@ -1318,16 +1320,29 @@ for executor in baseline["workload"]["executors"]:
     shutil.copy2(source_root / executor["path"], path)
     executor["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
 baseline["workload"]["script_sha256"] = baseline["workload"]["executors"][0]["sha256"]
+# First-phase release preparation consumes the public policy only. Keep the
+# private fixture's commitment, but do not invent an installed-host verdict.
+q = fixtures.qualification
+private_bytes = (json.dumps(baseline, indent=2) + "\n").encode()
+policy = {
+    "schema": q.RESOURCE_POLICY_SCHEMA, "status": "accepted",
+    "acceptance_basis": "independent-reference-engineering-review",
+    "private_evidence": {
+        "sha256": hashlib.sha256(private_bytes).hexdigest(),
+        "canonical_sha256": hashlib.sha256(q.canonical_json_bytes(baseline)).hexdigest(),
+    },
+    **q.resource_policy_summary(baseline),
+}
 if state == "pending":
-    baseline.update(status="pending-reference-measurement", acceptance=None, limits=None)
-elif state == "forged-measurement":
-    baseline["measurements"]["engine_average_write_bytes_per_second"] += 1
+    policy["status"] = "pending-reference-measurement"
+elif state == "private-fields":
+    policy["host"] = {"fixture_only": True}
 elif state == "changed-executor":
-    baseline["workload"]["executors"][1]["sha256"] = "0" * 64
+    policy["workload"]["executors"][1]["sha256"] = "0" * 64
 elif state not in ("accepted", "missing"):
     raise ValueError("unsupported fixture baseline state: " + state)
 if state != "missing":
-    (fixture / "docs/RELEASE_RESOURCE_BASELINE.json").write_text(json.dumps(baseline, indent=2) + "\n")
+    (fixture / "docs/RELEASE_RESOURCE_BASELINE.json").write_text(json.dumps(policy, indent=2) + "\n")
 PYTHON
     write_executable "$fixture/.githooks/pre-commit" \
         '#!/bin/bash' \
@@ -1487,8 +1502,9 @@ PYTHON
 }
 
 # Baseline controls run the actual validator from an import-safe fixture
-# module, including raw-statistic/executor checks and real committed bytes.
-for baseline_state in missing pending forged-measurement changed-executor; do
+# module, including public-policy/executor checks and real committed bytes.
+# Private raw-statistic reconciliation belongs to host-supplied gate tests.
+for baseline_state in missing pending private-fields changed-executor; do
     baseline_fixture="$TEST_ROOT/release-baseline-$baseline_state"
     make_release_fixture "$baseline_fixture" "$baseline_state" 1
     run_release_control "$baseline_fixture"
@@ -1497,8 +1513,8 @@ for baseline_state in missing pending forged-measurement changed-executor; do
     case "$baseline_state" in
         missing) expected_baseline_error='reference resource baseline is missing' ;;
         pending) expected_baseline_error='resource baseline is not accepted' ;;
-        forged-measurement) expected_baseline_error='measurements do not reconcile with raw samples' ;;
-        changed-executor) expected_baseline_error='workload executor bytes changed' ;;
+        private-fields) expected_baseline_error='public resource policy has an unsupported schema or unknown fields' ;;
+        changed-executor) expected_baseline_error='public resource policy workload executor is missing, redirected or changed' ;;
     esac
     grep -q "$expected_baseline_error" "$baseline_fixture/output.log" \
         || fail "release baseline $baseline_state did not reach the real baseline validator"
@@ -1506,7 +1522,7 @@ for baseline_state in missing pending forged-measurement changed-executor; do
         && [ ! -s "$baseline_fixture/gh.log" ] && [ ! -s "$baseline_fixture/publish.log" ] \
         || fail "rejected baseline reached CI, construction, or publication"
 done
-echo "PASS: real missing, pending, forged-statistic, and changed-executor baselines fail before CI"
+echo "PASS: real missing, pending, private-field, and changed-executor policies fail before CI"
 
 ci_failure="$TEST_ROOT/release-retained-ci-failure"
 make_release_fixture "$ci_failure" accepted 1

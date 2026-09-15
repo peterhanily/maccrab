@@ -780,15 +780,18 @@ check "Release dependency provenance" ./scripts/check-release-dependencies.sh
 check "Release supply-chain fixtures" ./scripts/test-release-supply-chain.sh
 check "Exact-candidate qualification fixtures" /usr/bin/python3 -I ./scripts/test-candidate-qualification.py
 check "Resource baseline provenance fixtures" /usr/bin/python3 -I ./scripts/test-resource-baseline-provenance.py
+check "Release privacy fixtures" /usr/bin/python3 -I ./scripts/test-release-privacy.py
 check "Installer/DMG payload fixtures" ./scripts/test-install-payload.sh
 check "SQLCipher provenance fixtures" ./scripts/test-sqlcipher-provenance.sh
 
-# Publication gate. `main` is public and dev squash-merges into it, so
-# anything on dev is on a path to publication. Scans ADDED lines only —
+# Publication gate. Scan every unpublished commit, including changes later
+# removed before HEAD, and validate the public baseline document separately.
+# Credential patterns scan ADDED lines only —
 # the repo legitimately contains ~100 credential-shaped strings (honeyfile
 # canaries, sanitizer test fixtures) and a whole-tree scan reports all of
 # them every run until someone switches it off.
-check "No secrets or host paths in the diff" ./scripts/check-secrets.sh
+check "Secret guard fixtures" /usr/bin/python3 -I ./scripts/test-secret-guard.py
+check "No secrets or host paths in unpublished history" ./scripts/check-secrets.sh
 check "Tag gate preserves release artifact" ./scripts/test-release-artifact-preservation.sh
 
 echo ""

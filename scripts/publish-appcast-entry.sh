@@ -1,4 +1,6 @@
 #!/bin/bash
+# Disable tracing before any credential or private build-input expansion.
+set +x
 # Insert a locally generated, schema-validated Sparkle item through GitHub's
 # optimistic-locking Contents API. No PUT occurs until both the fragment and the
 # complete post-insertion feed have parsed successfully.
@@ -60,7 +62,7 @@ printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.g
 
 API="https://api.github.com/repos/${SITE_REPO}/contents/appcast.xml?ref=${BRANCH}"
 echo "Fetching current appcast.xml from ${SITE_REPO} (${BRANCH})..."
-/usr/bin/curl -fsS --connect-timeout 10 --max-time 30 --max-filesize 6291456 \
+/usr/bin/curl -q --proto '=https' --noproxy '*' -fsS --connect-timeout 10 --max-time 30 --max-filesize 6291456 \
     --config "$AUTH_CONFIG" "$API" --output "$RESPONSE"
 response_size=$(/usr/bin/stat -f%z "$RESPONSE")
 [[ "$response_size" -le 6291456 ]] || { echo "ERROR: GitHub response exceeds 6 MiB" >&2; exit 1; }
@@ -91,7 +93,7 @@ with os.fdopen(fd, "w", encoding="utf-8") as fh:
 ' "$MSG" "$NEW_XML" "$CURRENT_SHA" "$BRANCH" "$PAYLOAD"
 
 echo "Publishing validated feed to ${SITE_REPO}/appcast.xml on ${BRANCH}..."
-/usr/bin/curl -fsS --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
+/usr/bin/curl -q --proto '=https' --noproxy '*' -fsS --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
     --config "$AUTH_CONFIG" \
     -X PUT \
     -H "Content-Type: application/json" \

@@ -1534,6 +1534,31 @@ class CandidateQualificationTests(unittest.TestCase):
             output_sha256=hashlib.sha256(output.encode()).hexdigest(),
         )
 
+    def resource_policy_fixture(self, baseline: dict | None = None) -> dict:
+        baseline = self.resource_baseline_fixture() if baseline is None else baseline
+        raw = qualification.canonical_json_bytes(baseline)
+        return {
+            "schema": qualification.RESOURCE_POLICY_SCHEMA, "status": "accepted",
+            "acceptance_basis": "independent-reference-engineering-review",
+            **qualification.resource_policy_summary(baseline),
+            "private_evidence": {"sha256": qualification.sha256_bytes(raw),
+                                 "canonical_sha256": qualification.sha256_bytes(raw)},
+        }
+
+    def write_resource_policy_fixture(self, directory: pathlib.Path, baseline: dict | None = None) -> dict:
+        baseline = self.resource_baseline_fixture() if baseline is None else baseline
+        policy = self.resource_policy_fixture(baseline)
+        path = directory / qualification.RESOURCE_BASELINE_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+        private_directory = directory / qualification.PRIVATE_RESOURCE_BASELINE_DIRECTORY
+        private_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_directory.chmod(0o700)
+        private = private_directory / (policy["private_evidence"]["sha256"] + ".json")
+        private.write_bytes(qualification.canonical_json_bytes(baseline))
+        private.chmod(0o600)
+        return policy
+
     def test_resource_baseline_accepts_measured_reference_and_portable_checkout_path(self) -> None:
         baseline = self.resource_baseline_fixture()
         self.assertEqual(self.validate_resource_baseline(baseline), baseline["limits"])
@@ -1629,9 +1654,8 @@ class CandidateQualificationTests(unittest.TestCase):
         baseline = self.resource_baseline_fixture()
         directory = self.resource_baseline_source()
         path = directory / qualification.RESOURCE_BASELINE_PATH
-        path.parent.mkdir(parents=True, exist_ok=True)
-        serialized = json.dumps(baseline, indent=2) + "\n"
-        path.write_text(serialized, encoding="utf-8")
+        self.write_resource_policy_fixture(directory, baseline)
+        serialized = path.read_text(encoding="utf-8")
         expected_command = ["/usr/bin/git", "-C", str(directory), "show", f"{COMMIT}:{qualification.RESOURCE_BASELINE_PATH}"]
         with mock.patch.object(qualification.subprocess, "run", return_value=subprocess.CompletedProcess(expected_command, 0, serialized, "")) as git:
             self.assertEqual(qualification.release_resource_limits(directory, COMMIT, host=self.runtime["host"]), baseline["limits"])
@@ -1641,6 +1665,144 @@ class CandidateQualificationTests(unittest.TestCase):
                 qualification.release_resource_limits(directory, COMMIT, host=self.runtime["host"])
         with mock.patch.object(qualification.subprocess, "run", return_value=subprocess.CompletedProcess(expected_command, 0, "{}\n", "")):
             with self.assertRaisesRegex(qualification.QualificationError, "not frozen in the candidate source commit"):
+                qualification.release_resource_limits(directory, COMMIT, host=self.runtime["host"])
+
+    def test_public_resource_policy_rejects_unknown_or_host_specific_fields(self) -> None:
+        private = self.resource_baseline_fixture()
+        before = qualification.resource_policy_summary(private)
+        for row in (private, private["reference"], private["recorder"], private["measurements"],
+                    private["limits"], private["workload"], private["workload"]["executors"][0]):
+            row["host_private_metadata"] = "fixture must remain private"
+        self.assertEqual(qualification.resource_policy_summary(private), before)
+        policy = self.resource_policy_fixture()
+        self.assertEqual(qualification.validate_resource_policy(policy, source_root=ROOT), policy["limits"])
+        for target in ((), ("reference",), ("recorder",), ("workload",), ("measurements",),
+                       ("limits",), ("statistics",), ("private_evidence",), ("workload", "executors", 0)):
+            with self.subTest(target=target):
+                changed = copy.deepcopy(policy)
+                row = changed
+                for key in target:
+                    row = row[key]
+                row["host_private_metadata"] = "fixture must remain private"
+                with self.assertRaises(qualification.QualificationError):
+                    qualification.validate_resource_policy(changed, source_root=ROOT)
+        for value in (float("nan"), float("inf"), -1, True):
+            with self.subTest(measurement=value):
+                changed = copy.deepcopy(policy)
+                changed["measurements"]["gui_p95_percent"] = value
+                with self.assertRaises(qualification.QualificationError):
+                    qualification.validate_resource_policy(changed, source_root=ROOT)
+
+    def test_historical_public_policy_binds_the_passed_document_as_well_as_disk(self) -> None:
+        policy = json.loads((ROOT / qualification.RESOURCE_BASELINE_PATH).read_text())
+        self.assertEqual(qualification.validate_resource_policy(policy, source_root=ROOT), policy["limits"])
+        original = (ROOT / qualification.RESOURCE_BASELINE_PATH).read_bytes()
+        policy["limits"]["gui_p95_percent"] += 1
+        with self.assertRaisesRegex(qualification.QualificationError, "Passed public policy document"):
+            qualification.validate_resource_policy(policy, source_root=ROOT)
+        self.assertEqual((ROOT / qualification.RESOURCE_BASELINE_PATH).read_bytes(), original)
+
+    def test_public_policy_preflight_never_substitutes_for_private_host_evidence(self) -> None:
+        directory = self.resource_baseline_source()
+        policy = self.write_resource_policy_fixture(directory)
+        raw = (directory / qualification.RESOURCE_BASELINE_PATH).read_text()
+        private = directory / qualification.PRIVATE_RESOURCE_BASELINE_DIRECTORY / (policy["private_evidence"]["sha256"] + ".json")
+        private.unlink()
+        with mock.patch.object(qualification, "run_checked", return_value=subprocess.CompletedProcess([], 0, raw, "")):
+            self.assertEqual(qualification.release_resource_limits(directory, COMMIT), policy["limits"])
+            with self.assertRaisesRegex(qualification.QualificationError, "private resource evidence is unavailable"):
+                qualification.release_resource_limits(directory, COMMIT, host=self.runtime["host"])
+
+    def test_private_resource_receipt_requires_exact_bytes_canonical_content_and_private_permissions(self) -> None:
+        directory = self.resource_baseline_source()
+        policy = self.write_resource_policy_fixture(directory)
+        commitment = policy["private_evidence"]
+        private = directory / qualification.PRIVATE_RESOURCE_BASELINE_DIRECTORY / (commitment["sha256"] + ".json")
+        expected = self.resource_baseline_fixture()
+        self.assertEqual(qualification.read_private_resource_baseline(directory, commitment), expected)
+        original = private.read_bytes()
+        private.write_bytes(original + b"\n")
+        with self.assertRaisesRegex(qualification.QualificationError, "bytes differ"):
+            qualification.read_private_resource_baseline(directory, commitment)
+        private.write_bytes(original)
+        changed = {**commitment, "canonical_sha256": "0" * 64}
+        with self.assertRaisesRegex(qualification.QualificationError, "canonical content differs"):
+            qualification.read_private_resource_baseline(directory, changed)
+        private.chmod(0o644)
+        with self.assertRaisesRegex(qualification.QualificationError, "single private file"):
+            qualification.read_private_resource_baseline(directory, commitment)
+        private.chmod(0o600)
+        private.parent.chmod(0o755)
+        with self.assertRaisesRegex(qualification.QualificationError, "directory must be private"):
+            qualification.read_private_resource_baseline(directory, commitment)
+        private.parent.chmod(0o700)
+        before = private.stat()
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+        after = mock.Mock(**{key: getattr(before, key) for key in fields})
+        after.st_mtime_ns += 1
+        with mock.patch.object(qualification.os, "fstat", side_effect=[before, after]):
+            with self.assertRaisesRegex(qualification.QualificationError, "changed while being read"):
+                qualification.read_private_resource_baseline(directory, commitment)
+
+    def test_private_resource_receipt_refuses_symlinks_and_hardlinks(self) -> None:
+        directory = self.resource_baseline_source()
+        policy = self.write_resource_policy_fixture(directory)
+        commitment = policy["private_evidence"]
+        private = directory / qualification.PRIVATE_RESOURCE_BASELINE_DIRECTORY / (commitment["sha256"] + ".json")
+        saved = private.with_suffix(".saved")
+        private.rename(saved)
+        private.symlink_to(saved.name)
+        with self.assertRaisesRegex(qualification.QualificationError, "redirected"):
+            qualification.read_private_resource_baseline(directory, commitment)
+        private.unlink()
+        os.link(saved, private)
+        with self.assertRaisesRegex(qualification.QualificationError, "single private file"):
+            qualification.read_private_resource_baseline(directory, commitment)
+        private.unlink()
+        saved.rename(private)
+        actual_directory = private.parent.with_name("actual-private-evidence")
+        private.parent.rename(actual_directory)
+        private.parent.symlink_to(actual_directory.name)
+        with self.assertRaisesRegex(qualification.QualificationError, "directory must be private"):
+            qualification.read_private_resource_baseline(directory, commitment)
+
+    def test_private_resource_receipt_root_exception_is_limited_to_checkout_owner(self) -> None:
+        directory = self.resource_baseline_source()
+        policy = self.write_resource_policy_fixture(directory)
+        commitment = policy["private_evidence"]
+        with mock.patch.object(qualification.os, "geteuid", return_value=0):
+            self.assertEqual(qualification.read_private_resource_baseline(directory, commitment), self.resource_baseline_fixture())
+        other_uid = max(1, directory.stat().st_uid + 1)
+        with mock.patch.object(qualification.os, "geteuid", return_value=other_uid):
+            with self.assertRaisesRegex(qualification.QualificationError, "owned by the permitted user"):
+                qualification.read_private_resource_baseline(directory, commitment)
+        private = directory / qualification.PRIVATE_RESOURCE_BASELINE_DIRECTORY / (commitment["sha256"] + ".json")
+        observed = private.stat()
+        foreign = mock.Mock(st_mode=observed.st_mode, st_uid=other_uid,
+                            st_size=observed.st_size, st_nlink=observed.st_nlink)
+        with mock.patch.object(qualification.os, "geteuid", return_value=0), \
+                mock.patch.object(qualification.os, "fstat", return_value=foreign):
+            with self.assertRaisesRegex(qualification.QualificationError, "single private file"):
+                qualification.read_private_resource_baseline(directory, commitment)
+
+    def test_private_resource_validation_recomputes_measurements_and_requires_same_host(self) -> None:
+        directory = self.resource_baseline_source()
+        baseline = self.resource_baseline_fixture()
+        policy = self.write_resource_policy_fixture(directory, baseline)
+        path = directory / qualification.RESOURCE_BASELINE_PATH
+        with mock.patch.object(qualification, "run_checked", side_effect=lambda *args, **kwargs: subprocess.CompletedProcess([], 0, path.read_text(), "")):
+            other_host = {**self.runtime["host"], "machine_id_sha256": "0" * 64}
+            with self.assertRaisesRegex(qualification.QualificationError, "same reference host"):
+                qualification.release_resource_limits(directory, COMMIT, host=other_host)
+            policy["measurements"]["gui_p95_percent"] += 1
+            path.write_text(json.dumps(policy) + "\n")
+            with self.assertRaisesRegex(qualification.QualificationError, "summaries differ"):
+                qualification.release_resource_limits(directory, COMMIT, host=self.runtime["host"])
+            # Rebinding both the public summary and exact private receipt still
+            # cannot make a forged statistic agree with the retained raw samples.
+            baseline["measurements"]["gui_p95_percent"] += 1
+            self.write_resource_policy_fixture(directory, baseline)
+            with self.assertRaisesRegex(qualification.QualificationError, "measurements do not reconcile"):
                 qualification.release_resource_limits(directory, COMMIT, host=self.runtime["host"])
 
     def test_resource_baseline_cannot_substitute_candidate_or_invent_reference_images(self) -> None:

@@ -1,4 +1,6 @@
 #!/bin/bash
+# Disable tracing before any credential or private build-input expansion.
+set +x
 # build-release.sh — Build MacCrab.app with embedded ES system extension.
 #
 # v1.3.0 architectural shift: the daemon that previously ran as a
@@ -1150,7 +1152,7 @@ stage_sign() {
 
         # Public, content-addressed evidence for every external build input.
         # No private key is opened. The profile is already a shipped public CMS
-        # payload; only its digest and stable file metadata are recorded.
+        # payload; only its digest is recorded publicly. Stable file metadata remains local.
         npm_corpus="$PROJECT_DIR/Sources/MacCrabCore/Resources/typosquat-top-npm.json"
         pypi_corpus="$PROJECT_DIR/Sources/MacCrabCore/Resources/typosquat-top-pypi.json"
         bundled_npm=$(/usr/bin/find "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" \
@@ -1174,7 +1176,6 @@ package_resolved_sha256=$($SHASUM_BIN -a 256 "$PROJECT_DIR/Package.resolved" | /
 release_dependency_lock_sha256=$($SHASUM_BIN -a 256 "$SCRIPT_DIR/release-dependencies.lock" | /usr/bin/awk '{print $1}')
 pyyaml_manifest_sha256=$($SHASUM_BIN -a 256 "$SCRIPT_DIR/release-pyyaml.sha256" | /usr/bin/awk '{print $1}')
 provisioning_profile_sha256=$PROFILE_SHA_BEFORE
-provisioning_profile_metadata=$PROFILE_STAT_BEFORE
 core_npm_source_sha256=$($SHASUM_BIN -a 256 "$npm_corpus" | /usr/bin/awk '{print $1}')
 core_npm_bundled_sha256=$($SHASUM_BIN -a 256 "$bundled_npm" | /usr/bin/awk '{print $1}')
 core_pypi_source_sha256=$($SHASUM_BIN -a 256 "$pypi_corpus" | /usr/bin/awk '{print $1}')
@@ -1690,7 +1691,7 @@ stage_publish() {
             "$SCRIPT_DIR/notarize.sh" "$DMG_PATH"
 
         # audit #17: notarize.sh prints "Notarization skipped" and exits 0 when the
-        # notary credentials (NOTARIZE_KEYCHAIN_PROFILE / APPLE_ID+TEAM_ID+PASSWORD)
+        # notary credential profile (NOTARIZE_KEYCHAIN_PROFILE)
         # are unset or expired — so a signed-but-UN-notarized DMG could sail through
         # to git push / gh release and hit Gatekeeper rejection on every download.
         # HARD-GATE it: the shipped DMG must be stapled AND spctl-accepted, unless

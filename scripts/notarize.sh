@@ -1,4 +1,6 @@
 #!/bin/bash
+# Disable tracing before any credential or private build-input expansion.
+set +x
 #
 # notarize.sh — Sign a DMG and submit for Apple notarization.
 #
@@ -21,10 +23,10 @@
 #                       (e.g., "Developer ID Application: Your Name (TEAMID)")
 #                       If unset, falls back to ad-hoc signing.
 #
-#   APPLE_ID            Apple ID email for notarization
-#   APPLE_TEAM_ID       Apple Developer Team ID
-#   NOTARIZE_PASSWORD    App-specific password (or @keychain:notarize)
-#                       All three required to notarize; otherwise skipped.
+#   NOTARIZE_KEYCHAIN_PROFILE  Name of a saved notarytool credential profile.
+#                       Create it interactively with:
+#                       xcrun notarytool store-credentials maccrab-notary
+#                       Enter credentials at prompts, never in command arguments.
 #
 # Examples:
 #   # Ad-hoc only (no credentials)
@@ -36,9 +38,7 @@
 #
 #   # Full signing + notarization
 #   DEVELOPER_ID="Developer ID Application: Jane Doe (A1B2C3D4E5)" \
-#   APPLE_ID="jane@example.com" \
-#   APPLE_TEAM_ID="A1B2C3D4E5" \
-#   NOTARIZE_PASSWORD="@keychain:notarize" \
+#   NOTARIZE_KEYCHAIN_PROFILE=maccrab-notary \
 #     ./scripts/notarize.sh .build/MacCrab-v1.0.0.dmg
 
 set -euo pipefail
@@ -55,6 +55,18 @@ ok()    { echo -e "${GREEN}  ✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}  ⚠${NC} $1"; }
 fail()  { echo -e "${RED}  ✗${NC} $1"; exit 1; }
 
+# Refuse the removed password-argument route before any external command,
+# signing, sidecar deletion or submission. Existing profile-based configs may
+# still contain unused legacy values; do not pass those to child processes.
+NOTARIZE_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-}"
+if [ -n "$NOTARIZE_KEYCHAIN_PROFILE" ]; then
+    [[ "$NOTARIZE_KEYCHAIN_PROFILE" =~ ^[A-Za-z0-9._-]{1,128}$ ]] \
+        || fail "NOTARIZE_KEYCHAIN_PROFILE has an unsafe shape"
+elif [ -n "${APPLE_ID:-}${APPLE_TEAM_ID:-}${NOTARIZE_PASSWORD:-}" ]; then
+    fail "Password-based notarization is disabled. Run xcrun notarytool store-credentials maccrab-notary interactively, enter credentials at prompts, then set NOTARIZE_KEYCHAIN_PROFILE=maccrab-notary."
+fi
+unset APPLE_ID APPLE_TEAM_ID NOTARIZE_PASSWORD
+
 # ─── Validate arguments ──────────────────────────────────────────────
 
 DMG_PATH="${1:-}"
@@ -63,9 +75,7 @@ if [ -z "$DMG_PATH" ]; then
     echo ""
     echo "Environment variables:"
     echo "  DEVELOPER_ID       Developer ID certificate (optional, ad-hoc if unset)"
-    echo "  APPLE_ID           Apple ID for notarization (optional)"
-    echo "  APPLE_TEAM_ID      Developer Team ID (optional)"
-    echo "  NOTARIZE_PASSWORD  App-specific password (optional)"
+    echo "  NOTARIZE_KEYCHAIN_PROFILE  Saved notarytool credential profile (optional)"
     exit 1
 fi
 
@@ -110,22 +120,9 @@ fi
 
 # ─── Notarize ─────────────────────────────────────────────────────────
 
-APPLE_ID="${APPLE_ID:-}"
-APPLE_TEAM_ID="${APPLE_TEAM_ID:-}"
-NOTARIZE_PASSWORD="${NOTARIZE_PASSWORD:-}"
-NOTARIZE_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-}"
-
-# Auth argv selection. If NOTARIZE_KEYCHAIN_PROFILE is set the script
-# uses `xcrun notarytool --keychain-profile <name>` which reads the
-# stored credential from the macOS keychain — nothing sensitive ends
-# up on the command line and `ps` can't observe it. To set up the
-# profile once:
-#   xcrun notarytool store-credentials maccrab-notary \
-#       --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$NOTARIZE_PASSWORD"
-#   export NOTARIZE_KEYCHAIN_PROFILE=maccrab-notary
-# The legacy `--apple-id / --team-id / --password` path remains the
-# fallback so existing release configs keep working without any
-# operator action.
+# Credentials are read by notarytool from the selected Keychain profile.
+# Interactive setup: xcrun notarytool store-credentials maccrab-notary
+# Then set NOTARIZE_KEYCHAIN_PROFILE=maccrab-notary.
 NOTARIZE_AUTH=()
 NOTARIZE_AUTH_OK=0
 NOTARIZE_DISPLAY=""
@@ -134,10 +131,6 @@ if [ -n "$NOTARIZE_KEYCHAIN_PROFILE" ]; then
     NOTARIZE_AUTH=(--keychain-profile "$NOTARIZE_KEYCHAIN_PROFILE")
     NOTARIZE_AUTH_OK=1
     NOTARIZE_DISPLAY="keychain profile: $NOTARIZE_KEYCHAIN_PROFILE"
-elif [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$NOTARIZE_PASSWORD" ]; then
-    NOTARIZE_AUTH=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$NOTARIZE_PASSWORD")
-    NOTARIZE_AUTH_OK=1
-    NOTARIZE_DISPLAY="Apple ID: $APPLE_ID  Team ID: $APPLE_TEAM_ID"
 fi
 
 if [ "$NOTARIZE_AUTH_OK" = "1" ]; then
@@ -185,7 +178,7 @@ if [ "$NOTARIZE_AUTH_OK" = "1" ]; then
                 fail "Stapling failed — exact-candidate qualification requires an offline-verifiable ticket"
             fi
         elif echo "$NOTARIZE_OUTPUT" | grep -qi "unable to authenticate\|401"; then
-            fail "Authentication failed — check NOTARIZE_KEYCHAIN_PROFILE (or APPLE_ID / APPLE_TEAM_ID / NOTARIZE_PASSWORD)"
+            fail "Authentication failed — check NOTARIZE_KEYCHAIN_PROFILE"
         elif echo "$NOTARIZE_OUTPUT" | grep -q "status: Invalid"; then
             # Extract the submission ID for log retrieval
             SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep -o 'id: [a-f0-9-]*' | head -1 | awk '{print $2}')
@@ -200,15 +193,7 @@ if [ "$NOTARIZE_AUTH_OK" = "1" ]; then
         fi
     fi
 else
-    if [ -n "$APPLE_ID" ] || [ -n "$APPLE_TEAM_ID" ] || [ -n "$NOTARIZE_PASSWORD" ]; then
-        warn "Incomplete notarization credentials — set NOTARIZE_KEYCHAIN_PROFILE,"
-        warn "or set all three of: APPLE_ID / APPLE_TEAM_ID / NOTARIZE_PASSWORD:"
-        [ -z "$APPLE_ID" ]          && warn "  Missing: APPLE_ID (Apple ID email)"
-        [ -z "$APPLE_TEAM_ID" ]     && warn "  Missing: APPLE_TEAM_ID (Developer Team ID)"
-        [ -z "$NOTARIZE_PASSWORD" ] && warn "  Missing: NOTARIZE_PASSWORD (app-specific password)"
-    else
-        warn "Notarization skipped — set NOTARIZE_KEYCHAIN_PROFILE or APPLE_ID + APPLE_TEAM_ID + NOTARIZE_PASSWORD"
-    fi
+    warn "Notarization skipped — set NOTARIZE_KEYCHAIN_PROFILE after interactive notarytool store-credentials setup"
 fi
 
 # ─── Verify ───────────────────────────────────────────────────────────

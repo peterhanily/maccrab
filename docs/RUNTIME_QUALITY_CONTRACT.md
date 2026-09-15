@@ -16,10 +16,14 @@ GUI thresholds were changed using observations of the candidate series; a
 passing result cannot validate that choice. Release acceptance still requires
 a recorded workload, independently justified user-facing resource targets, and
 measurements of the actual statistics the validator enforces. Live qualification
-now requires an accepted, candidate-source-bound
-[`RELEASE_RESOURCE_BASELINE.json`](RELEASE_RESOURCE_BASELINE.json). Its initial
-state is explicitly unmeasured and cannot pass. The three candidate-derived
-write/GUI constants are retained only for deterministic offline fixtures.
+now requires an accepted, candidate-source-bound public policy in
+[`RELEASE_RESOURCE_BASELINE.json`](RELEASE_RESOURCE_BASELINE.json), plus its exact
+private accepted reference evidence for installed recording and final verification.
+The public policy excludes machine identifiers, paths, process IDs, timestamps and
+raw samples. A source-only policy check does not qualify the installed host; the
+private receipt must pass the complete unchanged capture and same-host checks.
+The three candidate-derived write/GUI constants remain only for deterministic
+offline fixtures.
 See [the reference measurement procedure](RESOURCE_BASELINE.md).
 
 ## Feature contract

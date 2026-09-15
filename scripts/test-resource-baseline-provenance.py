@@ -89,17 +89,23 @@ class ResourceBaselineProvenanceTests(unittest.TestCase):
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, target)
-        return P.digest(P.canonical(json.loads((root / 'docs/RELEASE_RESOURCE_BASELINE.json').read_bytes())))
+        return json.loads((root / 'docs/RELEASE_RESOURCE_BASELINE.json').read_bytes())['private_evidence']['canonical_sha256']
 
     def test_exact_document_workload_and_archive_bindings(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             document_hash = self.fixture(root)
             self.assertEqual(P.verify(root, document_hash)['baseline_sha256'], P.BASELINE_SHA)
+            public = json.loads((root / 'docs/RELEASE_RESOURCE_BASELINE.json').read_bytes())
+            public_hash = P.digest(P.canonical(public))
+            self.assertEqual(P.verify(root, document_hash, public_hash)['baseline_sha256'], P.BASELINE_SHA)
+            public['limits']['gui_p95_percent'] += 1
+            with self.assertRaisesRegex(P.ProvenanceError, 'Passed public policy document'):
+                P.verify(root, document_hash, P.digest(P.canonical(public)))
             with self.assertRaisesRegex(P.ProvenanceError, 'Passed baseline document'):
                 P.verify(root, '0' * 64)
             for relative, message in (
-                ('docs/RELEASE_RESOURCE_BASELINE.json', 'exact accepted historical baseline'),
+                ('docs/RELEASE_RESOURCE_BASELINE.json', 'exact accepted public resource policy'),
                 (P.ARCHIVE, 'archive hash'),
                 ('scripts/runtime-qualification-workload.sh', 'workload executor'),
             ):

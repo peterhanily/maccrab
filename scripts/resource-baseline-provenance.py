@@ -11,7 +11,9 @@ import stat
 
 ARCHIVE = 'docs/release-provenance/resource-baseline-recorder-v1.py.txt'
 RECORDER_SHA = '6871807f08e6477db7525c4f78ae522d3b4296095e2a5560b6a500792ed7f33d'
-BASELINE_SHA = 'bac5749cb83ca5eab33a8e86338dbae93c0b801fb8661aa05583f20f863aab49'
+BASELINE_SHA = 'c3134ac55a0546640fe51db5f547ab819643af83185af5b069bd89deafbfe809'
+PRIVATE_EVIDENCE_SHA256 = 'b435df9a74658e1d04d9b152359c725cb86ce6e7465cc06c94e450a48c352ef3'
+PRIVATE_CANONICAL_SHA256 = 'c3a8eb418db899b41031dacab7a3fd1322070fd0ceeb9e03fa33bb794ab4b9c7'
 ROOTS = ('command_record_resource_baseline', 'validate_resource_baseline')
 OLD_GUARD = '        fail("resource baseline recorder bytes differ from the candidate source")'
 NEW_GUARD = '''        run_checked(
@@ -204,12 +206,18 @@ def verify_sources(archived_raw, current_raw):
             'dependency_manifest_sha256': digest(canonical(manifest))}
 
 
-def verify(source_root, document_sha256):
+def verify(source_root, document_sha256, public_policy_document_sha256=None):
     root = Path(source_root).resolve()
     baseline_raw = read_regular(root / 'docs/RELEASE_RESOURCE_BASELINE.json')
-    require(digest(baseline_raw) == BASELINE_SHA, 'Only the exact accepted historical baseline is compatible')
+    require(digest(baseline_raw) == BASELINE_SHA, 'Only the exact accepted public resource policy is compatible')
     baseline = json.loads(baseline_raw)
-    require(digest(canonical(baseline)) == document_sha256, 'Passed baseline document differs from historical evidence')
+    if public_policy_document_sha256 is not None:
+        require(digest(canonical(baseline)) == public_policy_document_sha256,
+                'Passed public policy document differs from the frozen policy')
+    require(baseline.get('private_evidence') == {'sha256': PRIVATE_EVIDENCE_SHA256,
+            'canonical_sha256': PRIVATE_CANONICAL_SHA256}, 'Private historical evidence commitment differs')
+    require(document_sha256 == PRIVATE_CANONICAL_SHA256,
+            'Passed baseline document differs from exact private historical evidence')
     require(baseline.get('recorder') == {'path': 'scripts/candidate-qualification.py', 'sha256': RECORDER_SHA},
             'Historical baseline recorder identity differs')
     archived = read_regular(root / ARCHIVE)
@@ -220,6 +228,7 @@ def verify(source_root, document_sha256):
                 and digest(read_regular(root / row['path'])) == row['sha256'], 'Historical workload executor changed')
     proof = verify_sources(archived, current)
     proof['baseline_sha256'] = BASELINE_SHA
+    proof['private_evidence_sha256'] = PRIVATE_EVIDENCE_SHA256
     return proof
 
 
@@ -227,9 +236,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-root', required=True)
     parser.add_argument('--document-sha256', required=True)
+    parser.add_argument('--public-policy-document-sha256')
     args = parser.parse_args()
     try:
-        print(json.dumps(verify(args.source_root, args.document_sha256), sort_keys=True))
+        print(json.dumps(verify(args.source_root, args.document_sha256,
+                               args.public_policy_document_sha256), sort_keys=True))
     except (ProvenanceError, OSError, ValueError, KeyError, TypeError, SyntaxError) as error:
         parser.exit(1, 'Resource baseline provenance refused: ' + str(error) + '\n')
 

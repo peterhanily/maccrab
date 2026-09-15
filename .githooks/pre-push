@@ -142,6 +142,10 @@ TAG_COMMIT=""
 TAG_OBJECT=""
 CREATED_TAG_COUNT=0
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    if [[ "$_local_ref" == refs/private/* || "$remote_ref" == refs/private/* ]]; then
+        echo "ERROR: private recovery refs must never be published" >&2
+        exit 2
+    fi
     case "$remote_ref" in
         refs/tags/*)
             CLEAN_TREE=1

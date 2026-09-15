@@ -1,1 +1,51 @@
-{"reason":"Host-specific historical evidence is retained privately. This historical document is not an accepted resource policy and cannot qualify a release.","schema":"com.maccrab.release-resource-policy.v1","status":"withheld-private-historical-evidence"}
+{
+  "acceptance_basis": "independent-reference-engineering-review",
+  "limits": {
+    "engine_average_write_bytes_per_second": 9437184,
+    "engine_max_window_write_bytes_per_second": 171966464,
+    "gui_p95_percent": 19
+  },
+  "measurements": {
+    "engine_average_write_bytes_per_second": 7414033.066666666,
+    "engine_max_window_write_bytes_per_second": 136759022.93333334,
+    "gui_p95_percent": 15.1
+  },
+  "private_evidence": {
+    "canonical_sha256": "c3a8eb418db899b41031dacab7a3fd1322070fd0ceeb9e03fa33bb794ab4b9c7",
+    "sha256": "b435df9a74658e1d04d9b152359c725cb86ce6e7465cc06c94e450a48c352ef3"
+  },
+  "recorder": {
+    "path": "scripts/candidate-qualification.py",
+    "sha256": "6871807f08e6477db7525c4f78ae522d3b4296095e2a5560b6a500792ed7f33d"
+  },
+  "reference": {
+    "dmg_sha256": "9eb6f49389af910e9d1bad14b26d2510aebd2ed2e874bbd2f464f36b664c529b",
+    "engine_sha256": "00df3a78b47f1bdf33d2ff1d78591a94171ec91d72afd9ea2ef02851fdf25458",
+    "gui_sha256": "897d4e426680fe3cbb45bde3ebd0d86d57353e1eb144571074cd9a6447fc66c6",
+    "source_commit": "4f9ab9b35a80aba3f11cc99e7c60d10cc3e6d6eb",
+    "version": "1.21.5"
+  },
+  "schema": "com.maccrab.release-resource-policy.v1",
+  "statistics": {
+    "engine_average_write_bytes_per_second": "cumulative-write-delta/captured-epoch-seconds",
+    "engine_max_window_write_bytes_per_second": "maximum-captured-interval-and-sample-aligned-span-up-to-60s",
+    "gui_p95_percent": "nearest-rank-p95-of-ps-pcpu-snapshots"
+  },
+  "status": "accepted",
+  "workload": {
+    "burst_start_offset_seconds": 300,
+    "executors": [
+      {
+        "path": "scripts/runtime-qualification-workload.sh",
+        "sha256": "3fa70b277719c6dc5ec6355467ee93450885e81005c5a3a4e4703bdf50cd8fe3"
+      },
+      {
+        "path": "scripts/test-otlp-curl.sh",
+        "sha256": "8384a31467b166063a9121f46f1668f2fc401e7552ea32c0babe568e57265e6f"
+      }
+    ],
+    "iterations": 3000,
+    "sample_interval_seconds": 30,
+    "script_sha256": "3fa70b277719c6dc5ec6355467ee93450885e81005c5a3a4e4703bdf50cd8fe3"
+  }
+}

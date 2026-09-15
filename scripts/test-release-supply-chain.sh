@@ -522,6 +522,8 @@ done
     || { echo "  ✗ critical executor list is unexpectedly incomplete" >&2; exit 1; }
 /usr/bin/grep -qx 'scripts/resource-baseline-provenance.py' "$EXECUTOR_BASELINE" \
     || { echo "  ✗ resource provenance verifier is missing from critical executors" >&2; exit 1; }
+/usr/bin/grep -q 'test-release-privacy.py' "$PROJECT_DIR/scripts/ci-local.sh" \
+    || { echo "  ✗ release privacy controls missing from clean CI" >&2; exit 1; }
 pass "release source retains all provenance/isolation/parse boundaries"
 
 echo "PASS: $pass_count release supply-chain adversarial checks"

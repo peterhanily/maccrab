@@ -1,11 +1,13 @@
 #!/bin/bash
+# Disable tracing before any credential or private build-input expansion.
+set +x
 # release.sh — Two-phase exact-candidate build/qualification/publication flow
 #
 # Usage:
 #   ./scripts/release.sh 1.1.0
 #
-# Requires: DEVELOPER_ID, APPLE_ID, APPLE_TEAM_ID, NOTARIZE_PASSWORD
-# Set these in ~/.maccrab-release-env (sourced automatically) or export them.
+# Requires: DEVELOPER_ID and NOTARIZE_KEYCHAIN_PROFILE for a new candidate.
+# Set these in ~/.maccrab-release-env (parsed as data) or export them.
 set -euo pipefail
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -518,9 +520,9 @@ if [ "$CANDIDATE_READY" != "1" ] && [ -z "$MACCRAB_SIGN_DEVELOPER_ID" ]; then
     echo ""
     echo "Either export it or create ~/.maccrab-release-env with:"
     echo '  export DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)"'
-    echo '  export APPLE_ID="your@email.com"'
-    echo '  export APPLE_TEAM_ID="TEAMID"'
-    echo '  export NOTARIZE_PASSWORD="xxxx-xxxx-xxxx-xxxx"'
+    echo '  export NOTARIZE_KEYCHAIN_PROFILE="maccrab-notary"'
+    echo 'Create that profile interactively: xcrun notarytool store-credentials maccrab-notary'
+    echo 'Enter credentials at the prompts, never in command arguments.'
     exit 1
 fi
 
@@ -1441,9 +1443,13 @@ else
             > "$APPCAST_ITEM"; then
         # The publisher receives only the one PAT it needs; Apple credentials,
         # other PATs and signing configuration are not inherited.
-        if /usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR=/private/tmp LC_ALL=C LANG=C \
-                SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" \
-                "$BUILD_WORKSPACE/scripts/publish-appcast-entry.sh" \
+        if SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" /usr/bin/python3 -I -B -c '
+import os, sys
+environment = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"],
+               "TMPDIR": "/private/tmp", "LC_ALL": "C", "LANG": "C",
+               "SITE_REPO_TOKEN": os.environ["SITE_REPO_TOKEN"]}
+os.execve(sys.argv[1], sys.argv[1:], environment)
+' "$BUILD_WORKSPACE/scripts/publish-appcast-entry.sh" \
                 --item "$APPCAST_ITEM" \
                 --site-repo "$SITE_REPO" \
                 --version "$VERSION"; then

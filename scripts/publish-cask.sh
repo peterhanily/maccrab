@@ -1,4 +1,6 @@
 #!/bin/bash
+# Disable tracing before any credential or private build-input expansion.
+set +x
 # publish-cask.sh — Publish the locally-bumped Casks/maccrab.rb into the
 # dedicated peterhanily/homebrew-maccrab tap repo via the GitHub Contents API.
 #
@@ -52,12 +54,27 @@ VERSION=$(grep -E '^[[:space:]]*version[[:space:]]+"' "$CASK_PATH" \
     exit 1
 }
 
+
+# The credential never appears in an external command's argument list.
+umask 077
+WORK_DIR=$(/usr/bin/mktemp -d /private/tmp/maccrab-publisher.XXXXXX)
+trap '/bin/rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+AUTH_CONFIG="$WORK_DIR/curl-auth"
+[[ "$TOKEN" =~ ^[A-Za-z0-9_]+$ ]] || { echo "ERROR: publisher token malformed" >&2; exit 2; }
+printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\n' \
+    "$TOKEN" > "$AUTH_CONFIG"
+
+publisher_curl() {
+    /usr/bin/curl -q --proto '=https' --noproxy '*' \
+        --connect-timeout 10 --max-time 30 --config "$AUTH_CONFIG" "$@"
+}
+
 echo "Publishing $CASK_PATH to ${TAP_REPO}/${DEST_PATH} on $BRANCH (v$VERSION)..."
 
 API="https://api.github.com/repos/${TAP_REPO}/contents/${DEST_PATH}"
 
 # Current blob SHA (PUT requires it to update an existing file).
-CURRENT=$(curl -sS -H "Authorization: Bearer $TOKEN" "${API}?ref=${BRANCH}" \
+CURRENT=$(publisher_curl -fsS "${API}?ref=${BRANCH}" \
           | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha",""))' 2>/dev/null || echo "")
 
 B64=$(base64 -i "$CASK_PATH")
@@ -75,9 +92,7 @@ if sha:
 print(json.dumps(payload))
 ")
 
-RESPONSE=$(curl -sS -X PUT \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Accept: application/vnd.github+json" \
+RESPONSE=$(publisher_curl -fsS -X PUT \
     -d "$PAYLOAD" \
     "$API")
 

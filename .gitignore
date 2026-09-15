@@ -72,6 +72,7 @@ events.jsonl
 *.crt
 *.der
 *.p12
+*.p8
 *.pfx
 *.pkcs12
 *.key
