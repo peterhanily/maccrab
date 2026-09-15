@@ -8478,15 +8478,34 @@ def prewarm_alert_investigation(
     return probe, drained, drain_deadline
 
 
+def unified_log_timestamp(value: Any, path: str, *, round_up: bool = False) -> str:
+    """Render an ISO-8601 timestamp for `/usr/bin/log show --start/--end`.
+
+    `log show` rejects ISO-8601 text (the 'T' separator, a 'Z' suffix or
+    fractional seconds) with "Failed conversion ... using format
+    '%Y-%m-%d %H:%M:%S'". It accepts 'YYYY-MM-DD HH:MM:SS' followed by a
+    numeric offset, so emit UTC with an explicit +0000 and never depend on
+    the host time zone. An end boundary rounds a fractional second up so the
+    window never excludes the final partial second.
+    """
+    parsed = parse_time(value, path)
+    if round_up and parsed.microsecond:
+        parsed = parsed + dt.timedelta(seconds=1)
+    return parsed.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S%z")
+
+
 def log_diagnostic_count(
     *, started_at: str, ended_at: str, predicate: str, label: str
 ) -> Tuple[int, Dict[str, Any]]:
     command = [
         "/usr/bin/log", "show", "--style", "compact",
-        "--start", started_at, "--end", ended_at, "--predicate", predicate,
+        "--start", unified_log_timestamp(started_at, f"{label}.started_at"),
+        "--end", unified_log_timestamp(ended_at, f"{label}.ended_at", round_up=True),
+        "--predicate", predicate,
     ]
     evidence = subprocess_probe(command, label=label)
-    # `log show --style compact` emits one header line when there are matches.
+    # `log show --style compact` always emits one header line, even with zero
+    # matches, so the match count is the line count minus that header.
     return max(0, int_value(
         evidence.get("output_line_count"), f"{label}.output_line_count"
     ) - 1), evidence
@@ -8926,7 +8945,10 @@ def live_runtime_recording(
     reload_log = subprocess_probe(
         [
             "/usr/bin/log", "show", "--style", "compact",
-            "--start", reload_evidence["sent_at"], "--end", end_text,
+            "--start", unified_log_timestamp(
+                reload_evidence["sent_at"], "live rule-reload sent_at"
+            ),
+            "--end", unified_log_timestamp(end_text, "epoch end", round_up=True),
             "--predicate",
             f"processID == {first_pid} AND eventMessage CONTAINS[c] '[SIGHUP]'",
         ],

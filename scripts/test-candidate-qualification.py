@@ -6195,5 +6195,70 @@ class CandidateQualificationTests(unittest.TestCase):
             self.validate_containment(report)
 
 
+class UnifiedLogTimestampTests(unittest.TestCase):
+    """`/usr/bin/log show` rejects ISO-8601 --start/--end text; the recorder must render its accepted form."""
+
+    def test_iso_z_renders_the_log_show_form(self) -> None:
+        self.assertEqual(
+            qualification.unified_log_timestamp("2026-09-15T20:43:21Z", "t"),
+            "2026-09-15 20:43:21+0000",
+        )
+
+    def test_offsets_and_fractions_normalize_to_utc(self) -> None:
+        self.assertEqual(
+            qualification.unified_log_timestamp("2026-09-15T21:43:21.250+01:00", "t"),
+            "2026-09-15 20:43:21+0000",
+        )
+        self.assertEqual(
+            qualification.unified_log_timestamp("2026-09-15T21:43:21.250+01:00", "t", round_up=True),
+            "2026-09-15 20:43:22+0000",
+        )
+        self.assertEqual(
+            qualification.unified_log_timestamp("2026-09-15T20:43:21Z", "t", round_up=True),
+            "2026-09-15 20:43:21+0000",
+        )
+
+    def test_naive_or_malformed_timestamps_are_rejected(self) -> None:
+        for text in ("2026-09-15 20:43:21", "2026-09-15T20:43:21", "yesterday", ""):
+            with self.subTest(text=text), self.assertRaises(qualification.QualificationError):
+                qualification.unified_log_timestamp(text, "t")
+
+    def test_log_diagnostic_count_passes_accepted_dates_and_subtracts_the_header(self) -> None:
+        seen: dict = {}
+
+        def fake_probe(command, *, label, **_kwargs):
+            seen["command"] = list(command)
+            seen["label"] = label
+            return {"command": list(command), "exit_code": 0, "output_line_count": 3}
+
+        with mock.patch.object(qualification, "subprocess_probe", side_effect=fake_probe):
+            count, evidence = qualification.log_diagnostic_count(
+                started_at="2026-09-15T20:43:21Z", ended_at="2026-09-15T20:58:21Z",
+                predicate="processID == 1", label="probe",
+            )
+        self.assertEqual(count, 2)
+        self.assertEqual(evidence["output_line_count"], 3)
+        self.assertEqual(seen["label"], "probe")
+        self.assertEqual(
+            seen["command"],
+            ["/usr/bin/log", "show", "--style", "compact",
+             "--start", "2026-09-15 20:43:21+0000", "--end", "2026-09-15 20:58:21+0000",
+             "--predicate", "processID == 1"],
+        )
+        for part in seen["command"]:
+            self.assertFalse(re.fullmatch(r"\d{4}-\d{2}-\d{2}T.*", part), part)
+
+    def test_log_diagnostic_count_treats_a_header_only_transcript_as_zero(self) -> None:
+        with mock.patch.object(
+            qualification, "subprocess_probe",
+            return_value={"command": [], "exit_code": 0, "output_line_count": 1},
+        ):
+            count, _ = qualification.log_diagnostic_count(
+                started_at="2026-09-15T20:43:21Z", ended_at="2026-09-15T20:58:21Z",
+                predicate="processID == 1", label="probe",
+            )
+        self.assertEqual(count, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
