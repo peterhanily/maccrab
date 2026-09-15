@@ -4406,6 +4406,12 @@ def normalized_runtime_sample(
     completed = heartbeat_counter_map(pipeline, "completed_by_lane", "heartbeat.event_pipeline")
     backlog = heartbeat_counter_map(pipeline, "backlog_estimate_by_lane", "heartbeat.event_pipeline")
     in_flight = heartbeat_counter_map(pipeline, "in_flight_by_lane", "heartbeat.event_pipeline")
+    ingress_handoffs = event_ingress_handoffs_sample(
+        pipeline.get("yield_handoffs_in_flight_by_lane"),
+        "heartbeat.event_pipeline.yield_handoffs_in_flight_by_lane",
+    )
+    if any(ingress_handoffs[lane] > offered[lane] for lane in ingress_handoffs):
+        fail("ingress yield handoffs exceed begun offers")
     ingress_shed = heartbeat_counter_map(
         pipeline, "merged_dropped_by_lane", "heartbeat.event_pipeline"
     )
@@ -4689,6 +4695,7 @@ def normalized_runtime_sample(
         "event_journal_repair_payload_expired_total":
             terminal_repair_payload_expired_total,
         "conservation": boundaries,
+        "event_ingress_handoffs": ingress_handoffs,
         "event_writer_admission_prefix": writer_prefix,
         "event_persistence_outcomes": {
             lane: {"persisted": storage_persisted[lane], "filtered": storage_filtered[lane]}
@@ -4847,6 +4854,34 @@ def sample_from_recorder_observation(raw: Any, path: str) -> Dict[str, Any]:
     )
 
 
+def event_ingress_handoffs_sample(raw: Any, path: str) -> Dict[str, int]:
+    """Read begun offers whose synchronous yield result is not yet published.
+
+    Offers and handoffs are reserved together before yielding. Each handoff
+    ends only when its exact yield/loss result is published; offers are cumulative.
+    """
+    row = object_value(raw, path)
+    if set(row) != {"priority", "file"}:
+        fail(f"{path} must contain exactly the priority and file lanes")
+    result = {lane: int_value(row[lane], f"{path}.{lane}") for lane in row}
+    if any(value > (1 << 64) - 1 for value in result.values()):
+        fail(f"{path} is outside its UInt64 bounds")
+    return result
+
+
+def event_ingress_handoff_pending(sample: Mapping[str, Any]) -> List[str]:
+    handoffs = event_ingress_handoffs_sample(
+        sample.get("event_ingress_handoffs"), "event_ingress_handoffs",
+    )
+    boundaries = object_value(sample.get("conservation"), "ingress handoff conservation")
+    for lane, value in handoffs.items():
+        row = object_value(boundaries.get(f"{lane}-ingress"), f"{lane}-ingress")
+        if value > int_value(row.get("offered"), f"{lane}-ingress.offered"):
+            fail("ingress yield handoffs exceed begun offers")
+    return [f"{lane}-ingress yield_handoffs_in_flight={value}"
+            for lane, value in handoffs.items() if value]
+
+
 def event_writer_admission_prefix_sample(
     heartbeat: Mapping[str, Any], boundaries: Mapping[str, Any],
 ) -> Dict[str, int]:
@@ -4918,8 +4953,9 @@ def forgive_flowing_boundary_lanes(
     """One drain policy for recording, full verification and workload derivation.
 
     t0 has no earlier epoch evidence and stays strict. Only base persistence
-    uses the global writer prefix; graph flow uses its original outstanding
-    age, including heartbeat age. Every other boundary retains its prior rule.
+    uses the global writer prefix; ingress uses its own FIFO and settled yield
+    results. Graph flow uses its original age, including heartbeat age.
+    Every other boundary retains its prior rule.
     """
     if not pending or previous_sample is None:
         return pending
@@ -4964,15 +5000,42 @@ def forgive_flowing_boundary_lanes(
         if not isinstance(row, Mapping) or not isinstance(previous, Mapping):
             survivors.append(entry)
             continue
-        bounded_progress = (
-            row["in_flight"] == 0
-            and 0 <= row["queued"] <= RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT
-            and row["completed"] > previous["completed"]
-        )
+        completed_progress = row["completed"] > previous["completed"]
         if name in {"priority-event-persistence", "file-event-persistence"}:
-            flows = bounded_progress and prefix_cleared
+            # The contiguous prefix proves that queued AND detached base work
+            # belongs to newer admissions. Count both against the same limit;
+            # sampling a live database batch is not evidence of an older stall.
+            flows = (
+                completed_progress and prefix_cleared
+                and row["explicitly_shed"] == previous["explicitly_shed"] == 0
+                and 0 <= row["queued"] + row["in_flight"]
+                    <= RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT
+            )
+        elif name in {"priority-ingress", "file-ingress"}:
+            lane = name.removesuffix("-ingress")
+            handoffs = event_ingress_handoffs_sample(
+                sample.get("event_ingress_handoffs"), "current ingress handoffs",
+            )
+            # One serial FIFO consumer runs per lane. Offers are reserved before
+            # yielding, so the previous offer count bounds its yielded prefix.
+            # Requiring no current handoff also settles any delayed drop result;
+            # cumulative loss checks therefore cannot be bypassed by a yield
+            # whose accounting lock has not run yet. Never use writer generations
+            # for this upstream boundary.
+            flows = (
+                completed_progress and handoffs[lane] == 0
+                and row["explicitly_shed"] == previous["explicitly_shed"] == 0
+                and row["completed"] >= previous["offered"]
+                and 0 <= row["in_flight"] <= 1
+                and 0 <= row["queued"] + row["in_flight"]
+                    <= RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT
+            )
         else:
-            flows = bounded_progress and row["queued"] <= previous["queued"]
+            flows = (
+                completed_progress and row["in_flight"] == 0
+                and 0 <= row["queued"] <= RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT
+                and row["queued"] <= previous["queued"]
+            )
         if not flows:
             survivors.append(entry)
     return survivors
@@ -5073,6 +5136,7 @@ def runtime_readiness_failures(
     sample = sample_from_recorder_observation(observation, path)
     fatal: List[str] = []
     pending: List[str] = []
+    pending.extend(event_ingress_handoff_pending(sample))
 
     heartbeat = object_value(
         observation.get("heartbeat"), f"{path}.heartbeat"
@@ -5487,9 +5551,12 @@ def derive_workload_ingress(
     by_offset: Dict[int, Mapping[str, Any]] = {}
     for sample in samples:
         faults = storage_write_readiness_failures(sample)
+        handoff_pending = event_ingress_handoff_pending(sample)
         if faults:
             fail("workload contains a storage readiness fault: " + "; ".join(faults))
         offset = number_value(sample.get("offset_seconds"), "workload sample offset")
+        if offset == 0 and handoff_pending:
+            fail("workload t0 has unsettled ingress yield handoffs")
         rounded = int(round(offset))
         if abs(offset - rounded) <= 0.001:
             by_offset[rounded] = sample
@@ -5513,6 +5580,8 @@ def derive_workload_ingress(
         for name in sorted(REQUIRED_CONSERVATION_BOUNDARIES):
             row = object_value(boundaries.get(name), f"workload conservation.{name}")
             require_counter_equation(row, f"workload conservation.{name}")
+            if name in {"priority-ingress", "file-ingress"} and row["explicitly_shed"]:
+                fail(f"workload contains cumulative ingress loss: {name}")
 
     # Cumulative producer counters may never move backwards. Queue and
     # in-flight values are gauges, so they are intentionally excluded here.
@@ -5783,7 +5852,7 @@ def derive_workload_ingress(
         < BURST_DRAIN_OFFSET_SECONDS
     ]
     previous = previous_distinct_heartbeat_sample(preceding, drain_end)
-    pending = []
+    pending = event_ingress_handoff_pending(drain_end)
     for name in sorted(REQUIRED_CONSERVATION_BOUNDARIES):
         queued = counter(drain_end, name, "queued")
         in_flight = counter(drain_end, name, "in_flight")

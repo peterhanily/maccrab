@@ -49,6 +49,7 @@ struct EventPipelineTelemetryTests {
         #expect(snapshot.backlogEstimateByLane["file"] == 3)
         #expect(snapshot.inFlightByLane["priority"] == 0)
         #expect(snapshot.inFlightByLane["file"] == 1)
+        #expect(snapshot.handoffsInFlightByLane == ["priority": 0, "file": 0])
         #expect(snapshot.processingP99MicrosByLane["priority"] == 16_000)
         #expect(snapshot.processingP99MicrosByLane["file"] == 4_000)
         #expect(snapshot.latencySampleCountByLane == snapshot.completedByLane)
@@ -153,6 +154,7 @@ struct EventPipelineTelemetryTests {
         #expect(snapshot.mergedDroppedBySourceAndLane["TCCMonitor"]?["priority"] == 0)
         #expect(snapshot.backlogEstimateByLane["priority"] == 2)
         #expect(snapshot.detectionInputDroppedTotal == 1)
+        #expect(snapshot.handoffsInFlightByLane == ["priority": 0, "file": 0])
         _ = stream
     }
 
@@ -177,6 +179,7 @@ struct EventPipelineTelemetryTests {
         #expect(snapshot.mergedTerminatedBySourceAndLane["NetworkCollector"]?["priority"] == 1)
         #expect(snapshot.backlogEstimateByLane["priority"] == 0)
         #expect(snapshot.detectionInputDroppedTotal == 1)
+        #expect(snapshot.handoffsInFlightByLane == ["priority": 0, "file": 0])
         _ = stream
     }
 
@@ -209,7 +212,153 @@ struct EventPipelineTelemetryTests {
         #expect(snapshot.mergedDroppedByLane["priority"] == 900)
         #expect(snapshot.backlogEstimateByLane["priority"] == 100)
         #expect(snapshot.detectionInputDroppedTotal == 900)
+        #expect(snapshot.handoffsInFlightByLane == ["priority": 0, "file": 0])
         _ = stream
+    }
+
+    @Test("yield handoff spans pre-yield and consumption before accounting")
+    func handoffSpansYieldAndConsumerCompletion() async throws {
+        let (stream, continuation) = AsyncStream<EventPipelineEnvelope>.makeStream(
+            bufferingPolicy: .bufferingNewest(2)
+        )
+        let telemetry = EventPipelineTelemetry()
+        let envelope = EventPipelineEnvelope(
+            source: .endpointSecurity,
+            event: makeEvent(category: .file, action: "write", pid: 31)
+        )
+        let beforeYield = DispatchSemaphore(value: 0)
+        let allowYield = DispatchSemaphore(value: 0)
+        let afterYield = DispatchSemaphore(value: 0)
+        let allowAccounting = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        defer {
+            allowYield.signal()
+            allowAccounting.signal()
+            continuation.finish()
+        }
+        DispatchQueue.global().async {
+            telemetry.recordYield(envelope, lane: .file) {
+                beforeYield.signal()
+                _ = allowYield.wait(timeout: .now() + 3)
+                let result = continuation.yield(envelope)
+                afterYield.signal()
+                _ = allowAccounting.wait(timeout: .now() + 3)
+                return result
+            }
+            finished.signal()
+        }
+        try #require(beforeYield.wait(timeout: .now() + 3) == .success)
+        let before = telemetry.snapshot()
+        #expect(before.handoffsInFlightByLane == ["priority": 0, "file": 1])
+        #expect(before.offeredByLane["file"] == 1)
+        #expect(before.offeredBySource["ESCollector"] == 1)
+        #expect(before.offeredBySourceAndLane["ESCollector"]?["file"] == 1)
+        #expect(before.backlogEstimateByLane["file"] == 1)
+        allowYield.signal()
+        try #require(afterYield.wait(timeout: .now() + 3) == .success)
+        var iterator = stream.makeAsyncIterator()
+        let received = await iterator.next()
+        #expect(received?.event.id == envelope.event.id)
+        telemetry.recordDequeued(lane: .file)
+        telemetry.recordCompleted(lane: .file, elapsedNanos: 1_000)
+        let unpublished = telemetry.snapshot()
+        #expect(unpublished.handoffsInFlightByLane["file"] == 1)
+        #expect(unpublished.offeredByLane["file"] == 1)
+        #expect(unpublished.completedByLane["file"] == 1)
+        #expect(unpublished.backlogEstimateByLane["file"] == 0)
+        #expect(unpublished.inFlightByLane["file"] == 0)
+        allowAccounting.signal()
+        try #require(finished.wait(timeout: .now() + 3) == .success)
+        let published = telemetry.snapshot()
+        #expect(published.handoffsInFlightByLane == ["priority": 0, "file": 0])
+        #expect(published.offeredByLane["file"] == 1)
+        #expect(published.completedByLane["file"] == 1)
+        #expect(published.backlogEstimateByLane["file"] == 0)
+    }
+
+    @Test("pending yield losses remain visible until their accounting is published")
+    func handoffCoversEvictionAndTermination() throws {
+        for terminated in [false, true] {
+            let (stream, continuation) = AsyncStream<EventPipelineEnvelope>.makeStream(
+                bufferingPolicy: .bufferingNewest(1)
+            )
+            let telemetry = EventPipelineTelemetry()
+            let event = makeEvent(category: .process, action: "exec", pid: 32)
+            telemetry.yield(
+                EventPipelineEnvelope(source: .endpointSecurity, event: event),
+                to: continuation, lane: .priority
+            )
+            if terminated { continuation.finish() }
+            let envelope = EventPipelineEnvelope(source: .unifiedLog, event: event)
+            let yielded = DispatchSemaphore(value: 0)
+            let publish = DispatchSemaphore(value: 0)
+            let finished = DispatchSemaphore(value: 0)
+            defer {
+                publish.signal()
+                continuation.finish()
+                _ = stream
+            }
+            DispatchQueue.global().async {
+                telemetry.recordYield(envelope, lane: .priority) {
+                    let result = continuation.yield(envelope)
+                    yielded.signal()
+                    _ = publish.wait(timeout: .now() + 3)
+                    return result
+                }
+                finished.signal()
+            }
+            try #require(yielded.wait(timeout: .now() + 3) == .success)
+            let pending = telemetry.snapshot()
+            #expect(pending.handoffsInFlightByLane == ["priority": 1, "file": 0])
+            #expect(pending.offeredByLane["priority"] == 2)
+            #expect(pending.backlogEstimateByLane["priority"] == 2)
+            #expect(pending.detectionInputDroppedTotal == 0)
+            publish.signal()
+            try #require(finished.wait(timeout: .now() + 3) == .success)
+            let settled = telemetry.snapshot()
+            #expect(settled.handoffsInFlightByLane == ["priority": 0, "file": 0])
+            #expect(settled.offeredByLane["priority"] == 2)
+            #expect(settled.backlogEstimateByLane["priority"] == 1)
+            #expect(settled.detectionInputDroppedTotal == 1)
+            #expect(settled.mergedDroppedBySourceAndLane["ESCollector"]?["priority"]
+                    == (terminated ? 0 : 1))
+            #expect(settled.mergedTerminatedBySourceAndLane["UnifiedLogCollector"]?["priority"]
+                    == (terminated ? 1 : 0))
+        }
+    }
+
+    @Test("concurrent real handoffs reconcile independently in both lanes")
+    func concurrentHandoffsInBothLanes() {
+        let (priority, priorityContinuation) = AsyncStream<EventPipelineEnvelope>.makeStream(
+            bufferingPolicy: .bufferingNewest(100)
+        )
+        let (file, fileContinuation) = AsyncStream<EventPipelineEnvelope>.makeStream(
+            bufferingPolicy: .bufferingNewest(100)
+        )
+        let telemetry = EventPipelineTelemetry()
+        let priorityEvent = makeEvent(category: .process, action: "exec", pid: 33)
+        let fileEvent = makeEvent(category: .file, action: "write", pid: 34)
+        DispatchQueue.concurrentPerform(iterations: 1_000) { index in
+            let priorityLane = index.isMultiple(of: 2)
+            let source: EventPipelineSource = index % 4 < 2 ? .endpointSecurity : .unifiedLog
+            telemetry.yield(
+                EventPipelineEnvelope(source: source, event: priorityLane ? priorityEvent : fileEvent),
+                to: priorityLane ? priorityContinuation : fileContinuation,
+                lane: priorityLane ? .priority : .file
+            )
+        }
+        let snapshot = telemetry.snapshot()
+        #expect(snapshot.handoffsInFlightByLane == ["priority": 0, "file": 0])
+        #expect(snapshot.offeredByLane == ["priority": 500, "file": 500])
+        #expect(snapshot.mergedDroppedByLane == ["priority": 400, "file": 400])
+        #expect(snapshot.backlogEstimateByLane == ["priority": 100, "file": 100])
+        #expect(snapshot.detectionInputDroppedTotal == 800)
+        for source in ["ESCollector", "UnifiedLogCollector"] {
+            #expect(snapshot.offeredBySourceAndLane[source] == ["priority": 250, "file": 250])
+        }
+        priorityContinuation.finish()
+        fileContinuation.finish()
+        _ = (priority, file)
     }
 
     @Test("every production source driver carries a bounded stable source tag")

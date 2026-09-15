@@ -4441,6 +4441,7 @@ enum DaemonTimers {
                     "completed_by_lane": eventPipeline.completedByLane,
                     "backlog_estimate_by_lane": eventPipeline.backlogEstimateByLane,
                     "in_flight_by_lane": eventPipeline.inFlightByLane,
+                    "yield_handoffs_in_flight_by_lane": eventPipeline.handoffsInFlightByLane,
                     "processing_p99_us_by_lane": eventPipeline.processingP99MicrosByLane,
                     "latency_sample_count_by_lane": eventPipeline.latencySampleCountByLane,
                     "upstream_dropped_by_lane": eventPipeline.upstreamDroppedByLane,

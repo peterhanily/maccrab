@@ -313,6 +313,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
         pipeline["merged_terminated_by_lane"] = {"priority": 0, "file": 0}
         pipeline["upstream_dropped_by_lane"] = {"priority": 0, "file": 0}
         pipeline["upstream_terminated_by_lane"] = {"priority": 0, "file": 0}
+        pipeline["yield_handoffs_in_flight_by_lane"] = {"priority": 0, "file": 0}
         heartbeat = {
             "schema_version": 5,
             "written_at_unix": qualification.parse_time(
@@ -2447,7 +2448,8 @@ class CandidateQualificationTests(unittest.TestCase):
             qualification.forgive_flowing_boundary_lanes(pending, healthy, previous), [],
         )
         for changes in (
-            {"completed": 100}, {"in_flight": 1},
+            {"completed": 100},
+            {"in_flight": qualification.RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT},
             {"queued": qualification.RUNTIME_DRAIN_FLOWING_QUEUE_LIMIT + 1},
         ):
             with self.subTest(changes=changes):
@@ -2458,7 +2460,10 @@ class CandidateQualificationTests(unittest.TestCase):
                     pending,
                 )
 
-    def fresh_boundary_work_observations(self, *, boundary_offset: int | None = None) -> list[dict]:
+    def fresh_boundary_work_observations(
+        self, *, boundary_offset: int | None = None, file_in_flight: int = 0,
+        ingress_in_flight: bool = False,
+    ) -> list[dict]:
         """Synthetic new work shaped like GA3's failure, with real prefix proof.
 
         GA3 did not publish that proof; this fixture does not repair its receipt.
@@ -2474,6 +2479,18 @@ class CandidateQualificationTests(unittest.TestCase):
                 heartbeat["events_storage_write_offered_by_lane"][lane] += count
                 key = "buffer_depth" if offset == drain else "persisted"
                 heartbeat[f"events_storage_write_{key}_by_lane"][lane] += count
+            if offset == drain:
+                heartbeat["events_storage_write_buffer_depth_by_lane"]["file"] -= file_in_flight
+                heartbeat["events_storage_write_in_flight_depth_by_lane"]["file"] += file_in_flight
+            if ingress_in_flight:
+                pipeline = heartbeat["event_pipeline"]
+                for lane, count in (("file", 7), ("priority", 3)):
+                    pipeline["offered_by_lane"][lane] += count
+                    if offset == drain:
+                        pipeline["backlog_estimate_by_lane"][lane] += count - 1
+                        pipeline["in_flight_by_lane"][lane] += 1
+                    else:
+                        pipeline["completed_by_lane"][lane] += count
             graph = heartbeat["tracegraph_storage_admission"]
             graph["ingest_events_total"] += 1
             graph["entity_observations_total"] += 2
@@ -2493,8 +2510,14 @@ class CandidateQualificationTests(unittest.TestCase):
         return observations
 
     def test_new_boundary_work_requires_prefix_and_graph_age_in_all_paths(self) -> None:
-        observations = self.fresh_boundary_work_observations()
+        observations = self.fresh_boundary_work_observations(
+            file_in_flight=17, ingress_in_flight=True,
+        )
         index = qualification.BURST_DRAIN_OFFSET_SECONDS // 30
+        observations[index - 1]["heartbeat"]["event_pipeline"]["yield_handoffs_in_flight_by_lane"] = {
+            "file": 3, "priority": 2,
+        }
+        self.rebind_observation_heartbeat(observations[index - 1])
         current = observations[index]
         previous = qualification.sample_from_recorder_observation(observations[index - 1], "prior")
         qualification.validate_runtime_readiness(
@@ -2520,7 +2543,7 @@ class CandidateQualificationTests(unittest.TestCase):
             ), current)
 
     def test_increasing_completions_cannot_hide_an_older_unsettled_prefix(self) -> None:
-        observations = self.fresh_boundary_work_observations()
+        observations = self.fresh_boundary_work_observations(file_in_flight=17)
         index = qualification.BURST_DRAIN_OFFSET_SECONDS // 30
         before = observations[index - 1]["heartbeat"]
         before["events_storage_write_offered_by_lane"]["file"] += 1
@@ -2641,6 +2664,161 @@ class CandidateQualificationTests(unittest.TestCase):
                 elif kind == "old heartbeat": current["captured_at"] = iso(791)
                 elif kind == "same heartbeat": current["heartbeat_written_at_unix"] = previous["heartbeat_written_at_unix"]
                 self.assertEqual(qualification.forgive_flowing_boundary_lanes(pending, current, previous), pending)
+
+    def test_begun_ingress_offers_bound_fifo_prefix_without_double_counting_handoffs(self) -> None:
+        for lane in ("file", "priority"):
+            with self.subTest(lane=lane):
+                name = f"{lane}-ingress"
+                previous = copy.deepcopy(self.runtime["samples"][25])
+                current = copy.deepcopy(self.runtime["samples"][26])
+                # Begun offers already include these unresolved reservations.
+                # Their later FIFO completion must cover that entire bound;
+                # adding the handoff count again would double-count them.
+                previous["event_ingress_handoffs"][lane] = 6
+                prior_offered = previous["conservation"][name]["offered"]
+                previous["conservation"][name].update(completed=prior_offered - 10, queued=10)
+                for completed_hidden in range(7):
+                    with self.subTest(completed_hidden=completed_hidden):
+                        row = current["conservation"][name]
+                        row.update(completed=prior_offered - 6 + completed_hidden,
+                                   offered=prior_offered + 20, in_flight=1)
+                        row["queued"] = row["offered"] - row["completed"] - 1
+                        qualification.require_counter_equation(row, "FIFO fixture")
+                        pending = [f"{name} queued={row['queued']} in_flight=1"]
+                        self.assertEqual(
+                            qualification.forgive_flowing_boundary_lanes(pending, current, previous),
+                            [] if completed_hidden == 6 else pending,
+                        )
+                # A consumer stalled on the final previously yielded item has
+                # only five of these six completions. New arrivals cannot
+                # overtake it in the single consumer's FIFO stream.
+                fifo = list(range(prior_offered - 6, prior_offered))
+                completed_before_stall = prior_offered - 6 + len(fifo[:-1])
+                self.assertGreater(completed_before_stall, prior_offered - 6)
+                self.assertLess(completed_before_stall, prior_offered)
+
+    def test_combined_base_and_ingress_work_remains_within_existing_limit(self) -> None:
+        for name in ("file-event-persistence", "priority-event-persistence", "file-ingress", "priority-ingress"):
+            for queued, in_flight, accepted in ((511, 1, True), (512, 1, False), (0, 513, False), (0, 2, "ingress" not in name)):
+                with self.subTest(name=name, queued=queued, in_flight=in_flight):
+                    previous = copy.deepcopy(self.runtime["samples"][25])
+                    current = copy.deepcopy(self.runtime["samples"][26])
+                    row = current["conservation"][name]
+                    row["queued"], row["in_flight"] = queued, in_flight
+                    row["offered"] = row["completed"] + queued + in_flight
+                    qualification.require_counter_equation(row, "bounded new work")
+                    if "event-persistence" in name:
+                        current["event_writer_admission_prefix"]["admitted_generation"] += queued + in_flight
+                    pending = [f"{name} queued={queued} in_flight={in_flight}"]
+                    self.assertEqual(
+                        qualification.forgive_flowing_boundary_lanes(pending, current, previous),
+                        [] if accepted else pending,
+                    )
+
+    def test_new_inflight_work_needs_a_distinct_predecessor(self) -> None:
+        observations = self.fresh_boundary_work_observations(file_in_flight=17, ingress_in_flight=True)
+        current = observations[26]
+        previous = qualification.sample_from_recorder_observation(observations[25], "prior")
+        for predecessor in (None, qualification.sample_from_recorder_observation(current, "same publication")):
+            with self.subTest(has_predecessor=predecessor is not None):
+                with self.assertRaisesRegex(qualification.QualificationError, "not drained"):
+                    qualification.validate_runtime_readiness(current, "unproven flow", phase="drain", require_drained=True, previous_sample=predecessor)
+        qualification.validate_runtime_readiness(current, "proven flow", phase="drain", require_drained=True, previous_sample=previous)
+
+    def test_unsettled_ingress_handoff_blocks_empty_and_flowing_drain_in_all_paths(self) -> None:
+        for flowing in (False, True):
+            with self.subTest(flowing=flowing):
+                report = self.rebuild_runtime_from_observations(
+                    self.fresh_boundary_work_observations(file_in_flight=17, ingress_in_flight=True)
+                ) if flowing else copy.deepcopy(self.runtime)
+                index = qualification.BURST_DRAIN_OFFSET_SECONDS // 30
+                current = report["recorder_observations"][index]
+                current["heartbeat"]["event_pipeline"]["yield_handoffs_in_flight_by_lane"]["file"] = 1
+                self.rederive_sample(report, index)
+                # Even a yield already consumed by the FIFO can still await
+                # result publication. Observed zero loss is not sufficient.
+                qualification.validate_runtime_readiness(current, "handoff", phase="ordinary", require_drained=False)
+                with self.assertRaisesRegex(qualification.QualificationError, "yield_handoffs_in_flight"):
+                    qualification.validate_runtime_readiness(current, "handoff", phase="drain", require_drained=True, previous_sample=report["samples"][index - 1])
+                with self.assertRaisesRegex(qualification.QualificationError, "yield_handoffs_in_flight"):
+                    self.validate_runtime(report)
+                with self.assertRaisesRegex(qualification.QualificationError, "yield_handoffs_in_flight"):
+                    qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+        t0 = copy.deepcopy(self.runtime)
+        pipeline = t0["recorder_observations"][0]["heartbeat"]["event_pipeline"]
+        pipeline["yield_handoffs_in_flight_by_lane"]["priority"] = 1
+        pipeline["offered_by_lane"]["priority"] = 1
+        pipeline["completed_by_lane"]["priority"] = 1
+        self.rederive_sample(t0, 0)
+        with self.assertRaisesRegex(qualification.QualificationError, "yield_handoffs_in_flight"):
+            qualification.validate_runtime_readiness(t0["recorder_observations"][0], "t0 handoff", phase="t0", require_drained=True)
+        with self.assertRaisesRegex(qualification.QualificationError, "t0.*handoffs"):
+            qualification.derive_workload_ingress(t0["samples"], t0["recorder_probe_evidence"]["workload"])
+
+    def test_settled_ingress_handoff_cannot_hide_a_drop_or_termination(self) -> None:
+        for loss_key in ("merged_dropped_by_lane", "merged_terminated_by_lane"):
+            with self.subTest(loss_key=loss_key):
+                report = copy.deepcopy(self.runtime)
+                index = qualification.BURST_DRAIN_OFFSET_SECONDS // 30
+                current = report["recorder_observations"][index]
+                for later in range(index, len(report["recorder_observations"])):
+                    pipeline = report["recorder_observations"][later]["heartbeat"]["event_pipeline"]
+                    pipeline["yield_handoffs_in_flight_by_lane"]["file"] = 0
+                    pipeline[loss_key]["file"] = 1
+                    pipeline["offered_by_lane"]["file"] += 1
+                    self.rederive_sample(report, later)
+                with self.assertRaisesRegex(qualification.QualificationError, "cumulative"):
+                    qualification.validate_runtime_readiness(current, "settled loss", phase="drain", require_drained=True, previous_sample=report["samples"][index - 1])
+                with self.assertRaisesRegex(qualification.QualificationError, "cumulative"):
+                    self.validate_runtime(report)
+                with self.assertRaisesRegex(qualification.QualificationError, "cumulative ingress loss"):
+                    qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+
+    def test_ingress_handoff_metadata_is_required_unsigned_and_raw_bound(self) -> None:
+        for value in (None, {}, {"file": 0}, {"priority": 0, "file": 0, "unknown": 0},
+                      {"priority": 0, "file": True}, {"priority": 0, "file": -1},
+                      {"priority": 0, "file": 1 << 64},
+                      {"priority": 0, "file": self.runtime["samples"][20]["conservation"]["file-ingress"]["offered"] + 1}):
+            with self.subTest(value=value):
+                observation = copy.deepcopy(self.runtime["recorder_observations"][20])
+                pipeline = observation["heartbeat"]["event_pipeline"]
+                if value is None:
+                    del pipeline["yield_handoffs_in_flight_by_lane"]
+                else:
+                    pipeline["yield_handoffs_in_flight_by_lane"] = value
+                self.rebind_observation_heartbeat(observation)
+                with self.assertRaises(qualification.QualificationError):
+                    qualification.sample_from_recorder_observation(observation, "invalid handoff")
+        samples = copy.deepcopy(self.runtime["samples"])
+        samples[20]["event_ingress_handoffs"]["file"] = samples[20]["conservation"]["file-ingress"]["offered"] + 1
+        with self.assertRaisesRegex(qualification.QualificationError, "handoffs exceed begun offers"):
+            qualification.derive_workload_ingress(samples, self.runtime["recorder_probe_evidence"]["workload"])
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][20]
+        observation["heartbeat"]["event_pipeline"]["yield_handoffs_in_flight_by_lane"]["file"] = 1
+        self.rebind_observation_heartbeat(observation)
+        # Keep the normalized stale zero while rebinding both document hashes.
+        self.rehash_samples(report)
+        with self.assertRaisesRegex(qualification.QualificationError, "do not match the raw recorder"):
+            self.validate_runtime(report)
+
+    def test_ingress_prefix_proof_has_one_serial_consumer_per_lane(self) -> None:
+        # This source guard protects the FIFO assumption, not a fixed number of
+        # collectors. Adding consumers or detaching per-event work needs a new
+        # contiguous completion watermark, not reuse of aggregate completions.
+        bootstrap = (ROOT / "Sources/MacCrabAgentKit/DaemonBootstrap.swift").read_text()
+        calls = re.findall(r"await EventLoop\.run\(\s*state: handles\.state,\s*lane: \.(\w+),\s*eventStream: streams\.(\w+)", bootstrap)
+        self.assertEqual(calls, [("priority", "priority"), ("file", "file")])
+        self.assertEqual(bootstrap.count("let streams = await handles.state.mergedEventStreams()"), 1)
+        loop = (ROOT / "Sources/MacCrabAgentKit/EventLoop.swift").read_text()
+        self.assertEqual(loop.count("for await envelope in eventStream {"), 1)
+        prefix = loop.split("for await envelope in eventStream {", 1)[1].split("eventCount.increment()", 1)[0]
+        self.assertRegex(prefix, r"recordDequeued\(lane: lane\)\s*defer\s*\{")
+        self.assertIn("state.eventPipelineTelemetry.recordCompleted(", prefix)
+        self.assertNotRegex(loop, r"\bTask(?:\s*<[^>]+>)?\s*(?:\.\s*detached|\(|\{)")
+        self.assertNotRegex(loop, r"\basync\s+let\b")
+        lifecycle = (ROOT / "Sources/MacCrabAgentKit/DaemonLifecycle.swift").read_text()
+        self.assertIn("precondition(priorityContinuation == nil && fileContinuation == nil)", lifecycle)
 
     def test_complete_report_passes_every_threshold(self) -> None:
         self.validate_runtime()

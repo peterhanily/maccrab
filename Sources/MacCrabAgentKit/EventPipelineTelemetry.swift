@@ -8,8 +8,8 @@ import os
 /// This is measurement only; it never gates, delays, or reorders an event.
 final class EventPipelineTelemetry: @unchecked Sendable {
     struct Snapshot: Sendable, Equatable {
-        /// Events that survived each collector's own bounded stream and were
-        /// offered to the downstream merger.
+        /// Events that survived each collector's own bounded stream and began
+        /// an offer to the downstream merger, including unfinished handoffs.
         let offeredBySource: [String: UInt64]
         /// Fixed source × lane cross-tab. Separate source/lane marginals cannot
         /// prove whether Unified Log or ES supplied a saturated file lane.
@@ -35,6 +35,10 @@ final class EventPipelineTelemetry: @unchecked Sendable {
         let completedByLane: [String: UInt64]
         let backlogEstimateByLane: [String: UInt64]
         let inFlightByLane: [String: UInt64]
+        /// Begun offers whose yield result has not yet been accounted for.
+        /// Includes both pre-yield and post-yield handoffs; zero means no yield
+        /// result or loss is waiting to be published in this locked snapshot.
+        let handoffsInFlightByLane: [String: UInt64]
         let processingP99MicrosByLane: [String: UInt64]
         /// Sum of the fixed latency buckets. This must equal completed events
         /// for each lane and makes histogram-accounting drift observable.
@@ -61,6 +65,7 @@ final class EventPipelineTelemetry: @unchecked Sendable {
         var ruleEvaluationReachedByLaneAndCategory: [UInt64]
         var ruleEvaluationCompletedByLaneAndCategory: [UInt64]
         var completedByLane: [UInt64]
+        var handoffsInFlightByLane: [UInt64]
         /// Lane-major flattened storage: lane * bucketCount + bucket.
         var latencyBuckets: [UInt64]
 
@@ -91,6 +96,7 @@ final class EventPipelineTelemetry: @unchecked Sendable {
                 count: laneCount * EventCategory.allCases.count
             )
             completedByLane = [UInt64](repeating: 0, count: laneCount)
+            handoffsInFlightByLane = [UInt64](repeating: 0, count: laneCount)
             latencyBuckets = [UInt64](
                 repeating: 0,
                 count: laneCount * bucketCount
@@ -194,23 +200,34 @@ final class EventPipelineTelemetry: @unchecked Sendable {
         }
     }
 
-    /// The production downstream boundary in one operation. The continuation
-    /// decides which OLD envelope was evicted; one telemetry lock then records
-    /// the new offer and the exact old source/lane (or terminal new loss).
+    /// The continuation decides which OLD envelope was evicted. Reserve the
+    /// offer first and expose its unfinished result without locking across yield.
     @inline(__always)
     func yield(
         _ envelope: EventPipelineEnvelope,
         to continuation: AsyncStream<EventPipelineEnvelope>.Continuation,
         lane: EventPipelineLane
     ) {
-        let result = continuation.yield(envelope)
+        recordYield(envelope, lane: lane) { continuation.yield(envelope) }
+    }
+
+    /// Synchronous, nonescaping seam for controlled handoff interleavings.
+    @inline(__always)
+    func recordYield(
+        _ envelope: EventPipelineEnvelope,
+        lane: EventPipelineLane,
+        operation: () -> AsyncStream<EventPipelineEnvelope>.Continuation.YieldResult
+    ) {
+        let offeredCross = envelope.source.rawValue * EventPipelineLane.allCases.count
+            + lane.rawValue
         state.withLock { locked in
             Self.incrementSaturating(&locked.offeredBySource[envelope.source.rawValue])
-            let offeredCross = envelope.source.rawValue * EventPipelineLane.allCases.count
-                + lane.rawValue
             Self.incrementSaturating(&locked.offeredBySourceAndLane[offeredCross])
             Self.incrementSaturating(&locked.offeredByLane[lane.rawValue])
-
+            Self.incrementSaturating(&locked.handoffsInFlightByLane[lane.rawValue])
+        }
+        let result = operation()
+        state.withLock { locked in
             switch result {
             case .dropped(let oldEnvelope):
                 let oldLane = EventPipelineLane.finalLane(for: oldEnvelope.event)
@@ -226,6 +243,12 @@ final class EventPipelineTelemetry: @unchecked Sendable {
             @unknown default:
                 Self.incrementSaturating(&locked.terminatedBySourceAndLane[offeredCross])
                 Self.incrementSaturating(&locked.terminatedByLane[lane.rawValue])
+            }
+            // Saturation stays visibly nonzero; it must never wrap into a
+            // false claim that every yield result has been accounted for.
+            if locked.handoffsInFlightByLane[lane.rawValue] != UInt64.max {
+                precondition(locked.handoffsInFlightByLane[lane.rawValue] > 0)
+                locked.handoffsInFlightByLane[lane.rawValue] -= 1
             }
         }
     }
@@ -251,8 +274,9 @@ final class EventPipelineTelemetry: @unchecked Sendable {
     /// Snapshot cumulative counters. For `.bufferingNewest`, every `.dropped`
     /// result evicts one queued event while accepting the new one; `.terminated`
     /// rejects the new event. Therefore offered − dropped − terminated − dequeued
-    /// is the queued-depth estimate (apart from a concurrent handoff). Every
-    /// downstream marginal and cross-tab comes from this single locked state.
+    /// is the queued-depth estimate. It conservatively includes reservations
+    /// not yet yielded and losses not yet published while handoffs are nonzero.
+    /// Every downstream marginal and cross-tab comes from this locked state.
     func snapshot(
         upstreamBuffers: [EventPipelineSource: EventCollectorBufferSnapshot] = [:]
     ) -> Snapshot {
@@ -273,6 +297,7 @@ final class EventPipelineTelemetry: @unchecked Sendable {
             var completedByLane: [String: UInt64] = [:]
             var backlogByLane: [String: UInt64] = [:]
             var inFlightByLane: [String: UInt64] = [:]
+            var handoffsInFlightByLane: [String: UInt64] = [:]
             var p99ByLane: [String: UInt64] = [:]
             var latencySamplesByLane: [String: UInt64] = [:]
             var upstreamDroppedByLane: [String: UInt64] = [:]
@@ -367,6 +392,7 @@ final class EventPipelineTelemetry: @unchecked Sendable {
                 completedByLane[key] = completed
                 backlogByLane[key] = offered >= removed ? offered - removed : 0
                 inFlightByLane[key] = dequeued >= completed ? dequeued - completed : 0
+                handoffsInFlightByLane[key] = locked.handoffsInFlightByLane[laneIndex]
                 p99ByLane[key] = Self.percentile99(
                     state: locked,
                     laneIndex: laneIndex,
@@ -406,6 +432,7 @@ final class EventPipelineTelemetry: @unchecked Sendable {
                 completedByLane: completedByLane,
                 backlogEstimateByLane: backlogByLane,
                 inFlightByLane: inFlightByLane,
+                handoffsInFlightByLane: handoffsInFlightByLane,
                 processingP99MicrosByLane: p99ByLane,
                 latencySampleCountByLane: latencySamplesByLane,
                 upstreamDroppedByLane: upstreamDroppedByLane,
