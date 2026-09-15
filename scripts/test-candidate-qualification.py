@@ -126,6 +126,23 @@ def llm_heartbeat_payload(*, healthy: bool, started: int = 0, accepted: int = 0,
     return result
 
 
+def start_readiness_fixture(first: dict, proof: dict) -> dict:
+    """Synthetic preceding publication, never a copied installed-host receipt."""
+    anchor = copy.deepcopy(first)
+    capture = qualification.parse_time(first["captured_at"], "fixture t0")
+    first_tick = first["heartbeat"]["written_at_unix"]
+    anchor_tick = max(first_tick - 30, qualification.parse_time(proof["observed_at"], "fixture proof").timestamp())
+    timestamp = max(capture - dt.timedelta(seconds=30), dt.datetime.fromtimestamp(anchor_tick, dt.timezone.utc))
+    anchor["captured_at"] = anchor["recorded_at"] = timestamp.isoformat().replace("+00:00", "Z")
+    heartbeat = anchor["heartbeat"]
+    heartbeat["written_at_unix"] = anchor_tick
+    heartbeat["engine_uptime_seconds"] = max(0, heartbeat["engine_uptime_seconds"] - (first_tick - anchor_tick))
+    raw = qualification.canonical_json_bytes(heartbeat)
+    anchor["heartbeat_file"].update(raw_json=raw.decode(), raw_sha256=qualification.sha256_bytes(raw),
+        canonical_sha256=qualification.sha256_bytes(raw), mtime_unix=heartbeat["written_at_unix"])
+    return qualification.epoch_start_readiness_document(anchor, proof)
+
+
 def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
     candidate = copy.deepcopy(manifest["candidate"])
     inventory_sha = manifest["artifact_verification"]["payload_inventory"]["sha256"]
@@ -893,7 +910,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
         observations=observations,
         host=host,
         workload=workload,
-        probes=probes,
+        probes={**probes, "start_readiness": start_readiness_fixture(observations[0], prewarm_proof)},
         capture_mode="deterministic-fixture",
     )
 
@@ -1986,6 +2003,7 @@ class CandidateQualificationTests(unittest.TestCase):
         measurements = self.runtime["measurements"]
         process = measurements["process"]
         return {
+            "start_readiness": copy.deepcopy(self.runtime["start_readiness"]),
             "installed_gui_start": copy.deepcopy(self.runtime["installed_gui"]["start"]),
             "installed_gui_end": copy.deepcopy(self.runtime["installed_gui"]["end"]),
             "installed_engine_start": copy.deepcopy(
@@ -2017,15 +2035,20 @@ class CandidateQualificationTests(unittest.TestCase):
         }
 
     def rebuild_runtime_from_observations(
-        self, observations: list[dict], *, probes: dict | None = None
+        self, observations: list[dict], *, probes: dict | None = None,
+        start_readiness: dict | None = None,
     ) -> dict:
+        selected_probes = probes if probes is not None else self.recorder_probes()
+        selected_probes["start_readiness"] = start_readiness or start_readiness_fixture(
+            observations[0], selected_probes["evidence"]["llm_prewarm"]["alert_investigation"],
+        )
         return qualification.build_runtime_report_from_observations(
             candidate_manifest=self.manifest,
             candidate_manifest_sha256=self.manifest_sha,
             observations=observations,
             host=copy.deepcopy(self.runtime["host"]),
             workload=copy.deepcopy(self.runtime["workload"]),
-            probes=probes if probes is not None else self.recorder_probes(),
+            probes=selected_probes,
             capture_mode="deterministic-fixture",
         )
 
@@ -2425,7 +2448,7 @@ class CandidateQualificationTests(unittest.TestCase):
         self.assertEqual(drained, current)
         report = self.rebuild_runtime_from_observations(observations)
         self.validate_runtime(report)
-        window = qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+        window = qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
         self.assertEqual(
             window["file_persistence_offered_delta"]
             - window["file_persistence_completed_delta"], 1,
@@ -2525,7 +2548,7 @@ class CandidateQualificationTests(unittest.TestCase):
         )
         report = self.rebuild_runtime_from_observations(observations)
         self.validate_runtime(report)
-        qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+        qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
         with self.assertRaisesRegex(qualification.QualificationError, "not drained"):
             qualification.validate_runtime_readiness(current, "new work", phase="t0", require_drained=True)
         # Drain polling must use the same proof, including a repeated current
@@ -2541,6 +2564,209 @@ class CandidateQualificationTests(unittest.TestCase):
                 initial=prior_observation, phase="new work", heartbeat_path=self.root / "unused",
                 candidate=self.manifest["candidate"], data_dirs=[self.root], sqlite_overrides={}, expected_pid=4321,
             ), current)
+
+    def flowing_start_observations(self) -> list[dict]:
+        """Generic conserving new traffic; contains no installed-host values."""
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for index, observation in enumerate(observations):
+            heartbeat = observation["heartbeat"]
+            for lane, new in (("file", 37), ("priority", 1)):
+                heartbeat["events_storage_write_offered_by_lane"][lane] += 100 + new
+                heartbeat["events_storage_write_persisted_by_lane"][lane] += 100 + (new if index else 0)
+                if index == 0:
+                    heartbeat["events_storage_write_buffer_depth_by_lane"][lane] += new
+                pipeline = heartbeat["event_pipeline"]
+                pipeline["offered_by_lane"][lane] += 103
+                pipeline["completed_by_lane"][lane] += 100 + (3 if index else 0)
+                if index == 0:
+                    pipeline["backlog_estimate_by_lane"][lane] += 2
+                    pipeline["in_flight_by_lane"][lane] += 1
+            self.rebind_observation_heartbeat(observation)
+        return observations
+
+    def test_start_anchor_proves_new_work_in_live_builder_verifier_and_derivation(self) -> None:
+        observations = self.flowing_start_observations()
+        first = qualification.sample_from_recorder_observation(observations[0], "synthetic t0")
+        with self.assertRaisesRegex(qualification.QualificationError, "not drained"):
+            qualification.validate_runtime_readiness(observations[0], "unanchored", phase="t0", require_drained=True)
+        anchor = self.runtime["start_readiness"]
+        qualification.validate_epoch_start_readiness(anchor, first)
+        report = qualification.build_runtime_report_from_observations(
+            candidate_manifest=self.manifest, candidate_manifest_sha256=self.manifest_sha,
+            observations=observations, host=self.runtime["host"], workload=self.runtime["workload"],
+            probes=self.recorder_probes(), capture_mode="deterministic-fixture",
+        )
+        self.validate_runtime(report)
+        qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"], report["start_readiness"])
+        self.assertEqual(len(report["samples"]), 31)
+        self.assertEqual(report["epoch"]["duration_seconds"], 900)
+        self.assertEqual(report["measurements"]["disk_writes"], self.runtime["measurements"]["disk_writes"])
+        with mock.patch.object(qualification, "capture_runtime_observation", return_value=observations[0]), \
+                mock.patch.object(qualification.time, "sleep"), \
+                mock.patch.object(qualification.time, "monotonic", return_value=0):
+            result = qualification.wait_for_runtime_drain(
+                initial=anchor["anchor_observation"], phase="epoch-start-readiness",
+                heartbeat_path=self.root / "unused", candidate=self.manifest["candidate"],
+                data_dirs=[self.root], sqlite_overrides={}, expected_pid=4321,
+                proof_backed_only=True, start_proof=anchor["prewarm_alert_investigation"],
+                minimum_heartbeat_unix=anchor["anchor_observation"]["heartbeat"]["written_at_unix"],
+                strictly_after=True, deadline_monotonic=300,
+            )
+        self.assertEqual(result, observations[0])
+
+    def test_start_anchor_rejects_missing_forged_time_identity_and_fault_evidence(self) -> None:
+        def check(document, expected):
+            with self.assertRaisesRegex(qualification.QualificationError, expected):
+                qualification.validate_epoch_start_readiness(document, self.runtime["samples"][0])
+            with self.assertRaisesRegex(qualification.QualificationError, expected):
+                qualification.derive_workload_ingress(self.runtime["samples"], self.runtime["recorder_probe_evidence"]["workload"], document)
+            report = copy.deepcopy(self.runtime)
+            report["start_readiness"] = document
+            with self.assertRaisesRegex(qualification.QualificationError, expected):
+                self.validate_runtime(report)
+        check(None, "start_readiness")
+        check({"ready": True}, "raw-anchor schema")
+        forged = copy.deepcopy(self.runtime["start_readiness"])
+        forged["anchor_sha256"] = "0" * 64
+        check(forged, "anchor digest")
+        for field, value, expected in (
+            ("engine_pid", 9999, "PID|PID.*match"),
+            ("engine_build", "9.9.9.999", "native epoch changed"),
+            ("engine_started_at_unix", 1, "engine.*start|native epoch changed"),
+            ("events_storage_write_poisoned_total", 1, "poisoned"),
+            ("event_journal_repairable_gap_count", 1, "repairable_gap"),
+            ("es_kernel_dropped_total", 1, "cumulative loss"),
+        ):
+            with self.subTest(field=field):
+                document = copy.deepcopy(self.runtime["start_readiness"])
+                observation = document["anchor_observation"]
+                observation["heartbeat"][field] = value
+                self.rebind_observation_heartbeat(observation)
+                document["anchor_sha256"] = qualification.sha256_bytes(qualification.canonical_json_bytes(observation))
+                check(document, expected)
+        for seconds, expected in ((0, "strictly before"), (1, "strictly before"), (-120, "stale|predates")):
+            with self.subTest(seconds=seconds):
+                document = copy.deepcopy(self.runtime["start_readiness"])
+                observation = document["anchor_observation"]
+                observation["captured_at"] = observation["recorded_at"] = iso(seconds)
+                observation["heartbeat"]["written_at_unix"] = qualification.parse_time(iso(seconds), "fixture time").timestamp()
+                observation["heartbeat"]["engine_uptime_seconds"] = 600 + seconds
+                self.rebind_observation_heartbeat(observation)
+                document["anchor_sha256"] = qualification.sha256_bytes(qualification.canonical_json_bytes(observation))
+                check(document, expected)
+        stale = copy.deepcopy(self.runtime["start_readiness"])
+        observation = stale["anchor_observation"]
+        observation["heartbeat"]["written_at_unix"] -= 80
+        self.rebind_observation_heartbeat(observation)
+        stale["anchor_sha256"] = qualification.sha256_bytes(qualification.canonical_json_bytes(observation))
+        check(stale, "stale")
+
+    def test_start_anchor_refuses_stalled_prefix_handoffs_and_counter_regression(self) -> None:
+        observations = self.flowing_start_observations()
+        first = qualification.sample_from_recorder_observation(observations[0], "t0")
+        document = copy.deepcopy(self.runtime["start_readiness"])
+        anchor = document["anchor_observation"]
+        anchor["heartbeat"]["events_storage_write_offered_by_lane"]["file"] = 10
+        anchor["heartbeat"]["events_storage_write_persisted_by_lane"]["file"] = 1
+        anchor["heartbeat"]["events_storage_write_buffer_depth_by_lane"]["file"] = 9
+        self.rebind_observation_heartbeat(anchor)
+        document["anchor_sha256"] = qualification.sha256_bytes(qualification.canonical_json_bytes(anchor))
+        first["event_writer_admission_prefix"]["terminal_generation"] = 5
+        with self.assertRaisesRegex(qualification.QualificationError, "uncleared earlier writer prefix"):
+            qualification.validate_epoch_start_readiness(document, first)
+        for side in ("anchor", "current"):
+            with self.subTest(side=side):
+                document = copy.deepcopy(self.runtime["start_readiness"])
+                current = qualification.sample_from_recorder_observation(observations[0], "t0")
+                if side == "anchor":
+                    raw = document["anchor_observation"]
+                    pipeline = raw["heartbeat"]["event_pipeline"]
+                    pipeline["offered_by_lane"]["file"] = 1
+                    pipeline["completed_by_lane"]["file"] = 1
+                    pipeline["yield_handoffs_in_flight_by_lane"]["file"] = 1
+                    self.rebind_observation_heartbeat(raw)
+                    document["anchor_sha256"] = qualification.sha256_bytes(qualification.canonical_json_bytes(raw))
+                else:
+                    current["event_ingress_handoffs"]["file"] = 1
+                with self.assertRaisesRegex(qualification.QualificationError, "unsettled ingress"):
+                    qualification.validate_epoch_start_readiness(document, current)
+        for name in ("file-ingress", "priority-event-terminal-persistence"):
+            before = qualification.sample_from_recorder_observation(self.runtime["start_readiness"]["anchor_observation"], "anchor")
+            current = copy.deepcopy(first)
+            before["conservation"][name]["offered"] = current["conservation"][name]["offered"] + 1
+            with self.assertRaisesRegex(qualification.QualificationError, "cumulative .*offered regressed"):
+                qualification.validate_readiness_transition(before, current)
+
+    def test_start_keeps_terminal_overlay_work_strict_and_shares_one_deadline(self) -> None:
+        before, current = copy.deepcopy(self.runtime["samples"][:2])
+        name = "file-event-terminal-persistence"
+        before["conservation"][name].update(offered=2, completed=0, queued=2)
+        current["conservation"][name].update(offered=2, completed=1, queued=1)
+        pending = [name + " queued=1 in_flight=0"]
+        self.assertEqual(qualification.forgive_flowing_boundary_lanes(pending, current, before), [])
+        self.assertEqual(qualification.start_boundary_pending(pending, current, before), pending)
+        initial = self.runtime["start_readiness"]["anchor_observation"]
+        with mock.patch.object(qualification.time, "monotonic", return_value=301), \
+                mock.patch.object(qualification, "capture_runtime_observation") as capture:
+            with self.assertRaisesRegex(qualification.QualificationError, "queues did not drain"):
+                qualification.wait_for_runtime_drain(
+                    initial=initial, phase="epoch-start-readiness", heartbeat_path=self.root / "unused",
+                    candidate=self.manifest["candidate"], data_dirs=[self.root], sqlite_overrides={}, expected_pid=4321,
+                    minimum_heartbeat_unix=initial["heartbeat"]["written_at_unix"], strictly_after=True,
+                    deadline_monotonic=300,
+                )
+            capture.assert_not_called()
+
+    def test_failed_prewarm_retains_proof_distinct_polls_and_latest_file_digests(self) -> None:
+        initial = copy.deepcopy(self.runtime["recorder_observations"][0])
+        final = copy.deepcopy(initial)
+        final["captured_at"] = final["recorded_at"] = iso(2)
+        proof = copy.deepcopy(self.runtime["recorder_probe_evidence"]["llm_prewarm"])
+        def fail_after_proof(**kwargs):
+            kwargs["proof_observer"](proof)
+            kwargs["readiness_observer"](initial, "post-prewarm")
+            kwargs["readiness_observer"](final, "post-prewarm")
+            raise qualification.QualificationError("synthetic post-prewarm refusal")
+        original_write = qualification.write_json_exclusive
+        for fail_terminal in (False, True):
+            capture_path = self.root / f"failed-poll-diagnostics-{fail_terminal}.json"
+            def write_record(path, value):
+                if fail_terminal and value.get("terminal_latest") is True:
+                    raise OSError("synthetic diagnostic write failure")
+                original_write(path, value)
+            with mock.patch.object(qualification, "write_json_exclusive", side_effect=write_record), \
+                    mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
+                    mock.patch.object(qualification.os, "geteuid", return_value=0), \
+                    mock.patch.object(qualification, "read_live_heartbeat", return_value=(initial["heartbeat"], {})), \
+                    mock.patch.object(qualification, "installed_runtime_host", return_value=self.runtime["host"]), \
+                    mock.patch.object(qualification, "capture_runtime_observation", return_value=initial), \
+                    mock.patch.object(qualification, "source_runtime_probe_evidence", return_value={}), \
+                    mock.patch.object(qualification, "mounted_tool_probes", return_value={}), \
+                    mock.patch.object(qualification, "wait_for_runtime_drain", return_value=initial), \
+                    mock.patch.object(qualification, "prewarm_alert_investigation", side_effect=fail_after_proof):
+                with self.assertRaisesRegex(qualification.QualificationError, "synthetic post-prewarm refusal"):
+                    qualification.live_runtime_recording(
+                        root=ROOT, candidate_manifest=self.manifest, candidate_manifest_sha256=self.manifest_sha,
+                        dmg=self.dmg, heartbeat_path=self.root / "unused", data_dirs=[self.root],
+                        sqlite_overrides={}, capture_path=capture_path,
+                    )
+            document = qualification.read_json_file(capture_path, "failed diagnostic")
+            self.assertEqual(document["result"], "failed")
+            self.assertEqual(document["observations"], [])
+            self.assertEqual(document["llm_prewarm"], proof)
+            records = document["readiness_diagnostics"]
+            self.assertEqual(len(records), 3 if fail_terminal else 4)  # Two initial stages, one distinct poll, terminal latest.
+            for row in records:
+                path = pathlib.Path(row["path"])
+                self.assertEqual(row["sha256"], qualification.sha256_file(path))
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            if fail_terminal:
+                self.assertEqual(document["readiness_diagnostic_error"], "synthetic diagnostic write failure")
+            else:
+                last = qualification.read_json_file(pathlib.Path(records[-1]["path"]), "latest poll")
+                self.assertTrue(last["terminal_latest"])
+                self.assertEqual(last["observation"], final)
 
     def test_increasing_completions_cannot_hide_an_older_unsettled_prefix(self) -> None:
         observations = self.fresh_boundary_work_observations(file_in_flight=17)
@@ -2612,7 +2838,7 @@ class CandidateQualificationTests(unittest.TestCase):
                 samples = copy.deepcopy(self.runtime["samples"])
                 samples[20] = qualification.sample_from_recorder_observation(observation, "unsafe prefix")
                 with self.assertRaisesRegex(qualification.QualificationError, "poisoned_total|repairable_gap_count"):
-                    qualification.derive_workload_ingress(samples, self.runtime["recorder_probe_evidence"]["workload"])
+                    qualification.derive_workload_ingress(samples, self.runtime["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
 
     def test_graph_age_is_required_finite_and_bounded_before_drain(self) -> None:
         observations = self.fresh_boundary_work_observations(boundary_offset=600)
@@ -2642,7 +2868,7 @@ class CandidateQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(qualification.QualificationError, "oldest outstanding write age"):
             self.validate_runtime(report)
         with self.assertRaisesRegex(qualification.QualificationError, "oldest outstanding write age"):
-            qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+            qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
 
     def test_graph_flow_requires_fresh_bounded_work_and_no_inflight(self) -> None:
         observations = self.fresh_boundary_work_observations()
@@ -2743,7 +2969,7 @@ class CandidateQualificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(qualification.QualificationError, "yield_handoffs_in_flight"):
                     self.validate_runtime(report)
                 with self.assertRaisesRegex(qualification.QualificationError, "yield_handoffs_in_flight"):
-                    qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+                    qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
         t0 = copy.deepcopy(self.runtime)
         pipeline = t0["recorder_observations"][0]["heartbeat"]["event_pipeline"]
         pipeline["yield_handoffs_in_flight_by_lane"]["priority"] = 1
@@ -2753,7 +2979,7 @@ class CandidateQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(qualification.QualificationError, "yield_handoffs_in_flight"):
             qualification.validate_runtime_readiness(t0["recorder_observations"][0], "t0 handoff", phase="t0", require_drained=True)
         with self.assertRaisesRegex(qualification.QualificationError, "t0.*handoffs"):
-            qualification.derive_workload_ingress(t0["samples"], t0["recorder_probe_evidence"]["workload"])
+            qualification.derive_workload_ingress(t0["samples"], t0["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
 
     def test_settled_ingress_handoff_cannot_hide_a_drop_or_termination(self) -> None:
         for loss_key in ("merged_dropped_by_lane", "merged_terminated_by_lane"):
@@ -2772,7 +2998,7 @@ class CandidateQualificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(qualification.QualificationError, "cumulative"):
                     self.validate_runtime(report)
                 with self.assertRaisesRegex(qualification.QualificationError, "cumulative ingress loss"):
-                    qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+                    qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
 
     def test_ingress_handoff_metadata_is_required_unsigned_and_raw_bound(self) -> None:
         for value in (None, {}, {"file": 0}, {"priority": 0, "file": 0, "unknown": 0},
@@ -2792,7 +3018,7 @@ class CandidateQualificationTests(unittest.TestCase):
         samples = copy.deepcopy(self.runtime["samples"])
         samples[20]["event_ingress_handoffs"]["file"] = samples[20]["conservation"]["file-ingress"]["offered"] + 1
         with self.assertRaisesRegex(qualification.QualificationError, "handoffs exceed begun offers"):
-            qualification.derive_workload_ingress(samples, self.runtime["recorder_probe_evidence"]["workload"])
+            qualification.derive_workload_ingress(samples, self.runtime["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
         report = copy.deepcopy(self.runtime)
         observation = report["recorder_observations"][20]
         observation["heartbeat"]["event_pipeline"]["yield_handoffs_in_flight_by_lane"]["file"] = 1
@@ -3414,6 +3640,13 @@ class CandidateQualificationTests(unittest.TestCase):
     def test_live_recorder_retains_rejected_alert_pressure_sample(self) -> None:
         """A failed t0 or later sample must survive in the failed capture."""
         initial = copy.deepcopy(self.runtime["recorder_observations"][0])
+        anchor = self.runtime["start_readiness"]["anchor_observation"]
+        prewarm = self.runtime["recorder_probe_evidence"]["llm_prewarm"]
+        def drain(**kwargs):
+            if kwargs["phase"] == "epoch-start-readiness":
+                kwargs["readiness_observer"](anchor, kwargs["phase"])
+                kwargs["readiness_observer"](initial, kwargs["phase"])
+            return initial
         for offset in (0, 30):
             with self.subTest(offset=offset):
                 rejected = copy.deepcopy(self.runtime["recorder_observations"][offset // 30])
@@ -3428,8 +3661,8 @@ class CandidateQualificationTests(unittest.TestCase):
                         mock.patch.object(qualification, "capture_runtime_observation", side_effect=captured), \
                         mock.patch.object(qualification, "source_runtime_probe_evidence", return_value={}), \
                         mock.patch.object(qualification, "mounted_tool_probes", return_value={}), \
-                        mock.patch.object(qualification, "wait_for_runtime_drain", return_value=initial), \
-                        mock.patch.object(qualification, "prewarm_alert_investigation", return_value=({}, initial)), \
+                        mock.patch.object(qualification, "wait_for_runtime_drain", side_effect=drain), \
+                        mock.patch.object(qualification, "prewarm_alert_investigation", return_value=(prewarm, anchor, 300)), \
                         mock.patch.object(qualification, "installed_engine_identity", return_value=self.runtime["installed_engine"]["start"]), \
                         mock.patch.object(qualification, "installed_gui_identity", return_value=self.runtime["installed_gui"]["start"]), \
                         mock.patch.object(qualification, "installed_alert_database", return_value=self.root / "alerts.db"), \
@@ -4014,7 +4247,7 @@ class CandidateQualificationTests(unittest.TestCase):
                 "recovery_mutation_wait_saturations_total"
             ] = 1
             self.rebind_observation_heartbeat(observation)
-        report = self.rebuild_runtime_from_observations(observations)
+        report = self.rebuild_runtime_from_observations(observations, start_readiness=self.runtime["start_readiness"])
         self.assertEqual(
             report["measurements"]["trace_graph"][
                 "recovery_mutation_wait_saturations_epoch_delta"
@@ -4220,7 +4453,7 @@ class CandidateQualificationTests(unittest.TestCase):
         report = copy.deepcopy(self.runtime)
         for index, observation in enumerate(report["recorder_observations"]):
             observation["heartbeat"]["llm"] = llm_heartbeat_payload(
-                healthy=index != len(report["recorder_observations"]) - 1
+                healthy=index != len(report["recorder_observations"]) - 1, started=10, accepted=10
             )
             self.rederive_sample(report, index)
         report["measurements"]["ai_quality"] = {
@@ -4241,8 +4474,8 @@ class CandidateQualificationTests(unittest.TestCase):
         for index, observation in enumerate(report["recorder_observations"]):
             observation["heartbeat"]["llm"] = llm_heartbeat_payload(
                 healthy=True,
-                started=1 if index == last else 0,
-                accepted=0,
+                started=11 if index == last else 10,
+                accepted=10,
                 rejected=1 if index == last else 0,
             )
             self.rederive_sample(report, index)
@@ -4287,6 +4520,7 @@ class CandidateQualificationTests(unittest.TestCase):
             observation["heartbeat"]["llm"] = {"configured": False}
             self.rederive_sample(report, index)
         self.produce_unconfigured_alert_proofs(report["recorder_probe_evidence"])
+        report["start_readiness"] = start_readiness_fixture(report["recorder_observations"][0], report["recorder_probe_evidence"]["llm_prewarm"]["alert_investigation"])
         report["measurements"]["ai_quality"] = {
             "configured": False,
             "feature_disabled_entire_epoch": True,
@@ -4312,6 +4546,7 @@ class CandidateQualificationTests(unittest.TestCase):
         # Claims disabled, but the aggregate shows alert-investigation work —
         # not graceful degradation.
         self.produce_unconfigured_alert_proofs(report["recorder_probe_evidence"])
+        report["start_readiness"] = start_readiness_fixture(report["recorder_observations"][0], report["recorder_probe_evidence"]["llm_prewarm"]["alert_investigation"])
         report["measurements"]["ai_quality"] = {
             "configured": False,
             "feature_disabled_entire_epoch": True,
@@ -4332,8 +4567,8 @@ class CandidateQualificationTests(unittest.TestCase):
         report = copy.deepcopy(self.runtime)
         last = len(report["recorder_observations"]) - 1
         for index, observation in enumerate(report["recorder_observations"]):
-            started = 11 if index == last else 10
-            accepted = 10 if index == last else 9
+            started = 12 if index == last else 11
+            accepted = 11 if index == last else 10
             observation["heartbeat"]["llm"] = llm_heartbeat_payload(
                 healthy=True, started=started, accepted=accepted, current=1
             )
@@ -4619,7 +4854,7 @@ class CandidateQualificationTests(unittest.TestCase):
             qualification.MIN_BURST_COMBINED_OFFERED_PER_SECOND,
         )
         result = qualification.derive_workload_ingress(
-            samples, self.runtime["recorder_probe_evidence"]["workload"],
+            samples, self.runtime["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"],
         )
         self.assertEqual(result["combined_bracketed_offered_volume"], offered_delta)
         self.assertAlmostEqual(result["combined_offered_per_burst_second"], offered_delta / 22)
@@ -4791,11 +5026,12 @@ class CandidateQualificationTests(unittest.TestCase):
             for sample in samples:
                 tick = sample["offset_seconds"] - phase
                 sample["heartbeat_written_at_unix"] = epoch + tick
+                sample["engine_uptime_seconds"] -= phase
                 volume = round(49_200 * min(1, max(0, (tick - 300) / 22)))
                 for lane in ("priority", "file"):
                     boundary = sample["conservation"][f"{lane}-ingress"]
                     boundary["offered"] = boundary["completed"] = 1_000 + round(tick) + volume // 2
-            result = qualification.derive_workload_ingress(samples, timing)
+            result = qualification.derive_workload_ingress(samples, timing, self.runtime["start_readiness"])
             self.assertGreaterEqual(result["combined_bracketed_offered_volume"], 49_200)
             self.assertGreater(result["combined_offered_per_burst_second"], 2_200)
             peaks.append(result["combined_peak_offered_per_second"])
@@ -4807,7 +5043,7 @@ class CandidateQualificationTests(unittest.TestCase):
         timing["completed_at"] = iso(370)
         timing["elapsed_monotonic_seconds"] = 70
         with self.assertRaisesRegex(qualification.QualificationError, "reference load mean"):
-            qualification.derive_workload_ingress(self.runtime["samples"], timing)
+            qualification.derive_workload_ingress(self.runtime["samples"], timing, self.runtime["start_readiness"])
         samples = copy.deepcopy(self.runtime["samples"])
         for sample in samples:
             if sample["offset_seconds"] >= 330:
@@ -4818,7 +5054,7 @@ class CandidateQualificationTests(unittest.TestCase):
         timing["completed_at"] = iso(301)
         timing["elapsed_monotonic_seconds"] = 1
         with self.assertRaisesRegex(qualification.QualificationError, "reference load volume"):
-            qualification.derive_workload_ingress(samples, timing)
+            qualification.derive_workload_ingress(samples, timing, self.runtime["start_readiness"])
 
     def test_workload_exit_receipt_requires_independent_reconciled_timing(self) -> None:
         for changes, message in (
@@ -5178,7 +5414,7 @@ class CandidateQualificationTests(unittest.TestCase):
         search.update(projection_materialized=search["projection_considered"],
                       projection_omitted_quota=0, projection_omitted_total=0)
         self.rebind_observation_heartbeat(observations[0])
-        report = self.rebuild_runtime_from_observations(observations)
+        report = self.rebuild_runtime_from_observations(observations, start_readiness=self.runtime["start_readiness"])
         row = report["samples"][0]["event_search_projection"]
         self.assertFalse(row["complete"])
         self.assertTrue(row["search_index_degraded"])
@@ -5670,12 +5906,12 @@ class CandidateQualificationTests(unittest.TestCase):
         # The recorder derives this block from the same samples; the
         # reconciliation exists to catch a forged aggregate, not a moved host.
         report["measurements"]["workload_ingress"] = (
-            qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+            qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
         )
 
         self.validate_runtime(report)
 
-        window = qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"])
+        window = qualification.derive_workload_ingress(report["samples"], report["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
         self.assertEqual(
             window["sequence_journal_queued_drain"],
             window["sequence_journal_queued_start"] + 2,
@@ -5709,7 +5945,7 @@ class CandidateQualificationTests(unittest.TestCase):
                     qualification.QualificationError,
                     "in-flight work across a fixed boundary",
                 ):
-                    qualification.derive_workload_ingress(samples, self.runtime["recorder_probe_evidence"]["workload"])
+                    qualification.derive_workload_ingress(samples, self.runtime["recorder_probe_evidence"]["workload"], self.runtime["start_readiness"])
 
     def test_memory_growth_above_64_mib_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)

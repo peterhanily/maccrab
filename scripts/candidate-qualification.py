@@ -97,6 +97,7 @@ class DarwinRUsageInfoV4(ctypes.Structure):
 
 CANDIDATE_SCHEMA = "com.maccrab.release-candidate.v1"
 RUNTIME_SCHEMA = "com.maccrab.installed-host-qualification.v2"
+START_READINESS_SCHEMA = "com.maccrab.epoch-start-readiness.v1"
 CONTAINMENT_SCHEMA = "com.maccrab.containment-qualification.v2"
 QUALIFICATION_DIR = ".qualification-evidence"
 
@@ -2417,10 +2418,14 @@ def validate_runtime_report(
         ):
             # Compare distinct producer snapshots; repeated fresh publications
             # cannot erase previously measured flow at a capture boundary.
-            previous = previous_distinct_heartbeat_sample(samples[:index], sample)
-            readiness_pending = forgive_flowing_boundary_lanes(
-                readiness_pending, sample, previous,
-            )
+            if index == 0:
+                previous = validate_epoch_start_readiness(report.get("start_readiness"), sample)
+                readiness_pending = start_boundary_pending(readiness_pending, sample, previous)
+            else:
+                previous = previous_distinct_heartbeat_sample(samples[:index], sample)
+                readiness_pending = forgive_flowing_boundary_lanes(
+                    readiness_pending, sample, previous,
+                )
             if readiness_pending:
                 fail(
                     f"{path} is not drained at a fixed readiness boundary: "
@@ -3115,6 +3120,7 @@ def validate_runtime_report(
     )
     expected_workload_ingress = derive_workload_ingress(
         samples, object_value(report.get("recorder_probe_evidence"), "recorder probes")["workload"],
+        report.get("start_readiness"),
     )
     if workload_ingress != expected_workload_ingress:
         fail("workload ingress aggregate does not reconcile with raw counters")
@@ -3349,6 +3355,8 @@ def validate_runtime_report(
     validate_alert_investigation_proof(
         prewarm_proof, "runtime recorder LLM prewarm alert investigation"
     )
+    if object_value(report.get("start_readiness"), "start readiness").get("prewarm_alert_investigation") != prewarm_proof:
+        fail("start readiness prewarm proof differs from the recorder's causal proof")
     if parse_time(prewarm_probe.get("completed_at"), "LLM prewarm completed_at") \
             >= started:
         fail("LLM prewarm did not complete before the qualification epoch")
@@ -4672,6 +4680,8 @@ def normalized_runtime_sample(
         "heartbeat_written_at_unix": heartbeat_written_at_unix,
         "heartbeat_snapshot_sha256": sha256_bytes(canonical_json_bytes(heartbeat)),
         "engine_pid": pid,
+        "engine_version": string_value(heartbeat.get("engine_version"), "heartbeat.engine_version"),
+        "engine_build": string_value(heartbeat.get("engine_build"), "heartbeat.engine_build"),
         "engine_started_at_unix": engine_started_at,
         "engine_uptime_seconds": engine_uptime,
         "engine_cpu_seconds_total": engine_cpu_seconds_total,
@@ -4952,7 +4962,7 @@ def forgive_flowing_boundary_lanes(
 ) -> List[str]:
     """One drain policy for recording, full verification and workload derivation.
 
-    t0 has no earlier epoch evidence and stays strict. Only base persistence
+    A boundary without earlier measured evidence stays strict. Only base persistence
     uses the global writer prefix; ingress uses its own FIFO and settled yield
     results. Graph flow uses its original age, including heartbeat age.
     Every other boundary retains its prior rule.
@@ -5039,6 +5049,161 @@ def forgive_flowing_boundary_lanes(
         if not flows:
             survivors.append(entry)
     return survivors
+
+
+def sampled_boundary_pending(sample: Mapping[str, Any]) -> List[str]:
+    pending = event_ingress_handoff_pending(sample)
+    boundaries = object_value(sample.get("conservation"), "boundary conservation")
+    for name in sorted(REQUIRED_CONSERVATION_BOUNDARIES):
+        row = object_value(boundaries.get(name), f"boundary {name}")
+        require_counter_equation(row, f"boundary {name}")
+        if row["in_flight"] or (row["queued"] and name != "sequence-journal"):
+            pending.append(f"{name} queued={row['queued']} in_flight={row['in_flight']}")
+    graph = object_value(sample.get("trace_graph_write_accounting"), "boundary graph")
+    for key in ("write_batches_in_flight", "write_rows_in_flight", "pending_entity_rows", "pending_edge_rows"):
+        if graph[key]:
+            pending.append(f"TraceGraph {key}={graph[key]}")
+    waiters = sample["trace_graph_recovery_barrier"]["recovery_mutation_waiters"]
+    if waiters:
+        pending.append(f"TraceGraph recovery mutation waiters={waiters}")
+    for key in ("capture_pending", "capture_in_flight"):
+        value = sample["alert_storage_admission"][key]
+        if value:
+            pending.append(f"alert evidence {key}={value}")
+    llm = sample["llm_quality"]
+    if llm["configured"]:
+        for key in ("totals_current_in_flight", "totals_current_admitted_backend_requests", "totals_current_circuit_recovery_probes"):
+            if llm[key]:
+                pending.append(f"LLM {key}={llm[key]}")
+        if llm["alert_investigation"]["current_operations"]:
+            pending.append("LLM alert current_operations=" + str(llm["alert_investigation"]["current_operations"]))
+    return pending
+
+
+def start_boundary_pending(
+    pending: List[str], sample: Mapping[str, Any], previous: Mapping[str, Any] | None,
+) -> List[str]:
+    # Only these branches prove an earlier prefix or bound original work age.
+    # Later terminal overlays can pass an older blocked overlay, so the generic
+    # later-epoch progress rule must not weaken their formerly empty start gate.
+    names = {"priority-event-persistence", "file-event-persistence",
+             "priority-ingress", "file-ingress", "trace-graph-mutation"}
+    eligible, strict = [], []
+    for entry in pending:
+        if entry.split(" ", 1)[0] in names or entry.startswith((
+            "TraceGraph pending_entity_rows=", "TraceGraph pending_edge_rows=",
+        )):
+            eligible.append(entry)
+        else:
+            strict.append(entry)
+    return strict + forgive_flowing_boundary_lanes(eligible, sample, previous)
+
+
+def validate_readiness_transition(
+    previous: Mapping[str, Any], current: Mapping[str, Any],
+) -> None:
+    """Same native epoch, fresh producer coverage and cumulative progress."""
+    for key in ("engine_pid", "engine_started_at_unix", "engine_process",
+                "gui_process", "engine_version", "engine_build"):
+        if previous.get(key) != current.get(key):
+            fail(f"readiness native epoch changed: {key}")
+    gap = (parse_time(current.get("captured_at"), "readiness capture")
+           - parse_time(previous.get("captured_at"), "previous readiness capture")).total_seconds()
+    if not 0 <= gap <= HEARTBEAT_MAX_AGE_SECONDS:
+        fail("readiness capture gap is outside the freshness bound")
+    validate_event_writer_prefix_sequence([previous, current])
+    validate_heartbeat_sequence([previous, current])
+    uptime_gap = current["engine_uptime_seconds"] - previous["engine_uptime_seconds"]
+    heartbeat_gap = current["heartbeat_written_at_unix"] - previous["heartbeat_written_at_unix"]
+    if uptime_gap < 0 or (heartbeat_gap > 0 and uptime_gap <= 0) or \
+            abs(uptime_gap - heartbeat_gap) > MAX_HEARTBEAT_UPTIME_INTERVAL_DRIFT_SECONDS:
+        fail("readiness monotonic uptime does not match its heartbeat interval")
+    for key in ("engine_cpu_seconds_total", "engine_disk_write_bytes_total"):
+        if current[key] < previous[key]:
+            fail(f"readiness cumulative {key} regressed")
+    for name in sorted(REQUIRED_CONSERVATION_BOUNDARIES):
+        before, after = previous["conservation"][name], current["conservation"][name]
+        for key in ("offered", "completed", "explicitly_shed"):
+            if after[key] < before[key]:
+                fail(f"readiness cumulative {name}.{key} regressed")
+    for lane in ("priority", "file"):
+        for key in ("persisted", "filtered"):
+            if current["event_persistence_outcomes"][lane][key] < previous["event_persistence_outcomes"][lane][key]:
+                fail(f"readiness cumulative {lane}.{key} regressed")
+    validate_readiness_llm_transition(previous["llm_quality"], current["llm_quality"])
+
+
+def validate_readiness_llm_transition(before: Mapping[str, Any], after: Mapping[str, Any]) -> None:
+    for key in ("configured", "provider", "model"):
+        if before.get(key) != after.get(key):
+            fail(f"readiness LLM configuration changed: {key}")
+    def counters(row: Mapping[str, Any], prefix: str = "") -> Dict[str, int]:
+        result: Dict[str, int] = {}
+        for key, value in row.items():
+            name = prefix + key
+            if isinstance(value, Mapping):
+                result.update(counters(value, name + "."))
+            elif key.endswith("_total") or "outcomes." in name:
+                result[name] = int_value(value, "readiness LLM " + name)
+        return result
+    old, new = counters(before), counters(after)
+    if old.keys() != new.keys() or any(new[key] < value for key, value in old.items()):
+        fail("readiness cumulative LLM counters regressed")
+
+
+def epoch_start_readiness_document(
+    anchor: Mapping[str, Any], proof: Mapping[str, Any],
+) -> Dict[str, Any]:
+    return {"schema": START_READINESS_SCHEMA,
+            "anchor_observation": copy.deepcopy(anchor),
+            "anchor_sha256": sha256_bytes(canonical_json_bytes(anchor)),
+            "prewarm_alert_investigation": copy.deepcopy(proof)}
+
+
+def validate_epoch_start_readiness(raw: Any, first: Mapping[str, Any]) -> Dict[str, Any]:
+    """Recompute start admission from raw evidence, also in standalone derivation."""
+    row = object_value(raw, "start_readiness")
+    if set(row) != {"schema", "anchor_observation", "anchor_sha256", "prewarm_alert_investigation"} \
+            or row.get("schema") != START_READINESS_SCHEMA:
+        fail("start_readiness has a missing or unknown raw-anchor schema")
+    observation = object_value(row.get("anchor_observation"), "start readiness anchor")
+    if require_sha(row.get("anchor_sha256"), "start readiness anchor digest") != \
+            sha256_bytes(canonical_json_bytes(observation)):
+        fail("start readiness anchor digest does not match its raw observation")
+    proof = object_value(row.get("prewarm_alert_investigation"), "start readiness prewarm proof")
+    validate_alert_investigation_proof(proof, "start readiness prewarm proof")
+    if proof.get("phase") != "prewarm":
+        fail("start readiness requires the completed prewarm proof")
+    anchor = sample_from_recorder_observation(observation, "start readiness anchor")
+    completed = parse_time(proof.get("observed_at"), "start prewarm completion").timestamp()
+    if parse_time(first.get("captured_at"), "epoch start capture").timestamp() - completed > RUNTIME_DRAIN_TIMEOUT_SECONDS:
+        fail("epoch start exceeded the single post-prewarm drain deadline")
+    if anchor["heartbeat_written_at_unix"] < completed or \
+            parse_time(anchor["captured_at"], "start anchor capture").timestamp() < completed:
+        fail("start readiness anchor predates completed prewarm evidence")
+    if anchor["heartbeat_written_at_unix"] >= first["heartbeat_written_at_unix"] or \
+            parse_time(anchor["captured_at"], "start anchor capture") >= parse_time(first["captured_at"], "t0 capture"):
+        fail("start readiness anchor must be strictly before the distinct t0 heartbeat")
+    fatal, _ = runtime_readiness_failures(observation, "start readiness anchor", expected_pid=first["engine_pid"])
+    if fatal:
+        fail("start readiness anchor has a readiness fault: " + "; ".join(fatal))
+    if anchor["engine_uptime_seconds"] < MIN_ENGINE_UPTIME_AT_EPOCH_SECONDS:
+        fail("start readiness anchor predates 250-second engine warmup")
+    if event_ingress_handoff_pending(anchor) or event_ingress_handoff_pending(first):
+        fail("start readiness t0 has unsettled ingress yield handoffs")
+    validate_readiness_llm_transition(proof["telemetry_after"], anchor["llm_quality"])
+    validate_readiness_transition(anchor, first)
+    if first["event_writer_admission_prefix"]["terminal_generation"] < anchor["event_writer_admission_prefix"]["admitted_generation"]:
+        fail("epoch start has an uncleared earlier writer prefix")
+    faults = storage_write_readiness_failures(first)
+    if any(first["losses"].values()) or any(row["explicitly_shed"] for row in first["conservation"].values()):
+        faults.append("cumulative loss at epoch start")
+    if faults:
+        fail("start readiness has a readiness fault: " + "; ".join(faults))
+    pending = start_boundary_pending(sampled_boundary_pending(first), first, anchor)
+    if pending:
+        fail("epoch start queues are not drained: " + "; ".join(pending))
+    return anchor
 
 
 def native_es_readiness_failures(
@@ -5129,8 +5294,8 @@ def runtime_readiness_failures(
     Loss history remains disqualifying for this process epoch. Current native
     ES faults reject the observation even when no loss counter advances, and
     require verified recovery before another epoch can qualify. Drain work is
-    allowed while a known prewarm/workload operation is completing, but must
-    be empty immediately before t0 and at the fixed post-burst boundary.
+    allowed while a known prewarm/workload operation is completing. Boundary
+    admission separately requires emptiness or its bound earlier-work proof.
     """
     observation = object_value(raw, path)
     sample = sample_from_recorder_observation(observation, path)
@@ -5512,7 +5677,7 @@ def validate_runtime_readiness(
     sample = sample_from_recorder_observation(raw, path)
     adjacent = adjacent_sample if adjacent_sample is not None else previous_sample
     if adjacent is not None:
-        validate_event_writer_prefix_sequence([adjacent, sample])
+        validate_readiness_transition(adjacent, sample)
     if require_drained:
         pending = forgive_flowing_boundary_lanes(
             pending, sample, previous_sample,
@@ -5540,6 +5705,7 @@ def workload_elapsed_seconds(workload_timing: Mapping[str, Any]) -> float:
 
 def derive_workload_ingress(
     samples: Sequence[Mapping[str, Any]], workload_timing: Mapping[str, Any],
+    start_readiness: Any,
 ) -> Dict[str, Any]:
     """Reconcile host offered volume bracketing the independently timed burst.
 
@@ -5547,6 +5713,9 @@ def derive_workload_ingress(
     fixed workload ran, not attribution of every offered event to that process.
     The bracketing slack is reported and bounded by heartbeat freshness.
     """
+    if not samples:
+        fail("workload has no epoch start sample")
+    validate_epoch_start_readiness(start_readiness, samples[0])
     validate_event_writer_prefix_sequence(samples)
     by_offset: Dict[int, Mapping[str, Any]] = {}
     for sample in samples:
@@ -5932,6 +6101,7 @@ def build_runtime_report_from_observations(
         fail("event-search mutation generation regressed during the epoch")
     workload_ingress = derive_workload_ingress(
         samples, object_value(probes.get("evidence"), "probes.evidence")["workload"],
+        probes.get("start_readiness"),
     )
     duration = number_value(samples[-1].get("offset_seconds"), "last sample offset", minimum=MIN_EPOCH_SECONDS)
     captured_times = [
@@ -6293,6 +6463,7 @@ def build_runtime_report_from_observations(
 
     report = {
         "schema": RUNTIME_SCHEMA,
+        "start_readiness": copy.deepcopy(probes.get("start_readiness")),
         "counter_scope_policy": copy.deepcopy(RUNTIME_COUNTER_SCOPE_POLICY),
         "result": "pass",
         "candidate_manifest_sha256": candidate_manifest_sha256,
@@ -8128,13 +8299,21 @@ def wait_for_runtime_drain(
     sqlite_overrides: Mapping[str, int], expected_pid: int,
     timeout_seconds: int = RUNTIME_DRAIN_TIMEOUT_SECONDS,
     require_llm_ready: bool = True, allow_flowing: bool = True,
+    proof_backed_only: bool = False, minimum_heartbeat_unix: float | None = None,
+    strictly_after: bool = False, readiness_observer: Any = None,
+    start_proof: Mapping[str, Any] | None = None,
+    deadline_monotonic: float | None = None,
 ) -> Dict[str, Any]:
-    deadline = time.monotonic() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds if deadline_monotonic is None else deadline_monotonic
     observation = dict(initial)
     latest_sample: Dict[str, Any] | None = None
     previous_sample: Dict[str, Any] | None = None
     adjacent_sample: Dict[str, Any] | None = None
+    latest_observation: Dict[str, Any] | None = None
+    previous_observation: Dict[str, Any] | None = None
     while True:
+        if readiness_observer is not None:
+            readiness_observer(observation, phase)
         fatal, pending = runtime_readiness_failures(
             observation, f"{phase} observation", expected_pid=expected_pid,
             require_llm_ready=require_llm_ready,
@@ -8143,18 +8322,36 @@ def wait_for_runtime_drain(
             fail(f"{phase} runtime readiness failed: " + "; ".join(fatal))
         sample = sample_from_recorder_observation(observation, f"{phase} observation")
         if adjacent_sample is not None:
-            validate_event_writer_prefix_sequence([adjacent_sample, sample])
+            validate_readiness_transition(adjacent_sample, sample)
         adjacent_sample = sample
         # Polls can read the same heartbeat more than once. Compare with the
         # preceding distinct snapshot, without latching progress for future ones.
         if latest_sample is None or sample.get("heartbeat_written_at_unix") != \
                 latest_sample.get("heartbeat_written_at_unix"):
             previous_sample = latest_sample
-            latest_sample = sample
+            previous_observation = latest_observation
+        latest_sample = sample
+        latest_observation = observation
         if allow_flowing:
-            pending = forgive_flowing_boundary_lanes(
+            policy = start_boundary_pending if proof_backed_only else forgive_flowing_boundary_lanes
+            pending = policy(
                 pending, sample, previous_sample,
             )
+        if minimum_heartbeat_unix is not None and (
+            sample["heartbeat_written_at_unix"] < minimum_heartbeat_unix
+            or (strictly_after and sample["heartbeat_written_at_unix"] == minimum_heartbeat_unix)
+        ):
+            pending.append("waiting for a distinct post-proof heartbeat")
+        if start_proof is not None:
+            proof_time = parse_time(start_proof.get("observed_at"), "start proof time").timestamp()
+            if previous_sample is None or previous_observation is None or \
+                    previous_sample["heartbeat_written_at_unix"] < proof_time or \
+                    event_ingress_handoff_pending(previous_sample):
+                pending.append("waiting for a settled distinct post-proof start anchor")
+            elif not pending:
+                validate_epoch_start_readiness(
+                    epoch_start_readiness_document(previous_observation, start_proof), sample,
+                )
         if not pending:
             return observation
         if time.monotonic() >= deadline:
@@ -8175,7 +8372,8 @@ def prewarm_alert_investigation(
     heartbeat_path: pathlib.Path, candidate: Mapping[str, Any],
     data_dirs: Sequence[pathlib.Path], sqlite_overrides: Mapping[str, int],
     expected_pid: int,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    readiness_observer: Any = None, proof_observer: Any = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
     workload_script = root / "scripts/runtime-qualification-workload.sh"
     if workload_script.is_symlink() or not workload_script.is_file():
         fail("fixed runtime qualification workload script is missing or redirected")
@@ -8225,6 +8423,8 @@ def prewarm_alert_investigation(
             heartbeat_path=heartbeat_path, candidate=candidate,
             data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
         )
+        if readiness_observer is not None:
+            readiness_observer(latest, "llm-alert-prewarm")
         previous_poll_sample = validate_runtime_readiness(
             latest, "LLM prewarm poll", phase="LLM prewarm",
             require_drained=False, expected_pid=expected_pid,
@@ -8247,12 +8447,6 @@ def prewarm_alert_investigation(
             "alert prewarm timed out without one exact committed alert and "
             "an accepted investigation when LLM is configured"
         )
-    drained = wait_for_runtime_drain(
-        initial=latest, phase="post-prewarm", heartbeat_path=heartbeat_path,
-        candidate=candidate, data_dirs=data_dirs,
-        sqlite_overrides=sqlite_overrides, expected_pid=expected_pid,
-        allow_flowing=False,
-    )
     probe.update({
         "run_id": run_id,
         "alert_executable": alert_path,
@@ -8262,7 +8456,26 @@ def prewarm_alert_investigation(
         ),
         "alert_investigation": proof,
     })
-    return probe, drained
+    # Persist the causal proof before a later drain can fail. It is evidence of
+    # the completed alert investigation, never a qualification verdict.
+    if proof_observer is not None:
+        proof_observer(probe)
+    # Both readiness waits and the actual t0 share this original 300-second
+    # drain budget. UTC evidence independently bounds it in the final verifier;
+    # monotonic time controls the live wait without granting a second budget.
+    proof_age = max(0.0, (dt.datetime.now(dt.timezone.utc)
+                         - parse_time(proof["observed_at"], "prewarm proof time")).total_seconds())
+    drain_deadline = time.monotonic() + max(0.0, RUNTIME_DRAIN_TIMEOUT_SECONDS - proof_age)
+    drained = wait_for_runtime_drain(
+        initial=latest, phase="post-prewarm", heartbeat_path=heartbeat_path,
+        candidate=candidate, data_dirs=data_dirs,
+        sqlite_overrides=sqlite_overrides, expected_pid=expected_pid,
+        proof_backed_only=True,
+        minimum_heartbeat_unix=parse_time(proof["observed_at"], "prewarm proof time").timestamp(),
+        readiness_observer=readiness_observer,
+        deadline_monotonic=drain_deadline,
+    )
+    return probe, drained, drain_deadline
 
 
 def log_diagnostic_count(
@@ -8306,6 +8519,13 @@ def live_runtime_recording(
     workload_alert_id: str | None = None
     workload_alert_proof: Dict[str, Any] | None = None
     prewarm_evidence: Dict[str, Any] | None = None
+    start_readiness: Dict[str, Any] | None = None
+    start_candidates: List[Dict[str, Any]] = []
+    diagnostic_records: List[Dict[str, Any]] = []
+    diagnostic_failure: str | None = None
+    diagnostic_directory = capture_path.with_name(capture_path.name + ".readiness")
+    latest_readiness: Tuple[Dict[str, Any], str] | None = None
+    last_diagnostic_key: Tuple[str, str] | None = None
     reload_evidence: Dict[str, Any] | None = None
     phase = "initial-readiness"
 
@@ -8317,7 +8537,12 @@ def live_runtime_recording(
             "candidate_manifest_sha256": candidate_manifest_sha256,
             "readiness_observations": readiness_observations,
             "observations": observations,
+            "readiness_diagnostics": copy.deepcopy(diagnostic_records),
         }
+        if start_readiness is not None:
+            document["start_readiness"] = start_readiness
+        if diagnostic_failure is not None:
+            document["readiness_diagnostic_error"] = diagnostic_failure
         if prewarm_evidence is not None:
             document["llm_prewarm"] = prewarm_evidence
         if workload_run_id is not None:
@@ -8347,6 +8572,40 @@ def live_runtime_recording(
             document["failure"] = reason
         write_json_exclusive(capture_path, document)
 
+    def retain_readiness(observation: Mapping[str, Any], stage: str, force: bool = False) -> None:
+        nonlocal latest_readiness, last_diagnostic_key
+        latest_readiness = (dict(observation), stage)
+        heartbeat = object_value(observation.get("heartbeat"), "diagnostic heartbeat")
+        key = (stage, sha256_bytes(canonical_json_bytes(heartbeat)))
+        if stage in ("post-prewarm", "epoch-start-readiness"):
+            if start_candidates and start_candidates[-1]["heartbeat"]["written_at_unix"] == heartbeat.get("written_at_unix"):
+                start_candidates[-1] = dict(observation)
+            else:
+                start_candidates.append(dict(observation))
+                del start_candidates[:-2]
+        if key == last_diagnostic_key and not force:
+            return
+        # Each raw record is written once; repeated producer snapshots only
+        # replace the in-memory latest observation. The terminal latest read is
+        # also retained on failure. Aggregate capture rewrites contain small
+        # references, not an ever-growing copy of the raw polling history.
+        maximum = 4 * math.ceil((RUNTIME_DRAIN_TIMEOUT_SECONDS + LLM_PREWARM_TIMEOUT_SECONDS) / READINESS_POLL_SECONDS) + 16
+        if len(diagnostic_records) >= maximum:
+            fail("bounded readiness diagnostic inventory exhausted")
+        if not diagnostic_records:
+            capture_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            diagnostic_directory.mkdir(mode=0o700, parents=False, exist_ok=False)
+        path = diagnostic_directory / f"{len(diagnostic_records):04d}.json"
+        record = {"phase": stage, "terminal_latest": force, "observation": dict(observation)}
+        write_json_exclusive(path, record)
+        diagnostic_records.append({"path": str(path), "sha256": sha256_file(path), "phase": stage})
+        last_diagnostic_key = key
+
+    def retain_prewarm(probe: Mapping[str, Any]) -> None:
+        nonlocal prewarm_evidence
+        prewarm_evidence = dict(probe)
+        persist_capture("checking-readiness")
+
     try:
         preflight_heartbeat, _ = read_live_heartbeat(heartbeat_path, candidate)
         preflight_pid = heartbeat_counter(
@@ -8363,6 +8622,7 @@ def live_runtime_recording(
         validate_engine_candidate_process(initial.get("process"),
                                           candidate_verification=verification, path="initial engine")
         readiness_observations.append(initial)
+        retain_readiness(initial, "initial-readiness")
         # A never-used configured backend is expected to be healthy=false until
         # the exact alert prewarm below. Storage, loss, accounting, circuit and
         # failure state are still fail-closed here.
@@ -8385,28 +8645,44 @@ def live_runtime_recording(
             data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
         )
         readiness_observations.append(after_probes)
+        retain_readiness(after_probes, "source-and-artifact-probes")
         drained_before_prewarm = wait_for_runtime_drain(
             initial=after_probes, phase="pre-prewarm",
             heartbeat_path=heartbeat_path, candidate=candidate,
             data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
             expected_pid=preflight_pid, require_llm_ready=False,
             allow_flowing=False,
+            readiness_observer=retain_readiness,
         )
         readiness_observations.append(drained_before_prewarm)
 
         phase = "llm-alert-prewarm"
-        prewarm_evidence, post_prewarm = prewarm_alert_investigation(
+        prewarm_evidence, post_prewarm, drain_deadline = prewarm_alert_investigation(
             root=root, baseline=drained_before_prewarm,
             heartbeat_path=heartbeat_path, candidate=candidate,
             data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
             expected_pid=preflight_pid,
+            readiness_observer=retain_readiness, proof_observer=retain_prewarm,
         )
         readiness_observations.append(post_prewarm)
+        # The wait already applies the proof-backed start policy. Requiring a
+        # second empty snapshot here would silently discard its evidence.
         validate_runtime_readiness(
             post_prewarm, "post-prewarm readiness",
-            phase="post-prewarm readiness", require_drained=True,
+            phase="post-prewarm readiness", require_drained=False,
             expected_pid=preflight_pid,
         )
+        ready = wait_for_runtime_drain(
+            initial=post_prewarm, phase="epoch-start-readiness",
+            heartbeat_path=heartbeat_path, candidate=candidate,
+            data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
+            expected_pid=preflight_pid, proof_backed_only=True,
+            minimum_heartbeat_unix=post_prewarm["heartbeat"]["written_at_unix"],
+            strictly_after=True, readiness_observer=retain_readiness,
+            start_proof=prewarm_evidence["alert_investigation"],
+            deadline_monotonic=drain_deadline,
+        )
+        readiness_observations.append(ready)
 
         # Capture signed identity only after all unmeasured probes and before
         # t0. Re-reading endpoints later cannot substitute for this boundary.
@@ -8419,7 +8695,7 @@ def live_runtime_recording(
             installed_start, path="epoch engine start", candidate=candidate,
             candidate_verification=verification,
         )
-        installed_gui_start = installed_gui_identity(post_prewarm["gui_process"]["pid"])
+        installed_gui_start = installed_gui_identity(ready["gui_process"]["pid"])
         gui_epoch_identity, _ = validate_installed_gui_identity(
             installed_gui_start, path="epoch GUI start",
             candidate=candidate, candidate_verification=verification,
@@ -8432,10 +8708,18 @@ def live_runtime_recording(
             data_dirs=data_dirs, sqlite_overrides=sqlite_overrides,
         )
         observations.append(first)
-        validate_runtime_readiness(
-            first, "epoch t0", phase="epoch t0", require_drained=True,
+        first_sample = validate_runtime_readiness(
+            first, "epoch t0", phase="epoch t0", require_drained=False,
             expected_pid=preflight_pid,
         )
+        if time.monotonic() > drain_deadline:
+            fail("epoch start exceeded the single post-prewarm drain deadline")
+        anchor = next((item for item in reversed(start_candidates)
+                       if item["heartbeat"]["written_at_unix"] < first_sample["heartbeat_written_at_unix"]), None)
+        if anchor is None:
+            fail("epoch start has no distinct retained post-prewarm readiness anchor")
+        start_readiness = epoch_start_readiness_document(anchor, prewarm_evidence["alert_investigation"])
+        validate_epoch_start_readiness(start_readiness, first_sample)
         if first["gui_process"] != gui_epoch_identity:
             fail("GUI process changed before epoch t0")
         if normalized_engine_process(first["process"], "epoch t0 engine") != engine_epoch_identity:
@@ -8575,6 +8859,11 @@ def live_runtime_recording(
     except BaseException as exc:
         if timed_workload is not None:
             timed_workload.close()
+        if latest_readiness is not None and phase != "epoch":
+            try:
+                retain_readiness(*latest_readiness, force=True)
+            except BaseException as diagnostic_exc:
+                diagnostic_failure = str(diagnostic_exc)
         try:
             persist_capture("failed", reason=str(exc))
         except BaseException:
@@ -8700,6 +8989,7 @@ def live_runtime_recording(
         "live_sighup": reload_evidence,
     }
     probes = {
+        "start_readiness": start_readiness,
         "installed_engine_start": installed_start,
         "installed_engine_end": installed_end,
         "installed_gui_start": installed_gui_start,
@@ -9560,6 +9850,7 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
     inventory = object_value(verification.get("payload_inventory"), "artifact_verification.payload_inventory")
     return {
         "schema": RUNTIME_SCHEMA,
+        "start_readiness": {},
         "result": "INCOMPLETE",
         "counter_scope_policy": copy.deepcopy(RUNTIME_COUNTER_SCOPE_POLICY),
         "candidate_manifest_sha256": manifest_sha,
