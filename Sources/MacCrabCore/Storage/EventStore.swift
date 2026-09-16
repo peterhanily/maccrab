@@ -148,7 +148,7 @@ public enum EventStoreError: Error, LocalizedError {
             inheritedLegacyLossRecords,
             resourceLimitedRecords
         ):
-            return "Exact event query intersects \(poisonRecords) canonical-overflow record(s), \(corruptLegacyRecords) preserved corrupt legacy record(s), \(inheritedLegacyLossRecords) rc.12 inherited-loss record(s), and \(resourceLimitedRecords) byte-budget-limited record(s)"
+            return "Exact event query intersects \(poisonRecords) canonical-overflow record(s), \(corruptLegacyRecords) preserved corrupt legacy record(s), \(inheritedLegacyLossRecords) rc.12 inherited-loss record(s), and up to \(resourceLimitedRecords) resource-limited record(s) not retained"
         case .aggregateEvidenceGap(let records):
             return "Aggregate query intersects \(records) explicitly conserved canonical/compaction gap record(s)"
         case let .incompleteRetentionWindow(requested, effective):
@@ -383,6 +383,42 @@ public struct ExactEventQuerySnapshot: Sendable, Equatable {
         poisonRecords.isEmpty && corruptLegacyRecords == 0
             && inheritedLegacyLossRecords == 0
             && resourceLimitedRecords == 0
+    }
+
+    /// A best-effort retroactive scan may run over a resource-bounded
+    /// result: the retained events are scanned and the bound is reported.
+    /// Poison, corrupt-legacy and inherited-loss records remain hard gaps
+    /// because they hide events the scan would otherwise have evaluated.
+    /// Those three counts are scoped to the coverage the snapshot claims:
+    /// once a resource refuses a record the walk stops admitting, so
+    /// records beyond the retained prefix are counted as resource-limited
+    /// rather than inspected. A caller that needs the whole requested
+    /// window must still require ``isComplete``.
+    public var retroactiveScanGap: EventStoreError? {
+        Self.retroactiveScanGap(
+            poisonRecords: poisonRecords.count,
+            corruptLegacyRecords: corruptLegacyRecords,
+            inheritedLegacyLossRecords: inheritedLegacyLossRecords,
+            resourceLimitedRecords: resourceLimitedRecords
+        )
+    }
+
+    static func retroactiveScanGap(
+        poisonRecords: Int,
+        corruptLegacyRecords: Int,
+        inheritedLegacyLossRecords: Int,
+        resourceLimitedRecords: Int
+    ) -> EventStoreError? {
+        guard poisonRecords == 0, corruptLegacyRecords == 0,
+              inheritedLegacyLossRecords == 0 else {
+            return .exactEvidenceGap(
+                poisonRecords: poisonRecords,
+                corruptLegacyRecords: corruptLegacyRecords,
+                inheritedLegacyLossRecords: inheritedLegacyLossRecords,
+                resourceLimitedRecords: resourceLimitedRecords
+            )
+        }
+        return nil
     }
 }
 
@@ -16385,6 +16421,20 @@ public actor EventStore {
             var unscopedCorruptLegacyRecords = 0
             var retainedCandidateBytes = 0
             var resourceLimitedRecords = 0
+            // Once the array byte budget or the live-memory budget has
+            // refused a record the snapshot is a typed evidence gap and no
+            // later candidate is admitted, so the retained set is the
+            // ordered prefix of the walk. Authenticating and decoding the
+            // remaining retained blocks on the actor would only add cost
+            // while writers wait for admission (a 6 h newest-first scan held
+            // the actor for ~30 s and cost a priority terminal revision its
+            // settlement deadline), so blocks the walk never reaches are
+            // counted from their summaries instead of being decoded. Blocks
+            // are ordered by edge and lanes are written concurrently, so a
+            // counted block can still hold a record the query would rank
+            // ahead of a retained one; the count is an upper bound on the
+            // records in range that this result does not carry.
+            var resourceLimitReached = false
 
             func isBeforeCursor(timestamp: Date, id: String) -> Bool {
                 guard let cursor else { return true }
@@ -16453,6 +16503,14 @@ public actor EventStore {
             func retainCandidate(
                 _ candidate: ExactEventCandidate
             ) throws {
+                // Sticky: once a resource refused one record every later
+                // record in the walk is reported as not retained, poison
+                // markers included, so the hard-gap counts describe exactly
+                // the coverage this snapshot claims.
+                guard !resourceLimitReached else {
+                    resourceLimitedRecords += 1
+                    return
+                }
                 guard let event = candidate.event else {
                     candidates.append(candidate)
                     return
@@ -16466,6 +16524,7 @@ public actor EventStore {
                       next.partialValue
                         <= Self.exactQueryResultByteLimit else {
                     resourceLimitedRecords += 1
+                    resourceLimitReached = true
                     return
                 }
                 var ownershipLeases = candidate.ownershipLeases
@@ -16475,6 +16534,7 @@ public actor EventStore {
                         owner: .journalPrepared
                     ) else {
                         resourceLimitedRecords += 1
+                        resourceLimitReached = true
                         return
                     }
                     ownershipLeases = [lease]
@@ -16536,6 +16596,20 @@ public actor EventStore {
                             : lhs.0.blockID > rhs.0.blockID
                     }
                 for (summary, summaryMinimum, summaryMaximum) in orderedSummaries {
+                    if resourceLimitReached {
+                        // Count the block from its summary instead of
+                        // decoding it. Summary counts include records outside
+                        // the exact time bounds of an edge block, so the gap
+                        // reports an upper bound of the records not retained.
+                        if let category {
+                            resourceLimitedRecords +=
+                                summary.metadata.byCategory[category]?.count ?? 0
+                        } else {
+                            resourceLimitedRecords += summary.metadata.byCategory
+                                .values.reduce(0) { $0 + $1.count }
+                        }
+                        continue
+                    }
                     if candidates.count == boundedLimit,
                        let boundary = candidates.last {
                         let boundaryTimestamp =
@@ -16550,6 +16624,14 @@ public actor EventStore {
                     let block = try loadExactJournalBlock(
                         blockID: summary.blockID
                     )
+                    // A block stores records in arrival order, so admitting
+                    // them as enumerated would let a refusal part-way through
+                    // drop records this query ranks ahead of ones already
+                    // retained. Rank the block's matches first, then admit in
+                    // that order: at most one block of work, and the retained
+                    // set stays the walk's ordered prefix.
+                    var blockCandidates: [ExactEventCandidate] = []
+                    blockCandidates.reserveCapacity(block.events.count)
                     for (ordinal, event) in block.events.enumerated() {
                         let timestamp = event.timestamp.timeIntervalSince1970
                         guard timestamp >= lower, timestamp <= upper,
@@ -16573,7 +16655,7 @@ public actor EventStore {
                                     timestamp: event.timestamp,
                                     id: event.id.uuidString
                                ) {
-                                try retainCandidate(ExactEventCandidate(
+                                blockCandidates.append(ExactEventCandidate(
                                     timestamp: event.timestamp,
                                     id: event.id.uuidString,
                                     event: nil,
@@ -16586,7 +16668,7 @@ public actor EventStore {
                                 ))
                             }
                         } else if matches(event) {
-                            try retainCandidate(ExactEventCandidate(
+                            blockCandidates.append(ExactEventCandidate(
                                 timestamp: event.timestamp,
                                 id: event.id.uuidString,
                                 event: event,
@@ -16600,6 +16682,10 @@ public actor EventStore {
                                     block.ownershipLeasesByOrdinal[ordinal]
                             ))
                         }
+                    }
+                    blockCandidates.sort(by: precedes)
+                    for candidate in blockCandidates {
+                        try retainCandidate(candidate)
                     }
                     retainTopK()
                 }

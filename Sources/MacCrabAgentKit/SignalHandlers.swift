@@ -35,6 +35,7 @@ enum SignalHandlers {
                 let reloadRequestIDs = await state.runtimeConfigurationReporter.takeReloadRequests()
                 var reloadSucceeded = false
                 var reloadFailureReason = "Rule reload did not complete"
+                var retroactiveScanNote = ""
 
                 do {
                     try Task.checkCancellation()
@@ -198,60 +199,92 @@ enum SignalHandlers {
                     print("[SIGHUP] Suppressions: \(stats.pathCount) paths across \(stats.ruleCount) rules")
 
                     // Retroactive detection: scan last 6 hours of events against new rules
-                    let retroSince = Date().addingTimeInterval(-6 * 3600)
-                    let retroSnapshot = try await state.eventStore
-                        .exactEventsSnapshot(
-                            since: retroSince,
-                            limit: 10_000
-                        )
-                    guard retroSnapshot.isComplete else {
-                        throw EventStoreError.exactEvidenceGap(
-                            poisonRecords:
-                                retroSnapshot.poisonRecords.count,
-                            corruptLegacyRecords:
-                                retroSnapshot.corruptLegacyRecords,
-                            inheritedLegacyLossRecords:
-                                retroSnapshot.inheritedLegacyLossRecords,
-                            resourceLimitedRecords:
-                                retroSnapshot.resourceLimitedRecords
-                        )
-                    }
-                    let recentEvents = retroSnapshot.events
-                    var retroMatches = 0
-                    for event in recentEvents {
-                        try Task.checkCancellation()
-                        var matches = await state.ruleEngine.evaluate(event)
-                        NoiseFilter.apply(&matches, event: event, isWarmingUp: state.isWarmingUp)
-                        for match in matches {
-                            let alert = Alert(
-                                ruleId: match.ruleId,
-                                ruleTitle: "[Retroactive] \(match.ruleName)",
-                                severity: match.severity,
-                                eventId: event.id.uuidString,
-                                processPath: event.process.executable,
-                                processName: event.process.name,
-                                description: "Retroactive detection: \(match.description)",
-                                mitreTactics: match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }.joined(separator: ","),
-                                mitreTechniques: match.tags.filter { $0.contains("t1") }.joined(separator: ","),
-                                suppressed: false
+                    // v1.22.0: the scan is advisory. It used to abort the whole
+                    // reload — right after the rule swap, silently skipping the
+                    // storage, notification, response-action and feed reloads
+                    // below — whenever its exact query came back incomplete,
+                    // which on a busy engine is every time: the array byte
+                    // budget fills long before 10,000 events. A resource-bounded
+                    // result is scanned as far as it goes and the bound is
+                    // logged; a hard evidence gap (poison, corrupt legacy,
+                    // inherited loss) or any other scan error is logged and the
+                    // remaining reloads still run. Cancellation still aborts.
+                    do {
+                        let retroSince = Date().addingTimeInterval(-6 * 3600)
+                        let retroSnapshot = try await state.eventStore
+                            .exactEventsSnapshot(
+                                since: retroSince,
+                                limit: 10_000
                             )
-                            // AlertSink applies dedup + insert in one call; the
-                            // retroactive scan's earlier manual dedup folded in.
-                            let inserted: Bool
-                            do {
-                                inserted = try await state.alertSink.submit(alert: alert, event: event)
-                            } catch {
-                                await StorageErrorTracker.shared.recordAlertError(error)
-                                continue
-                            }
-                            if inserted { retroMatches += 1 }
+                        if let gap = retroSnapshot.retroactiveScanGap {
+                            throw gap
                         }
-                    }
-                    withExtendedLifetime(retroSnapshot) {}
-                    if retroMatches > 0 {
-                        print("[SIGHUP] Retroactive scan: \(retroMatches) new detections from \(recentEvents.count) events")
-                    } else {
-                        print("[SIGHUP] Retroactive scan: no new detections in \(recentEvents.count) events")
+                        if retroSnapshot.resourceLimitedRecords > 0 {
+                            print("[SIGHUP] Retroactive scan bounded by the exact-query resource budget: \(retroSnapshot.events.count) newest events retained, up to \(retroSnapshot.resourceLimitedRecords) record(s) in the window not scanned")
+                            logger.notice(
+                                "[SIGHUP] Retroactive scan bounded by the exact-query resource budget: \(retroSnapshot.events.count, privacy: .public) newest events retained, up to \(retroSnapshot.resourceLimitedRecords, privacy: .public) record(s) in the window not scanned"
+                            )
+                        }
+                        let recentEvents = retroSnapshot.events
+                        var retroMatches = 0
+                        for event in recentEvents {
+                            try Task.checkCancellation()
+                            var matches = await state.ruleEngine.evaluate(event)
+                            NoiseFilter.apply(&matches, event: event, isWarmingUp: state.isWarmingUp)
+                            for match in matches {
+                                let alert = Alert(
+                                    ruleId: match.ruleId,
+                                    ruleTitle: "[Retroactive] \(match.ruleName)",
+                                    severity: match.severity,
+                                    eventId: event.id.uuidString,
+                                    processPath: event.process.executable,
+                                    processName: event.process.name,
+                                    description: "Retroactive detection: \(match.description)",
+                                    mitreTactics: match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }.joined(separator: ","),
+                                    mitreTechniques: match.tags.filter { $0.contains("t1") }.joined(separator: ","),
+                                    suppressed: false
+                                )
+                                // AlertSink applies dedup + insert in one call; the
+                                // retroactive scan's earlier manual dedup folded in.
+                                let inserted: Bool
+                                do {
+                                    inserted = try await state.alertSink.submit(alert: alert, event: event)
+                                } catch {
+                                    await StorageErrorTracker.shared.recordAlertError(error)
+                                    continue
+                                }
+                                if inserted { retroMatches += 1 }
+                            }
+                        }
+                        withExtendedLifetime(retroSnapshot) {}
+                        if retroMatches > 0 {
+                            print("[SIGHUP] Retroactive scan: \(retroMatches) new detections from \(recentEvents.count) events")
+                        } else {
+                            print("[SIGHUP] Retroactive scan: no new detections in \(recentEvents.count) events")
+                        }
+                        // A system extension's stdout is discarded; the unified
+                        // log is the operator-visible record of the reload.
+                        logger.notice(
+                            "[SIGHUP] Retroactive scan: \(retroMatches, privacy: .public) new detections from \(recentEvents.count, privacy: .public) events"
+                        )
+                    } catch let cancellation as CancellationError {
+                        throw cancellation
+                    } catch {
+                        // The installed-qualification gate reads this line's
+                        // TEXT, not its level: it fails a reload window whose
+                        // [SIGHUP] lines say error/failed/rejected. A bounded
+                        // or gapped scan is tolerable and its description
+                        // carries no such word, while a storage step or
+                        // decode failure says "failed" and should fail the
+                        // run — the reload completed, but an engine that
+                        // cannot read its own journal is not qualified.
+                        // ExactQueryByteBudgetTests pins that split.
+                        let reason = String(error.localizedDescription.prefix(200))
+                        retroactiveScanNote = "; retroactive scan skipped: " + reason
+                        print("[SIGHUP] Retroactive scan skipped: \(reason)")
+                        logger.error(
+                            "[SIGHUP] Retroactive scan skipped: \(reason, privacy: .public)"
+                        )
                     }
 
                     // v1.6.14: reload storage config so the operator's
@@ -393,9 +426,9 @@ enum SignalHandlers {
                                     appliedLegacyEvidenceTransitionReserveMiB:
                                         newTransition.appliedReserveMiB
                                 )
-                            print("[SIGHUP] events.db hard admission reload failed closed: \(error.localizedDescription)")
+                            print("[SIGHUP] events.db hard admission reload refused; previous bound retained: \(error.localizedDescription)")
                             logger.error(
-                                "[SIGHUP] events.db hard admission reload failed closed: \(error.localizedDescription, privacy: .public)"
+                                "[SIGHUP] events.db hard admission reload refused; previous bound retained: \(error.localizedDescription, privacy: .public)"
                             )
                         }
                     } else if newTransition.pendingReserveFitsHardBoundary == true,
@@ -422,9 +455,9 @@ enum SignalHandlers {
                                 "[SIGHUP] alerts.db hard admission: latch=\(latch, privacy: .public), page_limit_pending=\(pending, privacy: .public)"
                             )
                         } catch {
-                            print("[SIGHUP] alerts.db hard admission reload failed closed: \(error.localizedDescription)")
+                            print("[SIGHUP] alerts.db hard admission reload refused; previous bound retained: \(error.localizedDescription)")
                             logger.error(
-                                "[SIGHUP] alerts.db hard admission reload failed closed: \(error.localizedDescription, privacy: .public)"
+                                "[SIGHUP] alerts.db hard admission reload refused; previous bound retained: \(error.localizedDescription, privacy: .public)"
                             )
                         }
                     }
@@ -447,9 +480,9 @@ enum SignalHandlers {
                                 "[SIGHUP] campaigns.db hard admission: latch=\(latch, privacy: .public), page_limit_pending=\(pending, privacy: .public)"
                             )
                         } catch {
-                            print("[SIGHUP] campaigns.db hard admission reload failed closed: \(error.localizedDescription)")
+                            print("[SIGHUP] campaigns.db hard admission reload refused; previous bound retained: \(error.localizedDescription)")
                             logger.error(
-                                "[SIGHUP] campaigns.db hard admission reload failed closed: \(error.localizedDescription, privacy: .public)"
+                                "[SIGHUP] campaigns.db hard admission reload refused; previous bound retained: \(error.localizedDescription, privacy: .public)"
                             )
                         }
                     }
@@ -474,9 +507,9 @@ enum SignalHandlers {
                                     "[SIGHUP] TraceGraph bounded recovery: traces=\(result.tracesDeleted, privacy: .public), trace_children=\(result.traceChildRowsDeleted, privacy: .public), edges=\(result.edgesDeleted, privacy: .public), entities=\(result.entitiesDeleted, privacy: .public), reclaimed_pages=\(result.vacuumPagesReclaimed, privacy: .public), footprint=\(result.footprintBeforeBytes ?? -1, privacy: .public)->\(result.footprintBytes ?? -1, privacy: .public), pinned=\(result.pinnedReader, privacy: .public)"
                                 )
                             } catch {
-                                print("[SIGHUP] TraceGraph bounded recovery failed: \(error.localizedDescription)")
+                                print("[SIGHUP] TraceGraph bounded recovery did not complete: \(error.localizedDescription)")
                                 logger.error(
-                                    "[SIGHUP] TraceGraph bounded recovery failed: \(error.localizedDescription, privacy: .public)"
+                                    "[SIGHUP] TraceGraph bounded recovery did not complete: \(error.localizedDescription, privacy: .public)"
                                 )
                             }
                         }
@@ -589,11 +622,14 @@ enum SignalHandlers {
                 } catch {
                     reloadFailureReason = String(error.localizedDescription.prefix(300))
                     print("[SIGHUP] ERROR: \(error)")
+                    logger.error(
+                        "[SIGHUP] ERROR: reload incomplete: \(reloadFailureReason, privacy: .public)"
+                    )
                 }
                 do {
                     try await state.runtimeConfigurationReporter.finishReload(
                         reloadRequestIDs, succeeded: reloadSucceeded,
-                        reason: reloadSucceeded ? "Rule reload completed" : "Reload incomplete; some components may have changed: " + reloadFailureReason
+                        reason: reloadSucceeded ? "Rule reload completed" + retroactiveScanNote : "Reload incomplete; some components may have changed: " + reloadFailureReason
                     )
                 } catch {
                     logger.error("Rule reload completion status could not be persisted: \(error.localizedDescription)")

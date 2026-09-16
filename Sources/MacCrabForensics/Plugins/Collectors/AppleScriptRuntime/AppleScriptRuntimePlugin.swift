@@ -219,7 +219,10 @@ public struct AppleScriptRuntimePlugin: Collector {
         if snapshot.resourceLimitedRecords > 0 {
             notes.append(
                 "The exact event snapshot reached its bounded result limit; "
-                    + "older matching runtime events are unknown."
+                    + "older matching runtime events are unknown, and so is "
+                    + "whether any of them were poisoned or corrupt — the "
+                    + "integrity checks above cover the records this "
+                    + "snapshot carries."
             )
         }
         if rejected > 0 {
