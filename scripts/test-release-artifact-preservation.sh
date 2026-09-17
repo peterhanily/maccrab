@@ -6,6 +6,16 @@
 # builds, signs, notarizes, contacts a network, or mutates a real remote/ref.
 set -euo pipefail
 
+# A real tag push exports the release manifest into the hook environment, and
+# this probe must not inherit it. Its fixtures are disposable repositories with
+# their own commits and trees; validating those against the live manifest makes
+# the probe fail during the one run that matters, the actual release. Cases
+# below still set these deliberately for their own scenarios.
+unset MACCRAB_RELEASE_EXPECTED_DMG MACCRAB_RELEASE_EXPECTED_SHA256 \
+      MACCRAB_RELEASE_EXPECTED_COMMIT MACCRAB_RELEASE_EXPECTED_TAG_OBJECT \
+      MACCRAB_RELEASE_EXPECTED_HOOK_BLOB MACCRAB_RELEASE_SOURCE_COMMIT \
+      MACCRAB_RELEASE_SOURCE_TREE MACCRAB_RELEASE_METADATA_TREE
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-release-artifact-test.XXXXXX")
