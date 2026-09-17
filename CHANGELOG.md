@@ -3,10 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.22.0] — Unreleased
-
-Final installed qualification is still pending. Development measurements below
-describe earlier candidates and do not qualify the current source.
+## [1.22.0] — 2026-09-17
 
 ### Fixed
 - **An upgraded store whose search index disagrees with its events now starts.**

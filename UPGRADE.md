@@ -135,6 +135,17 @@ usually a better fix.
 
 ---
 
+## Upgrading to v1.22.0
+
+v1.22.0 upgrades the on-disk databases and installs a deliberate barrier
+against writes from older MacCrab versions. **This is one-way. Reinstalling
+v1.21.5 or earlier over a v1.22.0 database is not supported**: the older
+recovery paths can move the database aside and start with empty history
+instead of refusing the newer format.
+
+Before upgrading, take a copy of `/Library/Application Support/MacCrab/`
+while the engine is stopped. Keep it until you are satisfied with v1.22.0.
+
 ## Within-family upgrades (v1.3.0 → v1.3.4, etc.)
 
 Standard `brew upgrade --cask maccrab` is sufficient. The sysext bundle

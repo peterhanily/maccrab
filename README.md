@@ -3,7 +3,7 @@
 **Open, local-first macOS detection & investigation — with first-class visibility into what AI coding agents do on your Mac.** For developers, researchers, and Mac security practitioners.
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
-[![Validation](https://img.shields.io/badge/release%20qualification-pending-lightgrey)](CHANGELOG.md)
+[![Validation](https://img.shields.io/badge/release%20qualification-passed-brightgreen)](CHANGELOG.md)
 [![Tests](https://img.shields.io/badge/tests-4742%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
 [![Version](https://img.shields.io/badge/version-1.22.0-blue)](https://github.com/peterhanily/maccrab/releases)
@@ -663,8 +663,7 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-This checkout targets **v1.22.0 (unreleased)**; the last published release is
-**v1.21.5**. See [CHANGELOG.md](CHANGELOG.md) for the full
+The current release is **v1.22.0**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 

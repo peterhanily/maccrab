@@ -197,7 +197,7 @@ struct ESCallbackAdmissionTests {
     @Test("execute grants survive in every location, including the noisy temp paths")
     func setmodeFilterIsModeBasedNotPathBased() {
         for path in [
-            "/private/var/folders/hf/gyw5ykz53xl2rr8yhfbg7q4h0000gn/T/dropper/payload",
+            "/private/var/folders/ab/c0ffeec0ffeec0ffeec0ffeec0000gn/T/dropper/payload",
             "/tmp/payload",
             "/Users/someone/Downloads/installer",
             "/private/var/log/payload"
