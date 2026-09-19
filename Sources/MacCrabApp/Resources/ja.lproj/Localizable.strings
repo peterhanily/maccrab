@@ -1853,3 +1853,11 @@
 "settings.abuseCH.save" = "キーを保存";
 "settings.abuseCH.saved" = "キーチェーンへの保存を確認しました。エンジンは次回の有効なフィード更新時にキーを読み取ります。サービスがキーを受け付けるかは未検証です。";
 "settings.abuseCH.title" = "abuse.ch認証キー（Auth-Key）";
+
+/* Startup upgrade and queued reload: English fallback pending translation. */
+"startup.upgrade.title" = "Upgrading event history";
+"startup.upgrade.detail" = "MacCrab is preparing your existing event history. Monitoring has not started yet; protection will be confirmed when startup completes.";
+"startup.upgrade.counts" = "%lld of %lld events processed · %lld remaining";
+"system.reloadRulesQueuedTitle" = "Rule reload queued";
+"system.reloadRulesQueuedDetail" = "The request was queued. The engine has not confirmed that its rules were reloaded.";
+"system.reloadRulesUnavailableDetail" = "The engine is not ready, its heartbeat is missing or stale, or the request could not be queued.";

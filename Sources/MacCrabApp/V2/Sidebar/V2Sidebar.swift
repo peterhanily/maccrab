@@ -293,7 +293,8 @@ struct V2Sidebar: View {
         let title: String = {
             switch status {
             case .active: return "Protection active"
-            case .starting: return "Protection starting"
+            case .starting: return appState.heartbeat?.bootPhase == "upgrading_store"
+                ? V2StoreUpgradeProgress.title : "Protection starting"
             case .unavailable: return "Protection unavailable"
             case .degraded: return "Protection degraded"
             case .inactive: return "Protection inactive"
@@ -455,4 +456,3 @@ private struct V2SidebarItem: View {
         return .clear
     }
 }
-

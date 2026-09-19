@@ -230,35 +230,20 @@ public enum V2DaemonControl {
     /// sysext polls (it raises SIGHUP to itself on receipt) — the same
     /// cross-uid-safe channel used by suppress / refresh-intel.
     ///
-    /// `pkill -HUP maccrabd` is kept as a best-effort fallback for a
-    /// `swift run maccrabd` dev daemon, which runs as the same user and
-    /// can be signaled directly.
-    ///
-    /// Returns true if a reload was successfully requested by either path.
+    /// Returns true only when queued for a recently ready selected engine.
+    /// Queueing is not an acknowledgement that the engine consumed the request
+    /// or reloaded its rules. Never signal unrelated development daemons.
     @discardableResult
     public static func reloadDetectionRules() -> Bool {
-        var requested = false
+        reloadDetectionRules(source: .session)
+    }
 
-        // Primary: inbox request → root sysext (cross-uid-safe).
-        if let inboxDir = resolveInboxDir() {
-            requested = writeReloadRulesRequest(inboxDir: inboxDir) || requested
-        }
-
-        // Fallback: same-uid dev daemon via pkill.
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        p.arguments = ["-HUP", "maccrabd"]
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do {
-            try p.run()
-            p.waitUntilExit()
-            if p.terminationStatus == 0 { requested = true }
-        } catch {
-            // pkill absent / sandbox-denied — the inbox path is primary.
-        }
-
-        return requested
+    static func reloadDetectionRules(source: V2EngineSource, now: Date = Date()) -> Bool {
+        guard let heartbeat = source.heartbeat(now: now),
+              heartbeat.engineIdentity != nil, heartbeat.isReady else { return false }
+        let age = now.timeIntervalSince(heartbeat.writtenAt)
+        guard age.isFinite, age >= 0, age <= V2HeartbeatSnapshot.staleThreshold else { return false }
+        return writeReloadRulesRequest(inboxDir: source.directory + "/inbox")
     }
 
     /// Push the (non-secret) LLM backend config to the ROOT engine via the

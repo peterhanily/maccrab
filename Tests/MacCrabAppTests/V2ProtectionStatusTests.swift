@@ -4,13 +4,78 @@ import Testing
 
 @Suite("Protection readiness and collector presentation")
 struct V2ProtectionStatusTests {
+    @Test("upgrade telemetry counts processed, expired and preserved rows without claiming protection")
+    func upgradeProgress() throws {
+        var raw: [String: Any] = [
+            "boot_phase": "upgrading_store", "liveness": false,
+            "upgrade_source_events": 100, "upgrade_migrated_events": 60,
+            "upgrade_remaining_events": 25, "upgrade_expired_events": 10,
+            "upgrade_corrupt_preserved_events": 5,
+        ]
+        let snapshot = V2HeartbeatSnapshot.decode(raw: raw)
+        let progress = try #require(snapshot.storeUpgradeProgress)
+        #expect(snapshot.readiness == .starting)
+        #expect(!snapshot.isReady)
+        #expect(progress.processedEvents == 75)
+        #expect(progress.migratedEvents == 60)
+        #expect(progress.expiredEvents == 10)
+        #expect(progress.corruptPreservedEvents == 5)
+        raw["boot_phase"] = "ready"
+        #expect(V2HeartbeatSnapshot.decode(raw: raw).storeUpgradeProgress == nil)
+        raw["boot_phase"] = "upgrading_store"
+        raw["upgrade_remaining_events"] = -1
+        #expect(V2HeartbeatSnapshot.decode(raw: raw).storeUpgradeProgress == nil)
+        raw.removeValue(forKey: "upgrade_remaining_events")
+        #expect(V2HeartbeatSnapshot.decode(raw: raw).readiness == .starting)
+        raw["upgrade_source_events"] = 5
+        raw["upgrade_migrated_events"] = 5
+        raw["upgrade_remaining_events"] = 5
+        #expect(V2HeartbeatSnapshot.decode(raw: raw).storeUpgradeProgress == nil)
+        raw["upgrade_source_events"] = 100
+        raw["upgrade_migrated_events"] = 60
+        raw["upgrade_remaining_events"] = 25
+        raw["upgrade_corrupt_preserved_events"] = 6
+        #expect(V2HeartbeatSnapshot.decode(raw: raw).storeUpgradeProgress == nil)
+    }
+
+    @Test("the menu bar warns about upgrade, failure, stale and absent engines without AppState")
+    func windowlessMenuBarHealth() {
+        // An exact Unix second avoids a round-trip rounding the encoded
+        // heartbeat a fraction of a microsecond ahead of the test clock.
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        func snapshot(_ phase: String, age: Double = 0) -> V2HeartbeatSnapshot {
+            V2HeartbeatSnapshot.decode(raw: [
+                "written_at_unix": now.addingTimeInterval(-age).timeIntervalSince1970,
+                "engine_pid": 101, "engine_started_at_unix": now.addingTimeInterval(-300).timeIntervalSince1970,
+                "engine_version": "1.22.1", "engine_build": "test",
+                "boot_phase": phase, "liveness": phase == "ready", "rules_loaded": 10,
+                "collector_health": [["name": "ESCollector", "healthy": true,
+                                      "state": "healthy", "enabled": true]],
+            ])
+        }
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: nil, now: now) == .unavailable)
+        var identityless = snapshot("ready")
+        identityless.engineIdentity = nil
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: identityless, now: now) == .unavailable)
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: snapshot("starting"), now: now) == .starting)
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: snapshot("upgrading_store"), now: now) == .upgrading)
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: snapshot("storage_not_ready"), now: now) == .unavailable)
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: snapshot("ready"), now: now) == .active)
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: snapshot("ready", age: 121), now: now) == .unavailable)
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: snapshot("ready", age: -1), now: now) == .unavailable)
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: snapshot("ready"), additionalDegradation: true, now: now) == .degraded)
+        for status in [V2MenuBarProtectionStatus.starting, .upgrading, .degraded, .unavailable] {
+            #expect(status.title != V2MenuBarProtectionStatus.active.title)
+        }
+    }
+
     @Test("normal boot, storage failure, recovery, and stale transitions stay truthful")
     func readinessTransitions() {
         func status(_ phase: String?, live: Bool? = false, stale: Bool = false) -> V2ProtectionStatus {
             .resolve(providerLive: true, heartbeatPresent: true, heartbeatStale: stale,
                      readiness: .init(bootPhase: phase, liveness: live), degraded: false)
         }
-        for phase in ["starting", "stores_ready", "rules_loaded", "collectors_started"] {
+        for phase in ["starting", "upgrading_store", "stores_ready", "rules_loaded", "collectors_started"] {
             #expect(status(phase) == .starting)
         }
         #expect(status("storage_not_ready") == .unavailable)
@@ -77,7 +142,7 @@ struct V2ProtectionStatusTests {
             .appendingPathComponent("maccrab-ui-boot-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let now = Date()
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
         let written = now.timeIntervalSince1970
         func write(_ value: [String: Any], _ name: String) throws {
             try JSONSerialization.data(withJSONObject: value).write(to: directory.appendingPathComponent(name))
@@ -98,6 +163,16 @@ struct V2ProtectionStatusTests {
         let starting = try #require(V2HeartbeatSnapshot.read(directory: directory.path, now: now))
         #expect(starting.readiness == .starting)
         #expect(starting.collectors.isEmpty)
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: starting, now: now) == .starting)
+        var upgrading = minimal("upgrading_store", false)
+        upgrading["upgrade_source_events"] = 100
+        upgrading["upgrade_migrated_events"] = 25
+        upgrading["upgrade_remaining_events"] = 75
+        try write(upgrading, "heartbeat.json")
+        let upgrade = try #require(V2HeartbeatSnapshot.read(directory: directory.path, now: now))
+        #expect(upgrade.collectors.isEmpty)
+        #expect(upgrade.storeUpgradeProgress?.processedEvents == 25)
+        #expect(V2MenuBarProtectionStatus.resolve(heartbeat: upgrade, now: now) == .upgrading)
         try write(minimal("storage_not_ready", false), "heartbeat.json")
         #expect(V2HeartbeatSnapshot.read(directory: directory.path, now: now)?.readiness == .unavailable)
         rich["written_at_unix"] = written

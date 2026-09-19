@@ -38,11 +38,14 @@ struct RootSubprocessSurfaceTests {
         // wired into the automated root response path. The remaining targets
         // are GUI/CLI/MCP/forensics processes and execute unprivileged.
         let allowed: [String: Int] = [
-            "Sources/MacCrabApp/AppState.swift": 4,
+            // Unprivileged threat-intel refresh helper, Agent Traces dev
+            // signal, and manual flush fallback. Rule reload now queues only
+            // to the selected engine, removing AppState's fourth constructor
+            // and V2DaemonControl's separate broad pkill fallback entirely.
+            "Sources/MacCrabApp/AppState.swift": 3,
             "Sources/MacCrabApp/UserRuleInstaller.swift": 1,
             "Sources/MacCrabApp/V2/Data/V2LiveDataProvider.swift": 1,
             "Sources/MacCrabApp/V2/Forensics/RaveInstallConsentSheet.swift": 1,
-            "Sources/MacCrabApp/V2/V2DaemonControl.swift": 1,
             "Sources/MacCrabApp/V2/Workspaces/V2DetectionWorkspace.swift": 1,
             "Sources/MacCrabApp/V2/Workspaces/V2InvestigationWorkspace.swift": 1,
             "Sources/MacCrabApp/V2/Workspaces/V2RaveCatalogBrowserView.swift": 1,

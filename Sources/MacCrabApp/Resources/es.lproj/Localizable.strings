@@ -1853,3 +1853,11 @@
 "ui.finalPrefix.V2IntelligenceWorkspace.custom.hashes.txt.sha.256.hashes" = "• `custom.hashes.txt` — hashes SHA-256";
 "ui.finalPrefix.V2IntelligenceWorkspace.custom.ips.txt.ipv4.ipv6.addresses" = "• `custom.ips.txt` — direcciones IPv4/IPv6";
 "ui.finalPrefix.V2InvestigationWorkspace.more.entities" = "+%lld entidades más";
+
+/* Startup upgrade and queued reload: English fallback pending translation. */
+"startup.upgrade.title" = "Upgrading event history";
+"startup.upgrade.detail" = "MacCrab is preparing your existing event history. Monitoring has not started yet; protection will be confirmed when startup completes.";
+"startup.upgrade.counts" = "%lld of %lld events processed · %lld remaining";
+"system.reloadRulesQueuedTitle" = "Rule reload queued";
+"system.reloadRulesQueuedDetail" = "The request was queued. The engine has not confirmed that its rules were reloaded.";
+"system.reloadRulesUnavailableDetail" = "The engine is not ready, its heartbeat is missing or stale, or the request could not be queued.";

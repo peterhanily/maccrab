@@ -233,7 +233,9 @@ struct V2OverviewWorkspace: View {
 
     private var protectionBanner: some View {
         let s = protectionState
+        let upgrading = s == .starting && appState.heartbeat?.bootPhase == "upgrading_store"
         let title: String = {
+            if upgrading { return V2StoreUpgradeProgress.title }
             switch s {
             case .active:   return String(localized: "overview.bannerTitleActive", defaultValue: "Protected — monitoring active")
             case .starting: return String(localized: "overview.bannerTitleStarting", defaultValue: "Protection starting — preparing the engine")
@@ -243,6 +245,10 @@ struct V2OverviewWorkspace: View {
             }
         }()
         let body: String = {
+            if upgrading {
+                let counts = appState.heartbeat?.storeUpgradeProgress.map { "\n" + $0.counts } ?? ""
+                return V2StoreUpgradeProgress.detail + counts
+            }
             switch s {
             case .active:
                 let collectors = appState.heartbeat?.collectorHealth?

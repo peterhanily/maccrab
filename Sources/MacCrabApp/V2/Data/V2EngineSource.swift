@@ -63,7 +63,7 @@ public struct V2EngineSource: Equatable, Sendable {
         phase: String?, writtenAt: Date?, identity: EngineTelemetryIdentity?, now: Date
     ) -> Bool {
         guard identity != nil, let writtenAt,
-              ["starting", "stores_ready", "rules_loaded", "collectors_started"].contains(phase ?? "")
+              ["starting", "upgrading_store", "stores_ready", "rules_loaded", "collectors_started"].contains(phase ?? "")
         else { return false }
         let age = now.timeIntervalSince(writtenAt)
         return age.isFinite && age >= 0 && age <= 120

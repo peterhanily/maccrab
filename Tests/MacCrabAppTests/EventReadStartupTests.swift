@@ -15,7 +15,7 @@ struct EventReadStartupTests {
     func startupPolicy() throws {
         let now = Date(timeIntervalSince1970: 1_780_000_000)
         let identity = try #require(EngineTelemetryIdentity(heartbeat: heartbeat(phase: "starting", now: now)))
-        for phase in ["starting", "stores_ready", "rules_loaded", "collectors_started"] {
+        for phase in ["starting", "upgrading_store", "stores_ready", "rules_loaded", "collectors_started"] {
             #expect(V2EngineSource.defersEventReads(phase: phase, writtenAt: now,
                 identity: identity, now: now))
         }
@@ -55,7 +55,7 @@ struct EventReadStartupTests {
         app.primeCachedEventStoreForTesting(reader)
         let oldProvider = try #require(await V2LiveDataProvider(source: source))
         #expect(oldProvider.lastErrorDescription == nil, "Both mandatory fixture stores must open before startup")
-        try write("starting")
+        try write("upgrading_store")
         app.refreshHeartbeat()
         #expect(app.eventReadsDeferred)
         #expect(!app.hasCachedEventStoreForTesting)

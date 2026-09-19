@@ -2,6 +2,7 @@ import Foundation
 import CSQLCipher
 import Testing
 @testable import MacCrabCore
+@testable import MacCrabAgentKit
 
 @Suite("Shipped EventStore upgrade")
 struct EventStoreLegacyUpgradeTests {
@@ -16,7 +17,11 @@ struct EventStoreLegacyUpgradeTests {
         var path: String { directory.appendingPathComponent("events.db").path }
     }
 
-    private func fixture(rows: Int, incrementalVacuum: Bool = false) throws -> Fixture {
+    private func fixture(
+        rows: Int,
+        incrementalVacuum: Bool = false,
+        payloadBytes: Int = 0
+    ) throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("legacy-event-upgrade-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -57,11 +62,15 @@ struct EventStoreLegacyUpgradeTests {
         var first: Event?
         var last: Event?
         var firstJSON: Data?
+        let payload = String(repeating: "x", count: payloadBytes)
         for index in 0..<rows {
-            let event = Event(
+            var event = Event(
                 timestamp: now.addingTimeInterval(-Double(index) / 1_000),
                 eventCategory: .process, eventType: .start, eventAction: "exec", process: process
             )
+            if payloadBytes > 0 {
+                event.enrichments["legacy_fixture_detail"] = payload
+            }
             if first == nil { first = event }
             last = event
             let json = String(decoding: try JSONEncoder().encode(event), as: UTF8.self)
@@ -279,10 +288,40 @@ struct EventStoreLegacyUpgradeTests {
         return result
     }
 
-    @Test("Default-policy shipped migration resumes after committed multi-batch progress")
-    func interruptedRecoveryPreservesEveryEvent() async throws {
-        let fixture = try fixture(rows: 1_024)
+    private func expectExactEvents(
+        in store: EventStore,
+        originals: [UUID: Event]
+    ) async throws {
+        // Each bounded query decodes a block once. Querying every UUID alone
+        // repeatedly decodes the same wide legacy payloads after migration.
+        let sorted = originals.values.sorted { $0.timestamp > $1.timestamp }
+        for start in stride(from: 0, to: sorted.count, by: 64) {
+            let expected = Array(sorted[start..<min(start + 64, sorted.count)])
+            let first = try #require(expected.first)
+            let last = try #require(expected.last)
+            let snapshot = try await store.exactEventsSnapshot(
+                since: last.timestamp.addingTimeInterval(-0.0004),
+                until: first.timestamp.addingTimeInterval(0.0004),
+                limit: expected.count + 1
+            )
+            #expect(snapshot.events == expected)
+            #expect(snapshot.poisonRecords.isEmpty)
+            #expect(snapshot.corruptLegacyRecords == 0)
+            #expect(snapshot.inheritedLegacyLossRecords == 0)
+            #expect(snapshot.resourceLimitedRecords == 0)
+        }
+    }
+
+    @Test("Shipped migration resumes after committed multi-batch progress under default and lowered caps",
+          arguments: [false, true])
+    func interruptedRecoveryPreservesEveryEvent(loweredCap: Bool) async throws {
+        let fixture = try fixture(rows: 1_024, payloadBytes: loweredCap ? 48 * 1_024 : 0)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let policy = loweredCap ? loweredUpgradePolicy(for: fixture) : nil
+        if let policy {
+            try #require(try SQLitePersistentStoreAdmission.measureFamily(fixture.path)
+                > policy.maxFootprintBytes)
+        }
         let original = try originalEvents(in: fixture)
         #expect(original.count == 1_024)
         let pressure = PressureAfterCommittedMigration()
@@ -290,8 +329,12 @@ struct EventStoreLegacyUpgradeTests {
 
         // The scope releases the first store before reopening. This models an
         // ordinary admission failure after a durable chunk, not a power loss.
-        func recoverUntilPressure() async throws {
-            let store = try EventStore(path: path)
+        func recoverUntilPressure() async throws -> Int64? {
+            let store = try EventStore(
+                path: path, storagePolicy: policy,
+                allowLegacyUpgradeHeadroom: loweredCap
+            )
+            let initialCap = (await store.storageAdmissionSnapshot())?.maxFootprintBytes
             try await store.setStorageAdmissionProbesForTesting(
                 footprint: { try SQLitePersistentStoreAdmission.measureFamily($0) },
                 freeSpace: {
@@ -320,24 +363,35 @@ struct EventStoreLegacyUpgradeTests {
             #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
             // Exercise both the already-journaled prefix and the still-legacy
             // tail before resuming, using every UUID captured before upgrade.
-            for (id, event) in original {
-                #expect(try await store.exactEventSnapshot(id: id).event == event)
-            }
+            try await expectExactEvents(in: store, originals: original)
             #expect(try await store.count() == original.count)
+            return initialCap
         }
-        try await recoverUntilPressure()
+        let interruptedCap = try await recoverUntilPressure()
+        let receiptURL = URL(fileURLWithPath: path + ".legacy-upgrade.json")
+        let interruptedReceipt = loweredCap ? try Data(contentsOf: receiptURL) : nil
 
-        let reopened = try EventStore(path: path)
+        let reopened = try EventStore(
+            path: path, storagePolicy: policy,
+            allowLegacyUpgradeHeadroom: loweredCap
+        )
+        if let interruptedReceipt {
+            #expect((await reopened.storageAdmissionSnapshot())?.maxFootprintBytes == interruptedCap)
+            #expect(try Data(contentsOf: receiptURL) == interruptedReceipt)
+        }
         let recovery = try await reopened.recoverJournalBeforeProducers()
+        if let policy {
+            _ = try await reopened.restoreConfiguredStorageAdmissionAfterLegacyUpgrade()
+            #expect((await reopened.storageAdmissionSnapshot())?.maxFootprintBytes
+                == policy.maxFootprintBytes)
+        }
         #expect(recovery.complete)
         #expect(recovery.sourceEvents == original.count)
         #expect(recovery.migratedEvents == original.count)
         #expect(recovery.remainingEvents == 0)
         #expect(recovery.corruptPreservedEvents == 0)
         #expect(recovery.rolledExpiredEvents == 0)
-        for (id, event) in original {
-            #expect(try await reopened.exactEventSnapshot(id: id).event == event)
-        }
+        try await expectExactEvents(in: reopened, originals: original)
         #expect(try await reopened.count() == original.count)
         #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
         let evidence = try await reopened.evidenceFor(alertId: fixture.alertID)
@@ -698,5 +752,182 @@ struct EventStoreLegacyUpgradeTests {
             #expect(try await reopened.count() == rows)
         }
         #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
+    }
+
+    private func loweredUpgradePolicy(
+        for fixture: Fixture,
+        capMiB: Int64 = 36
+    ) -> SQLitePersistentStorePolicy {
+        SQLitePersistentStorePolicy(
+            maxFootprintBytes: capMiB * 1_048_576,
+            freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
+            transactionReserveBytes: SQLitePersistentStorePolicy.eventTransactionReserveBytes,
+            storageVolumePath: fixture.directory.path
+        )
+    }
+
+    @Test("A lowered cap admits a legacy upgrade, preserves every event, and remains authoritative after restart")
+    func legacyUpgradeAdmittedOverLoweredCap() async throws {
+        // Use real bounded Event payloads and the production transaction
+        // reserve. An almost-empty store with a tiny artificial reserve also
+        // fails on unrelated schema estimates and does not model this upgrade.
+        let fixture = try fixture(rows: 2_400, payloadBytes: 48 * 1_024)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let originals = try originalEvents(in: fixture)
+        try #require(originals.count == 2_400)
+        let family = try SQLitePersistentStoreAdmission.measureFamily(fixture.path)
+        let policy = loweredUpgradePolicy(for: fixture, capMiB: 112)
+        try #require(policy.transactionReserveBytes < policy.maxFootprintBytes)
+        try #require(family > policy.maxFootprintBytes)
+
+        // A temporary preference overage must never waive physical disk
+        // safety. This deterministic floor cannot be satisfied on the host.
+        let unavailableDisk = SQLitePersistentStorePolicy(
+            maxFootprintBytes: policy.maxFootprintBytes,
+            freeSpaceFloorBytes: Int64.max / 2,
+            transactionReserveBytes: policy.transactionReserveBytes,
+            storageVolumePath: policy.storageVolumePath
+        )
+        do {
+            _ = try EventStore(
+                path: fixture.path, storagePolicy: unavailableDisk,
+                allowLegacyUpgradeHeadroom: true
+            )
+            Issue.record("Legacy transition bypassed the configured free-space floor")
+        } catch let error as SQLitePersistentStoreAdmissionError {
+            guard case .lowFreeSpace = error else { throw error }
+        }
+        #expect(try originalEvents(in: fixture) == originals)
+        #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
+
+        // Release the writer before reopening so this also exercises process
+        // restart, not merely a second connection to the first writer's WAL.
+        func performUpgrade() async throws -> (
+            recovery: EventStore.EventJournalRecoverySnapshot,
+            cap: Int64,
+            receipt: Data
+        ) {
+            let store = try EventStore(
+                path: fixture.path, storagePolicy: policy,
+                allowLegacyUpgradeHeadroom: true
+            )
+            let admission = try #require(await store.storageAdmissionSnapshot())
+            let transitionCap = try #require(admission.maxFootprintBytes)
+            #expect(transitionCap > policy.maxFootprintBytes)
+            let receipt = try Data(contentsOf: URL(fileURLWithPath: fixture.path + ".legacy-upgrade.json"))
+            let recovered = try await store.recoverJournalBeforeProducers()
+            #expect((await store.storageAdmissionSnapshot())?.maxFootprintBytes == transitionCap)
+            #expect(admission.transactionReserveBytes == policy.transactionReserveBytes)
+            #expect(admission.freeSpaceFloorBytes == policy.freeSpaceFloorBytes)
+            try await expectExactEvents(in: store, originals: originals)
+            #expect(try await store.count() == originals.count)
+            #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
+            return (recovered, transitionCap, receipt)
+        }
+        let firstBoot = try await performUpgrade()
+        let recovered = firstBoot.recovery
+        #expect(recovered.complete)
+        #expect(recovered.sourceEvents == originals.count)
+        #expect(recovered.migratedEvents == originals.count)
+        #expect(recovered.remainingEvents == 0)
+        #expect(recovered.rolledExpiredEvents == 0)
+        #expect(recovered.corruptPreservedEvents == 0)
+        let boundary = try #require(try Self.committedRecoveryBoundary(at: fixture.path))
+        #expect(boundary.conserved && boundary.finalized == 1)
+
+        let reopened = try EventStore(
+            path: fixture.path, storagePolicy: policy,
+            allowLegacyUpgradeHeadroom: true
+        )
+        #expect((await reopened.storageAdmissionSnapshot())?.maxFootprintBytes == firstBoot.cap)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: fixture.path + ".legacy-upgrade.json"))
+            == firstBoot.receipt)
+        #expect(try await reopened.recoverJournalBeforeProducers() == recovered)
+        #expect(try Self.committedRecoveryBoundary(at: fixture.path) == boundary)
+        #expect(try await reopened.expireJournalBlocks() == 0)
+        let readiness = await recoverEventStoreBeforeProducers(
+            eventStore: reopened,
+            dbPath: fixture.path,
+            boundary: EventsSizeCapBoundary(maxSizeMiB: 112),
+            processFloorMinutes: 15,
+            retentionBudgetHealth: EventRetentionBudgetHealth()
+        )
+        #expect(readiness.writableBeforeProducers, "\(readiness)")
+        let admission = try #require(await reopened.storageAdmissionSnapshot())
+        #expect(admission.maxFootprintBytes == policy.maxFootprintBytes)
+        #expect(admission.transactionReserveBytes == policy.transactionReserveBytes)
+        #expect(admission.freeSpaceFloorBytes == policy.freeSpaceFloorBytes)
+        #expect(admission.latchedFailure == nil)
+        try await expectExactEvents(in: reopened, originals: originals)
+        #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
+        let finalReopen = try EventStore(
+            path: fixture.path, storagePolicy: policy,
+            allowLegacyUpgradeHeadroom: true
+        )
+        #expect((await finalReopen.storageAdmissionSnapshot())?.maxFootprintBytes
+            == policy.maxFootprintBytes)
+        #expect(try await finalReopen.recoverJournalBeforeProducers() == recovered)
+        #expect(try await finalReopen.count() == originals.count)
+    }
+
+    private final class RecoveryProgress: @unchecked Sendable {
+        private let lock = NSLock()
+        private var reports: [EventStore.EventJournalRecoverySnapshot] = []
+
+        func record(_ report: EventStore.EventJournalRecoverySnapshot) {
+            lock.lock()
+            defer { lock.unlock() }
+            reports.append(report)
+        }
+
+        func snapshots() -> [EventStore.EventJournalRecoverySnapshot] {
+            lock.lock()
+            defer { lock.unlock() }
+            return reports
+        }
+    }
+
+    @Test("Migration progress conserves durable rows and reports completion on migration and reopen")
+    func migrationProgressReportsDurableCompletion() async throws {
+        let fixture = try fixture(rows: 300)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let store = try EventStore(path: fixture.path)
+        let progress = RecoveryProgress()
+        let path = fixture.path
+        let recovered = try await store.recoverJournalBeforeProducers { report in
+            progress.record(report)
+            do {
+                let durable = try #require(try Self.committedRecoveryBoundary(at: path))
+                #expect(durable.source == report.sourceEvents)
+                #expect(durable.migrated == report.migratedEvents)
+                #expect(durable.remaining == report.remainingEvents)
+                #expect(durable.corrupt == report.corruptPreservedEvents)
+                #expect(durable.expired == report.rolledExpiredEvents)
+                #expect(durable.conserved)
+            } catch {
+                Issue.record(error)
+            }
+        }
+        let reports = progress.snapshots()
+        try #require(reports.count > 1)
+        #expect(reports.last == recovered)
+        #expect(reports.last?.complete == true)
+        #expect(reports.contains { $0.migratedEvents > 0 && $0.remainingEvents > 0 })
+        for report in reports {
+            #expect(report.sourceEvents == 300)
+            #expect(report.sourceEvents == report.migratedEvents + report.remainingEvents
+                + report.rolledExpiredEvents + report.corruptPreservedEvents)
+        }
+        for (previous, next) in zip(reports, reports.dropFirst()) {
+            #expect(previous.migratedEvents <= next.migratedEvents)
+            #expect(previous.remainingEvents >= next.remainingEvents)
+        }
+        let boundary = try Self.committedRecoveryBoundary(at: fixture.path)
+        let reopened = try EventStore(path: fixture.path)
+        let reopenProgress = RecoveryProgress()
+        #expect(try await reopened.recoverJournalBeforeProducers(progress: reopenProgress.record)
+            == recovered)
+        #expect(reopenProgress.snapshots().last == recovered)
+        #expect(try Self.committedRecoveryBoundary(at: fixture.path) == boundary)
     }
 }

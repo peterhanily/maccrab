@@ -263,6 +263,7 @@ enum DaemonSetup {
             let store = try EventStore(
                 directory: supportDir,
                 storagePolicy: storagePolicy,
+                allowLegacyUpgradeHeadroom: true,
                 liveMemoryBudget: .processShared
             )
             // First attempt actually succeeded (transient failure
@@ -400,13 +401,16 @@ enum DaemonSetup {
     /// "Daemon: Starting (loading rules)..." with real-time progress
     /// instead of "Not running" for 15-20 s while the daemon finishes
     /// initialising. Phase strings: "starting", "stores_ready",
-    /// "rules_loaded", "collectors_started", "ready". Once `ready`, the
+    /// "upgrading_store", "rules_loaded", "collectors_started", "ready". Once `ready`, the
     /// regular livenessTimer takes over (`liveness: true` writes).
-    /// Atomic via .tmp + rename, same as the livenessTimer pattern.
+    /// Atomically replaced so progress polling never sees a partial heartbeat.
     static func writeBootPhase(
         supportDir: String,
         phase: String,
-        startedAt: Date
+        startedAt: Date,
+        // A long first upgrade needs to say what it is doing and how far it has
+        // got, or it reads as a hang behind a bare degraded banner.
+        detail: [String: Any] = [:]
     ) {
         let identity = DaemonProcessIdentity.current
         let payload: [String: Any] = [
@@ -424,8 +428,9 @@ enum DaemonSetup {
             // thinner; the dashboard reads schema_version informationally only.
             "schema_version": 4,
         ]
+        let merged = payload.merging(detail) { current, _ in current }
         guard let data = try? JSONSerialization.data(
-            withJSONObject: payload,
+            withJSONObject: merged,
             options: [.sortedKeys]
         ) else { return }
         // Ensure the dir exists; on first daemon launch after install
@@ -434,15 +439,9 @@ enum DaemonSetup {
             atPath: supportDir,
             withIntermediateDirectories: true
         )
-        let path = supportDir + "/heartbeat.json"
-        let tmp = path + ".tmp"
-        do {
-            try data.write(to: URL(fileURLWithPath: tmp))
-            try FileManager.default.moveItem(atPath: tmp, toPath: path)
-        } catch {
-            try? FileManager.default.removeItem(atPath: path)
-            try? FileManager.default.moveItem(atPath: tmp, toPath: path)
-        }
+        try? SecureFileIO.atomicReplace(
+            at: supportDir + "/heartbeat.json", data: data, mode: 0o644
+        )
     }
 
     /// Boot's own backpressure budget for the pre-producer journal expiry
@@ -804,10 +803,25 @@ enum DaemonSetup {
         )
 
         do {
-            eventStore = try EventStore(
-                directory: supportDir,
-                storagePolicy: eventStoragePolicy,
-                liveMemoryBudget: .processShared
+            // Opening an inherited store can encounter the same reader pins
+            // as later checkpoints. Retry typed contention within the shared
+            // grace; capacity and integrity refusals retain their causes.
+            eventStore = try await retryTransientEventStoreStartupOperation(
+                onRetry: { _ in
+                    Self.writeBootPhase(
+                        supportDir: supportDir,
+                        phase: "starting",
+                        startedAt: startedAt
+                    )
+                },
+                operation: {
+                    try EventStore(
+                        directory: supportDir,
+                        storagePolicy: eventStoragePolicy,
+                        allowLegacyUpgradeHeadroom: true,
+                        liveMemoryBudget: .processShared
+                    )
+                }
             )
         } catch let error as EventStoreError {
             if case .storageNotReady(_) = error {
@@ -880,6 +894,9 @@ enum DaemonSetup {
         // must complete first, while the measured transition reserve is still
         // active and before any collector can produce a new Event.
         let journalRecovery: EventStore.EventJournalRecoverySnapshot
+        let lastUpgradeReport = OSAllocatedUnfairLock<ContinuousClock.Instant?>(
+            initialState: nil
+        )
         do {
             journalRecovery = try await
                 retryTransientEventStoreStartupOperation(
@@ -891,7 +908,45 @@ enum DaemonSetup {
                         )
                     },
                     operation: {
-                        try await eventStore.recoverJournalBeforeProducers()
+                        try await eventStore.recoverJournalBeforeProducers(
+                            progress: { observed in
+                                // Throttled to once a second: the boot phase is
+                                // an atomic file rewrite, not a log line.
+                                guard observed.sourceEvents > 0 else { return }
+                                let shouldReport = lastUpgradeReport.withLock { last in
+                                    let now = ContinuousClock.now
+                                    if let previous = last {
+                                        guard observed.complete
+                                            || previous.duration(to: now) >= .seconds(1)
+                                        else { return false }
+                                    } else if observed.complete {
+                                        // A validation-only reopen is not a
+                                        // new migration of the historical count.
+                                        return false
+                                    }
+                                    last = now
+                                    return true
+                                }
+                                guard shouldReport else { return }
+                                Self.writeBootPhase(
+                                    supportDir: supportDir,
+                                    phase: "upgrading_store",
+                                    startedAt: startedAt,
+                                    detail: [
+                                        "upgrade_source_events":
+                                            observed.sourceEvents,
+                                        "upgrade_migrated_events":
+                                            observed.migratedEvents,
+                                        "upgrade_remaining_events":
+                                            observed.remainingEvents,
+                                        "upgrade_expired_events":
+                                            observed.rolledExpiredEvents,
+                                        "upgrade_corrupt_preserved_events":
+                                            observed.corruptPreservedEvents,
+                                    ]
+                                )
+                            }
+                        )
                     }
                 )
         } catch {

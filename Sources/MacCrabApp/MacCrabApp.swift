@@ -366,6 +366,7 @@ private final class CheckForUpdatesViewModel: ObservableObject {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
+    private var statusHealthItem: NSMenuItem?
     private var appState: AppState?
     /// Sparkle updater injected from MacCrabApp so the statusbar menu's
     /// "Check for Updates…" item can trigger a check. Menubar-only apps
@@ -375,11 +376,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var dismissTimer: Timer?
     private var lastPopoverAlertId: String?
-    /// Polls AppState's health signals and flips the statusbar icon
-    /// between the healthy crab 🦀 and a warning variant ⚠️🦀 when
-    /// detection is degraded (zero rules loaded, stale heartbeat, or
-    /// storage errors accumulating). Introduced in v1.4.3 so users
-    /// who glance at the menubar immediately know protection is off.
+    /// Polls the selected engine heartbeat even without a dashboard window.
+    /// Shows 🦀! until readiness and health are confirmed, with additional
+    /// storage/rule warnings from AppState when it observes the same boot.
     private var statusBarHealthTimer: Timer?
 
     /// v1.17 (issue #2): posts MacCrab-attributed OS banners via
@@ -594,14 +593,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alertNotifier?.suppressUntil = nil
     }
 
-    /// Flip the statusbar title to the healthy crab or the warning
-    /// variant based on AppState's current health signals. Source of
-    /// truth for "is protection degraded" is `isProtectionDegraded`
-    /// on AppState — see that property for the exact conditions.
+    /// Poll telemetry even if no dashboard has ever opened. AppState contributes
+    /// storage and rule-integrity warnings when it has data for this same boot.
     @MainActor private func updateStatusBarIcon() {
         guard let button = statusItem?.button else { return }
-        let degraded = appState?.isProtectionDegraded ?? false
-        Self.applyStatusBarImage(to: button, degraded: degraded)
+        let heartbeat = V2EngineSource.session.heartbeat()
+        let sameBoot = heartbeat?.engineIdentity != nil
+            && heartbeat?.engineIdentity == appState?.heartbeat?.engineIdentity
+        let status = V2MenuBarProtectionStatus.resolve(
+            heartbeat: heartbeat,
+            additionalDegradation: sameBoot && (appState?.isProtectionDegraded ?? false))
+        Self.applyStatusBarImage(to: button, status: status)
+        statusHealthItem?.title = status.label
     }
 
     /// Crab emoji in the menu bar — the brand identity. We tried a
@@ -612,33 +615,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// many popular Mac apps (1Password, Discord, Notion) use colorful
     /// menu-bar icons for the same brand-recognition reason.
     ///
-    /// The menu-bar glyph is always the single crab — prepending a second
-    /// emoji (a warning triangle for degraded state) rendered as a wider,
-    /// double-icon with an odd gap next to the crab. Degraded state is carried
-    /// by the accessibility description via `setAccessibilityLabel` (so
-    /// VoiceOver still announces it) and shown in full in the dashboard.
-    @MainActor private static func applyStatusBarImage(to button: NSStatusBarButton, degraded: Bool) {
-        let title = "🦀"
-        let label = degraded ? "MacCrab — protection degraded" : "MacCrab"
+    /// Keep the crab and append a visible warning whenever readiness/health
+    /// cannot be confirmed. Accessibility and the tooltip explain that warning.
+    @MainActor private static func applyStatusBarImage(to button: NSStatusBarButton, status: V2MenuBarProtectionStatus) {
+        let title = status.title
         if button.title != title {
             button.title = title
         }
         button.image = nil
         button.imagePosition = .noImage
         button.font = NSFont.systemFont(ofSize: 14)
-        button.setAccessibilityLabel(label)
+        button.setAccessibilityLabel(status.label)
+        button.toolTip = status.label
     }
 
     @MainActor private func createStatusBarItem() {
         guard statusItem == nil else { return }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
-            Self.applyStatusBarImage(to: button, degraded: false)
+            Self.applyStatusBarImage(to: button, status: .unavailable)
         }
 
         // Attach a menu — clicking the crab opens this menu
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "🦀 MacCrab", action: nil, keyEquivalent: ""))
+        let healthItem = NSMenuItem(title: V2MenuBarProtectionStatus.unavailable.label,
+                                   action: #selector(showDashboard), keyEquivalent: "")
+        healthItem.target = self
+        statusHealthItem = healthItem
+        menu.addItem(healthItem)
         menu.addItem(NSMenuItem.separator())
 
         // Helper: build a menu item with an SF Symbol leading icon
@@ -685,6 +690,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                               key: "q"))
 
         statusItem?.menu = menu
+        updateStatusBarIcon()
     }
 
     @objc private func checkForUpdates() {
@@ -782,7 +788,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func flashCrab(for severity: Severity) {
         guard let button = statusItem?.button else { return }
-        let originalAccessibilityLabel = button.accessibilityLabel() ?? "MacCrab"
 
         // A live alert updates the accessibility label (so VoiceOver announces
         // it) but the menu-bar glyph stays the single, normally-spaced crab —
@@ -791,9 +796,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Reset the label after 10s.
         button.setAccessibilityLabel("MacCrab — \(severity.rawValue) severity alert")
 
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 10_000_000_000)
-            button.setAccessibilityLabel(originalAccessibilityLabel)
+            self?.updateStatusBarIcon()
         }
     }
 

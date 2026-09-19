@@ -1464,6 +1464,20 @@
         "expression": "steps.count - 12",
         "type": "lld"
       }
+    ],
+    "startup.upgrade.counts": [
+      {
+        "expression": "processedEvents",
+        "type": "lld"
+      },
+      {
+        "expression": "sourceEvents",
+        "type": "lld"
+      },
+      {
+        "expression": "remainingEvents",
+        "type": "lld"
+      }
     ]
   }
 }

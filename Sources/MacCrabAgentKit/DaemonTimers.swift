@@ -7948,6 +7948,21 @@ func recoverEventStoreBeforeProducers(
             return ran ? .ran : .didNotRun
         },
         reprobeOrdinaryAdmission: {
+            // Keep the fixed upgrade allowance through physical reclamation.
+            // Restoring at schema finalization alone can strand the now-v8
+            // store above its configured cap on this boot or the next one.
+            let beforeRestore = try measureDatabaseFootprintBytes(dbPath: dbPath)
+            guard !boundary.requiresStartupConvergence(
+                footprintBytes: beforeRestore
+            ) else {
+                throw PreIngestionStorageRecoveryError.startupTargetNotReached(
+                    component: "EventStore",
+                    footprintBytes: beforeRestore,
+                    targetBytes: boundary.targetBytes
+                )
+            }
+            _ = try await eventStore
+                .restoreConfiguredStorageAdmissionAfterLegacyUpgrade()
             let priority = try await eventStore
                 .reprobeStorageAdmissionForWrite(lane: .priority)
             guard priority.maxFootprintBytes == boundary.nominalCapBytes,
@@ -7986,6 +8001,7 @@ func recoverEventStoreBeforeProducers(
                         targetBytes: boundary.targetBytes
                     )
             }
+            try await eventStore.completeLegacyUpgradeHeadroom()
         }
     )
 }

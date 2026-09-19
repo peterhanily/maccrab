@@ -10,6 +10,7 @@ import MacCrabCore
 public struct V2HeartbeatSnapshot: Sendable, Equatable {
     public let writtenAt: Date
     public var bootPhase: String? = nil
+    var storeUpgradeProgress: V2StoreUpgradeProgress? = nil
     public var liveness: Bool? = nil
     public var rulesLoaded: Int? = nil
     public var engineIdentity: EngineTelemetryIdentity? = nil
@@ -1094,6 +1095,7 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         return V2HeartbeatSnapshot(
             writtenAt: writtenAt,
             bootPhase: raw["boot_phase"] as? String,
+            storeUpgradeProgress: V2StoreUpgradeProgress(raw: raw),
             liveness: raw["liveness"] as? Bool,
             rulesLoaded: raw["rules_loaded"] as? Int,
             engineIdentity: EngineTelemetryIdentity(heartbeat: raw),

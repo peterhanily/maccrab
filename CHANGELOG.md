@@ -3,6 +3,44 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.1] — 2026-09-19
+
+### Fixed
+- **Legacy event-store upgrades can proceed when inherited data exceeds a lowered
+  storage cap.** Startup records a fixed temporary allowance before migration,
+  preserves that allowance across interrupted boots, and retains the existing
+  disk-space and transaction limits. After migration and compaction, the engine
+  restores the configured cap and proves ordinary write admission before
+  starting monitoring. This fixes the v1.22.0 upgrade refusal reported as
+  `legacy bootstrap checkpoint does not fit the unchanged family cap` without
+  changing the saved storage preference or deleting protected history. A cap
+  that cannot hold protected retained data can still prevent readiness.
+- **Transient SQLite contention during EventStore initialization receives bounded
+  retries.** Capacity, integrity, and other permanent failures retain their
+  original classification rather than being treated as transient waits.
+- **Database migration has a visible startup phase with durable progress.**
+  Overview and System Health show processed and remaining counts; diagnostics
+  retain migrated, expired, and preserved-corrupt counts. Protection remains
+  unready during migration, and dashboard event readers defer while it runs.
+- **The menu bar visibly warns when protection cannot be confirmed.** The crab
+  gains an exclamation mark for startup, upgrade, unavailable, or degraded
+  protection. Heartbeat polling works without a dashboard window and refuses
+  missing, stale, unidentified, or previous-process health as confirmation.
+- **Rule reload reports queueing rather than completion.** The dashboard requires
+  a recent ready heartbeat from the selected engine before writing its request.
+  The toast states that completion is unconfirmed; broad development-daemon
+  signal fallbacks no longer make an unrelated engine count as success.
+
+### Verification
+- Self-contained fixtures exercise the shipped v1.21.5 schema, lowered caps
+  with the production transaction reserve, interruption and restart, migration
+  conservation, disk refusal, and return to ordinary write readiness.
+- [Upgrade qualification](docs/UPGRADE_QUALIFICATION.md) records source-test
+  evidence separately from the required installed-candidate checks. Source
+  tests do not certify Sparkle installation or installed runtime qualification.
+- New startup and reload messages have English fallbacks in the other language
+  catalogs; native translations and packaged visual review remain outstanding.
+
 ## [1.22.0] — 2026-09-17
 
 ### Fixed

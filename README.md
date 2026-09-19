@@ -3,10 +3,10 @@
 **Open, local-first macOS detection & investigation — with first-class visibility into what AI coding agents do on your Mac.** For developers, researchers, and Mac security practitioners.
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
-[![Validation](https://img.shields.io/badge/release%20qualification-passed-brightgreen)](CHANGELOG.md)
-[![Tests](https://img.shields.io/badge/tests-4742%20passing-brightgreen)]()
+[![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
+[![Tests](https://img.shields.io/badge/tests-4753%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
-[![Version](https://img.shields.io/badge/version-1.22.0-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.22.1-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -125,19 +125,24 @@ MacCrab keeps detection data locally, and on an actively-used machine that adds 
 
 | Store | Cap | Notes |
 |-------|----:|-------|
-| `events.db` | 340 MiB | Event journal and search projection. The default hot tier is 30 minutes; recent process events have a soft 60-minute retention floor. |
+| `events.db` | 376 MiB | Event journal and search projection. The default hot tier is 30 minutes; recent process events have a soft 60-minute retention floor. |
 | `alerts.db` | 200 MiB | Alerts, analyst metadata, and new trigger evidence; includes the 100 MiB evidence allocation. |
 | `campaigns.db` | 50 MiB | Detected attack campaigns. |
 | `tracegraph.db` | 250 MiB | Causal-graph entity/edge substrate. |
 | `traces.db` | 100 MiB | Agent/OTLP spans when enabled. |
 
-These budgets total **940 MiB**, with smaller actual use on light workloads.
-Database-family accounting includes SQLite sidecars. A v1.22.0 upgrade may retain
+These budgets total **976 MiB**, with smaller actual use on light workloads.
+Database-family accounting includes SQLite sidecars. An upgrade may retain
 up to another 100 MiB temporarily while legacy evidence remains in `events.db`.
+An unfinished legacy event-store upgrade can also use a fixed temporary
+allowance measured before migration. The same allowance survives restarts;
+startup restores the configured cap and proves write readiness before monitoring
+starts. Physical free-space checks and protected-history limits still apply.
 Forensic cases, exported bundles, reports, and logs are additional storage, so
-940 MiB is not a cap on the entire support directory. Budgets are tunable under
+976 MiB is not a cap on the entire support directory. Budgets are tunable under
 the `storage` block in `daemon_config.json`; size pressure can shorten retention.
-See [KNOWN_LIMITS.md](KNOWN_LIMITS.md) for transition and admission behavior.
+See [KNOWN_LIMITS.md](KNOWN_LIMITS.md) for transition and admission behavior and
+[upgrade qualification](docs/UPGRADE_QUALIFICATION.md) for the migration contract.
 
 > **History:** Before v1.18, `tracegraph.db` had no retention sweep and could grow without bound — it was **field-observed at 17 GB**. v1.18 added time-based retention, a size cap, and an orphan sweep; v1.19 made all caps configurable. If you ran a pre-v1.18 build, a one-time prune reclaims the space on first launch.
 
@@ -663,10 +668,14 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-The current release is **v1.22.0**. See [CHANGELOG.md](CHANGELOG.md) for the full
+This source tree targets **v1.22.1**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.22.1** — fixes legacy event-store upgrades blocked by a lowered storage
+  cap, using a fixed temporary allowance that is retired before monitoring
+  starts; shows migration progress and a visible menu-bar warning when protection
+  is not confirmed; distinguishes queued rule reloads from confirmed completion.
 - **v1.22.0** — fixed a crash on the enrichment-timeout path; event storage now
   reclaims already-freed space and expired events are reliably reclaimed;
   the notification channel now starts without a window open; network-blocking

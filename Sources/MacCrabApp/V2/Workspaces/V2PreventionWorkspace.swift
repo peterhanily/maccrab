@@ -402,24 +402,17 @@ struct V2PreventionWorkspace: View {
                     V2ActionButton(String(localized: "prevention.triggerSighup", defaultValue: "Trigger SIGHUP"), icon: "arrow.clockwise", style: .secondary,
                                    tooltip: String(localized: "prevention.triggerSighupTooltip", defaultValue: "Reload rules (threat-intel refresh runs only when feeds are enabled)")) {
                         Task {
-                            // C3: deliver a REAL SIGHUP. The daemon's handler always
-                            // reloads the single/sequence/graph rulesets; it ALSO fires
-                            // a one-shot threat-intel refresh, but only when the
-                            // threat-intel feeds are enabled (egress is opt-in). The
-                            // tooltip/toast are worded to reflect that conditional half
-                            // rather than promising a refresh unconditionally. The old
-                            // call (refreshThreatIntel) only did the intel half and
-                            // never reloaded rules. Detached so the file-IPC write +
-                            // pkill fallback never beachball the main thread.
+                            // Queue on the selected engine's inbox. A successful
+                            // write does not prove SIGHUP delivery or completion.
                             let ok = await Task.detached(priority: .userInitiated) {
                                 V2DaemonControl.reloadDetectionRules()
                             }.value
                             await MainActor.run {
                                 state.showToast(V2Toast(
                                     kind: ok ? .info : .error,
-                                    title: ok ? String(localized: "prevention.toastSighupSignaled", defaultValue: "SIGHUP signaled") : String(localized: "prevention.toastSignalFailed", defaultValue: "Signal failed"),
-                                    detail: ok ? String(localized: "prevention.toastReloading", defaultValue: "Rules reloading — threat-intel refresh runs only if feeds are enabled")
-                                              : String(localized: "prevention.toastNoDaemon", defaultValue: "no daemon to signal")
+                                    title: ok ? String(localized: "system.reloadRulesQueuedTitle", defaultValue: "Rule reload queued") : String(localized: "system.reloadRulesFailTitle", defaultValue: "Couldn't request reload"),
+                                    detail: ok ? String(localized: "system.reloadRulesQueuedDetail", defaultValue: "The request was queued. The engine has not confirmed that its rules were reloaded.")
+                                              : String(localized: "system.reloadRulesUnavailableDetail", defaultValue: "The engine is not ready, its heartbeat is missing or stale, or the request could not be queued.")
                                 ))
                             }
                         }

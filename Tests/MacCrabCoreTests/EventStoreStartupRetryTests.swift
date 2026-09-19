@@ -148,7 +148,8 @@ struct EventStoreStartupRetryTests {
         let io = EventStoreError.sqliteFailure(context: "ordinary checkpoint", message: "IO unavailable",
             resultCode: SQLITE_IOERR, extendedResultCode: SQLITE_IOERR, systemErrno: EIO)
         let integrity = EventStoreError.decodingFailed("ordinary integrity failure")
-        for expected in [admission as any Error, io, integrity] {
+        let capacity = EventStoreError.storageNotReady("legacy transition exceeds its fixed ceiling")
+        for expected in [admission as any Error, io, integrity, capacity] {
             let clock = Clock()
             var attempts = 0
             do {
@@ -188,4 +189,5 @@ struct EventStoreStartupRetryTests {
             Issue.record("cancelled startup retry unexpectedly completed")
         } catch is CancellationError { }
     }
+
 }

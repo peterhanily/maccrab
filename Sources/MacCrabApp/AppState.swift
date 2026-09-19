@@ -157,6 +157,7 @@ final class AppState: ObservableObject, EventQueryReading {
         /// "ready" if liveness:true).
         var engineIdentity: EngineTelemetryIdentity? = nil
         var bootPhase: String?
+        var storeUpgradeProgress: V2StoreUpgradeProgress? = nil
         var liveness: Bool?
         /// Wall-clock time at which the daemon started its boot. Used
         /// to display elapsed time in the dashboard's "starting" banner.
@@ -820,6 +821,7 @@ final class AppState: ObservableObject, EventQueryReading {
         // those.
         snapshot.engineIdentity = identity
         snapshot.bootPhase = json["boot_phase"] as? String
+        snapshot.storeUpgradeProgress = V2StoreUpgradeProgress(raw: json)
         snapshot.liveness = json["liveness"] as? Bool
         if let startedAt = json["started_at_unix"] as? TimeInterval {
             snapshot.startedAt = Date(timeIntervalSince1970: startedAt)
@@ -2979,10 +2981,7 @@ final class AppState: ObservableObject, EventQueryReading {
     }
 
     func reloadDaemonRules() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = ["-HUP", "maccrabd"]
-        try? task.run()
+        _ = V2DaemonControl.reloadDetectionRules(source: engineSource)
     }
 
     /// Human-readable result of the last `pruneAlerts` call — shown next to

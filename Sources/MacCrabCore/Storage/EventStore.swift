@@ -811,6 +811,8 @@ public actor EventStore {
     private var journalExpiryCheckpointHookForTesting:
         (@Sendable () -> Void)?
     private var storagePolicy: SQLitePersistentStorePolicy?
+    private var legacyUpgradeConfiguredPolicy: SQLitePersistentStorePolicy?
+    private var legacyUpgradeReceipt: EventStoreLegacyUpgradeEnvelope.Receipt?
     private var storageAdmission: SQLitePersistentStoreAdmission?
     /// Authoritative PRAGMA page_size captured at each open/reopen. Transaction
     /// estimates use this value rather than assuming the usual 4 KiB so legacy
@@ -3004,6 +3006,7 @@ public actor EventStore {
         at path: String,
         forceReadOnly: Bool = false,
         storagePolicy: SQLitePersistentStorePolicy? = nil,
+        allowLegacyUpgradeHeadroom: Bool = false,
         liveMemoryBudget: EventPipelineLiveMemoryBudget
     ) throws -> (
         OpaquePointer,
@@ -3011,7 +3014,8 @@ public actor EventStore {
         OpaquePointer?,
         SQLitePersistentStoreAdmission?,
         Int64,
-        SQLiteControlledCheckpointController?
+        SQLiteControlledCheckpointController?,
+        EventStoreLegacyUpgradeEnvelope.Receipt?
     ) {
         // Preflight the DB path and its WAL/SHM/journal sidecars for clear
         // diagnostics and reject multiply-linked family members. The actual
@@ -3029,7 +3033,7 @@ public actor EventStore {
         _ = try SQLitePersistentStoreAdmission.measureFamily(path)
         let existingDatabase = try SQLitePersistentStoreAdmission
             .mainFileExists(path)
-        let effectivePolicy = forceReadOnly
+        var effectivePolicy = forceReadOnly
             ? nil : (storagePolicy ?? Self.defaultStoragePolicy(for: path))
         var admission = try effectivePolicy.map {
             try SQLitePersistentStoreAdmission(
@@ -3147,6 +3151,20 @@ public actor EventStore {
             )
         }
         let existingEventSubstrate = eventTableStep == SQLITE_ROW
+        var legacyUpgradeReceipt: EventStoreLegacyUpgradeEnvelope.Receipt?
+        if !isReadOnly, existingEventSubstrate, allowLegacyUpgradeHeadroom,
+           let configured = effectivePolicy {
+            let established = try EventStoreLegacyUpgradeEnvelope.establish(
+                path: path, configured: configured,
+                needsJournalUpgrade: try !Self.journalSchemaIsFinalized(on: handle)
+            )
+            effectivePolicy = established.0
+            legacyUpgradeReceipt = established.1
+            admission = try SQLitePersistentStoreAdmission(
+                databasePath: path, policy: established.0,
+                latchOperationalPressure: true
+            )
+        }
         if !isReadOnly, let effectivePolicy {
             checkpointController = try .install(
                 on: handle,
@@ -3302,7 +3320,7 @@ public actor EventStore {
                     let peak = SQLitePersistentStoreAdmission.saturatingAdd(
                         snapshot.familyFootprintBytes, snapshot.sidecarBytes)
                     guard peak <= journalTransitionCap else {
-                        throw EventStoreError.storageNotReady("legacy bootstrap checkpoint does not fit the unchanged family cap")
+                        throw EventStoreError.storageNotReady("legacy bootstrap checkpoint does not fit the fixed transition allowance; increase the events storage limit before retrying")
                     }
                 }
                 var logFrames: Int32 = 0
@@ -3324,7 +3342,7 @@ public actor EventStore {
                     )
                 }
                 if checkpointRC == SQLITE_BUSY || checkpointRC == SQLITE_LOCKED {
-                    return false
+                    throw EventStoreError.busy("legacy journal transition checkpoint is pinned by a reader")
                 }
                 guard checkpointRC == SQLITE_OK else {
                     let failure = SQLiteFailureDetails(
@@ -3339,7 +3357,10 @@ public actor EventStore {
                         systemErrno: failure.systemErrno
                     )
                 }
-                return logFrames == 0 || logFrames == checkpointedFrames
+                guard logFrames == 0 || logFrames == checkpointedFrames else {
+                    throw EventStoreError.busy("legacy journal transition checkpoint has undrained WAL frames")
+                }
+                return true
             }
 
             func transitionCanStartNextStatement(estimatedBytes: Int64 = 0) throws -> Bool {
@@ -4060,7 +4081,8 @@ public actor EventStore {
             insertStmt,
             admission,
             pageSize,
-            checkpointController
+            checkpointController,
+            legacyUpgradeReceipt
         )
     }
 
@@ -4322,6 +4344,7 @@ public actor EventStore {
         directory: String = "/Library/Application Support/MacCrab",
         forceReadOnly: Bool = false,
         storagePolicy: SQLitePersistentStorePolicy? = nil,
+        allowLegacyUpgradeHeadroom: Bool = false,
         liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared
     ) throws {
         let maccrabDir = URL(fileURLWithPath: directory)
@@ -4361,7 +4384,7 @@ public actor EventStore {
         // display while closing the direct-write tamper path.
         // (Skip umask + chmod entirely when forceReadOnly — see Wave 9A.)
         if forceReadOnly {
-            let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
+            let (handle, ro, stmt, admission, pageSize, controller, receipt) = try Self.openDatabase(
                 at: databasePath,
                 forceReadOnly: true,
                 storagePolicy: nil,
@@ -4373,13 +4396,17 @@ public actor EventStore {
             self.storageAdmission = admission
             self.sqlitePageSizeBytes = pageSize
             self.checkpointController = controller
+            self.legacyUpgradeReceipt = receipt
+            self.legacyUpgradeConfiguredPolicy = receipt == nil ? nil : effectiveStoragePolicy
+            self.storagePolicy = admission?.policy ?? effectiveStoragePolicy
         } else {
             let oldUmask = umask(0o027)
             defer { umask(oldUmask) }
-            let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
+            let (handle, ro, stmt, admission, pageSize, controller, receipt) = try Self.openDatabase(
                 at: databasePath,
                 forceReadOnly: false,
                 storagePolicy: effectiveStoragePolicy,
+                allowLegacyUpgradeHeadroom: allowLegacyUpgradeHeadroom,
                 liveMemoryBudget: liveMemoryBudget
             )
             self.db = handle
@@ -4388,6 +4415,9 @@ public actor EventStore {
             self.storageAdmission = admission
             self.sqlitePageSizeBytes = pageSize
             self.checkpointController = controller
+            self.legacyUpgradeReceipt = receipt
+            self.legacyUpgradeConfiguredPolicy = receipt == nil ? nil : effectiveStoragePolicy
+            self.storagePolicy = admission?.policy ?? effectiveStoragePolicy
             // Re-clamp existing files (incl. any created 0o660 by an older
             // build) to 0o640: owner rw, group read-only, no other.
             chmod(databasePath, 0o640)
@@ -4404,6 +4434,7 @@ public actor EventStore {
         path: String,
         forceReadOnly: Bool = false,
         storagePolicy: SQLitePersistentStorePolicy? = nil,
+        allowLegacyUpgradeHeadroom: Bool = false,
         liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared
     ) throws {
         self.databasePath = path
@@ -4412,10 +4443,11 @@ public actor EventStore {
             ? nil
             : (storagePolicy ?? Self.defaultStoragePolicy(for: path))
         self.storagePolicy = effectiveStoragePolicy
-        let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
+        let (handle, ro, stmt, admission, pageSize, controller, receipt) = try Self.openDatabase(
             at: path,
             forceReadOnly: forceReadOnly,
             storagePolicy: effectiveStoragePolicy,
+            allowLegacyUpgradeHeadroom: allowLegacyUpgradeHeadroom,
             liveMemoryBudget: liveMemoryBudget
         )
         self.db = handle
@@ -4424,6 +4456,9 @@ public actor EventStore {
         self.storageAdmission = admission
         self.sqlitePageSizeBytes = pageSize
         self.checkpointController = controller
+        self.legacyUpgradeReceipt = receipt
+        self.legacyUpgradeConfiguredPolicy = receipt == nil ? nil : effectiveStoragePolicy
+        self.storagePolicy = admission?.policy ?? effectiveStoragePolicy
     }
 
     deinit {
@@ -15046,8 +15081,14 @@ public actor EventStore {
     /// Crash-resumable rc.12 -> rc.13 transition. Each source row is removed
     /// only in the same transaction that either journals its canonical Event or
     /// preserves its exact original bytes+SHA in the immutable quarantine.
+    /// - Parameter progress: invoked with the durable migration counts as each
+    ///   batch lands. A first upgrade from a pre-journal store transcodes every
+    ///   inherited row before any collector starts, which on a large store is
+    ///   minutes; without this the boot is indistinguishable from a hang and the
+    ///   operator is shown a bare degraded banner with no explanation.
     public func recoverJournalBeforeProducers(
-        now: Date = Date()
+        now: Date = Date(),
+        progress: (@Sendable (EventJournalRecoverySnapshot) -> Void)? = nil
     ) async throws -> EventJournalRecoverySnapshot {
         terminalSettlementProtectionActive = false
         defer { terminalSettlementProtectionActive = true }
@@ -15128,6 +15169,7 @@ public actor EventStore {
                 // do not rewrite `updated_at`, bump mutation_generation, or
                 // force a TRUNCATE checkpoint merely to restate stage=2.
                 try finalizeJournalProjectionSchema()
+                progress?(existingState)
                 return existingState
             }
             if newLegacyEvents > 0 {
@@ -15185,6 +15227,9 @@ public actor EventStore {
             ?? SQLitePersistentStorePolicy.eventTransactionReserveBytes
         var migrationFormationLimit = EventJournalCodec.maximumEventsPerBlock
         migrationLoop: while true {
+            if let progress, let observed = try? migrationSnapshot() {
+                progress(observed)
+            }
             let rows = try nextLegacyJournalRows(limit: 128)
             guard !rows.isEmpty else { break }
             var prepared: [PreparedPersistedEvent] = []
@@ -15374,7 +15419,9 @@ public actor EventStore {
         try requireJournalRecoveryBoundary()
         try finalizeJournalProjectionSchema()
         projectionOwnedUpperBoundBytes = nil
-        return try migrationSnapshot()
+        let completed = try migrationSnapshot()
+        progress?(completed)
+        return completed
     }
 
     /// Startup may defer retained work to avoid a reader-driven boot loop.
@@ -20796,10 +20843,11 @@ public actor EventStore {
             // primary init — a self-heal must not silently re-loosen perms.
             let oldUmask = umask(0o027)
             defer { umask(oldUmask) }
-            let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
+            let recoveryPolicy = legacyUpgradeConfiguredPolicy ?? storagePolicy
+            let (handle, ro, stmt, admission, pageSize, controller, receipt) = try Self.openDatabase(
                 at: databasePath,
                 forceReadOnly: false,
-                storagePolicy: storagePolicy,
+                storagePolicy: recoveryPolicy,
                 liveMemoryBudget: liveMemoryBudget
             )
             db = handle
@@ -20808,6 +20856,9 @@ public actor EventStore {
             storageAdmission = admission
             sqlitePageSizeBytes = pageSize
             checkpointController = controller
+            legacyUpgradeReceipt = receipt
+            storagePolicy = admission?.policy ?? recoveryPolicy
+            legacyUpgradeConfiguredPolicy = nil
             chmod(databasePath, 0o640)
             chmod(databasePath + "-wal", 0o640)
             chmod(databasePath + "-shm", 0o640)
@@ -21444,6 +21495,43 @@ public actor EventStore {
         return result
     }
 
+    /// End temporary admission after journal recovery and boot expiry. Keep
+    /// the receipt until ordinary producer admission is proved; interruption
+    /// during physical convergence must resume the same fixed allowance.
+    @discardableResult
+    public func restoreConfiguredStorageAdmissionAfterLegacyUpgrade() throws
+        -> SQLitePersistentStoreAdmissionSnapshot? {
+        guard legacyUpgradeReceipt != nil, let policy = legacyUpgradeConfiguredPolicy,
+              let db else { return storageAdmissionSnapshot() }
+        guard try Self.journalSchemaIsFinalized(on: db),
+              try migrationSnapshot().complete else {
+            throw EventStoreError.storageNotReady(
+                "legacy upgrade cannot restore its configured cap before migration completes"
+            )
+        }
+        return try updateStorageAdmission(policy)
+    }
+
+    /// Called only after the daemon has converged to its configured startup
+    /// target. Independently prove both producer lanes before retiring the
+    /// durable permission for transition-only space.
+    public func completeLegacyUpgradeHeadroom() throws {
+        guard let receipt = legacyUpgradeReceipt else { return }
+        guard let legacyUpgradeConfiguredPolicy,
+              storagePolicy == legacyUpgradeConfiguredPolicy,
+              let db, try Self.journalSchemaIsFinalized(on: db),
+              try migrationSnapshot().complete else {
+            throw EventStoreError.storageNotReady(
+                "legacy upgrade completion requires the configured policy and finalized journal"
+            )
+        }
+        _ = try reprobeStorageAdmissionForWrite(lane: .priority)
+        _ = try reprobeStorageAdmissionForWrite(lane: .file)
+        try EventStoreLegacyUpgradeEnvelope.complete(path: databasePath, receipt: receipt)
+        legacyUpgradeReceipt = nil
+        self.legacyUpgradeConfiguredPolicy = nil
+    }
+
     private func reopenAfterStorageRecovery() throws {
         guard let policy = storagePolicy else { return }
         let (
@@ -21452,7 +21540,8 @@ public actor EventStore {
             newStatement,
             newAdmission,
             newPageSizeBytes,
-            newCheckpointController
+            newCheckpointController,
+            _
         ) = try Self.openDatabase(
             at: databasePath,
             forceReadOnly: false,

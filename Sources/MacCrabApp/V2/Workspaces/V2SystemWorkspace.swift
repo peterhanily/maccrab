@@ -300,20 +300,25 @@ public struct V2SystemWorkspace: View {
 
     private func startupStatusBanner(_ heartbeat: V2HeartbeatSnapshot) -> some View {
         let starting = heartbeat.readiness == .starting
+        let upgrading = heartbeat.bootPhase == "upgrading_store"
         let storageBlocked = heartbeat.bootPhase == "storage_not_ready"
         return VStack(alignment: .leading, spacing: 6) {
-            Label(starting
+            Label(upgrading ? V2StoreUpgradeProgress.title : starting
                   ? String(localized: "system.startupTitle", defaultValue: "Protection is starting")
                   : (storageBlocked
                      ? String(localized: "system.storageNotReadyTitle", defaultValue: "Storage needs attention")
                      : String(localized: "system.notReadyTitle", defaultValue: "The engine is not ready")),
                   systemImage: starting ? "hourglass" : "exclamationmark.shield.fill")
                 .font(V2Theme.cardTitle()).foregroundStyle(V2Theme.warning)
-            Text(starting
+            Text(upgrading ? V2StoreUpgradeProgress.detail : starting
                  ? String(localized: "system.startupDetail", defaultValue: "The engine is preparing storage, rules, and sensors. Protection will be confirmed after startup completes.")
                  : String(localized: "system.notReadyDetail", defaultValue: "Monitoring has not started. Export diagnostics to include the startup state when reporting this issue."))
                 .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
+            if upgrading, let progress = heartbeat.storeUpgradeProgress {
+                Text(progress.counts)
+                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .v2Panel()
@@ -346,12 +351,12 @@ public struct V2SystemWorkspace: View {
                 V2ActionButton(String(localized: "system.reloadRules", defaultValue: "Reload rules"), icon: "arrow.clockwise", style: .secondary) {
                     let ok = V2DaemonControl.reloadDetectionRules()
                     state.showToast(ok
-                        ? V2Toast(kind: .success,
-                                  title: String(localized: "system.reloadRulesOkTitle", defaultValue: "Rule reload requested"),
-                                  detail: String(localized: "system.reloadRulesOkDetail", defaultValue: "The engine will reload its rules shortly."))
+                        ? V2Toast(kind: .info,
+                                  title: String(localized: "system.reloadRulesQueuedTitle", defaultValue: "Rule reload queued"),
+                                  detail: String(localized: "system.reloadRulesQueuedDetail", defaultValue: "The request was queued. The engine has not confirmed that its rules were reloaded."))
                         : V2Toast(kind: .error,
                                   title: String(localized: "system.reloadRulesFailTitle", defaultValue: "Couldn't request reload"),
-                                  detail: String(localized: "system.reloadRulesFailDetail", defaultValue: "No running engine inbox was found.")))
+                                  detail: String(localized: "system.reloadRulesUnavailableDetail", defaultValue: "The engine is not ready, its heartbeat is missing or stale, or the request could not be queued.")))
                 }
                 V2ActionButton(String(localized: "system.exportDiagnostics", defaultValue: "Export diagnostics"), icon: "square.and.arrow.up", style: .secondary) {
                     exportDiagnostics()

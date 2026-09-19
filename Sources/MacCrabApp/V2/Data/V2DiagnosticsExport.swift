@@ -37,7 +37,7 @@ struct V2DiagnosticsExport: Identifiable, Sendable {
                 status["readiness"] = heartbeat.readiness.rawValue
                 // The raw phase can change across versions. Preserve known
                 // phases only; readiness still describes an unknown phase.
-                let known = ["starting", "stores_ready", "storage_not_ready", "rules_loaded", "collectors_started", "ready"]
+                let known = ["starting", "upgrading_store", "stores_ready", "storage_not_ready", "rules_loaded", "collectors_started", "ready"]
                 status["boot_phase"] = known.contains(phase) ? phase : "other"
             }
             if let identity = heartbeat.engineIdentity {
@@ -47,6 +47,13 @@ struct V2DiagnosticsExport: Identifiable, Sendable {
                 status["engine_build"] = identity.build
             }
             if let count = heartbeat.rulesLoaded { status["rules_loaded"] = count }
+            if let progress = heartbeat.storeUpgradeProgress {
+                status["upgrade_source_events"] = progress.sourceEvents
+                status["upgrade_migrated_events"] = progress.migratedEvents
+                status["upgrade_remaining_events"] = progress.remainingEvents
+                if let expired = progress.expiredEvents { status["upgrade_expired_events"] = expired }
+                if let corrupt = progress.corruptPreservedEvents { status["upgrade_corrupt_preserved_events"] = corrupt }
+            }
             if let memory = heartbeat.residentMemoryMB { status["resident_memory_mb"] = memory }
             result["heartbeat"] = status
             if let dns = heartbeat.dnsCapture { result["dns_capture"] = dns.diagnosticDictionary }

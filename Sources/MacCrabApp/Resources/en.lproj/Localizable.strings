@@ -1549,6 +1549,12 @@
 "system.reactivateToastTitle" = "Reactivating System Extension";
 "system.reconnect" = "Reconnect";
 "system.reloadRules" = "Reload rules";
+"startup.upgrade.title" = "Upgrading event history";
+"startup.upgrade.detail" = "MacCrab is preparing your existing event history. Monitoring has not started yet; protection will be confirmed when startup completes.";
+"startup.upgrade.counts" = "%lld of %lld events processed · %lld remaining";
+"system.reloadRulesQueuedTitle" = "Rule reload queued";
+"system.reloadRulesQueuedDetail" = "The request was queued. The engine has not confirmed that its rules were reloaded.";
+"system.reloadRulesUnavailableDetail" = "The engine is not ready, its heartbeat is missing or stale, or the request could not be queued.";
 "system.reloadRulesFailDetail" = "No running engine inbox was found.";
 "system.reloadRulesFailTitle" = "Couldn't request reload";
 "system.reloadRulesOkDetail" = "The engine will reload its rules shortly.";

@@ -1853,3 +1853,11 @@
 "settings.abuseCH.save" = "儲存金鑰";
 "settings.abuseCH.saved" = "已驗證鑰匙圈儲存。引擎將在下次已啟用的情報來源更新時讀取金鑰；尚未測試服務是否接受此金鑰。";
 "settings.abuseCH.title" = "abuse.ch 驗證金鑰（Auth-Key）";
+
+/* Startup upgrade and queued reload: English fallback pending translation. */
+"startup.upgrade.title" = "Upgrading event history";
+"startup.upgrade.detail" = "MacCrab is preparing your existing event history. Monitoring has not started yet; protection will be confirmed when startup completes.";
+"startup.upgrade.counts" = "%lld of %lld events processed · %lld remaining";
+"system.reloadRulesQueuedTitle" = "Rule reload queued";
+"system.reloadRulesQueuedDetail" = "The request was queued. The engine has not confirmed that its rules were reloaded.";
+"system.reloadRulesUnavailableDetail" = "The engine is not ready, its heartbeat is missing or stale, or the request could not be queued.";

@@ -9,7 +9,7 @@ enum V2EngineReadiness: String, Equatable {
 
     init(bootPhase: String?, liveness: Bool?) {
         switch bootPhase {
-        case "starting", "stores_ready", "rules_loaded", "collectors_started":
+        case "starting", "upgrading_store", "stores_ready", "rules_loaded", "collectors_started":
             self = .starting
         case "ready":
             self = liveness == false ? .starting : .ready
@@ -19,6 +19,92 @@ enum V2EngineReadiness: String, Equatable {
             // Includes storage_not_ready and any future failure phase. Unknown
             // phase names must not become a green status by default.
             self = .unavailable
+        }
+    }
+}
+
+/// Counts describe durable upgrade work, not live monitoring. Only the current
+/// upgrading phase may display them; a ready heartbeat must discard old counts.
+struct V2StoreUpgradeProgress: Equatable, Sendable {
+    let sourceEvents: Int
+    let migratedEvents: Int
+    let remainingEvents: Int
+    let expiredEvents: Int?
+    let corruptPreservedEvents: Int?
+    var processedEvents: Int { sourceEvents - remainingEvents }
+
+    init?(raw: [String: Any]) {
+        guard raw["boot_phase"] as? String == "upgrading_store",
+              let source = raw["upgrade_source_events"] as? Int,
+              let migrated = raw["upgrade_migrated_events"] as? Int,
+              let remaining = raw["upgrade_remaining_events"] as? Int,
+              source >= 0, migrated >= 0, remaining >= 0,
+              remaining <= source, migrated <= source - remaining else { return nil }
+        let expired = raw["upgrade_expired_events"] as? Int
+        let corrupt = raw["upgrade_corrupt_preserved_events"] as? Int
+        let settledWithoutMigration = source - remaining - migrated
+        if let expired, expired < 0 || expired > settledWithoutMigration { return nil }
+        if let corrupt, corrupt < 0 || corrupt > settledWithoutMigration { return nil }
+        if let expired, let corrupt, corrupt != settledWithoutMigration - expired { return nil }
+        sourceEvents = source
+        migratedEvents = migrated
+        remainingEvents = remaining
+        expiredEvents = expired
+        corruptPreservedEvents = corrupt
+    }
+
+    static var title: String {
+        String(localized: "startup.upgrade.title", defaultValue: "Upgrading event history")
+    }
+
+    static var detail: String {
+        String(localized: "startup.upgrade.detail", defaultValue: "MacCrab is preparing your existing event history. Monitoring has not started yet; protection will be confirmed when startup completes.")
+    }
+
+    var counts: String {
+        String(localized: "startup.upgrade.counts", defaultValue: "\(processedEvents) of \(sourceEvents) events processed · \(remainingEvents) remaining")
+    }
+}
+
+/// The menu bar runs without a dashboard window or database provider. Read its
+/// own current heartbeat so opening a window is never required to see an outage.
+enum V2MenuBarProtectionStatus: Equatable {
+    case active, starting, upgrading, degraded, unavailable
+
+    static func resolve(heartbeat: V2HeartbeatSnapshot?, additionalDegradation: Bool = false,
+                        now: Date = Date()) -> Self {
+        guard let heartbeat, heartbeat.engineIdentity != nil else { return .unavailable }
+        let age = now.timeIntervalSince(heartbeat.writtenAt)
+        guard age.isFinite, age >= 0, age <= V2HeartbeatSnapshot.staleThreshold else { return .unavailable }
+        if heartbeat.bootPhase == "upgrading_store" { return .upgrading }
+        switch heartbeat.readiness {
+        case .starting: return .starting
+        case .unavailable: return .unavailable
+        case .ready:
+            let collectors = V2CollectorSummary(states: heartbeat.collectors.map(\.resolvedState))
+            return additionalDegradation || !collectors.allEnabledHealthy
+                || heartbeat.rulesLoaded == 0 || heartbeat.esSensorDegraded
+                || heartbeat.traceGraphStorageAdmission?.evidenceUnavailable == true
+                || heartbeat.browserInventory?.degraded == true
+                || heartbeat.sequenceCheckpoint?.degraded == true
+                || heartbeat.timerLifecycle?.featureDegraded == true
+                || (heartbeat.detectionWorkLifecycle?.detectionProtectionDegraded
+                    ?? heartbeat.legacyDerivedWorkLifecycle?.featureDegraded) == true
+                || heartbeat.alertEvidenceBudget?.captureDegraded == true
+                || heartbeat.alertEvidenceBudget?.transitionDegraded == true
+                || heartbeat.alertWritesRequireAttention ? .degraded : .active
+        }
+    }
+
+    var title: String { self == .active ? "🦀" : "🦀!" }
+
+    var label: String {
+        switch self {
+        case .active: return "MacCrab — protection active"
+        case .starting: return "MacCrab — protection starting; monitoring not ready"
+        case .upgrading: return "MacCrab — upgrading event history; monitoring not ready"
+        case .degraded: return "MacCrab — protection degraded; open System health"
+        case .unavailable: return "MacCrab — protection unavailable; open System health"
         }
     }
 }
