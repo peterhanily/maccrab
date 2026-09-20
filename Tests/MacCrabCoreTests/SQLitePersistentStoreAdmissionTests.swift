@@ -825,7 +825,11 @@ struct SQLitePersistentStoreAdmissionTests {
 
         #expect(!timers.contains("EventStore.vacuumOnDedicatedConnection("),
                 "a detached VACUUM can race ingestion after its headroom probe")
-        #expect(occurrences(of: "try await eventStore.vacuum()", in: timers) == 2,
+        // v1.22.1: the tier-rollup enforcer passes `waitForReaders: false` so a
+        // reader cannot spend the writer actor's busy timeout. Match the shared
+        // prefix -- the invariant is that both enforcers call VACUUM on the
+        // actor, not that they pass identical arguments.
+        #expect(occurrences(of: "try await eventStore.vacuum(", in: timers) == 2,
                 "both cap enforcers must serialize VACUUM on the writer actor")
 
         #expect(signals.contains(

@@ -28,6 +28,14 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Legacy alerts retain the previous default of up to 50 evidence rows instead
   of being reduced to 16 rows after upgrade. Configured age and total-size
   limits still apply; this change cannot restore rows already removed.
+- **Background storage maintenance no longer stalls event writes behind a busy
+  database.** When another reader holds the events database open, the optional
+  maintenance checkpoint now reports that immediately and the sweep defers its
+  remaining reclamation to a later pass, instead of waiting out the write
+  timeout and then attempting more work that cannot succeed. The previous check
+  only recognised contention once the write-ahead log had grown past 64 MiB, so
+  a smaller but still-held log was missed. Ordinary write timeouts and the
+  required startup and recovery checkpoints are unchanged.
 - **Transient SQLite contention during EventStore initialization receives bounded
   retries.** Capacity, integrity, and other permanent failures retain their
   original classification rather than being treated as transient waits.

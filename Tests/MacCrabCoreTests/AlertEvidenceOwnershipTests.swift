@@ -1091,7 +1091,21 @@ struct AlertEvidenceOwnershipTests {
         let text = String(head[condition.lowerBound...])
         #expect(!text.contains("overCap &&"),
                 "compaction must not wait for the store to be over cap before running")
-        #expect(text.contains("!walPinned") && text.contains("!underPowerPressure"),
-                "the reader-pin and power-pressure guards must remain")
+        #expect(text.contains("!underPowerPressure"),
+                "the power-pressure guard must remain")
+        // v1.22.1: the reader-pin guard moved OUT of this condition and became
+        // stricter. The sweep now establishes drainability once, from SQLite's
+        // own checkpoint result, and returns early on contention -- so the
+        // optimize is still unreachable under a pin, via an earlier gate rather
+        // than a clause here. Pin that ordering instead of the old clause, or a
+        // future edit could drop the pin guard entirely and stay green.
+        guard let drainGate = timers.range(
+            of: "guard await maintenanceCheckpoint() else { return 0 }"
+        ) else {
+            Issue.record("the sweep no longer gates on the maintenance checkpoint result")
+            return
+        }
+        #expect(drainGate.lowerBound < gate.lowerBound,
+                "the reader-pin guard must still precede the FTS optimize")
     }
 }

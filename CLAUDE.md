@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (4421 tests in 684 suites)
+swift test                     # Unit tests (4777 tests in 752 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -68,7 +68,7 @@ Rules/            438 single-event Sigma-compatible YAML rules (17 tactic direct
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (4421 tests in 684 suites)
+Tests/            Swift Testing unit tests (4777 tests in 752 suites)
 ```
 
 ## Detection Stack (5 tiers)

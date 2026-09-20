@@ -242,6 +242,51 @@ default maintenance sweep, explicit smaller row limits, age and size cleanup,
 and the existing lowered-cap recovery fixtures. The new preservation test
 replaces a display-depth assertion; the total test count is unchanged.
 
+### Maintenance checkpoint contention, 2026-09-20
+
+Candidate 1.22.1.1155 remains unqualified. The host's free-space guard stopped
+the VM during its first upgraded boot, so the transition observer's ledger ends
+mid-migration at 36,593 of 83,580 source events with 46,987 remaining
+(`v1.22.1-default1155-upgrade/observer-heartbeat-transition.jsonl`). The VM was
+restarted and the candidate did reach readiness, but no preserved artifact
+records a terminal migration ledger, and `successor-report.json` is
+`status: "failed"` with `snapshots: []`. Neither the interrupted observation nor
+the restart establishes an uninterrupted upgrade or event/evidence conservation.
+
+The strict candidate capture then failed on native sensor-degraded coverage.
+Later numeric health cleared that advisory flag but retained one event-insert
+error and one priority-lane terminal-revision timeout. A fixed diagnostic places
+preparation-workspace acquisition timing out at 15:25:18.749 UTC
+(`v1.22.1-1155-checkpoint-stall-receipts/index.json`). No successful successor
+snapshot or completed-reboot proof was obtained; the original cohort deadline
+was not extended.
+
+Two preceding WAL truncation attempts returned SQLITE_BUSY after 5.389927542 s
+and 5.443125708 s — the writer connection's full `busy_timeout` — at
+`frames=1769/5597` and `frames=1769/5646`, with the sidecar measured at
+25,531,672 bytes, far below its 64 MiB limit (same receipt). Source inspection
+found a concrete maintenance defect: the sweep discarded the checkpoint's actual
+outcome and used only `WAL bytes > 64 MiB` to decide whether reclamation should
+be deferred. A smaller WAL can also be pinned, so that heuristic allowed further
+write-amplifying maintenance after a busy checkpoint.
+
+The correction makes optional maintenance checkpoints non-waiting and defers
+reclamation on their actual contention result, while ordinary write timeouts and
+required startup/recovery checkpoints keep their existing policy. Because the
+sweep now returns early on contention, its own FTS ceiling-exhaustion recovery
+is deferred too; that recovery remains unconditional at boot
+(`DaemonSetup.expireJournalBlocks`) and on the journal-expiry timer, so a
+ceiling-exhausted index is still rescued without waiting for an unpinned sweep.
+`EventStoreMaintenanceCheckpointTests` pins the exact condition: a pinned WAL
+below 64 MiB defers without spending the busy timeout, a required checkpoint
+still spends it, and the maintenance API reports contention as a deferral rather
+than a throw.
+
+The observed stalls and the source defect are a concrete lead, not a complete
+causal attribution of the capture failure. Failed attempts remain preserved, and
+the correction requires a new signed candidate with unchanged health and
+conservation gates.
+
 ## Installed release qualification
 
 These tests qualify source behavior, not Sparkle, signing, installation, or

@@ -54,8 +54,7 @@ struct StorageReclaimSlackTests {
                 totalPruned: 0,
                 footprintBytes: footprint,
                 targetBytes: target,
-                reclaimableSlackBytes: slack,
-                walPinned: false
+                reclaimableSlackBytes: slack
             ),
             "311 MiB of reclaimable freelist must trigger the reclaim even 1.4 MiB under target"
         )
@@ -70,8 +69,7 @@ struct StorageReclaimSlackTests {
                 totalPruned: 0,
                 footprintBytes: 350_834_688,
                 targetBytes: 352_321_536,
-                reclaimableSlackBytes: 0,
-                walPinned: false
+                reclaimableSlackBytes: 0
             )
         )
     }
@@ -84,8 +82,7 @@ struct StorageReclaimSlackTests {
                 totalPruned: 0,
                 footprintBytes: 100,
                 targetBytes: 352_321_536,
-                reclaimableSlackBytes: reclaimableSlackFloorBytes - 1,
-                walPinned: false
+                reclaimableSlackBytes: reclaimableSlackFloorBytes - 1
             )
         )
         #expect(
@@ -93,32 +90,10 @@ struct StorageReclaimSlackTests {
                 totalPruned: 0,
                 footprintBytes: 100,
                 targetBytes: 352_321_536,
-                reclaimableSlackBytes: reclaimableSlackFloorBytes,
-                walPinned: false
+                reclaimableSlackBytes: reclaimableSlackFloorBytes
             ),
             "the floor is inclusive"
         )
-    }
-
-    /// A reader-pinned WAL vetoes every reason. The reclaim cannot truncate
-    /// pages the pin holds alive and would only grow the sidecar.
-    @Test("a pinned WAL vetoes every reclaim reason")
-    func pinnedWALVetoesEveryReason() {
-        for (pruned, footprint, slack) in [
-            (10_000, Int64(100), Int64(0)),                        // pruned
-            (0, Int64(500_000_000), Int64(0)),                     // over target
-            (0, Int64(100), reclaimableSlackFloorBytes * 10),      // slack
-        ] {
-            #expect(
-                !StorageReclaimDecision.shouldReclaim(
-                    totalPruned: pruned,
-                    footprintBytes: footprint,
-                    targetBytes: 352_321_536,
-                    reclaimableSlackBytes: slack,
-                    walPinned: true
-                )
-            )
-        }
     }
 
     /// The two pre-existing reasons must keep working unchanged.
@@ -129,8 +104,7 @@ struct StorageReclaimSlackTests {
                 totalPruned: 1,
                 footprintBytes: 100,
                 targetBytes: 352_321_536,
-                reclaimableSlackBytes: 0,
-                walPinned: false
+                reclaimableSlackBytes: 0
             )
         )
         #expect(
@@ -138,8 +112,7 @@ struct StorageReclaimSlackTests {
                 totalPruned: 0,
                 footprintBytes: 352_321_537,
                 targetBytes: 352_321_536,
-                reclaimableSlackBytes: 0,
-                walPinned: false
+                reclaimableSlackBytes: 0
             )
         )
     }
@@ -153,8 +126,7 @@ struct StorageReclaimSlackTests {
                 footprintBytes: 100,
                 targetBytes: 352_321_536,
                 reclaimableSlackBytes: 0,
-                slackFloorBytes: 0,
-                walPinned: false
+                slackFloorBytes: 0
             )
         )
     }

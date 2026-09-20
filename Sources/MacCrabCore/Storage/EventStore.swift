@@ -20074,9 +20074,9 @@ public actor EventStore {
     /// drained main DB; post-checkpoint truncates the WAL that
     /// VACUUM itself produced so the on-disk footprint reflects the
     /// rebuilt DB.
-    public func vacuum() async throws {
+    public func vacuum(waitForReaders: Bool = true) async throws {
         guard let db = db else { return }
-        guard walCheckpoint() else {
+        guard try reclaimCheckpoint(waitForReaders: waitForReaders) else {
             throw EventStoreError.busy(
                 "VACUUM refused because the pre-checkpoint did not fully drain"
             )
@@ -20111,7 +20111,7 @@ public actor EventStore {
             let msg = String(cString: sqlite3_errmsg(db))
             throw EventStoreError.stepFailed("VACUUM failed: \(msg)")
         }
-        guard walCheckpointTruncate() else {
+        guard try reclaimCheckpoint(waitForReaders: waitForReaders, truncate: true) else {
             throw EventStoreError.busy(
                 "VACUUM completed but its WAL could not be fully drained/truncated"
             )
@@ -20195,6 +20195,44 @@ public actor EventStore {
         (try? walCheckpointTruncateObservation().truncated) ?? false
     }
 
+    package enum MaintenanceCheckpointOutcome: Sendable, Equatable {
+        case truncated
+        case deferredContention
+    }
+
+    /// A running maintenance sweep must not spend the writer connection's
+    /// busy timeout waiting for a reader. Required startup/recovery boundaries
+    /// retain the ordinary checkpoint API and its existing retry policy.
+    package func walCheckpointTruncateForMaintenance() throws
+        -> MaintenanceCheckpointOutcome {
+        let result = try walCheckpointTruncateObservation(waitForReaders: false)
+        try result.requireValidOutcome(context: "event maintenance checkpoint")
+        return result.truncated ? .truncated : .deferredContention
+    }
+
+    /// `truncate` distinguishes the pre-checkpoint (which only needs the WAL
+    /// drained) from the post-checkpoint (which must also shrink the sidecar).
+    /// It applies to the waiting path only: the non-waiting path always asks
+    /// for TRUNCATE and accepts a deferral, which is the STRICTER request.
+    ///
+    /// That is deliberate but not free. `walCheckpoint()`'s PASSIVE leg is
+    /// itself non-blocking and would drain — though not shrink — the sidecar
+    /// for a reader whose mark has caught up, where a non-waiting TRUNCATE
+    /// still reports contention. So for `waitForReaders: false, truncate:
+    /// false` this refuses in a narrow band the old path would have served.
+    /// The band is small (an ingesting engine moves a reader's mark behind
+    /// mxFrame almost immediately, where PASSIVE also fails to drain) and the
+    /// sweep retries, so the simpler single primitive is kept here rather than
+    /// reintroducing a mode matrix on the hot maintenance path.
+    private func reclaimCheckpoint(
+        waitForReaders: Bool, truncate: Bool = false
+    ) throws -> Bool {
+        if !waitForReaders {
+            return try walCheckpointTruncateForMaintenance() == .truncated
+        }
+        return truncate ? walCheckpointTruncate() : walCheckpoint()
+    }
+
     /// Exact checkpoint result for callers whose retry/error policy depends on
     /// the cause. The Boolean compatibility method is only best-effort.
     struct WALCheckpointObservation: Sendable, Equatable {
@@ -20248,10 +20286,28 @@ public actor EventStore {
     /// private connections without exposing this actor's live handle.
     nonisolated static func truncateCheckpoint(
         on handle: OpaquePointer,
+        waitForReaders: Bool = true,
         admit: () throws -> Void
     ) throws -> WALCheckpointObservation {
         try Task.checkCancellation()
         try admit()
+        var savedBusyTimeout: Int32?
+        if !waitForReaders {
+            var raw: OpaquePointer?
+            let prepared = sqlite3_prepare_v2(handle, "PRAGMA busy_timeout", -1, &raw, nil)
+            defer { sqlite3_finalize(raw) }
+            guard prepared == SQLITE_OK, let statement = raw,
+                  sqlite3_step(statement) == SQLITE_ROW,
+                  sqlite3_column_type(statement, 0) == SQLITE_INTEGER,
+                  let timeout = Int32(exactly: sqlite3_column_int64(statement, 0)),
+                  timeout >= 0, sqlite3_step(statement) == SQLITE_DONE else {
+                throw EventStoreError.storageNotReady("maintenance checkpoint could not preserve the busy timeout")
+            }
+            guard sqlite3_busy_timeout(handle, 0) == SQLITE_OK else {
+                throw EventStoreError.storageNotReady("maintenance checkpoint could not disable reader waiting")
+            }
+            savedBusyTimeout = timeout
+        }
         let inTransaction = sqlite3_get_autocommit(handle) == 0
         var log: Int32 = -1
         var ckpt: Int32 = -1
@@ -20265,16 +20321,26 @@ public actor EventStore {
         )
         // Capture before any follow-up SQLite call can replace the cause.
         let failure = SQLiteFailureDetails(resultCode: rc, db: handle)
+        let duration = started.duration(to: .now)
+        // There is no suspension or throwing operation between changing this
+        // actor-owned connection's timeout and restoring it. Ordinary writes
+        // and required checkpoints therefore keep their configured timeout.
+        if let savedBusyTimeout,
+           sqlite3_busy_timeout(handle, savedBusyTimeout) != SQLITE_OK {
+            throw EventStoreError.storageNotReady("maintenance checkpoint could not restore the busy timeout")
+        }
         return WALCheckpointObservation(failure: failure, logFrames: log,
-            checkpointedFrames: ckpt, duration: started.duration(to: .now),
+            checkpointedFrames: ckpt, duration: duration,
             connectionInTransaction: inTransaction)
     }
 
-    func walCheckpointTruncateObservation() throws -> WALCheckpointObservation {
+    func walCheckpointTruncateObservation(
+        waitForReaders: Bool = true
+    ) throws -> WALCheckpointObservation {
         guard let db, !isReadOnly else {
             throw EventStoreError.storageNotReady("checkpoint requires an open writable event store")
         }
-        let result = try Self.truncateCheckpoint(on: db) {
+        let result = try Self.truncateCheckpoint(on: db, waitForReaders: waitForReaders) {
             try admitStorageCheckpoint()
         }
         // Keep the existing pressure latch, using the captured original codes.
@@ -20332,7 +20398,9 @@ public actor EventStore {
     // reads the on-disk footprint directly via `statvfs` so it gets
     // exact numbers including the WAL/SHM sidecars.
     @discardableResult
-    public func incrementalVacuum(maxPages: Int) async throws -> Int {
+    public func incrementalVacuum(
+        maxPages: Int, waitForReaders: Bool = true
+    ) async throws -> Int {
         guard let db = db else { return 0 }
         guard StoragePragmas.readAutoVacuumMode(db) == 2 else { return 0 }
         let plan = SQLitePersistentStoreAdmission.boundedPageOperationPlan(
@@ -20344,7 +20412,7 @@ public actor EventStore {
         // The shared incremental-vacuum primitive cannot safely checkpoint:
         // it has no path/floor/family probes. Drain through this actor's fresh
         // whole-sidecar gate, then re-probe ordinary maintenance headroom.
-        guard walCheckpoint() else {
+        guard try reclaimCheckpoint(waitForReaders: waitForReaders) else {
             throw EventStoreError.stepFailed(
                 "incremental VACUUM refused because the pre-checkpoint did not fully drain"
             )
@@ -20359,7 +20427,7 @@ public actor EventStore {
                     maxPages: plan.pages
                 )
             }
-            guard walCheckpointTruncate() else {
+            guard try reclaimCheckpoint(waitForReaders: waitForReaders, truncate: true) else {
                 throw EventStoreError.stepFailed(
                     "incremental VACUUM completed but its WAL could not be fully drained/truncated"
                 )

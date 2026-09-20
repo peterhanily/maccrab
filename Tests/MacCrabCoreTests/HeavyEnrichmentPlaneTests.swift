@@ -118,6 +118,19 @@ struct HeavyEnrichmentPlaneTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
             latest = await plane.snapshot()
         }
+        if !predicate(latest) {
+            // Returning the last snapshot anyway keeps the caller's remaining
+            // assertions readable, but the expired wait is the real failure:
+            // report it here so the caller's downstream expectations are not
+            // mistaken for the root cause.
+            Issue.record(
+                """
+                waitForSnapshot expired after \(timeoutSeconds)s without the \
+                predicate holding; the snapshot below is the last observed \
+                state, not a satisfied one: \(latest)
+                """
+            )
+        }
         return latest
     }
 
@@ -201,10 +214,14 @@ struct HeavyEnrichmentPlaneTests {
             maximumQueuedWorkItems: 2,
             maximumOutstandingResults: 8,
             cacheCapacity: 4,
-            // Coalescing/cache semantics are independent of the production
-            // 50 ms budget. Keep a coarse test-only hang deadline so executor
-            // contention cannot turn this into a timeout-policy test.
-            operationTimeoutSeconds: 60
+            // The plane's deadline clock starts at admission, not at worker
+            // entry, so any budget that executor starvation can outrun turns
+            // this into a timeout-policy test: work 1 goes terminal, its key
+            // leaves activeByKey, and the second offer opens a second work
+            // that re-runs the operation instead of coalescing. This test
+            // asserts coalescing/cache semantics only, so it must never be
+            // able to reach a deadline.
+            operationTimeoutSeconds: 86_400
         ), liveMemoryBudget: Self.isolatedMemoryBudget())
         let gate = HeavyEnrichmentTestGate()
         let counter = HeavyEnrichmentTestCounter()
@@ -269,7 +286,11 @@ struct HeavyEnrichmentPlaneTests {
             maximumQueuedWorkItems: 1,
             maximumOutstandingResults: 8,
             cacheCapacity: 0,
-            operationTimeoutSeconds: 10
+            // Shutdown must be what terminates this work. The deadline clock
+            // starts at admission, so any budget executor starvation can
+            // outrun retires a request as .timedOut instead of .cancelled and
+            // breaks the cancellation accounting this test exists to check.
+            operationTimeoutSeconds: 86_400
         ), liveMemoryBudget: Self.isolatedMemoryBudget())
         let gate = HeavyEnrichmentTestGate()
         _ = await plane.offer(
@@ -334,7 +355,10 @@ struct HeavyEnrichmentPlaneTests {
             maximumOutstandingResults: 512,
             maximumRetainedResultBytes: perResult * 2,
             cacheCapacity: 512,
-            operationTimeoutSeconds: 60
+            // Byte-capacity accounting only; a reachable deadline would retire
+            // gated work mid-run and change the reservation totals asserted
+            // below. Same admission-clock reasoning as the coalescing test.
+            operationTimeoutSeconds: 86_400
         ), liveMemoryBudget: Self.isolatedMemoryBudget())
         let gate = HeavyEnrichmentTestGate()
         var accepted = 0

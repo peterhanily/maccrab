@@ -6947,24 +6947,6 @@ func measureDatabaseFootprintMB(dbPath: String) -> Int {
     return Int(bytes / 1_000_000)
 }
 
-/// The `-wal` sidecar size alone, in MB. Used by the size-cap sweep to tell a
-/// reclaimable free-page overage (fix with VACUUM) apart from a reader-pinned
-/// WAL (which VACUUM cannot fix — see the sweep's back-off below).
-func measureWalMB(dbPath: String) -> Int {
-    guard let attrs = try? FileManager.default.attributesOfItem(atPath: dbPath + "-wal"),
-          let b = attrs[.size] as? UInt64 else { return 0 }
-    return Int(b / 1_000_000)
-}
-
-/// Exact WAL size in bytes, for comparison against byte-denominated limits.
-/// `measureWalMB` is decimal MB and is display-only: comparing it to a MiB
-/// limit misclassified a normally-parked WAL as reader-pinned.
-func measureWalBytes(dbPath: String) -> Int64 {
-    guard let attrs = try? FileManager.default.attributesOfItem(atPath: dbPath + "-wal"),
-          let b = attrs[.size] as? UInt64 else { return 0 }
-    return Int64(b)
-}
-
 // MARK: - Adaptive rollup sweep (v1.8.0)
 
 /// Freelist slack at or above which the size-cap sweep runs `incremental_vacuum`
@@ -6994,18 +6976,18 @@ let reclaimableSlackFloorBytes: Int64 = 16 * 1_024 * 1_024
 /// peak, and a store whose retained rows all sit inside the forensic floor
 /// prunes nothing. See the call site for the measured installed-host case.
 ///
-/// A reader-pinned WAL still vetoes everything: the reclaim cannot truncate
-/// pages the pin holds alive and would only grow the sidecar.
+/// Checkpoint drainability is NOT decided here. The sweep establishes it up
+/// front from the maintenance checkpoint's own SQLite result and returns
+/// early on contention, so a reclaim that reaches this decision has already
+/// been cleared to truncate.
 enum StorageReclaimDecision {
     static func shouldReclaim(
         totalPruned: Int,
         footprintBytes: Int64,
         targetBytes: Int64,
         reclaimableSlackBytes: Int64,
-        slackFloorBytes: Int64 = reclaimableSlackFloorBytes,
-        walPinned: Bool
+        slackFloorBytes: Int64 = reclaimableSlackFloorBytes
     ) -> Bool {
-        guard !walPinned else { return false }
         if totalPruned > 0 { return true }
         if footprintBytes > targetBytes { return true }
         guard slackFloorBytes > 0 else { return false }
@@ -7067,6 +7049,19 @@ func runAdaptiveRollupSweep(
             logger.fault("Tier-rollup \(phase, privacy: .public): authoritative SQLite family probe failed; refusing further maintenance: \(error.localizedDescription, privacy: .public)")
             return nil
         }
+    }
+    func maintenanceCheckpoint() async -> Bool {
+        do {
+            switch try await eventStore.walCheckpointTruncateForMaintenance() {
+            case .truncated:
+                return true
+            case .deferredContention:
+                logger.notice("Tier-rollup: checkpoint contention; deferring further reclaim and FTS maintenance until a later sweep.")
+            }
+        } catch {
+            logger.error("Tier-rollup: maintenance checkpoint failed; refusing further reclaim: \(error.localizedDescription, privacy: .public)")
+        }
+        return false
     }
     // Probe before the first DELETE. Unsafe/partial families and stat failures
     // must never be converted into a zero-byte reading that authorizes mutation.
@@ -7208,33 +7203,22 @@ func runAdaptiveRollupSweep(
     // wal_checkpoint(TRUNCATE) so any drained pages migrate from the
     // WAL into the main file — a cheap partial cleanup.
     //
-    // v1.21.5-rc.3 (#21, broadening the rc.2 pinned-WAL back-off): probe WAL
+    // v1.21.5-rc.3 (#21, broadening the rc.2 pinned-WAL back-off): establish WAL
     // drainability ONCE up front. Every write-amplifying maintenance op below —
     // incremental_vacuum, the full VACUUM, AND the FTS merge — can only reclaim
     // space if the WAL can be checkpoint-truncated. Under a reader pin (typically
     // the dashboard's read-only events.db connection) it cannot, so running them
     // reclaims nothing and only grows the pinned sidecar further — the exact CPU/
-    // WAL churn we are trying to avoid. rc.2 skipped only the full VACUUM; skip
-    // all three under a pin and defer to a sweep where the reader has released
-    // (the prune above already bounded the working set).
-    await eventStore.walCheckpointTruncate()
-    let walPinnedMB = measureWalMB(dbPath: dbPath)
-    // rc.36: compare against the WAL's own configured limit, in the same units.
-    // This was `walPinnedMB > 64`, but measureWalMB returns DECIMAL MB while
-    // journalSizeLimitBytes is 67_108_864 (64 MiB). SQLite truncates an
-    // oversized WAL down to exactly that limit, which measures as 67 decimal MB
-    // — so a WAL resting at its designed ceiling reported itself as
-    // reader-pinned, and incremental_vacuum / VACUUM / FTS merge were skipped
-    // on every sweep with no reader involved at all.
-    // Mirrors StoragePragmas.journalSizeLimitBytes (64 MiB). That type is
-    // internal to MacCrabCore, so the value is restated rather than widening
-    // its visibility for one comparison.
-    let walLimitBytes: Int64 = 64 * 1_024 * 1_024
-    let walBytes = measureWalBytes(dbPath: dbPath)
-    let walPinned = walBytes > walLimitBytes
-    if walPinned {
-        logger.warning("Tier-rollup: events.db-wal measured \(walPinnedMB) MB, above its \(walLimitBytes / 1_048_576) MiB limit — consistent with a reader holding a read transaction on events.db (typically the dashboard's read-only connection), though this is a size measurement rather than a confirmed reader. incremental_vacuum / full VACUUM / FTS-merge are SKIPPED this sweep (they cannot reclaim a reader-pinned WAL and would only grow it); they resume once the WAL drains.")
-    }
+    // WAL churn we are trying to avoid.
+    //
+    // v1.22.1: the gate is SQLite's own checkpoint result, not a WAL-size proxy.
+    // rc.36 asked `walBytes > 64 MiB`, which cannot see a pinned WAL that is
+    // still small — the installed 1155 rehearsal recorded two TRUNCATE
+    // checkpoints returning SQLITE_BUSY after 5.390 s and 5.443 s with the
+    // sidecar well under its limit, and the sweep then proceeded to further
+    // reclaim and a second blocked checkpoint. The probe is also non-waiting, so
+    // a reader never spends the writer actor's five-second busy timeout.
+    guard await maintenanceCheckpoint() else { return 0 }
 
     // Power/thermal gate for the heavy maintenance below (also gates the FTS
     // optimize). A whole-file rewrite / full index compaction is non-urgent.
@@ -7267,15 +7251,15 @@ func runAdaptiveRollupSweep(
     // governor and is well calibrated: measured over a full interval it held the
     // index to a 3.90-28.81 MB sawtooth, and the post-optimize floor FELL across
     // five passes. Cost is 4 passes/day at 0.138-0.399 s each — about 1.6 s/day
-    // of actor time. `walPinned` and `underPowerPressure` still apply, so this
+    // of actor time. The checkpoint and `underPowerPressure` gates apply, so this
     // never runs while a reader pins the WAL or the machine is under thermal or
     // battery pressure.
-    if !walPinned && !underPowerPressure {
+    if !underPowerPressure {
         guard let ftsStart = currentFootprint("before FTS optimize") else {
             return 0
         }
         if await eventStore.optimizeFTS() {
-            _ = await eventStore.walCheckpoint()   // move optimize's freed pages out of the WAL
+            guard await maintenanceCheckpoint() else { return 0 }
             logger.notice("Tier-rollup: FTS optimize compacted events_fts (\(ftsStart) byte footprint, \(targetSizeBytes)-byte target, overCap=\(overCap)) — pages freed for reclamation")
         }
     }
@@ -7318,16 +7302,17 @@ func runAdaptiveRollupSweep(
         totalPruned: totalPruned,
         footprintBytes: footprintBeforeReclaimBytes,
         targetBytes: targetSizeBytes,
-        reclaimableSlackBytes: reclaimableSlackBytes,
-        walPinned: walPinned
+        reclaimableSlackBytes: reclaimableSlackBytes
     ) {
         guard let dbSizeBeforePrune = currentFootprint("before incremental vacuum") else {
             return 0
         }
-        let reclaimed = (try? await eventStore.incrementalVacuum(maxPages: 200_000)) ?? 0
+        let reclaimed = (try? await eventStore.incrementalVacuum(
+            maxPages: 200_000, waitForReaders: false
+        )) ?? 0
         incrementalVacuumReclaimedPages = reclaimed
         guard let dbSizeAfterIncremental = currentFootprint("after incremental vacuum") else {
-            return 0
+            return incrementalVacuumReclaimedPages
         }
         if reclaimed > 0 {
             logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages, \(dbSizeBeforePrune) bytes → \(dbSizeAfterIncremental) bytes")
@@ -7356,7 +7341,7 @@ func runAdaptiveRollupSweep(
         // (`underPowerPressure` is computed once above, before the FTS optimize.)
 
         // The full VACUUM only helps when its pre/post checkpoint can drain the
-        // WAL; the up-front `walPinned` probe already gated this whole block on
+        // WAL; the up-front checkpoint already gated this whole block on
         // that (a reader-pinned WAL is skipped entirely), so here we only choose
         // between the full rebuild and a cheap checkpoint.
         if dbSizeAfterIncremental > targetSizeBytes
@@ -7369,37 +7354,54 @@ func runAdaptiveRollupSweep(
             // SizeCapConvergence for the measurement and why a load-time clamp
             // can't substitute for it.
             if SizeCapConvergence.shouldFullVacuum() {
+                // Only a VACUUM that actually REBUILT the file may be scored
+                // for convergence. Since v1.22.1 the non-waiting pre-checkpoint
+                // can refuse on reader contention and throw before any rebuild
+                // happens; counting that as a failed rebuild would latch the
+                // —hour suppression and tell the operator the cap is
+                // structurally unreachable, which would be false.
+                var rebuiltThisSweep = false
                 do {
                     // Serialize checkpoint -> operation-boundary headroom probe
                     // -> VACUUM on the writer actor. A detached connection could
                     // race arbitrarily many ingestion commits between its stat
                     // and SQLite acquiring the writer lock, invalidating the
                     // disk-safety proof.
-                    try await eventStore.vacuum()
+                    try await eventStore.vacuum(waitForReaders: false)
+                    rebuiltThisSweep = true
+                } catch let error as EventStoreError {
+                    if case .busy = error {
+                        logger.notice("Tier-rollup: full VACUUM deferred — a reader held the store at its pre-checkpoint, so no rebuild ran. Not scored against cap convergence; it retries on a later sweep.")
+                    } else {
+                        logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
+                    }
                 } catch {
                     logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
                 }
+                guard rebuiltThisSweep else {
+                    return incrementalVacuumReclaimedPages
+                }
                 guard let afterVacuumBytes = currentFootprint("after full vacuum") else {
-                    return 0
+                    return incrementalVacuumReclaimedPages
                 }
                 if SizeCapConvergence.record(converged: afterVacuumBytes <= targetSizeBytes) {
                     logger.error("Tier-rollup: events.db size cap is UNREACHABLE — \(SizeCapConvergence.failureLimit) consecutive full VACUUMs left the footprint at \(afterVacuumBytes) bytes against a \(targetSizeBytes)-byte target. The measured floor (schema + legacy alert_evidence + events_fts + retained rows + WAL) exceeds the effective event-family target, so rebuilding cannot converge and was rewriting the whole file every sweep. Full VACUUM suppressed for \(Int(SizeCapConvergence.backoffSeconds / 3600)) h. Adjust the legacy events envelope/evidence allocation or reduce indexed event bytes.")
                 }
             } else {
                 logger.notice("Tier-rollup: full VACUUM suppressed — the size cap was measured unreachable (see the cap-unreachable error). Checkpointing the WAL instead; prune + incremental_vacuum still ran, so the working set stays bounded.")
-                await eventStore.walCheckpoint()
+                guard await maintenanceCheckpoint() else { return incrementalVacuumReclaimedPages }
             }
         } else if dbSizeAfterIncremental > targetSizeBytes && underPowerPressure {
             logger.notice("Tier-rollup: deferring full VACUUM under power/thermal pressure (poll-multiplier \(PowerGate.pollIntervalMultiplier)); incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) bytes. Checkpointing WAL; full rebuild will run on AC / nominal thermal.")
-            await eventStore.walCheckpoint()
+            guard await maintenanceCheckpoint() else { return incrementalVacuumReclaimedPages }
         } else if dbSizeAfterIncremental > targetSizeBytes {
             let freeMB = Int((vacuumHeadroom?.freeSpaceBytes ?? 0) / 1_000_000)
             let needMB = Int((vacuumHeadroom?.requiredFreeBytes ?? Int64.max) / 1_000_000)
             logger.warning("Tier-rollup: full VACUUM skipped by shared headroom gate (need \(needMB) MB free, have \(freeMB) MB); incremental_vacuum remains the low-space recovery path.")
-            await eventStore.walCheckpoint()
+            guard await maintenanceCheckpoint() else { return incrementalVacuumReclaimedPages }
         } else {
             logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) bytes (target \(targetSizeBytes) bytes); full VACUUM not needed, running checkpoint(TRUNCATE) for WAL cleanup.")
-            await eventStore.walCheckpoint()
+            guard await maintenanceCheckpoint() else { return incrementalVacuumReclaimedPages }
         }
     }
 
@@ -7411,18 +7413,15 @@ func runAdaptiveRollupSweep(
     // budget so the actor stays responsive; a no-op when there is nothing to
     // merge. DETECTION-SAFE: events_fts feeds only search()/hunt, never the
     // detection engine — this changes hunt latency, never any detection result.
-    // #21: skipped under a reader pin — its merge frames can't be checkpointed
-    // out of a pinned WAL and would only grow it; deferred to an unpinned sweep.
-    // rc.36: ceiling recovery runs UNCONDITIONALLY, ahead of the walPinned gate.
-    // rc.34 put `recoverExhaustedFTSIndexIfNeeded()` inside mergeFTS, which sits
-    // behind this gate — so the one operation that rescues an index stuck at its
-    // 2000-segid ceiling was skipped exactly when a pinned WAL made the store
-    // most stressed. A rebuild is not a merge: it is the escape hatch, and
-    // deferring it can leave the engine unable to boot at all.
+    // #21: reached only after the up-front checkpoint drained the WAL — merge
+    // frames can't be checkpointed out of a pinned WAL and would only grow it,
+    // so contention defers this to a later sweep. Sweep-only exhaustion recovery
+    // shares that gate: rebuilding while a reader prevents reclaim would amplify
+    // this sweep's writes. The boot and journal-expiry recovery paths are
+    // separate and stay unconditional, so a ceiling-exhausted index is still
+    // rescued without waiting for an unpinned sweep.
     await eventStore.recoverExhaustedFTSIndexIfNeededForSweep()
-    if !walPinned {
-        await eventStore.mergeFTS()
-    }
+    await eventStore.mergeFTS()
 
     // v1.21.4 perf (#23): reclaim the events.db-wal sidecar. Raising
     // `eventWalAutocheckpointPages` to 16 MB lets the WAL settle at a ~16 MB
@@ -7434,9 +7433,9 @@ func runAdaptiveRollupSweep(
     // mergeFTS() so the merge's own WAL frames are drained too, and before the
     // endMB measurement so the log reflects the reclaimed sidecar. Best-effort;
     // degrades to RESTART-like progress under an active reader.
-    guard await eventStore.walCheckpointTruncate() else { return 0 }
+    guard await maintenanceCheckpoint() else { return incrementalVacuumReclaimedPages }
 
-    guard let endBytes = currentFootprint("finish") else { return 0 }
+    guard let endBytes = currentFootprint("finish") else { return incrementalVacuumReclaimedPages }
     if startSizeBytes != endBytes || totalPruned > 0 {
         logger.notice("Tier-rollup sweep complete: DB \(startSizeBytes) bytes → \(endBytes) bytes, pruned \(totalPruned) events total.")
     }
