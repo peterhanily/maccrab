@@ -678,7 +678,8 @@ Recent milestones:
   shows migration progress
   and a visible menu-bar warning when protection is not confirmed; distinguishes
   queued rule reloads from confirmed completion and reconnects the dashboard
-  automatically after migration.
+  automatically after migration. Preserves the predecessor's default
+  50-row allowance for legacy alert evidence during background cleanup.
 - **v1.22.0** — fixed a crash on the enrichment-timeout path; event storage now
   reclaims already-freed space and expired events are reliably reclaimed;
   the notification channel now starts without a window open; network-blocking

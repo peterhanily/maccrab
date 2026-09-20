@@ -201,6 +201,47 @@ deferral and handoff checks. The inactive-ready regression failed against the
 prior source before the correction. Full clean CI and installed qualification
 of the replacement artifact remain separate requirements.
 
+### Legacy evidence maintenance regression, 2026-09-20
+
+Candidate 1.22.1.1154 passed clean CI and its 900-second reference-host runtime
+check. A real Sparkle upgrade from published v1.21.5 on macOS 14 migrated
+109,310 events. Its candidate-bound light heartbeat first reported ready about
+110 seconds after native process start. The inactive dashboard adopted its live
+provider without Reconnect. That observation does
+not independently establish that every workspace query succeeded.
+
+The candidate's coherent snapshots passed fresh zero-loss checks in the same
+native process. All 14 predeclared event records matched exactly. Alert-evidence
+conservation failed: 21 inherited alerts had 50 rows each before upgrade and
+16 afterward. All 336 retained rows matched exactly; all 714 missing rows
+were below the cleanup policy's first 16 ranked rows. Every parent alert
+remained present, with no rank-boundary ties or evidence relocated to alerts.db.
+
+The scheduled maintenance default had changed from the published predecessor's
+50 rows to 16. Restoring 50 prevents this reduction while retaining explicit
+row limits and age and total-size cleanup. The regression must migrate a
+predecessor fixture, run the actual maintenance sweep with its default
+arguments, and compare every inherited evidence key and byte. A test of only
+the eight rows displayed by the dashboard does not establish preservation.
+
+The predecessor acquisition also exposed a measurement problem: deliberate
+snapshot pacing held a read mark while its WAL grew beyond the unchanged
+family-size guard. That failed attempt is preserved. A separate predecessor-only
+capture removed the artificial delay and kept all identity, schema, size and
+health checks; candidate capture retained its pacing and strict zero-loss
+checks. The transition observer recorded readiness but exceeded its summary
+line-size bound afterward. Its original failed exit remains distinct from
+the saved observations. Neither measurement issue excuses the evidence loss.
+Candidate 1154 is not qualified; completed-upgrade reboot and lowered-cap
+checks were not completed. The source correction requires a new signed
+candidate and fresh installed qualification.
+
+The correction passed 65 focused tests in four suites (274.622 seconds),
+including exact preservation of 100 evidence rows across migration and the
+default maintenance sweep, explicit smaller row limits, age and size cleanup,
+and the existing lowered-cap recovery fixtures. The new preservation test
+replaces a display-depth assertion; the total test count is unchanged.
+
 ## Installed release qualification
 
 These tests qualify source behavior, not Sparkle, signing, installation, or

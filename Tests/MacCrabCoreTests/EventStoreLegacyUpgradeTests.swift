@@ -20,8 +20,13 @@ struct EventStoreLegacyUpgradeTests {
     private func fixture(
         rows: Int,
         incrementalVacuum: Bool = false,
-        payloadBytes: Int = 0
+        payloadBytes: Int = 0,
+        evidenceRowsPerAlert: Int = 1,
+        evidenceAlertCount: Int = 1,
+        variedSeverity: Bool = false
     ) throws -> Fixture {
+        try #require(evidenceRowsPerAlert > 0 && evidenceRowsPerAlert <= rows)
+        try #require(evidenceAlertCount > 0)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("legacy-event-upgrade-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -45,7 +50,7 @@ struct EventStoreLegacyUpgradeTests {
             INSERT INTO events (
                 id, timestamp, event_category, event_type, event_action, severity,
                 process_pid, process_name, process_path, process_commandline, process_ppid, raw_json
-            ) VALUES (?1, ?2, 'process', 'start', 'exec', 'informational',
+            ) VALUES (?1, ?2, 'process', 'start', 'exec', ?4,
                       4242, 'true', '/usr/bin/true', '/usr/bin/true', 1, ?3)
             """
         #expect(sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK)
@@ -71,6 +76,10 @@ struct EventStoreLegacyUpgradeTests {
             if payloadBytes > 0 {
                 event.enrichments["legacy_fixture_detail"] = payload
             }
+            if variedSeverity {
+                let levels: [Severity] = [.informational, .low, .medium, .high, .critical]
+                event.severity = levels[index % levels.count]
+            }
             if first == nil { first = event }
             last = event
             let json = String(decoding: try JSONEncoder().encode(event), as: UTF8.self)
@@ -79,6 +88,7 @@ struct EventStoreLegacyUpgradeTests {
             sqlite3_bind_text(insert, 1, event.id.uuidString, -1, transient)
             sqlite3_bind_double(insert, 2, event.timestamp.timeIntervalSince1970)
             sqlite3_bind_text(insert, 3, json, -1, transient)
+            sqlite3_bind_text(insert, 4, event.severity.rawValue, -1, transient)
             guard sqlite3_step(insert) == SQLITE_DONE else {
                 throw NSError(domain: "LegacyUpgradeFixture", code: Int(sqlite3_errcode(db)))
             }
@@ -92,14 +102,18 @@ struct EventStoreLegacyUpgradeTests {
                 event_action, severity, process_pid, process_name, process_path, raw_json
             ) SELECT ?1, id, timestamp, event_category, event_type,
                      event_action, severity, process_pid, process_name, process_path, raw_json
-              FROM events WHERE id = ?2
+              FROM events ORDER BY timestamp DESC LIMIT ?2
             """, -1, &evidenceStatement, nil) == SQLITE_OK)
         let evidenceInsert = try #require(evidenceStatement)
         defer { sqlite3_finalize(evidenceInsert) }
-        sqlite3_bind_text(evidenceInsert, 1, alertID, -1, transient)
-        sqlite3_bind_text(evidenceInsert, 2, firstEvent.id.uuidString, -1, transient)
-        #expect(sqlite3_step(evidenceInsert) == SQLITE_DONE)
-        #expect(sqlite3_changes(db) == 1)
+        for index in 0..<evidenceAlertCount {
+            sqlite3_reset(evidenceInsert)
+            let key = index == 0 ? alertID : UUID().uuidString
+            sqlite3_bind_text(evidenceInsert, 1, key, -1, transient)
+            sqlite3_bind_int(evidenceInsert, 2, Int32(evidenceRowsPerAlert))
+            #expect(sqlite3_step(evidenceInsert) == SQLITE_DONE)
+            #expect(Int(sqlite3_changes(db)) == evidenceRowsPerAlert)
+        }
         try execute("COMMIT", on: db)
         let result = Fixture(
             directory: directory, first: firstEvent, last: try #require(last),
@@ -139,6 +153,37 @@ struct EventStoreLegacyUpgradeTests {
         #expect(sqlite3_step(query) == SQLITE_ROW)
         let bytes = try #require(sqlite3_column_blob(query, 0))
         return Data(bytes: bytes, count: Int(sqlite3_column_bytes(query, 0)))
+    }
+
+    private struct LegacyEvidenceKey: Hashable {
+        let alertID: String
+        let eventID: String
+    }
+
+    private func allPreservedEvidence(in fixture: Fixture) throws -> [LegacyEvidenceKey: Data] {
+        var raw: OpaquePointer?
+        try #require(sqlite3_open_v2(fixture.path, &raw, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+        let db = try #require(raw)
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        try #require(sqlite3_prepare_v2(db, """
+            SELECT alert_id, id, CAST(raw_json AS BLOB) FROM alert_evidence
+            """, -1, &statement, nil) == SQLITE_OK)
+        let query = try #require(statement)
+        defer { sqlite3_finalize(query) }
+        var result: [LegacyEvidenceKey: Data] = [:]
+        while true {
+            let status = sqlite3_step(query)
+            if status == SQLITE_DONE { break }
+            try #require(status == SQLITE_ROW)
+            let alert = try #require(sqlite3_column_text(query, 0))
+            let event = try #require(sqlite3_column_text(query, 1))
+            let payload = try #require(sqlite3_column_blob(query, 2))
+            let key = LegacyEvidenceKey(alertID: String(cString: alert), eventID: String(cString: event))
+            try #require(result[key] == nil)
+            result[key] = Data(bytes: payload, count: Int(sqlite3_column_bytes(query, 2)))
+        }
+        return result
     }
 
     private func hasInstalledBarrier(in fixture: Fixture) throws -> Bool {
@@ -436,6 +481,54 @@ struct EventStoreLegacyUpgradeTests {
         #expect(try await reopened.recoverJournalBeforeProducers().complete)
         #expect(try await reopened.count() == 3)
         #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
+    }
+
+    @Test("Default maintenance preserves the predecessor's full per-alert evidence after journal upgrade")
+    func defaultMaintenancePreservesPublishedEvidenceAllowance() async throws {
+        let fixture = try fixture(
+            rows: 50, payloadBytes: 256, evidenceRowsPerAlert: 50,
+            evidenceAlertCount: 2, variedSeverity: true
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let original = try allPreservedEvidence(in: fixture)
+        try #require(original.count == 100)
+
+        let store = try EventStore(path: fixture.path)
+        let recovery = try await store.recoverJournalBeforeProducers()
+        try #require(recovery.complete && recovery.migratedEvents == 50)
+        #expect(try allPreservedEvidence(in: fixture) == original)
+
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: 420)
+        // Omit the per-alert argument exactly as the scheduled/watchdog paths
+        // do. The former default16 discarded34 rows from EACH inherited alert
+        // despite their fresh timestamps and ample physical evidence budget.
+        await runAdaptiveRollupSweep(
+            eventStore: store, dbPath: fixture.path,
+            targetSizeBytes: boundary.targetBytes,
+            capSizeBytes: boundary.proactiveSweepBoundaryBytes
+        )
+        #expect(try allPreservedEvidence(in: fixture) == original)
+        #expect(try await store.evidenceFor(alertId: fixture.alertID).count == 50)
+
+        // Preserving the inherited default does not disable age retention,
+        // an explicitly requested smaller cardinality cap, or physical limits.
+        let expired = try await store.pruneAlertEvidence(
+            olderThan: fixture.first.timestamp.addingTimeInterval(-0.025)
+        )
+        #expect(expired > 0 && expired < original.count)
+        let afterAge = try allPreservedEvidence(in: fixture)
+        #expect(afterAge.allSatisfy { original[$0.key] == $0.value })
+        await runAdaptiveRollupSweep(
+            eventStore: store, dbPath: fixture.path,
+            targetSizeBytes: boundary.targetBytes,
+            capSizeBytes: boundary.proactiveSweepBoundaryBytes,
+            evidencePerAlertCap: 16
+        )
+        let explicitlyCapped = try allPreservedEvidence(in: fixture)
+        #expect(explicitlyCapped.count == 32)
+        #expect(explicitlyCapped.allSatisfy { original[$0.key] == $0.value })
+        #expect(try await store.pruneAlertEvidenceBySize(maxBytes: 1) == 32)
+        #expect(try allPreservedEvidence(in: fixture).isEmpty)
     }
 
     @Test("Split legacy append uses recovery space without producer settlement reserve")

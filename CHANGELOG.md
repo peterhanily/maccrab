@@ -24,6 +24,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Receipts identify the persistent volume and database incarnation instead of
   relying on a mount device number that can change across boots. A replaced
   database cannot inherit the allowance, and completed upgrades cannot renew it.
+- **Background cleanup preserves the predecessor's alert-evidence allowance.**
+  Legacy alerts retain the previous default of up to 50 evidence rows instead
+  of being reduced to 16 rows after upgrade. Configured age and total-size
+  limits still apply; this change cannot restore rows already removed.
 - **Transient SQLite contention during EventStore initialization receives bounded
   retries.** Capacity, integrity, and other permanent failures retain their
   original classification rather than being treated as transient waits.
