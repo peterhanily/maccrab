@@ -71,10 +71,14 @@ publish.
 
 - v1.22.1 needs a disposable installed v1.21.5 upgrade rehearsal with preserved
   event history, default and lowered storage caps, and a consistent pre-upgrade
-  backup. Follow `docs/UPGRADE_QUALIFICATION.md`; an already-migrated store is
-  not predecessor-upgrade evidence. There is no qualified database downgrade
-  target. Also reconcile any legacy temporary PF rules in the shared
-  `com.maccrab` anchor before publication: the new dedicated response anchor
+  backup. Run the exact signed candidate on **actual macOS 14** to exercise the
+  TaskLocal backdeployment path; a macOS deployment target or a passing test on
+  a newer OS does not provide that runtime coverage. Follow
+  `docs/UPGRADE_QUALIFICATION.md`; an already-migrated store is not
+  predecessor-upgrade evidence, and an isolated compatibility test does not
+  replace installed upgrade and runtime qualification. There is no qualified
+  database downgrade target. Also reconcile any legacy temporary PF rules in
+  the shared `com.maccrab` anchor before publication: the new dedicated response anchor
   deliberately cannot erase potentially unrelated legacy rules. See
   `KNOWN_LIMITS.md` and `PREVENTION_RESEARCH.md` for the boundaries.
 - `gh` installed, authenticated, and authorized to write this repository before

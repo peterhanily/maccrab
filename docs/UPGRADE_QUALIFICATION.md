@@ -65,6 +65,34 @@ The new strings have explicit English fallbacks in non-English catalogs;
 native translation and packaged visual review remain outstanding. These
 results do not include the installed release qualification below.
 
+### macOS 14 compatibility regression, 2026-09-20
+
+Candidate `1.22.1.1150` failed a real Sparkle upgrade from the published
+`1.21.5.1018` app on macOS 14.8.7. It migrated 63,604 events, then aborted
+before producing a fresh healthy runtime heartbeat. Repeated relaunches did
+not recover. Its signed artifact and failed observations are preserved and
+must not qualify a later candidate.
+
+The failing binary's return address identifies a cross-module asynchronous
+`TaskLocal.withValue` binding of a Core-owned value. The older runtime pushes
+its binding above the caller's temporary payload; the caller then frees that
+payload out of task-stack order. An isolated two-module reproduction on the
+same macOS 14 guest aborts with the original binding and passes with
+non-inlined binding helpers in Core. The comparison also passes with the
+production Swift 5 language mode and macOS 13 deployment target. That target
+setting is not evidence of execution on macOS 13.
+
+`EventJournalAdmissionContextTests` checks nested nil bindings, throwing and
+cancellation unwinding, actor isolation, child inheritance, and shared lease
+ownership. These tests and the isolated comparison do not replace an installed
+upgrade and runtime qualification of the replacement signed candidate.
+
+The focused source run passed 55 tests in seven suites, including all six new
+scope tests and the existing alert-trigger, deferred-enrichment, pipeline
+memory, and selected journal-receipt checks. The initial compile attempt was
+invalidated by a concurrent formatting edit and is retained as a failed
+attempt; the successful rerun used unchanged source.
+
 ## Installed release qualification
 
 These tests qualify source behavior, not Sparkle, signing, installation, or
@@ -75,7 +103,9 @@ the shipped system-extension process. Before publishing a successor:
    temporary headroom and a default-cap control.
 2. Install the exact signed candidate through the supported upgrade path.
    Keep the predecessor fixture untouched so each candidate starts with an
-   actual migration rather than a no-op.
+   actual migration rather than a no-op. Include macOS 14 runtime execution:
+   compilation for an older deployment target and a run on a newer build Mac
+   do not exercise the older Swift concurrency implementation.
 3. Record artifact hash, predecessor/candidate versions, configuration,
    initial family size, migration conservation, time to ready, and final
    ordinary admission. Check restart both during migration and after schema

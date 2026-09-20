@@ -101,7 +101,7 @@ enum DeferredEnrichmentDispatcher {
                     .$deferredPatchMemoryLeases.withValue(
                         batch.appliedPatchMemoryLeases
                     ) {
-                    await EventJournalAdmissionContext.$current.withValue(
+                    await EventJournalAdmissionContext.withAdmission(
                         batch.journalAdmission
                     ) {
                 var terminalEvent = batch.event
@@ -175,7 +175,7 @@ enum DeferredEnrichmentDispatcher {
                         sequenceMatches: sequenceMatches
                     )
                     terminalEvent = await EventJournalAdmissionContext
-                        .$terminalRevision.withValue(terminalAdmission) {
+                        .withTerminalRevision(terminalAdmission) {
                             await EventLoop.dispatchReviewedMatches(
                                 state: state,
                                 reviewed: reviewedTerminal

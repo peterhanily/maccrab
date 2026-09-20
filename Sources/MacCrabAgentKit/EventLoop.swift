@@ -1223,9 +1223,9 @@ enum EventLoop {
             await EventJournalAdmissionContext.$sourceMemoryLease.withValue(
                 eventLoopSourceLease
             ) {
-                await EventJournalAdmissionContext.$forcedNonverifiedStatus
-                    .withValue(forcedJournalStatus) {
-                    await EventJournalAdmissionContext.$current.withValue(
+                await EventJournalAdmissionContext
+                    .withForcedNonverifiedStatus(forcedJournalStatus) {
+                    await EventJournalAdmissionContext.withAdmission(
                         journalAdmission
                     ) {
                 if childAttribution.isChild {
@@ -2647,7 +2647,7 @@ enum EventLoop {
                     state: state
                 )
                 enrichedEvent = await EventJournalAdmissionContext
-                    .$terminalRevision.withValue(terminalAdmission) {
+                    .withTerminalRevision(terminalAdmission) {
                         await dispatchReviewedMatches(
                             state: state,
                             reviewed: reviewedDispatch

@@ -120,6 +120,45 @@ public enum EventJournalAdmissionContext {
     /// pressure-rejected/poisoned boundary into an apparently healthy trigger.
     @TaskLocal public static var forcedNonverifiedStatus:
         EventJournalContextStatus?
+
+    // Keep async bindings of Core-owned, non-frozen value types inside Core.
+    // Inlining TaskLocal.withValue at an importing module's call site can
+    // allocate an opaque payload on the task stack before the older runtime
+    // pushes its binding, then deallocate that payload out of stack order.
+    // These non-inlined boundaries retain the native lexical scope, task
+    // identity, cancellation state, executor isolation, and child inheritance.
+    @inline(never)
+    public static func withAdmission<Result>(
+        _ admission: EventJournalAdmission?,
+        isolation: isolated (any Actor)? = #isolation,
+        operation: () async throws -> Result
+    ) async rethrows -> Result {
+        try await $current.withValue(
+            admission, operation: operation, isolation: isolation
+        )
+    }
+
+    @inline(never)
+    public static func withTerminalRevision<Result>(
+        _ revision: EventJournalTerminalAdmission?,
+        isolation: isolated (any Actor)? = #isolation,
+        operation: () async throws -> Result
+    ) async rethrows -> Result {
+        try await $terminalRevision.withValue(
+            revision, operation: operation, isolation: isolation
+        )
+    }
+
+    @inline(never)
+    public static func withForcedNonverifiedStatus<Result>(
+        _ status: EventJournalContextStatus?,
+        isolation: isolated (any Actor)? = #isolation,
+        operation: () async throws -> Result
+    ) async rethrows -> Result {
+        try await $forcedNonverifiedStatus.withValue(
+            status, operation: operation, isolation: isolation
+        )
+    }
 }
 
 /// Durable-journal truth frozen before one event-bearing alert commits.

@@ -710,7 +710,7 @@ struct DeferredEnrichmentIntegrationTests {
             "let terminalAdmission = await settleTerminalJournalRevision("
         ))
         #expect(loop.contains(
-            ".$terminalRevision.withValue(terminalAdmission)"
+            ".withTerminalRevision(terminalAdmission)"
         ))
         #expect(loop.contains(
             "EventJournalAdmissionContext.terminalRevision?.status == .verified"

@@ -3,9 +3,14 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.22.1] — 2026-09-19
+## [1.22.1] — 2026-09-20
 
 ### Fixed
+- **The engine no longer crashes when binding event context on macOS 14.**
+  Journal admission scopes now stay within the module that defines their
+  values, avoiding an allocation-order failure in the older Swift concurrency
+  runtime. Task inheritance, cancellation, actor isolation, and memory-lease
+  ownership remain unchanged.
 - **Legacy event-store upgrades can proceed when inherited data exceeds a lowered
   storage cap.** Startup records a fixed temporary allowance before migration,
   preserves that allowance across interrupted boots, and retains the existing

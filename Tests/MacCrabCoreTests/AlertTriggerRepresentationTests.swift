@@ -292,7 +292,7 @@ struct AlertTriggerRepresentationTests {
         )
 
         let inserted = try await EventJournalAdmissionContext
-            .$forcedNonverifiedStatus.withValue(.poisoned) {
+            .withForcedNonverifiedStatus(.poisoned) {
                 try await sink.submit(alert: alert, event: trigger)
             }
         #expect(inserted)
@@ -442,8 +442,8 @@ struct AlertTriggerRepresentationTests {
             eventId: trigger.id.uuidString
         )
 
-        let inserted = try await EventJournalAdmissionContext.$current
-            .withValue(receipt) {
+        let inserted = try await EventJournalAdmissionContext
+            .withAdmission(receipt) {
                 try await Task {
                     try await sink.submit(alert: alert, event: trigger)
                 }.value
@@ -691,7 +691,7 @@ struct AlertTriggerRepresentationTests {
             storageMutationGeneration: 9
         )
         let inserted = try await EventJournalAdmissionContext
-            .$terminalRevision.withValue(terminalProof) {
+            .withTerminalRevision(terminalProof) {
                 try await sink.submit(
                     alert: Alert(
                         id: "changed-with-terminal",
@@ -723,8 +723,8 @@ struct AlertTriggerRepresentationTests {
             status: .poisoned,
             storageMutationGeneration: 10
         )
-        #expect(try await EventJournalAdmissionContext.$terminalRevision
-            .withValue(poisonedProof) {
+        #expect(try await EventJournalAdmissionContext
+            .withTerminalRevision(poisonedProof) {
                 try await sink.submit(
                     alert: Alert(
                         id: "changed-with-terminal-poison",
