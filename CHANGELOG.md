@@ -39,6 +39,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   a recent ready heartbeat from the selected engine before writing its request.
   The toast states that completion is unconfirmed; broad development-daemon
   signal fallbacks no longer make an unrelated engine count as success.
+- **Credential privacy checks avoid repeated searches on ordinary ASCII fields.**
+  Fixed match tables scan candidate markers and sensitive map keys without
+  building a normalized string for every field. Redaction rules, Unicode
+  matching, and deterministic map-key collision handling remain unchanged.
 
 ### Verification
 - Self-contained fixtures exercise the shipped v1.21.5 schema, lowered caps

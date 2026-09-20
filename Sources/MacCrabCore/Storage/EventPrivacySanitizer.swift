@@ -40,6 +40,15 @@ public enum EventPrivacySanitizer {
         "sk_live_", "sk_test_", "pk_live_", "pk_test_", "rk_live_", "rk_test_",
     ]
 
+    private static let asciiCredentialHints = ASCIIMatcher(credentialHints)
+    private static let asciiShortCredentialHints = ASCIIMatcher([
+        "-p", "key", "auth", "://",
+    ])
+    private static let asciiSensitiveKeys = ASCIIMatcher([
+        "password", "passwd", "secret", "token", "apikey", "authorization",
+        "credential", "privatekey", "accesskey", "cookie",
+    ])
+
     public struct Result: Sendable, Equatable {
         public let event: Event
         public let canonicalJSON: Data
@@ -172,7 +181,30 @@ public enum EventPrivacySanitizer {
         )
     }
 
-    private static func mayContainCredential(_ value: String) -> Bool {
+    package static func mayContainCredential(_ value: String) -> Bool {
+        let isLong = value.utf8.count >= 8
+        let matcher = isLong ? asciiCredentialHints : asciiShortCredentialHints
+        var state = 0
+        var previous: UInt8 = 0
+        var found = false
+        for byte in value.utf8 {
+            // Even after a match, inspect the remaining bytes: any Unicode
+            // selects the original whole-string matching policy.
+            guard byte < 128 else {
+                return mayContainCredentialFallback(value)
+            }
+            if !found {
+                state = matcher.next(state, lowercaseASCII(byte))
+                found = matcher.terminal[state]
+                    || (isLong && ((previous == 83 && byte == 75)
+                        || (previous == 65 && byte == 67)))
+            }
+            previous = byte
+        }
+        return found
+    }
+
+    private static func mayContainCredentialFallback(_ value: String) -> Bool {
         // Short quoted assignments, MySQL options and URL fragments can
         // still contain credentials. Avoid scanning the full vendor list.
         guard value.utf8.count >= 8 else {
@@ -199,7 +231,30 @@ public enum EventPrivacySanitizer {
             || value.contains("SK") || value.contains("AC")
     }
 
-    private static func isSensitiveKey(_ key: String) -> Bool {
+    package static func isSensitiveKey(_ key: String) -> Bool {
+        var state = 0
+        var found = false
+        for byte in key.utf8 {
+            guard byte < 128 else { return isSensitiveKeyFallback(key) }
+            if found { continue }
+            let folded = lowercaseASCII(byte)
+            // Match lowercased().filter(isLetter || isNumber) for ASCII
+            // without constructing a normalized string or per-call buffer.
+            if (folded >= 97 && folded <= 122)
+                || (folded >= 48 && folded <= 57) {
+                state = asciiSensitiveKeys.next(state, folded)
+                found = asciiSensitiveKeys.terminal[state]
+            }
+        }
+        return found
+    }
+
+    @inline(__always)
+    private static func lowercaseASCII(_ byte: UInt8) -> UInt8 {
+        byte >= 65 && byte <= 90 ? byte + 32 : byte
+    }
+
+    private static func isSensitiveKeyFallback(_ key: String) -> Bool {
         let normalized = key.lowercased().filter {
             $0.isLetter || $0.isNumber
         }
@@ -213,5 +268,69 @@ public enum EventPrivacySanitizer {
             || normalized.contains("privatekey")
             || normalized.contains("accesskey")
             || normalized.contains("cookie")
+    }
+
+    /// Immutable Aho-Corasick tables search all policy literals in one pass.
+    /// Their size depends only on the fixed patterns above (84,039 bytes of
+    /// retained table payload), never on event contents. Construction runs
+    /// once per static matcher; searches need no normalization buffer or
+    /// input-dependent cache. String's UTF-8 access may still bridge storage.
+    private struct ASCIIMatcher: Sendable {
+        let transitions: [UInt16]
+        let terminal: [Bool]
+
+        init(_ patterns: [String]) {
+            var rows = [[Int]](
+                repeating: [Int](repeating: -1, count: 128), count: 1
+            )
+            var accepting = [false]
+            for pattern in patterns {
+                var node = 0
+                precondition(!pattern.isEmpty)
+                for byte in pattern.utf8 {
+                    precondition(byte < 128)
+                    if rows[node][Int(byte)] == -1 {
+                        rows[node][Int(byte)] = rows.count
+                        rows.append([Int](repeating: -1, count: 128))
+                        accepting.append(false)
+                    }
+                    node = rows[node][Int(byte)]
+                }
+                accepting[node] = true
+            }
+            precondition(rows.count <= Int(UInt16.max))
+            var failures = [Int](repeating: 0, count: rows.count)
+            var queue: [Int] = []
+            for byte in 0..<128 {
+                if rows[0][byte] == -1 {
+                    rows[0][byte] = 0
+                } else {
+                    queue.append(rows[0][byte])
+                }
+            }
+            var head = 0
+            while head < queue.count {
+                let node = queue[head]
+                head += 1
+                for byte in 0..<128 {
+                    let child = rows[node][byte]
+                    if child == -1 {
+                        rows[node][byte] = rows[failures[node]][byte]
+                    } else {
+                        let failure = rows[failures[node]][byte]
+                        failures[child] = failure
+                        accepting[child] = accepting[child] || accepting[failure]
+                        queue.append(child)
+                    }
+                }
+            }
+            transitions = rows.flatMap { $0.map(UInt16.init) }
+            terminal = accepting
+        }
+
+        @inline(__always)
+        func next(_ state: Int, _ byte: UInt8) -> Int {
+            Int(transitions[state * 128 + Int(byte)])
+        }
     }
 }

@@ -128,6 +128,30 @@ legacy migration, fixed-envelope, startup-retry and boot-heartbeat cases
 and the device-change regression that failed against the prior implementation.
 Installed qualification of the new signed artifact remains required.
 
+### Runtime resource qualification, 2026-09-20
+
+Candidate 1.22.1.1152 completed the 900-second reference-host capture in one
+native process, but failed final CPU validation: 482.735 CPU-seconds over
+900 seconds is 0.53637 cores, above the unchanged 0.50-core limit. The measured
+workload met its required pressure and the sampled loss checks held. This is
+a failed qualification; a completed capture is not a passing report.
+
+A separate diagnostic repeat and exact-candidate symbolication identified
+repeated credential-hint and sensitive-key searches as a performance lead.
+The replacement uses fixed ASCII match tables and retains the previous
+whole-string fallback for any non-ASCII input. A standalone optimized
+comparison passed 687,248 differential checks across 171,812 synthetic strings,
+including short-value boundaries, every hint, controls, case, and Unicode.
+Microbenchmark savings do not establish installed CPU compliance. The source
+change requires a new signed candidate and fresh installed qualification;
+1152's failure and diagnostic profile remain preserved.
+
+The replacement source passed 27 focused privacy and journal-admission tests
+in six suites (21.702 seconds). This includes differential ASCII matching,
+late-Unicode fallback, dynamic-map redaction and collision handling, existing
+credential syntax, and canonical event preparation. Full clean CI and the
+replacement candidate's installed checks remain separate requirements.
+
 ## Installed release qualification
 
 These tests qualify source behavior, not Sparkle, signing, installation, or
