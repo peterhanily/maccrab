@@ -76,7 +76,9 @@ publish.
   a newer OS does not provide that runtime coverage. Follow
   `docs/UPGRADE_QUALIFICATION.md`; an already-migrated store is not
   predecessor-upgrade evidence, and an isolated compatibility test does not
-  replace installed upgrade and runtime qualification. There is no qualified
+  replace installed upgrade and runtime qualification. Include a full OS reboot
+  while migration is unfinished; process relaunch alone does not exercise
+  persistent receipt identity across a volume remount. There is no qualified
   database downgrade target. Also reconcile any legacy temporary PF rules in
   the shared `com.maccrab` anchor before publication: the new dedicated response anchor
   deliberately cannot erase potentially unrelated legacy rules. See

@@ -22,6 +22,14 @@ free-space checks and transaction limits remain in force. Only an explicit
 configuration increase can raise the allowance. Fresh stores, completed
 upgrades, and read-only consumers receive no migration allowance.
 
+Receipt version 2 binds the volume's persistent UUID, inode, and database birth
+time. The recorded device number is diagnostic only: macOS can assign a
+different number when the same volume is mounted after reboot. No-follow file,
+ownership, link-count and same-call identity checks still guard the UUID lookup.
+A completed version-1 receipt from an unpublished candidate retains ordinary
+policy. An unfinished version-1 receipt lacks persistent volume identity and
+fails closed without creating or increasing an allowance.
+
 Before producers start, boot must reach the configured startup target,
 restore the configured policy, and prove ordinary priority and file writes
 admissible. Only then is the receipt marked complete. A cap that cannot hold
@@ -93,6 +101,33 @@ memory, and selected journal-receipt checks. The initial compile attempt was
 invalidated by a concurrent formatting edit and is retained as a failed
 attempt; the successful rerun used unchanged source.
 
+### Reboot identity regression, 2026-09-20
+
+Candidate 1.22.1.1151 reached readiness in one verified native process after a
+real v1.21.5 Sparkle upgrade on macOS 14.8.7. Its migration ledger conserved
+41,734 events. Comparison preserved the 14 predeclared fresh event records and
+all 850 legacy evidence rows exactly; excluded ambient records were outside the
+event-ID conservation claim. A later health check recorded 3,065 file-write
+copy-backpressure drops. The fast snapshot is a possible contributor, but
+neither per-process attribution nor a subsecond offered-rate peak was measured.
+That failed health check remains failed; this is not a qualified release.
+
+A subsequent normal OS reboot kept the engine ready with zero observed drops,
+but changed the database's mount device number while its inode and birth time
+remained unchanged. Version-1 receipts used that transient number as persistent
+identity. A regression run against the old implementation changed only the
+saved device number and proved that it discarded a pending allowance and
+refused completion. Version-2 receipts use persistent volume identity instead.
+Their tests cover unchanged fixed ceilings, completion, replacement identity,
+malformed UUIDs, and conservative handling of old receipts. Candidate 1151 and
+its failed reports are preserved; the source change requires a new candidate.
+
+The replacement source passed 24 focused tests in four suites, including all
+legacy migration, fixed-envelope, startup-retry and boot-heartbeat cases
+(370.924 seconds). This includes the production-reserve lowered-cap fixture
+and the device-change regression that failed against the prior implementation.
+Installed qualification of the new signed artifact remains required.
+
 ## Installed release qualification
 
 These tests qualify source behavior, not Sparkle, signing, installation, or
@@ -109,8 +144,10 @@ the shipped system-extension process. Before publishing a successor:
 3. Record artifact hash, predecessor/candidate versions, configuration,
    initial family size, migration conservation, time to ready, and final
    ordinary admission. Check restart both during migration and after schema
-   finalization. Verify the dashboard and menu bar stay unready until
-   monitoring starts.
+   finalization, including a full OS reboot with an unfinished receipt. Verify
+   the persistent volume/database binding and unchanged ceiling after remount;
+   a process-only restart does not cover this boundary. Verify the dashboard and
+   menu bar stay unready until monitoring starts.
 4. Run the existing installed runtime qualification against that same
    candidate. Retain failed attempts as failures; source changes require a
    new candidate and qualification.

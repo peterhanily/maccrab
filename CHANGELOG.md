@@ -20,6 +20,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   `legacy bootstrap checkpoint does not fit the unchanged family cap` without
   changing the saved storage preference or deleting protected history. A cap
   that cannot hold protected retained data can still prevent readiness.
+- **A full Mac restart preserves an unfinished upgrade's fixed allowance.**
+  Receipts identify the persistent volume and database incarnation instead of
+  relying on a mount device number that can change across boots. A replaced
+  database cannot inherit the allowance, and completed upgrades cannot renew it.
 - **Transient SQLite contention during EventStore initialization receives bounded
   retries.** Capacity, integrity, and other permanent failures retain their
   original classification rather than being treated as transient waits.

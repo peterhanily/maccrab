@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
-[![Tests](https://img.shields.io/badge/tests-4759%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-4763%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
 [![Version](https://img.shields.io/badge/version-1.22.1-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
@@ -673,8 +673,9 @@ dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detai
 Recent milestones:
 
 - **v1.22.1** — fixes legacy event-store upgrades blocked by a lowered storage
-  cap, using a fixed temporary allowance that is retired before monitoring
-  starts, and an event-processing crash on macOS 14; shows migration progress
+  cap, using a fixed temporary allowance that survives Mac restarts and is
+  retired before monitoring starts, and an event-processing crash on macOS 14;
+  shows migration progress
   and a visible menu-bar warning when protection is not confirmed; distinguishes
   queued rule reloads from confirmed completion.
 - **v1.22.0** — fixed a crash on the enrichment-timeout path; event storage now

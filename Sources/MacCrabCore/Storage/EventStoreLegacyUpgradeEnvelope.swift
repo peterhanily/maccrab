@@ -8,7 +8,10 @@ import Darwin
 enum EventStoreLegacyUpgradeEnvelope {
     struct Receipt: Codable, Sendable, Equatable {
         let schemaVersion: Int
+        // st_dev is a mount-session identifier on macOS, retained only for
+        // diagnostics. Persistent matching uses the volume UUID instead.
         let databaseDevice: UInt64
+        let databaseVolumeUUID: String?
         let databaseInode: UInt64
         let databaseBirthSeconds: Int64
         let databaseBirthNanoseconds: Int64
@@ -28,7 +31,15 @@ enum EventStoreLegacyUpgradeEnvelope {
         .storageNotReady("Legacy event-store upgrade: \(reason). Existing history is preserved; export diagnostics before recovery.")
     }
 
-    private static func identity(_ path: String) throws -> (UInt64, UInt64, Int64, Int64) {
+    private struct DatabaseIdentity: Equatable {
+        let device: UInt64
+        let inode: UInt64
+        let birthSeconds: Int64
+        let birthNanoseconds: Int64
+        var volumeUUID: String?
+    }
+
+    private static func fileIdentity(_ path: String) throws -> DatabaseIdentity {
         guard case .success(let snapshot) = BoundedRegularFileReader.readPrefixOutcome(
             at: path, maximumBytes: 0
         ) else { throw failure("cannot establish the database identity") }
@@ -41,9 +52,47 @@ enum EventStoreLegacyUpgradeEnvelope {
               (metadata.st_mode & S_IFMT) == S_IFREG else {
             throw failure("database identity or ownership changed")
         }
-        return (snapshot.deviceID, snapshot.inodeNumber,
-                Int64(metadata.st_birthtimespec.tv_sec),
-                Int64(metadata.st_birthtimespec.tv_nsec))
+        return DatabaseIdentity(
+            device: snapshot.deviceID, inode: snapshot.inodeNumber,
+            birthSeconds: Int64(metadata.st_birthtimespec.tv_sec),
+            birthNanoseconds: Int64(metadata.st_birthtimespec.tv_nsec)
+        )
+    }
+
+    private static func identity(
+        _ path: String, resolveVolumeUUID: Bool
+    ) throws -> DatabaseIdentity {
+        let before = try fileIdentity(path)
+        guard resolveVolumeUUID else { return before }
+        // Foundation documents volumeUUIDString as persistent across launches;
+        // volumeIdentifier and stat.st_dev are not persistent volume identities.
+        // The lookup uses a fresh URL, and anchored no-follow reads plus stat
+        // checks bind the same database incarnation on both sides of it.
+        let resourceValues: URLResourceValues
+        do {
+            resourceValues = try URL(fileURLWithPath: path).resourceValues(
+                forKeys: [.volumeUUIDStringKey]
+            )
+        } catch { throw failure("cannot establish a persistent database volume identity") }
+        guard let rawUUID = resourceValues.volumeUUIDString,
+              let volumeUUID = UUID(uuidString: rawUUID)?.uuidString else {
+            throw failure("the database volume has no persistent UUID for its fixed transition allowance")
+        }
+        guard try fileIdentity(path) == before else {
+            throw failure("database identity or ownership changed during volume lookup")
+        }
+        var result = before
+        result.volumeUUID = volumeUUID
+        return result
+    }
+
+    private static func matches(_ receipt: Receipt, _ identity: DatabaseIdentity) -> Bool {
+        receipt.schemaVersion == 2
+            && receipt.databaseVolumeUUID != nil
+            && receipt.databaseVolumeUUID == identity.volumeUUID
+            && receipt.databaseInode == identity.inode
+            && receipt.databaseBirthSeconds == identity.birthSeconds
+            && receipt.databaseBirthNanoseconds == identity.birthNanoseconds
     }
 
     static func read(for path: String) throws -> Receipt? {
@@ -59,7 +108,20 @@ enum EventStoreLegacyUpgradeEnvelope {
             let receipt: Receipt
             do { receipt = try JSONDecoder().decode(Receipt.self, from: snapshot.data) }
             catch { throw failure("transition receipt is invalid") }
-            guard receipt.schemaVersion == 1,
+            let identitySchemaIsValid: Bool
+            switch receipt.schemaVersion {
+            case 1:
+                identitySchemaIsValid = receipt.databaseVolumeUUID == nil
+            case 2:
+                if let volumeUUID = receipt.databaseVolumeUUID {
+                    identitySchemaIsValid = UUID(uuidString: volumeUUID)?.uuidString == volumeUUID
+                } else {
+                    identitySchemaIsValid = false
+                }
+            default:
+                identitySchemaIsValid = false
+            }
+            guard identitySchemaIsValid,
                   receipt.inheritedFamilyBytes >= 0,
                   receipt.inheritedSidecarBytes >= 0,
                   receipt.inheritedSidecarBytes <= receipt.inheritedFamilyBytes,
@@ -92,26 +154,38 @@ enum EventStoreLegacyUpgradeEnvelope {
         configured: SQLitePersistentStorePolicy,
         needsJournalUpgrade: Bool
     ) throws -> (SQLitePersistentStorePolicy, Receipt?) {
-        let dbIdentity = try identity(path)
-        func matches(_ receipt: Receipt) -> Bool {
-            receipt.databaseDevice == dbIdentity.0
-                && receipt.databaseInode == dbIdentity.1
-                && receipt.databaseBirthSeconds == dbIdentity.2
-                && receipt.databaseBirthNanoseconds == dbIdentity.3
-        }
         var receipt = try read(for: path)
+        // Ordinary finalized stores still undergo the existing no-follow file
+        // identity/owner/link checks, but need no new persistent-volume lookup.
+        let needsPersistentIdentity = receipt?.schemaVersion != 1
+            && (needsJournalUpgrade || receipt?.completed == false)
+        let dbIdentity = try identity(path, resolveVolumeUUID: needsPersistentIdentity)
         if let stored = receipt {
-            guard matches(stored) else {
+            if stored.schemaVersion == 1 {
+                // Unpublished v1 candidates persisted a mount-session device
+                // number. A pending v1 allowance cannot be safely rebound to a
+                // volume after reboot, and must never trigger a fresh measure.
+                guard stored.completed else {
+                    throw failure("the pending version-1 transition receipt has no persistent volume identity; its allowance cannot be resumed automatically")
+                }
+                guard !needsJournalUpgrade else {
+                    throw failure("a completed transition has become incomplete")
+                }
+                return (configured, nil)
+            }
+            if stored.completed && !needsJournalUpgrade {
+                // Preserve the tombstone and use only the ordinary configured
+                // cap. No allowance is granted, including for a replaced store.
+                return (configured, nil)
+            }
+            guard matches(stored, dbIdentity) else {
                 // Corruption recovery can legitimately move the old family
                 // aside and recreate this path. A stale receipt grants the
                 // replacement no allowance; its ordinary policy still applies.
                 return (configured, nil)
             }
             if stored.completed {
-                guard !needsJournalUpgrade else {
-                    throw failure("a completed transition has become incomplete")
-                }
-                return (configured, nil)
+                throw failure("a completed transition has become incomplete")
             }
         } else {
             guard needsJournalUpgrade else { return (configured, nil) }
@@ -123,9 +197,10 @@ enum EventStoreLegacyUpgradeEnvelope {
                 sidecars: family - main, reserve: configured.transactionReserveBytes
             )
             let created = Receipt(
-                schemaVersion: 1, databaseDevice: dbIdentity.0,
-                databaseInode: dbIdentity.1, databaseBirthSeconds: dbIdentity.2,
-                databaseBirthNanoseconds: dbIdentity.3,
+                schemaVersion: 2, databaseDevice: dbIdentity.device,
+                databaseVolumeUUID: dbIdentity.volumeUUID,
+                databaseInode: dbIdentity.inode, databaseBirthSeconds: dbIdentity.birthSeconds,
+                databaseBirthNanoseconds: dbIdentity.birthNanoseconds,
                 inheritedFamilyBytes: family, inheritedSidecarBytes: family - main,
                 configuredCapBytes: configured.maxFootprintBytes,
                 transactionReserveBytes: configured.transactionReserveBytes,
@@ -148,7 +223,7 @@ enum EventStoreLegacyUpgradeEnvelope {
                 receipt = try read(for: path)
             }
         }
-        guard let receipt, matches(receipt), !receipt.completed,
+        guard let receipt, matches(receipt, dbIdentity), !receipt.completed,
               receipt.transactionReserveBytes == configured.transactionReserveBytes else {
             throw failure("transition receipt changed during bootstrap")
         }
@@ -177,11 +252,8 @@ enum EventStoreLegacyUpgradeEnvelope {
         guard try read(for: path) == receipt else {
             throw failure("transition receipt changed before completion")
         }
-        let currentIdentity = try identity(path)
-        guard receipt.databaseDevice == currentIdentity.0,
-              receipt.databaseInode == currentIdentity.1,
-              receipt.databaseBirthSeconds == currentIdentity.2,
-              receipt.databaseBirthNanoseconds == currentIdentity.3 else {
+        let currentIdentity = try identity(path, resolveVolumeUUID: true)
+        guard matches(receipt, currentIdentity) else {
             throw failure("database was replaced before transition completion")
         }
         var completed = receipt
