@@ -152,6 +152,55 @@ late-Unicode fallback, dynamic-map redaction and collision handling, existing
 credential syntax, and canonical event preparation. Full clean CI and the
 replacement candidate's installed checks remain separate requirements.
 
+### Dashboard recovery and snapshot feedback, 2026-09-20
+
+Candidate 1.22.1.1153 passed its 900-second reference-host runtime check,
+including the unchanged CPU and event-loss limits. A real Sparkle upgrade
+from published v1.21.5 on macOS 14 then reached native engine readiness in
+58.069 seconds and displayed migration progress, but did not qualify.
+
+The subsequent paced database snapshot failed its fresh health check with
+7,264 file-write copy-backpressure drops. Those are real detection-input
+losses. Later recovery does not erase the failed check. Conservation and
+reboot checks were not completed for this attempt.
+
+A controlled comparison then copied the same preserved offline snapshot in
+the same engine process, with unchanged protection settings. The copy under
+an existing forensic-output prefix added no drops; an identical copy into a
+monitored directory added 8,066 write drops. Both copies produced identical
+185,147,392-byte files. The guest's SQLite 3.43.2 reported a 20,000-page spill
+threshold, and file growth showed roughly 78 MiB remaining buffered despite
+the helper's 16-page steps and 25-millisecond pauses. SQLite requires both its
+cache-size and spill thresholds to be exceeded before spilling dirty pages;
+callback pacing alone does not bound the final write burst.
+See [SQLite's cache-spill documentation](https://www.sqlite.org/pragma.html#pragma_cache_spill).
+
+Setting only the new snapshot destination connection's cache and spill
+thresholds to 32 pages produced the same bytes in a monitored directory with
+zero new drops and 45,736 processed write events. The source, engine process,
+saved configuration and exclusions stayed unchanged. Readbacks verified the
+destination settings before and after backup. The initial 100-second control
+timed out; separately declared 150-second diagnostics completed their copies
+in 107–110 seconds. Future snapshots use that operation bound while retaining
+the sealed cohort's independent expiry deadline and strict loss checks.
+These diagnostics correct the measurement method; they do not qualify 1153
+or establish lossless operation for arbitrary write bursts.
+
+The dashboard also remained offline after the engine became ready. Bringing
+the window forward and using Show Dashboard did not recover it; the normal
+Reconnect button did, without an engine restart. A regression against the
+unchanged source reproduced inactive-window startup recovery staying offline.
+The correction retains pending recovery until a healthy provider opens and
+allows recovery without a focus edge. Periodic workspace refreshes remain
+foreground-only. This source change requires a new signed candidate and
+fresh installed qualification.
+
+The replacement source passed 42 focused tests in five suites, including five
+new startup-recovery cases and the existing dashboard lifecycle, source-read
+deferral and handoff checks. The inactive-ready regression failed against the
+prior source before the correction. Full clean CI and installed qualification
+of the replacement artifact remain separate requirements.
+
 ## Installed release qualification
 
 These tests qualify source behavior, not Sparkle, signing, installation, or

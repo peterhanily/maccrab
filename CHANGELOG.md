@@ -31,6 +31,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Overview and System Health show processed and remaining counts; diagnostics
   retain migrated, expired, and preserved-corrupt counts. Protection remains
   unready during migration, and dashboard event readers defer while it runs.
+- **The dashboard reconnects automatically after an upgrade finishes.**
+  Startup recovery no longer waits for a window-focus change. A missing or
+  partially opened store remains eligible for another connection attempt;
+  ordinary periodic refreshes still pause while the window is inactive.
 - **The menu bar visibly warns when protection cannot be confirmed.** The crab
   gains an exclamation mark for startup, upgrade, unavailable, or degraded
   protection. Heartbeat polling works without a dashboard window and refuses

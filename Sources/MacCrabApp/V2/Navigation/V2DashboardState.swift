@@ -228,7 +228,6 @@ public final class V2DashboardState: ObservableObject {
     /// to call repeatedly (e.g. after the user installs the daemon).
     public func connectLiveData() async {
         guard !deferProviderDuringStartup() else { return }
-        providerDeferredForStartup = false
         providerProbeGeneration &+= 1
         let generation = providerProbeGeneration
         let probed = await V2LiveDataProvider(source: engineSource)
@@ -244,6 +243,7 @@ public final class V2DashboardState: ObservableObject {
         if let live = probed {
             (provider as? V2LiveDataProvider)?.retireEventReads()
             self.provider = live
+            finishStartupRecoveryIfHealthy()
             let dir = live.dataDir.map { " (\($0))" } ?? ""
             showToast(V2Toast(
                 kind: .success,
@@ -265,7 +265,6 @@ public final class V2DashboardState: ObservableObject {
     /// prevents an older asynchronous probe from replacing a newer provider.
     public func reconnectLiveDataIfStale(force: Bool = false) async {
         guard !deferProviderDuringStartup() else { return }
-        providerDeferredForStartup = false
         providerProbeGeneration &+= 1
         let generation = providerProbeGeneration
         if force {
@@ -293,6 +292,7 @@ public final class V2DashboardState: ObservableObject {
         } else {
             live.retireEventReads()
         }
+        finishStartupRecoveryIfHealthy()
     }
 
     /// Adopt a recovered provider only for the current source. A healthy
@@ -310,17 +310,32 @@ public final class V2DashboardState: ObservableObject {
     public func onEngineIdentity(_ identity: EngineTelemetryIdentity?) async {
         let changed = Self.updateEngineIdentity(&lastEngineIdentity, next: identity)
         guard !deferProviderDuringStartup() else { return }
-        if changed { await reconnectLiveDataIfStale(force: true) }
+        if changed {
+            providerDeferredForStartup = true
+            await reconnectLiveDataIfStale(force: true)
+        }
     }
 
+    // A successful metadata/store-open probe settles recovery. A missing or
+    // partially opened provider must keep retrying after the ready edge passes.
     private var providerDeferredForStartup = false
+    private var startupRecoveryInFlight = false
+
+    private func finishStartupRecoveryIfHealthy() {
+        if provider.mode == .live, provider.dataDir == engineSource.directory,
+           provider.lastErrorDescription == nil {
+            providerDeferredForStartup = false
+        }
+    }
 
     @discardableResult
     private func deferProviderDuringStartup() -> Bool {
         guard engineSource.defersEventReads() else { return false }
-        if !providerDeferredForStartup {
-            providerDeferredForStartup = true
-            providerProbeGeneration &+= 1
+        // Pending recovery can coexist with an in-flight probe and an offline
+        // provider. Every observed startup must invalidate that earlier probe.
+        providerDeferredForStartup = true
+        providerProbeGeneration &+= 1
+        if provider.mode != .offline {
             (provider as? V2LiveDataProvider)?.retireEventReads()
             provider = V2OfflineDataProvider()
             paletteAlerts = []; paletteRules = []; paletteTraces = []
@@ -328,10 +343,16 @@ public final class V2DashboardState: ObservableObject {
         return true
     }
 
-    private func resumeProviderAfterStartup() async {
-        guard foregroundActive, providerDeferredForStartup,
-              !engineSource.defersEventReads() else { return }
-        providerDeferredForStartup = false
+    // Recovery itself opens handles; adopting a live provider can trigger one
+    // initial workspace load. It must not depend on a focus edge: an LSUIElement
+    // dashboard can remain inactive throughout relaunch and the ready transition.
+    // The timer retries only unresolved recovery; foregroundActive still gates
+    // refreshTick, keeping periodic background workspace queries paused.
+    func resumeProviderAfterStartup() async {
+        guard providerDeferredForStartup, !startupRecoveryInFlight,
+              !Task.isCancelled, !engineSource.defersEventReads() else { return }
+        startupRecoveryInFlight = true
+        defer { startupRecoveryInFlight = false }
         await reconnectLiveDataIfStale()
     }
 
@@ -347,11 +368,9 @@ public final class V2DashboardState: ObservableObject {
         return previous != next
     }
 
-    /// Drive a one-shot reconnect on the sysext's non-ready→ready boot
-    /// edge. Called from the shell's `.onChange(of: heartbeat.bootPhase)`.
-    /// Fires at most once per (re)boot: the daemon writes bootPhase="ready"
-    /// once per start, and the edge guard ignores the steady stream of
-    /// "ready" heartbeats that follow — so this never thrashes the provider.
+    /// Arm connection recovery on the sysext's non-ready→ready boot edge.
+    /// Steady ready heartbeats do not re-arm a recovered connection; an
+    /// unresolved attempt remains eligible for the periodic recovery check.
     public func onSysextBootPhase(_ phase: String?) async {
         // Record the new phase BEFORE the await so an interleaving call
         // during reconnectLiveDataIfStale() sees the updated value and can't
@@ -359,8 +378,8 @@ public final class V2DashboardState: ObservableObject {
         let fire = Self.bootPhaseDidBecomeReady(previous: lastBootPhase, next: phase)
         lastBootPhase = phase
         guard !deferProviderDuringStartup() else { return }
-        if providerDeferredForStartup { await resumeProviderAfterStartup() }
-        else if fire { await reconnectLiveDataIfStale() }
+        if fire { providerDeferredForStartup = true }
+        await resumeProviderAfterStartup()
     }
 
     /// Pure non-ready→ready edge detector for `onSysextBootPhase`, extracted
