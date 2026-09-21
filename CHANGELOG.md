@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [1.22.1] — 2026-09-20
 
 ### Fixed
+- **A rule that fails to parse now fails the build instead of quietly shrinking
+  the ruleset.** The compiler reported success after a parse error and then
+  removed the previously compiled copy of that rule. It now leaves the previous
+  output in place and exits with an error. Release builds were already protected
+  by a separate check; this fixes the compiler itself, which is what local and
+  third-party build steps rely on.
+- **Two rules that share a filename in different directories now fail the build.**
+  Previously the second silently overwrote the first while the summary counted
+  both. No shipped rule is affected.
+- **Strict prompt sanitization now inspects secrets wrapped in structured data.**
+  A credential embedded in JSON was previously skipped by the final safety check
+  rather than examined. This check is off by default.
+- **A log collector that accepts a request but rejects the records no longer
+  counts them as delivered,** and a collector asking us to slow down (HTTP 429)
+  or reporting a request timeout (408) is now retried instead of treated as a
+  permanent failure. Affects the optional log-forwarding integrations only.
 - **The dashboard uses noticeably less CPU while it is open.** Its five-second
   refresh republished unchanged rule-telemetry and fleet-status values, and each
   republish redrew the whole window even when nothing on screen had changed. The

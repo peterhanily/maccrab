@@ -230,7 +230,16 @@ public enum LLMSanitizer {
     /// diversity, mixed case + digits), so ordinary prose / paths / log lines
     /// pass through.
     public static func hasResidualSensitiveContent(_ text: String) -> Bool {
-        for raw in text.split(whereSeparator: { $0.isWhitespace }) {
+        // Split on structural punctuation as well as whitespace. Trimming only
+        // the OUTER boundary left a JSON-framed secret as one candidate whose
+        // internal quotes and colons failed the token-charset test below, so
+        // {"secret":"..."} was skipped entirely rather than examined. The
+        // characters here are exactly the ones the trim already removed; the
+        // token alphabet (+ / = _ - .) stays intact so base64 and dotted
+        // credentials are still evaluated whole.
+        for raw in text.split(whereSeparator: {
+            $0.isWhitespace || "\"'`,;:()[]{}<>".contains($0)
+        }) {
             let t = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`,;:()[]{}<>"))
             guard t.count >= 24 else { continue }
             if t.contains("REDACTED") { continue }                 // already redacted

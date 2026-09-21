@@ -1610,7 +1610,7 @@ def compile_all(input_dir: str, output_dir: str, *, compact_json: bool = False) 
     a bad compile can be rolled back with `cp -R`. After compiling, prunes
     orphaned outputs so the dir mirrors the current corpus exactly.
 
-    Returns (total_found, compiled, skipped).
+    Returns (total_found, compiled, skipped, parse_failures).
     """
     # Snapshot the previous compiled corpus (best-effort).
     archive_root = output_dir.rstrip(os.sep) + ".archive"
@@ -1622,6 +1622,7 @@ def compile_all(input_dir: str, output_dir: str, *, compact_json: bool = False) 
     total = len(yaml_files)
     compiled = 0
     skipped = 0
+    parse_failures = 0
     written: set = set()
 
     for filepath in yaml_files:
@@ -1634,6 +1635,11 @@ def compile_all(input_dir: str, output_dir: str, *, compact_json: bool = False) 
         except Exception as exc:
             print(f"  ERROR parsing {rel_path}: {exc}", file=sys.stderr)
             skipped += 1
+            # Tracked separately from a legitimate skip (a non-macOS
+            # logsource.product returns None and is not a failure). A parse
+            # failure means we cannot know what this rule should compile to, so
+            # the run must neither prune the previous generation nor exit 0.
+            parse_failures += 1
             continue
 
         for doc_idx, rule_data in enumerate(documents):
@@ -1666,6 +1672,18 @@ def compile_all(input_dir: str, output_dir: str, *, compact_json: bool = False) 
             else:
                 out_path = os.path.join(output_dir, out_name)
 
+            # Two rules in different tactic directories can share a basename
+            # and therefore an output path; the later write would silently win
+            # while the summary still counted both. Fail loudly instead. Do NOT
+            # "fix" this by qualifying out_name with the directory: that renames
+            # every compiled output and invalidates the rule-bundle manifest and
+            # trust-anchor hashes on every installed host.
+            if os.path.abspath(out_path) in written:
+                print(f"  ERROR {rel_path}: output {out_name} was already written "
+                      f"by another rule - duplicate basename across directories.",
+                      file=sys.stderr)
+                sys.exit(1)
+
             with open(out_path, "w", encoding="utf-8") as out_f:
                 json.dump(result, out_f, ensure_ascii=False,
                           indent=None if compact_json else 2,
@@ -1677,11 +1695,19 @@ def compile_all(input_dir: str, output_dir: str, *, compact_json: bool = False) 
             tag = "SEQ" if is_sequence else "OK "
             print(f"  {tag} {rel_path} -> {out_name}")
 
-    pruned = _prune_orphans(output_dir, written)
-    if pruned:
-        print(f"  Pruned {pruned} orphaned compiled rule(s) with no source.")
+    # Never prune on an incomplete build. A rule that failed to parse produced
+    # no output this run, so its previous JSON looks orphaned - pruning it would
+    # delete a valid compiled rule because its SOURCE is momentarily unreadable.
+    if parse_failures:
+        print(f"  Pruning suppressed: {parse_failures} rule(s) failed to parse; "
+              f"the previous compiled output is left intact.", file=sys.stderr)
+        pruned = 0
+    else:
+        pruned = _prune_orphans(output_dir, written)
+        if pruned:
+            print(f"  Pruned {pruned} orphaned compiled rule(s) with no source.")
 
-    return total, compiled, skipped
+    return total, compiled, skipped, parse_failures
 
 
 # ---------------------------------------------------------------------------
@@ -1716,7 +1742,7 @@ def main():
     print(f"Output directory: {args.output_dir}")
     print()
 
-    total, compiled, skipped = compile_all(
+    total, compiled, skipped, parse_failures = compile_all(
         args.input_dir, args.output_dir, compact_json=args.compact_json
     )
 
@@ -1748,6 +1774,18 @@ def main():
 
     if compiled == 0 and total > 0:
         print("\nNo rules were compiled. Check that rules have logsource.product = 'macos'.")
+        sys.exit(1)
+
+    # A build that could not read one of its inputs is not a successful build.
+    # Exiting 0 here let a partial compile look like a clean one, and any
+    # pipeline that trusted the exit status would deploy the smaller ruleset.
+    if parse_failures:
+        print(
+            f"\nERROR: {parse_failures} rule file(s) failed to parse. The compiled "
+            f"output is incomplete and the previous generation was left in place.\n"
+            f"Fix the YAML and re-run; do not deploy this output.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 

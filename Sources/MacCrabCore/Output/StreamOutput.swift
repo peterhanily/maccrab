@@ -219,15 +219,30 @@ public actor StreamOutput: Output {
             }
 
             do {
-                let (_, resp) = try await session.data(for: request)
+                let (data, resp) = try await session.data(for: request)
                 if let http = resp as? HTTPURLResponse {
                     if (200...299).contains(http.statusCode) {
+                        // A bulk collector can accept the REQUEST and reject
+                        // documents inside it. Elasticsearch answers 200 with
+                        // `errors: true` and per-item outcomes, so counting the
+                        // HTTP status as delivery made health() report a sink
+                        // as healthy while it was dropping every document.
+                        if kind == .elasticBulk, let reason = Self.bulkItemFailure(in: data) {
+                            stats.failed += 1
+                            stats.lastError = "collector rejected item: \(reason)"
+                            logger.warning("\(self.name) got HTTP 200 with per-item errors: \(reason, privacy: .public)")
+                            return
+                        }
                         stats.sent += 1
                         stats.lastSentAt = Date()
                         return
                     }
-                    // Non-transient 4xx → don't retry.
-                    if (400...499).contains(http.statusCode) {
+                    // Non-transient 4xx — don't retry. 429 (too many requests)
+                    // and 408 (request timeout) are explicitly transient: the
+                    // collector is asking us to come back, not refusing the
+                    // content, so they fall through to the backoff below.
+                    if (400...499).contains(http.statusCode),
+                       http.statusCode != 429, http.statusCode != 408 {
                         stats.failed += 1
                         stats.lastError = "HTTP \(http.statusCode) (non-retryable)"
                         logger.warning("\(self.name) got HTTP \(http.statusCode), not retrying")
@@ -249,6 +264,37 @@ public actor StreamOutput: Output {
     }
 
     // MARK: - Helpers
+
+    /// First per-item failure reason in an Elasticsearch bulk response, or nil
+    /// when every item was accepted.
+    ///
+    /// Deliberately conservative in both directions. An unparseable or
+    /// unexpected body returns nil, because this runs only on a 2xx and a
+    /// decoder defect must not invent a delivery failure. `errors: false` short
+    /// -circuits before any item walk, which is the ordinary path. The body is
+    /// bounded first: a collector answering 200 with an enormous body must not
+    /// let a logging concern allocate without limit.
+    static func bulkItemFailure(in data: Data) -> String? {
+        guard !data.isEmpty, data.count <= 1_048_576 else { return nil }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["errors"] as? Bool == true,
+              let items = root["items"] as? [[String: Any]] else { return nil }
+        for item in items {
+            // Each item is keyed by its action, e.g. {"index": {...}}.
+            for (_, value) in item {
+                guard let outcome = value as? [String: Any] else { continue }
+                if let error = outcome["error"] as? [String: Any] {
+                    let type = error["type"] as? String ?? "unknown"
+                    let reason = error["reason"] as? String ?? ""
+                    return reason.isEmpty ? type : "\(type): \(reason.prefix(200))"
+                }
+                if let status = outcome["status"] as? Int, !(200...299).contains(status) {
+                    return "status \(status)"
+                }
+            }
+        }
+        return nil
+    }
 
     private var contentType: String {
         switch kind {

