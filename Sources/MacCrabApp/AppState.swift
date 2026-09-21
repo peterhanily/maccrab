@@ -888,10 +888,19 @@ final class AppState: ObservableObject, EventQueryReading {
     /// mean-exec-ms columns on each rule row.
     func refreshRuleTelemetry() {
         let context = RuleTelemetryContext.load(directory: dataDir)
-        ruleTelemetry = context.statsByID
-        ruleTelemetryLastRefresh = context.snapshotWrittenAt
-        ruleTelemetryFreshness = context.freshness.rawValue
-
+        // Publish only what actually changed. `load` still runs every tick so
+        // freshness keeps decaying on wall time with a stopped engine; only the
+        // redundant @Published writes are removed. RuleStats is Hashable, so
+        // the dictionary compares.
+        if ruleTelemetry != context.statsByID {
+            ruleTelemetry = context.statsByID
+        }
+        if ruleTelemetryLastRefresh != context.snapshotWrittenAt {
+            ruleTelemetryLastRefresh = context.snapshotWrittenAt
+        }
+        if ruleTelemetryFreshness != context.freshness.rawValue {
+            ruleTelemetryFreshness = context.freshness.rawValue
+        }
     }
 
     /// Refresh the AI agent-lineage timeline from the daemon-written
@@ -1111,7 +1120,7 @@ final class AppState: ObservableObject, EventQueryReading {
     private var lastThreatIntelMtime: Date?
 
     /// Fleet telemetry connection status
-    struct FleetStatus {
+    struct FleetStatus: Equatable {
         var isConfigured: Bool = false
         var fleetURL: String = ""
     }
@@ -2391,10 +2400,13 @@ final class AppState: ObservableObject, EventQueryReading {
             UserDefaults.standard.set(false, forKey: "fdaBannerDismissedByUser")
         }
 
-        // Check fleet configuration
+        // Check fleet configuration. Publish only on change: this is read from
+        // the process environment, so after the first tick it is always equal,
+        // and an unchanged @Published write still fires objectWillChange and
+        // forces a whole-tree SwiftUI layout pass every poll.
         let fleetURL = ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] ?? ""
-        fleetStatus.isConfigured = !fleetURL.isEmpty
-        fleetStatus.fleetURL = fleetURL
+        let currentFleet = FleetStatus(isConfigured: !fleetURL.isEmpty, fleetURL: fleetURL)
+        if fleetStatus != currentFleet { fleetStatus = currentFleet }
 
         // Applied LLM configuration is reconciled exclusively from the root
         // engine's rich heartbeat in refreshHeartbeat(). The editable user

@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [1.22.1] — 2026-09-20
 
 ### Fixed
+- **The dashboard uses noticeably less CPU while it is open.** Its five-second
+  refresh republished unchanged rule-telemetry and fleet-status values, and each
+  republish redrew the whole window even when nothing on screen had changed. The
+  engine only rewrites those figures every thirty seconds, so most refreshes did
+  no useful work. Displayed values update exactly as before.
+- **The catalog's animated crab no longer animates at full display rate.** It now
+  runs at a fixed low rate and stops entirely when the window is inactive or
+  Reduce Motion is on, matching the Overview crab.
 - **The engine no longer crashes when binding event context on macOS 14.**
   Journal admission scopes now stay within the module that defines their
   values, avoiding an allocation-order failure in the older Swift concurrency

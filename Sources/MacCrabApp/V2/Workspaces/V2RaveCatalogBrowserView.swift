@@ -1510,9 +1510,31 @@ private let raveCrabShades: [RaveCrabPixel] = [
 /// dancing (vertical bob) under twinkling lights with a pulsing glow.
 /// Drawn natively so it stays crisp at any size and needs no asset.
 private struct RaveCrabView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.controlActiveState) private var controlActiveState
+
+    /// Mirrors V2CrabWidget: 15 Hz is well above flicker fusion for a bob and a
+    /// twinkle, while `.animation` runs at display refresh (up to 120 Hz).
+    private static let animationTickSeconds = 1.0 / 15.0
+
     var body: some View {
-        TimelineView(.animation) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
+        // Same defect V2CrabWidget fixed in v1.22.0: `TimelineView(.animation)`
+        // keeps ticking while the dashboard is merely open, and every tick
+        // dirties the AttributeGraph and forces a whole-tree layout pass. This
+        // view was left on the raw `.animation` schedule, and `.verifiedEmpty`
+        // is the Catalog tab's default pane, so parking there animated forever.
+        if reduceMotion || controlActiveState == .inactive {
+            scene(t: 0)
+        } else {
+            TimelineView(.periodic(from: .now, by: Self.animationTickSeconds)) { timeline in
+                scene(t: timeline.date.timeIntervalSinceReferenceDate)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func scene(t: TimeInterval) -> some View {
+        Group {
             Canvas { ctx, size in
                 let cols: CGFloat = 16, rows: CGFloat = 13
                 let s = min(size.width / cols, size.height / rows)
