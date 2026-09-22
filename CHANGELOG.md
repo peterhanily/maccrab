@@ -94,6 +94,13 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - New startup and reload messages have English fallbacks in the other language
   catalogs; native translations and packaged visual review remain outstanding.
 
+### Notes
+- **Release qualification note.** The per-rule multi-machine false-positive
+  baseline required by RELEASE_PROCESS.md Step 1b was not collected for 1.22.1.
+  The compiled rule corpus is byte-identical to v1.22.0 (479/479 rules, corpus
+  digest `6f0c7265…`), so detection behaviour is unchanged from the prior
+  release; the baseline remains outstanding for the next release.
+
 ## [1.22.0] — 2026-09-17
 
 ### Fixed
