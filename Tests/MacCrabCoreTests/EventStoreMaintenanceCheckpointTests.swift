@@ -1,10 +1,10 @@
 // EventStoreMaintenanceCheckpointTests.swift
 // v1.22.1: pins the non-waiting maintenance checkpoint.
 //
-// The installed 1155 upgrade rehearsal recorded two WAL TRUNCATE checkpoints
-// returning SQLITE_BUSY after 5.390 s and 5.443 s — the writer actor's full
+// An installed upgrade rehearsal recorded two WAL TRUNCATE checkpoints
+// returning SQLITE_BUSY after ~5.4 s each — the writer actor's full
 // `PRAGMA busy_timeout = 5000` — while the `-wal` sidecar was well under its
-// 64 MiB limit. The sweep's gate at the time asked `walBytes > 64 MiB`, which
+// 64 MiB limit. The previous gate asked `walBytes > 64 MiB`, which
 // cannot see a pinned WAL that is still small, so it discarded the checkpoint's
 // actual result and went on to more reclaim and a second blocked checkpoint.
 //
@@ -148,7 +148,7 @@ struct EventStoreMaintenanceCheckpointTests {
             #expect(deferred.retryableContention)
             #expect(deferred.failure.resultCode & 0xff == SQLITE_BUSY)
             // The whole point: SQLITE_BUSY arrived without burning the writer's
-            // busy timeout. 1155 spent 5.390 s and 5.443 s here.
+            // busy timeout. The installed rehearsal spent ~5.4 s here, twice.
             #expect(deferred.duration < .milliseconds(
                 Int(Self.fixtureBusyTimeoutMilliseconds) / 3
             ), "an optional checkpoint must not wait for a reader")

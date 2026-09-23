@@ -57,235 +57,18 @@ A successful test run on an already-migrated store is not evidence for the
 predecessor upgrade. Do not substitute an optional local measurement harness
 for these self-contained regressions.
 
-### Local verification, 2026-09-19
-
-Verification covered 4,753 executed tests across split runs; 12 opt-in tests
-were skipped. All seven predecessor-upgrade tests passed, including the
-production-reserve lowered-cap case and interrupted migration at both caps.
-The remaining suite exposed an outdated exact subprocess inventory after
-removal of the reload signal fallbacks. After updating that inventory, a
-rebuilt 33-test focused run passed, including storage-envelope, heartbeat,
-reload, menu-health, and subprocess checks. No migration implementation
-changed after the predecessor-upgrade suite passed.
-
-The deterministic pre-release audit and localization format checks passed.
-The new strings have explicit English fallbacks in non-English catalogs;
-native translation and packaged visual review remain outstanding. These
-results do not include the installed release qualification below.
-
-### macOS 14 compatibility regression, 2026-09-20
-
-Candidate `1.22.1.1150` failed a real Sparkle upgrade from the published
-`1.21.5.1018` app on macOS 14.8.7. It migrated 63,604 events, then aborted
-before producing a fresh healthy runtime heartbeat. Repeated relaunches did
-not recover. Its signed artifact and failed observations are preserved and
-must not qualify a later candidate.
-
-The failing binary's return address identifies a cross-module asynchronous
-`TaskLocal.withValue` binding of a Core-owned value. The older runtime pushes
-its binding above the caller's temporary payload; the caller then frees that
-payload out of task-stack order. An isolated two-module reproduction on the
-same macOS 14 guest aborts with the original binding and passes with
-non-inlined binding helpers in Core. The comparison also passes with the
-production Swift 5 language mode and macOS 13 deployment target. That target
-setting is not evidence of execution on macOS 13.
-
-`EventJournalAdmissionContextTests` checks nested nil bindings, throwing and
-cancellation unwinding, actor isolation, child inheritance, and shared lease
-ownership. These tests and the isolated comparison do not replace an installed
-upgrade and runtime qualification of the replacement signed candidate.
-
-The focused source run passed 55 tests in seven suites, including all six new
-scope tests and the existing alert-trigger, deferred-enrichment, pipeline
-memory, and selected journal-receipt checks. The initial compile attempt was
-invalidated by a concurrent formatting edit and is retained as a failed
-attempt; the successful rerun used unchanged source.
-
-### Reboot identity regression, 2026-09-20
-
-Candidate 1.22.1.1151 reached readiness in one verified native process after a
-real v1.21.5 Sparkle upgrade on macOS 14.8.7. Its migration ledger conserved
-41,734 events. Comparison preserved the 14 predeclared fresh event records and
-all 850 legacy evidence rows exactly; excluded ambient records were outside the
-event-ID conservation claim. A later health check recorded 3,065 file-write
-copy-backpressure drops. The fast snapshot is a possible contributor, but
-neither per-process attribution nor a subsecond offered-rate peak was measured.
-That failed health check remains failed; this is not a qualified release.
-
-A subsequent normal OS reboot kept the engine ready with zero observed drops,
-but changed the database's mount device number while its inode and birth time
-remained unchanged. Version-1 receipts used that transient number as persistent
-identity. A regression run against the old implementation changed only the
-saved device number and proved that it discarded a pending allowance and
-refused completion. Version-2 receipts use persistent volume identity instead.
-Their tests cover unchanged fixed ceilings, completion, replacement identity,
-malformed UUIDs, and conservative handling of old receipts. Candidate 1151 and
-its failed reports are preserved; the source change requires a new candidate.
-
-The replacement source passed 24 focused tests in four suites, including all
-legacy migration, fixed-envelope, startup-retry and boot-heartbeat cases
-(370.924 seconds). This includes the production-reserve lowered-cap fixture
-and the device-change regression that failed against the prior implementation.
-Installed qualification of the new signed artifact remains required.
-
-### Runtime resource qualification, 2026-09-20
-
-Candidate 1.22.1.1152 completed the 900-second reference-host capture in one
-native process, but failed final CPU validation: 482.735 CPU-seconds over
-900 seconds is 0.53637 cores, above the unchanged 0.50-core limit. The measured
-workload met its required pressure and the sampled loss checks held. This is
-a failed qualification; a completed capture is not a passing report.
-
-A separate diagnostic repeat and exact-candidate symbolication identified
-repeated credential-hint and sensitive-key searches as a performance lead.
-The replacement uses fixed ASCII match tables and retains the previous
-whole-string fallback for any non-ASCII input. A standalone optimized
-comparison passed 687,248 differential checks across 171,812 synthetic strings,
-including short-value boundaries, every hint, controls, case, and Unicode.
-Microbenchmark savings do not establish installed CPU compliance. The source
-change requires a new signed candidate and fresh installed qualification;
-1152's failure and diagnostic profile remain preserved.
-
-The replacement source passed 27 focused privacy and journal-admission tests
-in six suites (21.702 seconds). This includes differential ASCII matching,
-late-Unicode fallback, dynamic-map redaction and collision handling, existing
-credential syntax, and canonical event preparation. Full clean CI and the
-replacement candidate's installed checks remain separate requirements.
-
-### Dashboard recovery and snapshot feedback, 2026-09-20
-
-Candidate 1.22.1.1153 passed its 900-second reference-host runtime check,
-including the unchanged CPU and event-loss limits. A real Sparkle upgrade
-from published v1.21.5 on macOS 14 then reached native engine readiness in
-58.069 seconds and displayed migration progress, but did not qualify.
-
-The subsequent paced database snapshot failed its fresh health check with
-7,264 file-write copy-backpressure drops. Those are real detection-input
-losses. Later recovery does not erase the failed check. Conservation and
-reboot checks were not completed for this attempt.
-
-A controlled comparison then copied the same preserved offline snapshot in
-the same engine process, with unchanged protection settings. The copy under
-an existing forensic-output prefix added no drops; an identical copy into a
-monitored directory added 8,066 write drops. Both copies produced identical
-185,147,392-byte files. The guest's SQLite 3.43.2 reported a 20,000-page spill
-threshold, and file growth showed roughly 78 MiB remaining buffered despite
-the helper's 16-page steps and 25-millisecond pauses. SQLite requires both its
-cache-size and spill thresholds to be exceeded before spilling dirty pages;
-callback pacing alone does not bound the final write burst.
-See [SQLite's cache-spill documentation](https://www.sqlite.org/pragma.html#pragma_cache_spill).
-
-Setting only the new snapshot destination connection's cache and spill
-thresholds to 32 pages produced the same bytes in a monitored directory with
-zero new drops and 45,736 processed write events. The source, engine process,
-saved configuration and exclusions stayed unchanged. Readbacks verified the
-destination settings before and after backup. The initial 100-second control
-timed out; separately declared 150-second diagnostics completed their copies
-in 107–110 seconds. Future snapshots use that operation bound while retaining
-the sealed cohort's independent expiry deadline and strict loss checks.
-These diagnostics correct the measurement method; they do not qualify 1153
-or establish lossless operation for arbitrary write bursts.
-
-The dashboard also remained offline after the engine became ready. Bringing
-the window forward and using Show Dashboard did not recover it; the normal
-Reconnect button did, without an engine restart. A regression against the
-unchanged source reproduced inactive-window startup recovery staying offline.
-The correction retains pending recovery until a healthy provider opens and
-allows recovery without a focus edge. Periodic workspace refreshes remain
-foreground-only. This source change requires a new signed candidate and
-fresh installed qualification.
-
-The replacement source passed 42 focused tests in five suites, including five
-new startup-recovery cases and the existing dashboard lifecycle, source-read
-deferral and handoff checks. The inactive-ready regression failed against the
-prior source before the correction. Full clean CI and installed qualification
-of the replacement artifact remain separate requirements.
-
-### Legacy evidence maintenance regression, 2026-09-20
-
-Candidate 1.22.1.1154 passed clean CI and its 900-second reference-host runtime
-check. A real Sparkle upgrade from published v1.21.5 on macOS 14 migrated
-109,310 events. Its candidate-bound light heartbeat first reported ready about
-110 seconds after native process start. The inactive dashboard adopted its live
-provider without Reconnect. That observation does
-not independently establish that every workspace query succeeded.
-
-The candidate's coherent snapshots passed fresh zero-loss checks in the same
-native process. All 14 predeclared event records matched exactly. Alert-evidence
-conservation failed: 21 inherited alerts had 50 rows each before upgrade and
-16 afterward. All 336 retained rows matched exactly; all 714 missing rows
-were below the cleanup policy's first 16 ranked rows. Every parent alert
-remained present, with no rank-boundary ties or evidence relocated to alerts.db.
-
-The scheduled maintenance default had changed from the published predecessor's
-50 rows to 16. Restoring 50 prevents this reduction while retaining explicit
-row limits and age and total-size cleanup. The regression must migrate a
-predecessor fixture, run the actual maintenance sweep with its default
-arguments, and compare every inherited evidence key and byte. A test of only
-the eight rows displayed by the dashboard does not establish preservation.
-
-The predecessor acquisition also exposed a measurement problem: deliberate
-snapshot pacing held a read mark while its WAL grew beyond the unchanged
-family-size guard. That failed attempt is preserved. A separate predecessor-only
-capture removed the artificial delay and kept all identity, schema, size and
-health checks; candidate capture retained its pacing and strict zero-loss
-checks. The transition observer recorded readiness but exceeded its summary
-line-size bound afterward. Its original failed exit remains distinct from
-the saved observations. Neither measurement issue excuses the evidence loss.
-Candidate 1154 is not qualified; completed-upgrade reboot and lowered-cap
-checks were not completed. The source correction requires a new signed
-candidate and fresh installed qualification.
-
-The correction passed 65 focused tests in four suites (274.622 seconds),
-including exact preservation of 100 evidence rows across migration and the
-default maintenance sweep, explicit smaller row limits, age and size cleanup,
-and the existing lowered-cap recovery fixtures. The new preservation test
-replaces a display-depth assertion; the total test count is unchanged.
-
-### Maintenance checkpoint contention, 2026-09-20
-
-Candidate 1.22.1.1155 remains unqualified. The host's free-space guard stopped
-the VM during its first upgraded boot, so the transition observer's ledger ends
-mid-migration at 36,593 of 83,580 source events with 46,987 remaining
-(`v1.22.1-default1155-upgrade/observer-heartbeat-transition.jsonl`). The VM was
-restarted and the candidate did reach readiness, but no preserved artifact
-records a terminal migration ledger, and `successor-report.json` is
-`status: "failed"` with `snapshots: []`. Neither the interrupted observation nor
-the restart establishes an uninterrupted upgrade or event/evidence conservation.
-
-The strict candidate capture then failed on native sensor-degraded coverage.
-Later numeric health cleared that advisory flag but retained one event-insert
-error and one priority-lane terminal-revision timeout. A fixed diagnostic places
-preparation-workspace acquisition timing out at 15:25:18.749 UTC
-(`v1.22.1-1155-checkpoint-stall-receipts/index.json`). No successful successor
-snapshot or completed-reboot proof was obtained; the original cohort deadline
-was not extended.
-
-Two preceding WAL truncation attempts returned SQLITE_BUSY after 5.389927542 s
-and 5.443125708 s — the writer connection's full `busy_timeout` — at
-`frames=1769/5597` and `frames=1769/5646`, with the sidecar measured at
-25,531,672 bytes, far below its 64 MiB limit (same receipt). Source inspection
-found a concrete maintenance defect: the sweep discarded the checkpoint's actual
-outcome and used only `WAL bytes > 64 MiB` to decide whether reclamation should
-be deferred. A smaller WAL can also be pinned, so that heuristic allowed further
-write-amplifying maintenance after a busy checkpoint.
-
-The correction makes optional maintenance checkpoints non-waiting and defers
-reclamation on their actual contention result, while ordinary write timeouts and
-required startup/recovery checkpoints keep their existing policy. Because the
-sweep now returns early on contention, its own FTS ceiling-exhaustion recovery
-is deferred too; that recovery remains unconditional at boot
-(`DaemonSetup.expireJournalBlocks`) and on the journal-expiry timer, so a
-ceiling-exhausted index is still rescued without waiting for an unpinned sweep.
-`EventStoreMaintenanceCheckpointTests` pins the exact condition: a pinned WAL
-below 64 MiB defers without spending the busy timeout, a required checkpoint
-still spends it, and the maintenance API reports contention as a deferral rather
-than a throw.
-
-The observed stalls and the source defect are a concrete lead, not a complete
-causal attribution of the capture failure. Failed attempts remain preserved, and
-the correction requires a new signed candidate with unchanged health and
-conservation gates.
+Additional self-contained regressions pin defects that earlier installed lanes
+exposed, so a later candidate cannot reintroduce them unnoticed:
+`EventJournalAdmissionContextTests` covers cross-module task-local bindings on
+the older Swift concurrency runtime, including nested nil bindings, throwing
+and cancellation unwinding, actor isolation and child inheritance;
+`EventStoreMaintenanceCheckpointTests` pins the non-waiting maintenance
+checkpoint, which defers reclamation on SQLite's actual contention result
+rather than on WAL size; the legacy-upgrade suite migrates a predecessor
+fixture, runs the scheduled maintenance sweep with its default arguments and
+compares every inherited alert-evidence row; and the receipt tests cover a
+changed device number after remount, replacement identity, malformed UUIDs and
+conservative handling of version-1 receipts.
 
 ## Installed release qualification
 
@@ -310,6 +93,51 @@ the shipped system-extension process. Before publishing a successor:
 4. Run the existing installed runtime qualification against that same
    candidate. Retain failed attempts as failures; source changes require a
    new candidate and qualification.
+
+### Qualification lanes
+
+Each signed candidate is qualified against a database family created by
+the published predecessor, through the supported upgrade path. The lanes
+below are all required; a candidate that fails any of them is recorded as
+failed, its observations never qualify a later candidate, and any source
+change requires a new signed candidate and a fresh run of every lane.
+
+Predecessor upgrade at the default cap. A real upgrade from the published
+predecessor over a preserved event store must reach a fresh healthy runtime
+heartbeat in one native process, and its migration ledger must conserve every
+source event. Repeated relaunches, an interrupted observation, or a restart
+that eventually reaches readiness do not establish an uninterrupted upgrade.
+
+Predecessor upgrade at a lowered cap. The same upgrade with a saved events
+envelope small enough that migration needs the temporary allowance described
+in the storage contract. The candidate must reach ordinary write readiness
+under the original cap without deleting protected history or increasing the
+saved limit, and the recorded ceiling must survive a restart unchanged.
+
+Positive control. The lowered-cap fixture is also booted under the published
+build known to refuse it, to prove that the fixture reproduces the refusal and
+that the lane can fail. A lane that has never failed against a known-bad build
+is not evidence.
+
+Cohort and legacy-evidence conservation. A predeclared cohort of event records
+and every inherited alert-evidence row are compared key by key and byte by
+byte before and after upgrade, and again after the scheduled maintenance sweep
+has run with its default arguments. Comparing only the rows the dashboard
+displays does not establish preservation. Snapshots taken for comparison must
+pass a fresh zero-loss health check in the same engine process; the snapshot
+destination bounds its cache and spill thresholds so the copy itself does not
+burst writes into a monitored directory and register as detection-input loss.
+
+OS-reboot survival. A full OS reboot while a receipt is unfinished must keep
+the engine ready, keep the migration ceiling unchanged after the volume
+remounts, and complete the receipt without a new allowance. A process-only
+restart does not cover this boundary, and the dashboard and menu bar must
+report unready until monitoring actually starts.
+
+Every lane also runs the installed runtime qualification against the same
+candidate: a fixed-length reference capture in one native process with
+unchanged CPU, memory and event-loss limits, followed by fresh health checks.
+A completed capture is not a passing report; the limits decide.
 
 Removing an appcast item pauses Sparkle offers only. Direct downloads and
 Homebrew are separate distribution channels. A database migrated forward

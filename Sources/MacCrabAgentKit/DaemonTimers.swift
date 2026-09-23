@@ -7212,12 +7212,13 @@ func runAdaptiveRollupSweep(
     // WAL churn we are trying to avoid.
     //
     // v1.22.1: the gate is SQLite's own checkpoint result, not a WAL-size proxy.
-    // rc.36 asked `walBytes > 64 MiB`, which cannot see a pinned WAL that is
-    // still small — the installed 1155 rehearsal recorded two TRUNCATE
-    // checkpoints returning SQLITE_BUSY after 5.390 s and 5.443 s with the
-    // sidecar well under its limit, and the sweep then proceeded to further
-    // reclaim and a second blocked checkpoint. The probe is also non-waiting, so
-    // a reader never spends the writer actor's five-second busy timeout.
+    // The previous gate asked `walBytes > 64 MiB`, which cannot see a pinned WAL
+    // that is still small — an installed upgrade rehearsal recorded two TRUNCATE
+    // checkpoints returning SQLITE_BUSY after ~5.4 s each (the full busy
+    // timeout) with the sidecar well under its limit, and the sweep then
+    // proceeded to further reclaim and a second blocked checkpoint. The probe is
+    // also non-waiting, so a reader never spends the writer actor's five-second
+    // busy timeout.
     guard await maintenanceCheckpoint() else { return 0 }
 
     // Power/thermal gate for the heavy maintenance below (also gates the FTS
