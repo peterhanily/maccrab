@@ -3376,7 +3376,7 @@ enum DaemonTimers {
                     "error_count": s.errorCount,
                     "expected_interval_seconds": s.expectedIntervalSeconds,
                     "healthy": s.healthy,
-                    // v1.21.6-rc.45: a boolean cannot say "never started".
+                    // A boolean cannot say "never started".
                     "reason": s.reason,
                     "state": s.state.rawValue,
                     "enabled": s.enabled,
@@ -3561,7 +3561,7 @@ enum DaemonTimers {
                 // `sequencePendingStepsEvicted > 0` — CUMULATIVE-since-boot
                 // counters. A lifetime total never decreases, so the flag
                 // latched on at the first eviction and could never clear for the
-                // life of the process. Measured on an installed rc.8 host: one
+                // life of the process. Measured on an installed host: one
                 // load spike left `sequence_state_continuity_maintained = false`
                 // permanently, which is the single input driving the menu bar's
                 // "protection degraded" label — so the product reported degraded
@@ -7354,7 +7354,7 @@ func runAdaptiveRollupSweep(
         }
     }
 
-    // v1.21.6-rc.45: reclaim ALSO when the file is holding reclaimable slack,
+    // Reclaim ALSO when the file is holding reclaimable slack,
     // even if this sample says we are under target.
     //
     // `overCap` is measured immediately after `walCheckpointTruncate()` above —
@@ -7364,7 +7364,7 @@ func runAdaptiveRollupSweep(
     // instant, skip the reclaim on every sweep, and still pause ingestion
     // seconds later when the WAL grows back.
     //
-    // Measured on an installed host (rc.44, 2026-08-30): events.db was
+    // Measured on an installed host: events.db was
     // 350,703,616 bytes of which 79,300 of 85,621 pages were freelist — 311 MiB
     // of reclaimable slack behind live data of 23 MiB. The post-truncate
     // footprint landed at 350,834,688 against a 352,321,536 target, i.e. 1.4 MiB

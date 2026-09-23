@@ -3,9 +3,17 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.22.1] — 2026-09-22
+## [Unreleased]
 
 ### Fixed
+- **Event writes no longer pause right after upgrading a large store at the
+  default cap.** During the migration of legacy alert evidence the transition
+  reserve added to the events budget was recomputed from a momentary
+  measurement on every sweep, so it could fall faster than the freed pages were
+  actually reclaimed and briefly leave the live cap below the file's real size;
+  under heavy event load that surfaced as a temporary write pause. The reserve
+  now shrinks only as fast as space is reclaimed, and still converges to zero
+  once the legacy rows are gone.
 - **The engine no longer raises a spurious "Sensor Degraded" alert shortly after
   it starts.** The exec-throughput comparator in the sensor-degraded advisory
   judged the first few ticks against a one-tick baseline made of the engine's
@@ -16,6 +24,29 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   minutes) and never averages the startup burst into it. Detection of actual
   loss — kernel drops, collector-stage drops, and sustained loss — is unchanged
   and active from the first evaluated tick.
+- **The optional S3 and SFTP alert sinks now deliver on a schedule and on
+  shutdown.** Nothing previously triggered their upload, so batched alerts
+  stayed in memory. The engine now flushes them on the configured interval
+  (default five minutes) and once more during a graceful stop; a failed upload
+  keeps its batch, bounded, and retries it after a short backoff instead of
+  discarding it. The SFTP upload script now quotes and validates the
+  configured remote directory, and refuses one containing characters that
+  could alter the transfer. Installs without these sinks configured are
+  unaffected.
+
+### Verification
+- The installed-host runtime gate no longer counts the routine "full VACUUM not
+  needed" notice as a prune/refill loop, and measures dashboard CPU from
+  cputime deltas between samples instead of `ps` load snapshots.
+- `scripts/release.sh` honours the documented `RUNTIME_REPORT` /
+  `CONTAINMENT_REPORT` overrides, and `record-runtime` leaves its report
+  readable by the invoking user.
+- The pre-release secret scan now also inspects commit and tag messages and
+  detects Ed25519/Sparkle private keys.
+
+## [1.22.1] — 2026-09-22
+
+### Fixed
 - **A rule that fails to parse now fails the build instead of quietly shrinking
   the ruleset.** The compiler reported success after a parse error and then
   removed the previously compiled copy of that rule. It now leaves the previous
@@ -93,15 +124,6 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Fixed match tables scan candidate markers and sensitive map keys without
   building a normalized string for every field. Redaction rules, Unicode
   matching, and deterministic map-key collision handling remain unchanged.
-- **The optional S3 and SFTP alert sinks now deliver on a schedule and on
-  shutdown.** Nothing previously triggered their upload, so batched alerts
-  stayed in memory. The engine now flushes them on the configured interval
-  (default five minutes) and once more during a graceful stop; a failed upload
-  keeps its batch, bounded, and retries it after a short backoff instead of
-  discarding it. The SFTP upload script now quotes and validates the
-  configured remote directory, and refuses one containing characters that
-  could alter the transfer. Installs without these sinks configured are
-  unaffected.
 
 ### Verification
 - Self-contained fixtures exercise the shipped v1.21.5 schema, lowered caps
