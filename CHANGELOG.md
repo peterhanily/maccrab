@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [1.22.1] — 2026-09-22
 
 ### Fixed
+- **The engine no longer raises a spurious "Sensor Degraded" alert shortly after
+  it starts.** The exec-throughput comparator in the sensor-degraded advisory
+  judged the first few ticks against a one-tick baseline made of the engine's
+  own startup activity, so an ordinary burst of file events about a minute
+  after boot was reported as possible telemetry-drop evasion with every loss
+  counter at zero, and `es_sensor_degraded` flipped true for one heartbeat.
+  That comparator now waits for the exec baseline to settle (about two
+  minutes) and never averages the startup burst into it. Detection of actual
+  loss — kernel drops, collector-stage drops, and sustained loss — is unchanged
+  and active from the first evaluated tick.
 - **A rule that fails to parse now fails the build instead of quietly shrinking
   the ruleset.** The compiler reported success after a parse error and then
   removed the previously compiled copy of that rule. It now leaves the previous

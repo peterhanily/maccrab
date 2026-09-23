@@ -27,18 +27,29 @@ struct SensorDegradationEvaluatorTests {
     typealias Eval = SensorDegradationEvaluator
     typealias Input = SensorDegradationEvaluator.Input
 
-    /// Warm the evaluator through one seed tick + one normal tick so the
-    /// baseline is established (fileEwma ≈ 1000, processEwma ≈ 500) before the
-    /// test drives the interesting tick.
+    /// Warm the evaluator through one seed tick + enough normal ticks for the
+    /// process baseline to settle, so the baseline is established (fileEwma ≈
+    /// 1000, processEwma ≈ 500) and every branch — including the exec-collapse
+    /// comparator — is live before the test drives the interesting tick.
     private func warmedBaseline() -> Eval.Baseline {
         var b = Eval.Baseline()
-        b = Eval.evaluate(input: Input(fileEventsThisTick: 1000, processEventsThisTick: 500,
-                                       kernelDropDelta: 0, collectorDropDelta: 0,
-                                       benignHighIOSigner: false), baseline: b).newBaseline
-        b = Eval.evaluate(input: Input(fileEventsThisTick: 1000, processEventsThisTick: 500,
-                                       kernelDropDelta: 0, collectorDropDelta: 0,
-                                       benignHighIOSigner: false), baseline: b).newBaseline
+        for _ in 0..<Eval.processBaselineSettleTicks {
+            b = Eval.evaluate(input: Input(fileEventsThisTick: 1000, processEventsThisTick: 500,
+                                           kernelDropDelta: 0, collectorDropDelta: 0,
+                                           benignHighIOSigner: false), baseline: b).newBaseline
+        }
         return b
+    }
+
+    /// The seed tick as a fresh boot produces it: MacCrab's own startup probes
+    /// plus post-boot churn make the very first delta an exec burst (400 here)
+    /// that is nothing like the host's steady rate.
+    private func startupSeed() -> Eval.Baseline {
+        Eval.evaluate(
+            input: Input(fileEventsThisTick: 1000, processEventsThisTick: 400,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: Eval.Baseline()
+        ).newBaseline
     }
 
     @Test("seed tick never fires (no history)")
@@ -356,6 +367,103 @@ struct SensorDegradationEvaluatorTests {
         #expect(r.reason == nil)
     }
 
+    // MARK: - Startup settle (v1.22.1)
+
+    /// The live regression: a fresh 1.22.1 boot raised HIGH on the FIRST
+    /// evaluated tick with every loss counter at 0 for the whole epoch, and the
+    /// strict post-boot coverage check read `es_sensor_degraded: true` 30 s
+    /// after `ready`. The process baseline was one tick of the daemon's own
+    /// startup probes; the next tick's ordinary exec rate read as a "collapse"
+    /// the moment a file burst coincided with it.
+    @Test("startup: an exec-rate fall against a one-tick baseline with ZERO loss does not fire")
+    func startupBurstDoesNotFireCollapse() {
+        let b = startupSeed()
+        // File burst (≥ floor, > 3× the seed) while exec settles to 40 — no
+        // kernel drops, no collector drops.
+        let r = Eval.evaluate(
+            input: Input(fileEventsThisTick: 5_000, processEventsThisTick: 40,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        #expect(r.outcome == .noAlert, "no loss evidence + an unsettled baseline is not a degraded sensor")
+        #expect(r.reason == nil)
+    }
+
+    @Test("startup: kernel-drop and collector-drop evidence still fires during the settle window")
+    func lossEvidenceFiresDuringSettle() {
+        let b = startupSeed()
+        let kernel = Eval.evaluate(
+            input: Input(fileEventsThisTick: 5_000, processEventsThisTick: 40,
+                         kernelDropDelta: 42, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        guard case let .degraded(severity, benign) = kernel.outcome else {
+            Issue.record("kernel drops during a spike must fire regardless of baseline maturity"); return
+        }
+        #expect(severity == .high)
+        #expect(!benign)
+        #expect(kernel.reason == .spikeWithLoss)
+
+        let collector = Eval.evaluate(
+            input: Input(fileEventsThisTick: 5_000, processEventsThisTick: 400,
+                         kernelDropDelta: 0, collectorDropDelta: 9001, benignHighIOSigner: false),
+            baseline: b)
+        #expect({ if case .degraded = collector.outcome { return true } else { return false } }(),
+                "collector-stage drops during a spike must fire regardless of baseline maturity")
+    }
+
+    @Test("startup: sustained loss still fires during the settle window")
+    func sustainedLossFiresDuringSettle() {
+        var b = startupSeed()
+        let t1 = lossTick(b); b = t1.newBaseline
+        #expect(t1.outcome == .noAlert)
+        let t2 = lossTick(b)
+        #expect({ if case .degraded = t2.outcome { return true } else { return false } }())
+        #expect(t2.reason == .sustainedLoss)
+    }
+
+    @Test("the startup burst never becomes the exec baseline; the collapse branch is live once settled")
+    func settledBaselineExcludesBurst() {
+        var b = startupSeed()
+        // Calm post-startup ticks at the host's real exec rate (60/tick).
+        for _ in 1..<Eval.processBaselineSettleTicks {
+            let r = Eval.evaluate(
+                input: Input(fileEventsThisTick: 1_000, processEventsThisTick: 60,
+                             kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+                baseline: b)
+            #expect(r.outcome == .noAlert)
+            b = r.newBaseline
+        }
+        #expect(b.processBaselineTicks == Eval.processBaselineSettleTicks)
+        #expect(b.processEventEwma == 60, "the 400-exec startup burst must leave no trace in the settled baseline")
+
+        // Ordinary rate + a file burst, zero loss → still quiet (55 is not
+        // below half of 60).
+        let steady = Eval.evaluate(
+            input: Input(fileEventsThisTick: 5_000, processEventsThisTick: 55,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        #expect(steady.outcome == .noAlert)
+
+        // A genuine exec collapse (60 → 10) under the same burst now fires on
+        // the collapse branch — the settle window withheld it, not removed it.
+        let collapse = Eval.evaluate(
+            input: Input(fileEventsThisTick: 5_000, processEventsThisTick: 10,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: steady.newBaseline)
+        #expect({ if case .degraded = collapse.outcome { return true } else { return false } }())
+        #expect(collapse.reason == .spikeWithLoss)
+    }
+
+    @Test("a spike during settle does not advance the settle count (no learning from anomalies)")
+    func spikeDoesNotAdvanceSettle() {
+        let b = startupSeed()
+        let r = Eval.evaluate(
+            input: Input(fileEventsThisTick: 5_000, processEventsThisTick: 400,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        #expect(r.newBaseline.processBaselineTicks == b.processBaselineTicks)
+        #expect(r.newBaseline.processEventEwma == b.processEventEwma)
+    }
+
 }
 
 @Suite("D2 SensorDegradationState box (cumulative → delta)")
@@ -424,5 +532,23 @@ struct SensorDegradationStateTests {
         let r = box.step(fileCumulative: 10, processCumulative: 5, kernelDropCumulative: 0,
                          collectorDropCumulative: 0, benignHighIOSigner: false)
         #expect(r.outcome == .noAlert)
+    }
+
+    /// The fresh-boot shape through the same delta machinery the heartbeat
+    /// uses: tick 1 snapshots the cumulative counters, tick 2's delta is the
+    /// startup exec burst (seeds), tick 3 is a file burst against a settled
+    /// exec rate with every loss counter still 0 — the exact 1.22.1 sample the
+    /// strict coverage check rejected.
+    @Test("fresh boot: startup burst, then a zero-loss file burst → no fire")
+    func freshBootNoSpuriousFire() {
+        let box = SensorDegradationState()
+        _ = box.step(fileCumulative: 0, processCumulative: 0, kernelDropCumulative: 0,
+                     collectorDropCumulative: 0, benignHighIOSigner: false)
+        _ = box.step(fileCumulative: 1_000, processCumulative: 400, kernelDropCumulative: 0,
+                     collectorDropCumulative: 0, benignHighIOSigner: false)
+        let r = box.step(fileCumulative: 6_000, processCumulative: 440, kernelDropCumulative: 0,
+                         collectorDropCumulative: 0, benignHighIOSigner: false)
+        #expect(r.outcome == .noAlert)
+        #expect(r.reason == nil)
     }
 }

@@ -50,6 +50,19 @@ enum SensorDegradationEvaluator {
     /// from tripping the collapse branch on ordinary noise. The kernel-drop
     /// branch is unaffected.
     static let minProcessBaselineForCollapse = 50.0
+    /// The collapse comparator judges "well BELOW baseline", so it needs a
+    /// baseline with history behind it. Right after daemon start the process
+    /// EWMA is ONE tick — MacCrab's own startup probes plus post-boot churn —
+    /// and the next tick's ordinary exec rate reads as a collapse the moment a
+    /// file burst coincides with it. Seen on a fresh 1.22.1 boot: the first
+    /// evaluated tick raised HIGH with every loss counter at 0 for the whole
+    /// epoch, and the strict post-boot coverage check failed 30 s after `ready`.
+    /// Until the process baseline has folded in this many ticks it is a plain
+    /// sample (not an average, so the startup burst never becomes the baseline)
+    /// and the collapse branch is withheld. The kernel-drop, collector-drop and
+    /// sustained-loss branches are untouched and live from the first evaluated
+    /// tick. 4 × 30 s ≈ 2 min. NEEDS-ON-DEVICE calibration like the rest.
+    static let processBaselineSettleTicks = 4
     /// #12 (mother-of-all-audits): the spike gate above only fires when the file
     /// rate exceeds baseline × 3, so an attacker who ramps activity GRADUALLY —
     /// or simply operates on an already-busy host — can bleed millions of dropped
@@ -79,6 +92,9 @@ enum SensorDegradationEvaluator {
         var fileEventEwma: Double = 0
         var processEventEwma: Double = 0
         var seeded: Bool = false
+        /// Ticks folded into `processEventEwma` (the seed counts as one). Below
+        /// `processBaselineSettleTicks` the exec-collapse comparator is withheld.
+        var processBaselineTicks: Int = 0
         var degradedActive: Bool = false
         /// #12: separate rising-edge latch for the sustained drop-fraction branch,
         /// so a chronic-loss episode also fires exactly once and re-arms only when
@@ -163,6 +179,7 @@ enum SensorDegradationEvaluator {
         guard b.seeded else {
             b.fileEventEwma = input.fileEventsThisTick
             b.processEventEwma = input.processEventsThisTick
+            b.processBaselineTicks = 1
             b.seeded = true
             return Result(
                 outcome: .noAlert, newBaseline: b,
@@ -175,7 +192,8 @@ enum SensorDegradationEvaluator {
 
         let spike = input.fileEventsThisTick >= minFileEventsForSpike
             && input.fileEventsThisTick > b.fileEventEwma * fileSpikeMultiplier
-        let processCollapse = b.processEventEwma >= minProcessBaselineForCollapse
+        let processCollapse = b.processBaselineTicks >= processBaselineSettleTicks
+            && b.processEventEwma >= minProcessBaselineForCollapse
             && input.processEventsThisTick < b.processEventEwma * processCollapseRatio
         // Any coverage-loss signal — kernel drops OR the ES-collector-stage
         // userspace drops (backpressure / stream-yield) OR an exec-channel
@@ -231,7 +249,15 @@ enum SensorDegradationEvaluator {
         // flood can't poison it (which would blind the next episode).
         if !spike {
             b.fileEventEwma = ewmaAlpha * input.fileEventsThisTick + (1 - ewmaAlpha) * b.fileEventEwma
-            b.processEventEwma = ewmaAlpha * input.processEventsThisTick + (1 - ewmaAlpha) * b.processEventEwma
+            if b.processBaselineTicks < processBaselineSettleTicks {
+                // Settling: track the latest tick instead of averaging, so the
+                // startup burst never becomes the exec baseline the collapse
+                // comparator judges against.
+                b.processEventEwma = input.processEventsThisTick
+            } else {
+                b.processEventEwma = ewmaAlpha * input.processEventsThisTick + (1 - ewmaAlpha) * b.processEventEwma
+            }
+            b.processBaselineTicks += 1
         }
 
         return Result(
