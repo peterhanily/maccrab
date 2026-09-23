@@ -64,9 +64,17 @@ Review the capture and choose all three limits with a written rationale:
 | `engine_max_window_write_bytes_per_second` | Maximum write rate across each captured interval and every sample-aligned span of at most 60 seconds. |
 | `gui_p95_percent` | Nearest-rank p95 of the 31 background GUI `ps pcpu` snapshots, in percent of one core. |
 
-The window statistic is not a continuous sliding-window measurement. GUI
-snapshots are `ps pcpu`, not instantaneous interval CPU deltas. The baseline and
-candidate use these same definitions.
+The window statistic is not a continuous sliding-window measurement. The
+accepted v1.21.5 reference GUI value (`nearest-rank-p95-of-ps-pcpu-snapshots`)
+was measured from `ps pcpu` snapshots, a decaying average that read 0.0 across a
+whole epoch against a true ~3%. Since v1.22.1 the candidate gate reports
+`cputime-interval-delta` instead: per-interval CPU percentages from cumulative
+user+system CPU-time deltas divided by the captured wall-clock delta between
+consecutive samples (the first sample only seeds the delta, so 31 samples yield
+30 intervals). The frozen reference protocol keeps its own identifier, so the
+`gui_p95_percent` limit is provisional: it must be re-measured with the interval
+statistic before it is treated as tight. The disk-write statistics are shared
+by baseline and candidate unchanged.
 
 Preserve the raw capture. In a separate private accepted receipt, set `status`
 to `accepted`, supply the three positive finite `limits`, and record the reviewer,

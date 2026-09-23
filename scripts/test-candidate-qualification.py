@@ -171,7 +171,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "engine_cpu_seconds_total": offset * 0.1,
                 "engine_disk_write_bytes_total": engine_write_bytes * offset // 900,
                 "engine_memory_footprint_bytes": rss,
-                "gui_background_cpu_percent": 5.0,
+                "gui_cpu_seconds_total": offset * 3 / 60,
                 "sequence_pending_steps_evicted_total": 0,
                 "sequence_state_continuity_maintained": True,
                 "sequence_state_continuity_detail": "nominal",
@@ -661,9 +661,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                     "executable_sha256": installed_identity["executable_sha256"],
                 },
                 "gui_process": copy.deepcopy(gui_process),
-                "gui_background_cpu_percent": sample[
-                    "gui_background_cpu_percent"
-                ],
+                "gui_cpu_seconds_total": sample["gui_cpu_seconds_total"],
                 "sqlite_families": {
                     row["name"]: {
                         "footprint_bytes": row["max_db_wal_shm_bytes"],
@@ -952,23 +950,67 @@ class CandidateQualificationTests(unittest.TestCase):
     def test_present_candidate_gui_identity_is_bound_to_all_samples(self) -> None:
         process = self.runtime["samples"][0]["gui_process"]
         self.assertEqual(process["pid"], 5432)
-        self.assertEqual(self.runtime["measurements"]["cpu"]["gui_cpu_statistic"], "ps-pcpu-snapshot")
+        cpu = self.runtime["measurements"]["cpu"]
+        self.assertEqual(cpu["gui_cpu_statistic"], "cputime-interval-delta")
+        self.assertEqual(qualification.GUI_CPU_STATISTIC, "cputime-interval-delta")
+        # 31 cumulative samples yield 30 interval percentages: the first
+        # sample only seeds the delta and contributes no percentage.
+        self.assertEqual(len(cpu["gui_background_percent_samples"]), len(self.runtime["samples"]) - 1)
+        self.assertEqual(cpu["gui_background_percent_samples"], [5.0] * 30)
+        self.assertEqual(cpu["gui_background_p95_percent"], 5.0)
         self.validate_runtime()
 
     def test_absent_gui_process_evidence_cannot_mean_zero_cpu(self) -> None:
         observations = copy.deepcopy(self.runtime["recorder_observations"])
         observations[-1].pop("gui_process")
-        observations[-1]["gui_background_cpu_percent"] = 0
+        observations[-1]["gui_cpu_seconds_total"] = observations[-2]["gui_cpu_seconds_total"]
         with self.assertRaisesRegex(qualification.QualificationError, "gui_process"):
             self.rebuild_runtime_from_observations(observations)
 
     def test_present_idle_candidate_gui_can_have_measured_zero_cpu(self) -> None:
         observations = copy.deepcopy(self.runtime["recorder_observations"])
         for observation in observations:
-            observation["gui_background_cpu_percent"] = 0
+            observation["gui_cpu_seconds_total"] = 12.5
         report = self.rebuild_runtime_from_observations(observations)
         self.assertEqual(report["measurements"]["cpu"]["gui_background_p95_percent"], 0)
         self.validate_runtime(report)
+
+    def test_gui_cpu_intervals_reconcile_with_cumulative_samples_and_the_statistic(self) -> None:
+        for mutate, reason in (
+            (lambda cpu: cpu.update(gui_cpu_statistic="ps-pcpu-snapshot"), "per-interval CPU-time delta statistic"),
+            (lambda cpu: cpu["gui_background_percent_samples"].__setitem__(0, 4.0), "do not reconcile"),
+            (lambda cpu: cpu["gui_background_percent_samples"].append(5.0), "do not reconcile"),
+            (lambda cpu: cpu.update(gui_background_p95_percent=4.0), "background GUI p95 does not reconcile"),
+        ):
+            with self.subTest(reason=reason):
+                report = copy.deepcopy(self.runtime)
+                mutate(report["measurements"]["cpu"])
+                with self.assertRaisesRegex(qualification.QualificationError, reason):
+                    self.validate_runtime(report)
+
+    def test_gui_cpu_counter_reset_is_a_recorder_fault_not_measured_zero(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[-1]["gui_cpu_seconds_total"] = 0
+        with self.assertRaisesRegex(qualification.QualificationError, "CPU time decreased"):
+            self.rebuild_runtime_from_observations(observations)
+        report = copy.deepcopy(self.runtime)
+        report["recorder_observations"][-1]["gui_cpu_seconds_total"] = 0
+        self.rederive_sample(report, len(report["samples"]) - 1)
+        with self.assertRaisesRegex(qualification.QualificationError, "CPU time decreased"):
+            self.validate_runtime(report)
+
+    def test_gui_interval_percentages_skip_the_seed_sample(self) -> None:
+        times = [qualification.parse_time(iso(offset), "t") for offset in (0, 30, 60)]
+        self.assertEqual(qualification.gui_interval_cpu_percentages([10.0, 11.5, 14.5], times), [5.0, 10.0])
+        self.assertEqual(qualification.gui_interval_cpu_percentages([2.0, 2.0, 2.0], times), [0.0, 0.0])
+        for totals, stamps, reason in (
+            ([10.0, 9.0, 9.5], times, "decreased"),
+            ([1.0, 2.0, 3.0], [times[0], times[0], times[2]], "strictly increasing"),
+            ([1.0], times[:1], "at least two"),
+            ([1.0, 2.0], times, "at least two"),
+        ):
+            with self.subTest(reason=reason), self.assertRaisesRegex(qualification.QualificationError, reason):
+                qualification.gui_interval_cpu_percentages(totals, stamps)
 
     def test_gui_restart_and_reused_pid_fail_epoch_continuity(self) -> None:
         for field in ("pid", "process_start_abstime"):
@@ -1031,6 +1073,43 @@ class CandidateQualificationTests(unittest.TestCase):
                     mock.patch.object(qualification, "darwin_process_path", return_value=pathlib.Path(process["executable_path"])):
                 with self.assertRaisesRegex(qualification.QualificationError, reason):
                     qualification.gui_process_observation()
+
+    def test_gui_cputime_probe_requires_exactly_one_present_process(self) -> None:
+        line = "5432 /Applications/MacCrab.app/Contents/MacOS/MacCrab\n"
+        for output in ("1 /sbin/launchd\n", line + line.replace("5432", "6543")):
+            with self.subTest(output=output), mock.patch.object(qualification, "command_text", return_value=output):
+                with self.assertRaisesRegex(qualification.QualificationError, "exactly one running MacCrab GUI"):
+                    qualification.gui_process_cputime_observation()
+
+    def test_gui_cputime_probe_records_present_process_and_cumulative_cpu_seconds(self) -> None:
+        process = copy.deepcopy(self.runtime["samples"][0]["gui_process"])
+        usage = qualification.DarwinRUsageInfoV4()
+        usage.ri_proc_start_abstime = process["process_start_abstime"]
+        usage.ri_user_time = 2_000_000_000
+        usage.ri_system_time = 500_000_000
+        discovery = f"1 /sbin/launchd\n5432 {process['executable_path']}\n"
+        with mock.patch.object(qualification, "command_text", return_value=discovery) as probe, \
+                mock.patch.object(qualification, "darwin_process_metrics", return_value=process), \
+                mock.patch.object(qualification, "darwin_process_cdhash", return_value=process["running_cdhash"]), \
+                mock.patch.object(qualification, "darwin_process_rusage", return_value=usage), \
+                mock.patch.object(qualification, "darwin_process_path", return_value=pathlib.Path(process["executable_path"])), \
+                mock.patch.object(qualification, "mach_absolute_ticks_to_seconds", side_effect=lambda ticks: ticks / 1e9):
+            observed = qualification.gui_process_cputime_observation()
+        self.assertEqual(observed, {"process": process, "cpu_seconds_total": 2.5})
+        probe.assert_called_once_with(["/bin/ps", "-axo", "pid=,comm="], "GUI CPU probe")
+
+    def test_gui_cputime_probe_detects_restart_during_sample(self) -> None:
+        process = copy.deepcopy(self.runtime["samples"][0]["gui_process"])
+        line = f"5432 {process['executable_path']}\n"
+        usage = qualification.DarwinRUsageInfoV4()
+        usage.ri_proc_start_abstime = process["process_start_abstime"] + 1
+        with mock.patch.object(qualification, "command_text", return_value=line), \
+                mock.patch.object(qualification, "darwin_process_metrics", return_value=process), \
+                mock.patch.object(qualification, "darwin_process_cdhash", return_value=process["running_cdhash"]), \
+                mock.patch.object(qualification, "darwin_process_rusage", return_value=usage), \
+                mock.patch.object(qualification, "darwin_process_path", return_value=pathlib.Path(process["executable_path"])):
+            with self.assertRaisesRegex(qualification.QualificationError, "changed while its CPU time"):
+                qualification.gui_process_cputime_observation()
 
     def test_prior_running_gui_hash_does_not_match_replaced_candidate_disk_image(self) -> None:
         observations = copy.deepcopy(self.runtime["recorder_observations"])
@@ -6258,6 +6337,155 @@ class UnifiedLogTimestampTests(unittest.TestCase):
                 predicate="processID == 1", label="probe",
             )
         self.assertEqual(count, 0)
+
+
+STORAGE_LOG_HEADER = "Timestamp               Ty Process[PID:TID]\n"
+STORAGE_LOG_REFILL_LOOP_LINES = (
+    "2026-09-21 03:14:07.101 E  com.maccrab.agent[512:9f2] Tier-rollup: events.db size cap is UNREACHABLE "
+    "— 3 consecutive full VACUUMs left the footprint at 402653184 bytes against a 394264576-byte target.",
+    "2026-09-21 03:14:07.102 Df com.maccrab.agent[512:9f2] Tier-rollup: full VACUUM suppressed — the size cap "
+    "was measured unreachable (see the cap-unreachable error). Checkpointing the WAL instead.",
+    "2026-09-21 03:14:07.103 Df com.maccrab.agent[512:9f2] Campaigns size cap: full VACUUM complete — 61 MB → 48 MB",
+    "2026-09-21 03:14:07.104 F  com.maccrab.agent[512:9f2] Tier-rollup early-fire watchdog: The event-family "
+    "budget is NOT reachable on this host. Backing the watchdog off to 900s to stop the prune+VACUUM rewrite loop.",
+)
+STORAGE_LOG_ROUTINE_LINES = (
+    "2026-09-21 03:00:00.200 Df com.maccrab.agent[512:9f2] Tier-rollup: incremental_vacuum reclaimed 0 pages → "
+    "301989888 bytes (target 394264576 bytes); full VACUUM not needed, running checkpoint(TRUNCATE) for WAL cleanup.",
+    "2026-09-21 03:00:00.201 Df com.maccrab.agent[512:9f2] Tier-rollup: full VACUUM deferred — a reader held the "
+    "store at its pre-checkpoint, so no rebuild ran. Not scored against cap convergence; it retries on a later sweep.",
+    "2026-09-21 03:00:00.202 Df com.maccrab.agent[512:9f2] Tier-rollup: deferring full VACUUM under power/thermal "
+    "pressure (poll-multiplier 2); incremental_vacuum reclaimed 12 pages → 301989888 bytes.",
+    "2026-09-21 03:00:00.203 Df com.maccrab.agent[512:9f2] Tier-rollup: full VACUUM skipped by shared headroom gate "
+    "(need 900 MB free, have 512 MB); incremental_vacuum remains the low-space recovery path.",
+)
+
+
+class StorageConvergenceEvidenceTests(unittest.TestCase):
+    """The hourly 'full VACUUM not needed' checkpoint notice failed a real epoch; only rebuilds that ran count."""
+
+    def test_predicate_keeps_every_convergence_line_for_the_transcript(self) -> None:
+        self.assertEqual(
+            qualification.storage_convergence_log_predicate(4321),
+            "processID == 4321 AND (eventMessage CONTAINS[c] 'full VACUUM' OR "
+            "eventMessage CONTAINS[c] 'budget is NOT reachable')",
+        )
+
+    def test_only_genuine_refill_loop_lines_count(self) -> None:
+        for line in STORAGE_LOG_REFILL_LOOP_LINES:
+            with self.subTest(line=line[:80]):
+                self.assertTrue(qualification.storage_convergence_refill_loop_line(line))
+                self.assertTrue(qualification.storage_convergence_refill_loop_line(line.upper()))
+        for line in STORAGE_LOG_ROUTINE_LINES + (STORAGE_LOG_HEADER, "", "unrelated notice"):
+            with self.subTest(line=line[:80]):
+                self.assertFalse(qualification.storage_convergence_refill_loop_line(line))
+                self.assertFalse(qualification.storage_convergence_refill_loop_line(line.upper()))
+
+    def test_filtered_log_count_embeds_the_transcript_and_ignores_routine_notices(self) -> None:
+        transcript = STORAGE_LOG_HEADER + "\n".join(
+            (STORAGE_LOG_ROUTINE_LINES[0], STORAGE_LOG_REFILL_LOOP_LINES[0], STORAGE_LOG_ROUTINE_LINES[1])
+        ) + "\n"
+        seen: dict = {}
+
+        def fake_probe(command, *, label, include_output=False, **_kwargs):
+            seen["include_output"] = include_output
+            evidence = {
+                "command": list(command), "exit_code": 0,
+                "output_sha256": qualification.sha256_bytes(transcript.encode("utf-8")),
+                "output_tail": transcript[-4096:], "output_line_count": len(transcript.splitlines()),
+            }
+            if include_output:
+                evidence["output"] = transcript
+            return evidence
+
+        with mock.patch.object(qualification, "subprocess_probe", side_effect=fake_probe):
+            count, evidence = qualification.log_diagnostic_count(
+                started_at="2026-09-21T03:00:00Z", ended_at="2026-09-21T03:15:00Z",
+                predicate=qualification.storage_convergence_log_predicate(512),
+                label="storage convergence diagnostic query",
+                line_filter=qualification.storage_convergence_refill_loop_line,
+            )
+        self.assertEqual(count, 1)
+        self.assertTrue(seen["include_output"])
+        self.assertEqual(evidence["output"], transcript)
+        self.assertEqual(evidence["output_line_count"], 4)
+
+    def test_routine_only_transcript_counts_zero(self) -> None:
+        transcript = STORAGE_LOG_HEADER + "\n".join(STORAGE_LOG_ROUTINE_LINES) + "\n"
+        with mock.patch.object(qualification, "subprocess_probe", return_value={
+            "command": [], "exit_code": 0, "output": transcript,
+            "output_line_count": len(transcript.splitlines()),
+        }):
+            count, _ = qualification.log_diagnostic_count(
+                started_at="2026-09-21T03:00:00Z", ended_at="2026-09-21T03:15:00Z",
+                predicate="processID == 512", label="probe",
+                line_filter=qualification.storage_convergence_refill_loop_line,
+            )
+        self.assertEqual(count, 0)
+
+
+class InvokingUserHandoffTests(unittest.TestCase):
+    """record-runtime runs under sudo; the uid-501 verify-release must be able to read its report."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="maccrab-handoff-test.")
+        self.path = pathlib.Path(self.temporary.name) / "MacCrab-v9.9.9.runtime.json"
+        qualification.write_json_exclusive(self.path, {"result": "pass"})
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_root_hands_the_file_to_the_sudo_caller_keeping_0600(self) -> None:
+        with mock.patch.object(qualification.os, "geteuid", return_value=0), \
+                mock.patch.dict(qualification.os.environ, {"SUDO_UID": "501", "SUDO_GID": "20", "SUDO_USER": "terrance"}), \
+                mock.patch.object(qualification.os, "fchown") as fchown, \
+                mock.patch.object(qualification.os, "fchmod") as fchmod:
+            qualification.chown_to_invoking_user(self.path)
+        fchown.assert_called_once()
+        self.assertEqual(fchown.call_args.args[1:], (501, 20))
+        fchmod.assert_called_once_with(fchown.call_args.args[0], 0o600)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_sudo_user_name_resolves_when_the_numeric_ids_are_absent(self) -> None:
+        entry = mock.Mock(pw_uid=501, pw_gid=20)
+        with mock.patch.object(qualification.os, "geteuid", return_value=0), \
+                mock.patch.dict(qualification.os.environ, {"SUDO_USER": "terrance"}, clear=True), \
+                mock.patch.object(qualification.pwd, "getpwnam", return_value=entry) as getpwnam, \
+                mock.patch.object(qualification.os, "fchown") as fchown, \
+                mock.patch.object(qualification.os, "fchmod"):
+            qualification.chown_to_invoking_user(self.path)
+        getpwnam.assert_called_once_with("terrance")
+        self.assertEqual(fchown.call_args.args[1:], (501, 20))
+
+    def test_without_a_sudo_identity_or_outside_root_nothing_changes(self) -> None:
+        for euid, environment in (
+            (501, {"SUDO_UID": "501", "SUDO_GID": "20"}),
+            (0, {}),
+            (0, {"SUDO_UID": "0", "SUDO_GID": "0", "SUDO_USER": "root"}),
+            (0, {"SUDO_USER": "../evil"}),
+        ):
+            with self.subTest(euid=euid, environment=environment), \
+                    mock.patch.object(qualification.os, "geteuid", return_value=euid), \
+                    mock.patch.dict(qualification.os.environ, environment, clear=True), \
+                    mock.patch.object(qualification.os, "fchown") as fchown:
+                qualification.chown_to_invoking_user(self.path)
+                fchown.assert_not_called()
+
+    def test_redirected_report_path_is_refused(self) -> None:
+        link = self.path.with_name("redirected.json")
+        link.symlink_to(self.path)
+        with mock.patch.object(qualification.os, "geteuid", return_value=0), \
+                mock.patch.dict(qualification.os.environ, {"SUDO_UID": "501", "SUDO_GID": "20"}), \
+                mock.patch.object(qualification.os, "fchown") as fchown:
+            with self.assertRaisesRegex(qualification.QualificationError, "cannot reopen"):
+                qualification.chown_to_invoking_user(link)
+        fchown.assert_not_called()
+
+    def test_record_runtime_hands_over_the_report_and_its_capture_sidecar(self) -> None:
+        source = inspect.getsource(qualification.command_record_runtime)
+        self.assertIn("chown_to_invoking_user(output)", source)
+        self.assertIn("chown_to_invoking_user(capture_path)", source)
+        self.assertLess(source.index("write_json_exclusive(output, report)"), source.index("chown_to_invoking_user(output)"))
 
 
 if __name__ == "__main__":

@@ -1609,6 +1609,26 @@ run_release_control "$first_phase"
 assert_retained_ci_transcript "$first_phase" 1
 echo "PASS: accepted committed baseline reaches the real unpublished GA first-phase boundary"
 
+# The documented RUNTIME_REPORT / CONTAINMENT_REPORT environment overrides must
+# survive argument parsing: release.sh used to reset both to "" before applying
+# ${VAR:-default}, so a caller-provided path was silently replaced.
+env_override="$TEST_ROOT/release-report-env-override"
+make_release_fixture "$env_override" accepted 1
+run_release_control "$env_override" \
+    RUNTIME_REPORT="$env_override/elsewhere/runtime.json" \
+    CONTAINMENT_REPORT="$env_override/elsewhere/containment.json"
+[ "$release_control_status" -eq 3 ] \
+    || { tail -50 "$env_override/output.log" >&2; fail "env-override first phase did not stop at its exit-3 boundary"; }
+grep -Fqx "Runtime:     $env_override/elsewhere/runtime.json" "$env_override/output.log" \
+    || fail "RUNTIME_REPORT environment override was discarded"
+grep -Fqx "Containment: $env_override/elsewhere/containment.json" "$env_override/output.log" \
+    || fail "CONTAINMENT_REPORT environment override was discarded"
+[ -s "$env_override/elsewhere/runtime.json" ] \
+    || fail "runtime template was not written at the overridden RUNTIME_REPORT path"
+[ ! -e "$env_override/.qualification-evidence/MacCrab-v9.9.11.runtime.json" ] \
+    || fail "runtime template was written at the default path despite RUNTIME_REPORT"
+echo "PASS: RUNTIME_REPORT/CONTAINMENT_REPORT environment overrides survive argument parsing"
+
 run_release_attack() {
     local attack="$1"
     local expected_message="$2"

@@ -163,8 +163,10 @@ unset_maccrab_publisher_env
 VERSION=""
 SKIP_PRERELEASE=0
 PUBLISH_RC=0
-RUNTIME_REPORT=""
-CONTAINMENT_REPORT=""
+# Seeded from the environment so the documented RUNTIME_REPORT/CONTAINMENT_REPORT
+# overrides survive to the ${VAR:-default} application below; a flag still wins.
+RUNTIME_REPORT="${RUNTIME_REPORT:-}"
+CONTAINMENT_REPORT="${CONTAINMENT_REPORT:-}"
 # Re-spinning a version used to die at `git tag` ("tag already exists") AFTER the
 # full build + notarize had burnt ~15 minutes, leaving the release half-done with
 # no way forward but manual surgery. --respin is the explicit opt-in to re-point

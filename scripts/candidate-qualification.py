@@ -115,7 +115,7 @@ RUNTIME_COUNTER_SCOPE_POLICY = {
     "current_faults": "absolute: every observation",
     "historical_wait_and_saturation": "absolute: current process including startup and prewarm",
     "cpu_and_disk_rates": "deltas: captured 900-second epoch and actual captured windows",
-    "gui_cpu": "nearest-rank p95: ps-pcpu snapshots of one verified candidate GUI epoch",
+    "gui_cpu": "nearest-rank p95: per-interval CPU-time deltas of one verified candidate GUI epoch; the first sample seeds the delta and yields no percentage",
     "maxima": "never subtract cumulative maxima",
 }
 # Provisional regression ceilings retained from the earlier candidate series.
@@ -367,7 +367,26 @@ EXPECTED_DEVELOPER_ID = "Developer ID Application: Peter Hanily (79S425CW99)"
 EXPECTED_TEAM_ID = "79S425CW99"
 EXPECTED_APP_IDENTIFIER = "com.maccrab.app"
 GUI_PAYLOAD_PATH = "MacCrab.app/Contents/MacOS/MacCrab"
-GUI_CPU_STATISTIC = "ps-pcpu-snapshot"
+# Per-interval GUI CPU% = 100 x (cumulative user+system CPU-time delta) /
+# (captured wall-clock delta) between consecutive samples, nearest-rank p95
+# over the intervals. `ps pcpu` is a decaying average that read 0.0 across a
+# 32-sample epoch against a true ~3%. The first sample only seeds the delta,
+# so 31 observations yield 30 interval percentages.
+GUI_CPU_STATISTIC = "cputime-interval-delta"
+# Unified-log evidence of the prune -> full VACUUM -> refill loop. The routine
+# hourly tier-rollup notice "full VACUUM not needed, running
+# checkpoint(TRUNCATE) for WAL cleanup" (DaemonTimers) failed a real 900 s
+# epoch; only lines announcing a rebuild that actually ran, or the
+# unreachable-budget diagnostics, count. The `log show` predicate keeps every
+# convergence line in the transcript; the no-rebuild notices are excluded
+# from the count. Matching is case-insensitive, like CONTAINS[c].
+STORAGE_CONVERGENCE_LOG_TERMS = ("full VACUUM", "budget is NOT reachable")
+STORAGE_CONVERGENCE_NO_REBUILD_TERMS = (
+    "full VACUUM not needed",
+    "full VACUUM deferred",
+    "deferring full VACUUM",
+    "full VACUUM skipped",
+)
 GUI_ARCHITECTURES = ("arm64", "x86_64")
 CS_OPS_CDHASH = 5
 CDHASH_BYTES = 20
@@ -447,6 +466,42 @@ def write_json_exclusive(path: pathlib.Path, value: Mapping[str, Any]) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def chown_to_invoking_user(path: pathlib.Path) -> None:
+    """Hand a root-written evidence file to the sudo caller, keeping mode 0600.
+
+    record-runtime must run under sudo, but the later uid-501 verify-release
+    reads the report and its .capture.json sidecar; a root-owned 0600 file
+    fails that read with EACCES. Without a sudo identity this is a no-op.
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        uid = int(os.environ["SUDO_UID"])
+        gid = int(os.environ["SUDO_GID"])
+    except (KeyError, ValueError):
+        user = os.environ.get("SUDO_USER", "")
+        if not user or user == "root" or not re.fullmatch(r"[A-Za-z0-9._-]+", user):
+            return
+        try:
+            entry = pwd.getpwnam(user)
+        except KeyError:
+            return
+        uid, gid = entry.pw_uid, entry.pw_gid
+    if uid <= 0:
+        return
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        fail(f"cannot reopen {path} to hand it to the invoking user: {exc}")
+    try:
+        os.fchown(descriptor, uid, gid)
+        os.fchmod(descriptor, 0o600)
+    except OSError as exc:
+        fail(f"cannot hand {path} to the invoking user (chown it manually): {exc}")
+    finally:
+        os.close(descriptor)
 
 
 def read_json_file(path: pathlib.Path, label: str) -> Dict[str, Any]:
@@ -548,6 +603,29 @@ def percentile_nearest_rank(values: Sequence[float], percentile: float) -> float
     ordered = sorted(values)
     rank = max(1, math.ceil(percentile * len(ordered)))
     return ordered[rank - 1]
+
+
+def gui_interval_cpu_percentages(
+    cpu_seconds_totals: Sequence[float], captured_at: Sequence[dt.datetime],
+) -> List[float]:
+    """Per-interval GUI CPU% from cumulative CPU-time deltas between samples.
+
+    The first sample only seeds the delta, so N samples yield N-1 values. A
+    decreasing counter (restart or reused PID) or a non-positive capture gap
+    is a recorder fault, never a measured zero.
+    """
+    if len(cpu_seconds_totals) != len(captured_at) or len(cpu_seconds_totals) < 2:
+        fail("GUI CPU intervals need at least two aligned samples")
+    percentages: List[float] = []
+    for index in range(1, len(cpu_seconds_totals)):
+        cpu_delta = cpu_seconds_totals[index] - cpu_seconds_totals[index - 1]
+        elapsed = (captured_at[index] - captured_at[index - 1]).total_seconds()
+        if cpu_delta < 0:
+            fail("GUI cumulative CPU time decreased between samples")
+        if elapsed <= 0:
+            fail("GUI CPU intervals require strictly increasing capture times")
+        percentages.append(100.0 * cpu_delta / elapsed)
+    return percentages
 
 
 def run_checked(command: Sequence[str], label: str) -> subprocess.CompletedProcess[str]:
@@ -2393,7 +2471,7 @@ def validate_runtime_report(
     sample_capture_times: List[dt.datetime] = []
     sample_capture_gaps: List[float] = []
     sample_rss_values: List[int] = []
-    sample_gui_values: List[float] = []
+    sample_gui_cpu_totals: List[float] = []
     sample_sequence_evictions: List[int] = []
     sample_journal_shed: List[int] = []
     sample_journal_index_full_rebuilds: List[int] = []
@@ -2461,15 +2539,15 @@ def validate_runtime_report(
             sample.get("engine_disk_write_bytes_total"), f"{path}.engine_disk_write_bytes_total"
         )
         rss = int_value(sample.get("engine_memory_footprint_bytes"), f"{path}.engine_memory_footprint_bytes")
-        gui_cpu = number_value(
-            sample.get("gui_background_cpu_percent"), f"{path}.gui_background_cpu_percent", minimum=0
+        gui_cpu_total = number_value(
+            sample.get("gui_cpu_seconds_total"), f"{path}.gui_cpu_seconds_total", minimum=0
         )
         sample_cpu_totals.append(cpu_total)
         sample_write_totals.append(write_total)
         sample_offsets.append(offset)
         sample_capture_times.append(capture_time)
         sample_rss_values.append(rss)
-        sample_gui_values.append(gui_cpu)
+        sample_gui_cpu_totals.append(gui_cpu_total)
         sample_sequence_evictions.append(
             int_value(
                 sample.get("sequence_pending_steps_evicted_total"),
@@ -3194,14 +3272,22 @@ def validate_runtime_report(
     if abs(recorded_cores - average_cores) > 0.001 or average_cores > MAX_ENGINE_AVERAGE_CORES:
         fail("engine CPU average does not reconcile or exceeds 0.50 core")
     if cpu.get("gui_cpu_statistic") != GUI_CPU_STATISTIC:
-        fail("GUI CPU evidence must identify the ps-pcpu snapshot statistic")
+        fail("GUI CPU evidence must identify the per-interval CPU-time delta statistic")
     gui_samples = [
         number_value(value, f"runtime.measurements.cpu.gui_background_percent_samples[{index}]", minimum=0)
         for index, value in enumerate(list_value(cpu.get("gui_background_percent_samples"), "runtime.measurements.cpu.gui_background_percent_samples", nonempty=True))
     ]
     gui_p95 = percentile_nearest_rank(gui_samples, 0.95)
-    if gui_samples != sample_gui_values:
-        fail("GUI CPU samples do not match the embedded full-interval samples")
+    # The first sample seeds the delta: the intervals are one shorter than the
+    # embedded samples and each reconciles with the cumulative CPU counters.
+    expected_gui_samples = gui_interval_cpu_percentages(
+        sample_gui_cpu_totals, sample_capture_times
+    )
+    if len(gui_samples) != len(expected_gui_samples) or any(
+        abs(recorded - expected) > 0.001
+        for recorded, expected in zip(gui_samples, expected_gui_samples)
+    ):
+        fail("GUI CPU interval samples do not reconcile with the embedded cumulative CPU-time samples")
     recorded_p95 = number_value(cpu.get("gui_background_p95_percent"), "runtime.measurements.cpu.gui_background_p95_percent", minimum=0)
     if abs(recorded_p95 - gui_p95) > 0.001 or gui_p95 > resource_limits["gui_p95_percent"]:
         fail(
@@ -4400,7 +4486,7 @@ def normalized_runtime_sample(
     engine_disk_write_bytes_total: int,
     engine_memory_footprint_bytes: int,
     engine_process: Mapping[str, Any],
-    gui_background_cpu_percent: float,
+    gui_cpu_seconds_total: float,
     gui_process: Mapping[str, Any],
 ) -> Dict[str, Any]:
     """Turn one rich heartbeat plus Darwin process counters into gate input."""
@@ -4688,7 +4774,7 @@ def normalized_runtime_sample(
         "engine_disk_write_bytes_total": engine_disk_write_bytes_total,
         "engine_memory_footprint_bytes": engine_memory_footprint_bytes,
         "engine_process": dict(engine_process),
-        "gui_background_cpu_percent": gui_background_cpu_percent,
+        "gui_cpu_seconds_total": gui_cpu_seconds_total,
         "gui_process": dict(gui_process),
         "sequence_pending_steps_evicted_total": pending_evictions,
         "sequence_state_continuity_maintained": bool_value(
@@ -4856,9 +4942,9 @@ def sample_from_recorder_observation(raw: Any, path: str) -> Dict[str, Any]:
         ),
         engine_process=engine_process,
         gui_process=normalized_gui_process(observation.get("gui_process"), f"{path}.gui_process"),
-        gui_background_cpu_percent=number_value(
-            observation.get("gui_background_cpu_percent"),
-            f"{path}.gui_background_cpu_percent",
+        gui_cpu_seconds_total=number_value(
+            observation.get("gui_cpu_seconds_total"),
+            f"{path}.gui_cpu_seconds_total",
             minimum=0,
         ),
     )
@@ -6388,7 +6474,10 @@ def build_runtime_report_from_observations(
         fail("sequence conservation counters reset during the qualification epoch")
     if journal_shed_delta != sequence_eviction_delta:
         fail("sequence journal shed does not reconcile with pending-step evictions")
-    gui_values = [number_value(sample["gui_background_cpu_percent"], "GUI CPU") for sample in samples]
+    gui_values = gui_interval_cpu_percentages(
+        [number_value(sample["gui_cpu_seconds_total"], "GUI CPU seconds") for sample in samples],
+        [parse_time(sample["captured_at"], "GUI CPU capture time") for sample in samples],
+    )
     rss_values = [int_value(sample["engine_memory_footprint_bytes"], "RSS") for sample in samples]
     rss_at = {int(round(number_value(sample["offset_seconds"], "offset"))): int_value(sample["engine_memory_footprint_bytes"], "RSS") for sample in samples}
     llm_rows = [object_value(sample.get("llm_quality"), "sample.llm_quality") for sample in samples]
@@ -7049,6 +7138,48 @@ def gui_process_observation() -> Dict[str, Any]:
             or darwin_process_cdhash(pid) != process["running_cdhash"]:
         fail("GUI process changed while its CPU snapshot was captured")
     return {"process": process, "cpu_percent": cpu_percent}
+
+
+def gui_process_cputime_observation() -> Dict[str, Any]:
+    """One present GUI and its cumulative CPU time; absence is not measured zero.
+
+    `ps pcpu` is a decaying average that read 0.0 across a whole epoch against
+    a true ~3%, so the candidate gate samples the kernel's cumulative
+    user+system CPU time and derives per-interval percentages between
+    consecutive samples (`gui_interval_cpu_percentages`).
+    """
+    output = command_text(["/bin/ps", "-axo", "pid=,comm="], "GUI CPU probe")
+    rows = []
+    for line in output.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and (parts[1].endswith("/MacCrab") or parts[1] == "MacCrab"):
+            rows.append(parts)
+    if len(rows) != 1:
+        fail(f"qualification requires exactly one running MacCrab GUI; observed {len(rows)}")
+    try:
+        pid = int(rows[0][0])
+    except ValueError:
+        fail("GUI process probe returned an invalid PID")
+    int_value(pid, "GUI PID", minimum=1)
+    metrics = darwin_process_metrics(pid)
+    process = normalized_gui_process({
+        "pid": pid,
+        "process_start_abstime": metrics["process_start_abstime"],
+        "executable_path": metrics["executable_path"],
+        "executable_sha256": metrics["executable_sha256"],
+        "running_cdhash": darwin_process_cdhash(pid),
+    }, "live GUI process")
+    # Read the CPU counter from the same rusage that re-proves the native
+    # process-start identity, so the value cannot belong to a reused PID.
+    after = darwin_process_rusage(pid)
+    if int(after.ri_proc_start_abstime) != process["process_start_abstime"] \
+            or str(darwin_process_path(pid)) != process["executable_path"] \
+            or darwin_process_cdhash(pid) != process["running_cdhash"]:
+        fail("GUI process changed while its CPU time was captured")
+    cpu_seconds_total = mach_absolute_ticks_to_seconds(
+        int(after.ri_user_time) + int(after.ri_system_time)
+    )
+    return {"process": process, "cpu_seconds_total": cpu_seconds_total}
 
 
 def installed_gui_identity(pid: int) -> Dict[str, Any]:
@@ -7942,7 +8073,7 @@ def capture_runtime_observation(
     heartbeat, heartbeat_file = read_live_heartbeat(heartbeat_path, candidate)
     pid = heartbeat_counter(heartbeat, "engine_pid", "heartbeat")
     process = engine_process_observation(pid)
-    gui = gui_process_observation()
+    gui = gui_process_cputime_observation()
     graph = object_value(
         heartbeat.get("tracegraph_storage_admission"),
         "heartbeat.tracegraph_storage_admission",
@@ -7961,7 +8092,7 @@ def capture_runtime_observation(
         "heartbeat": heartbeat,
         "heartbeat_file": heartbeat_file,
         "process": process,
-        "gui_background_cpu_percent": gui["cpu_percent"],
+        "gui_cpu_seconds_total": gui["cpu_seconds_total"],
         "gui_process": gui["process"],
         "sqlite_families": sqlite_family_observation(
             heartbeat=heartbeat, data_dirs=data_dirs, overrides=sqlite_overrides
@@ -8494,8 +8625,32 @@ def unified_log_timestamp(value: Any, path: str, *, round_up: bool = False) -> s
     return parsed.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S%z")
 
 
+def storage_convergence_log_predicate(pid: int) -> str:
+    """Coarse `log show` prefilter; `storage_convergence_refill_loop_line` counts."""
+    terms = " OR ".join(
+        f"eventMessage CONTAINS[c] '{term}'" for term in STORAGE_CONVERGENCE_LOG_TERMS
+    )
+    return f"processID == {pid} AND ({terms})"
+
+
+def storage_convergence_refill_loop_line(line: str) -> bool:
+    """Genuine refill-loop evidence from one compact `log show` line.
+
+    A full VACUUM that ran (or the unreachable-budget diagnostics) counts;
+    the routine "not needed" checkpoint notice and the deferred/skipped
+    variants announce that no rebuild ran and are excluded.
+    """
+    text = line.lower()
+    if not any(term.lower() in text for term in STORAGE_CONVERGENCE_LOG_TERMS):
+        return False
+    return not any(
+        term.lower() in text for term in STORAGE_CONVERGENCE_NO_REBUILD_TERMS
+    )
+
+
 def log_diagnostic_count(
-    *, started_at: str, ended_at: str, predicate: str, label: str
+    *, started_at: str, ended_at: str, predicate: str, label: str,
+    line_filter: Any = None,
 ) -> Tuple[int, Dict[str, Any]]:
     command = [
         "/usr/bin/log", "show", "--style", "compact",
@@ -8503,12 +8658,18 @@ def log_diagnostic_count(
         "--end", unified_log_timestamp(ended_at, f"{label}.ended_at", round_up=True),
         "--predicate", predicate,
     ]
-    evidence = subprocess_probe(command, label=label)
-    # `log show --style compact` always emits one header line, even with zero
-    # matches, so the match count is the line count minus that header.
-    return max(0, int_value(
-        evidence.get("output_line_count"), f"{label}.output_line_count"
-    ) - 1), evidence
+    if line_filter is None:
+        evidence = subprocess_probe(command, label=label)
+        # `log show --style compact` always emits one header line, even with zero
+        # matches, so the match count is the line count minus that header.
+        return max(0, int_value(
+            evidence.get("output_line_count"), f"{label}.output_line_count"
+        ) - 1), evidence
+    # A filtered count embeds the transcript so the counted lines stay
+    # reviewable; the header line never matches a message filter.
+    evidence = subprocess_probe(command, label=label, include_output=True)
+    output = string_value(evidence.get("output"), f"{label}.output", nonempty=False)
+    return sum(1 for line in output.splitlines() if line_filter(line)), evidence
 
 
 def live_runtime_recording(
@@ -8928,12 +9089,9 @@ def live_runtime_recording(
     )
     vacuum_events, vacuum_log = log_diagnostic_count(
         started_at=start_text, ended_at=end_text,
-        predicate=(
-            f"processID == {first_pid} AND "
-            "(eventMessage CONTAINS[c] 'full VACUUM' OR "
-            "eventMessage CONTAINS[c] 'budget is NOT reachable')"
-        ),
+        predicate=storage_convergence_log_predicate(first_pid),
         label="storage convergence diagnostic query",
+        line_filter=storage_convergence_refill_loop_line,
     )
     auth_events, auth_log = log_diagnostic_count(
         started_at=start_text, ended_at=end_text,
@@ -10437,6 +10595,11 @@ def command_record_runtime(args: argparse.Namespace) -> None:
         source_root=root,
     )
     write_json_exclusive(output, report)
+    # The recorder runs as root; the uid-501 verify-release must be able to
+    # read the report and its capture sidecar.
+    chown_to_invoking_user(output)
+    if capture_path.is_file():
+        chown_to_invoking_user(capture_path)
     print(f"PASS: installed-host runtime qualification written: {output}")
 
 
