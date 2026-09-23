@@ -2494,8 +2494,13 @@ enum DaemonSetup {
                 additionalOutputs.append(out)
             }
         }
+        // The batching sinks (S3, SFTP) only leave memory on flush(), which
+        // the output-flush timer drives at the tightest configured cadence.
+        let additionalOutputFlushIntervalSeconds = DaemonTimers.outputFlushIntervalSeconds(
+            configured: config.outputs.compactMap { $0.flushIntervalSeconds }
+        )
         if !additionalOutputs.isEmpty {
-            logger.info("Configured \(additionalOutputs.count) additional output(s)")
+            logger.info("Configured \(additionalOutputs.count) additional output(s); flush every \(Int(additionalOutputFlushIntervalSeconds)) s")
             print("Additional outputs: \(additionalOutputs.map { $0.name }.joined(separator: ", "))")
         }
 
@@ -2907,6 +2912,7 @@ enum DaemonSetup {
             webhookOutput: webhookOutput,
             syslogOutput: syslogOutput,
             additionalOutputs: additionalOutputs,
+            additionalOutputFlushIntervalSeconds: additionalOutputFlushIntervalSeconds,
             notificationIntegrations: notificationIntegrations,
             selfDefense: selfDefense,
             esHealthMonitor: esHealthMonitor,

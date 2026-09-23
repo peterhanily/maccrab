@@ -1345,6 +1345,24 @@ final class TraceGraphRecoveryCadenceGate: @unchecked Sendable {
 /// stats logging, retention pruning, maintenance sweeps).
 /// Returns the timer sources so they stay alive.
 enum DaemonTimers {
+    /// Cadence of the output-flush timer that drains the batching sinks in
+    /// `state.additionalOutputs`. The tightest configured
+    /// `outputs[].flushIntervalSeconds` wins, defaulting to five minutes when
+    /// none is set; the result is clamped so a typo can neither spawn an
+    /// `sftp` every second nor leave alerts in memory for a day.
+    static let defaultOutputFlushIntervalSeconds: TimeInterval = 300
+    static let minimumOutputFlushIntervalSeconds: TimeInterval = 30
+    static let maximumOutputFlushIntervalSeconds: TimeInterval = 3_600
+
+    static func outputFlushIntervalSeconds(configured: [TimeInterval]) -> TimeInterval {
+        let candidates = configured.filter { $0.isFinite && $0 > 0 }
+        let chosen = candidates.min() ?? defaultOutputFlushIntervalSeconds
+        return min(
+            max(chosen, minimumOutputFlushIntervalSeconds),
+            maximumOutputFlushIntervalSeconds
+        )
+    }
+
     /// Journal retention is a separate contract from the configurable legacy
     /// size-cap sweep. Honor a tighter operator cadence, but never permit more
     /// than the fixed five-minute canonical overhang.
@@ -1589,6 +1607,11 @@ enum DaemonTimers {
         /// so the DispatchSourceTimer isn't ARC-deallocated on return from
         /// start() (same reason as the prune timers above).
         let coverageCanaryTimer: DispatchSourceTimer
+        /// v1.22.1: periodic flush for the batching sinks (S3, SFTP) in
+        /// `state.additionalOutputs`. Until this timer existed nothing called
+        /// their flush(), so buffered alerts never left memory. Armed only
+        /// when at least one additional output is configured; nil otherwise.
+        let outputFlushTimer: DispatchSourceTimer?
     }
 
     static func start(state: DaemonState, eventCount: @escaping () -> UInt64, alertCount: @escaping () -> UInt64, startTime: Date) -> Handles {
@@ -5045,6 +5068,30 @@ enum DaemonTimers {
         }
         coverageCanaryTimer.resume()
 
+        // v1.22.1: output-flush timer. The batching sinks (S3, SFTP) hold
+        // alerts in memory until flush(); the graceful-shutdown hook in
+        // DaemonShutdownCoordinator drains them once more at stop. Armed only
+        // when an additional output is configured so an unconfigured daemon
+        // gains no timer. Label coalescing keeps a slow sftp (60 s runner
+        // timeout) from stacking a second flush behind it.
+        let outputFlushTimer: DispatchSourceTimer?
+        if state.additionalOutputs.isEmpty {
+            outputFlushTimer = nil
+        } else {
+            let t = DispatchSource.makeTimerSource(queue: .global())
+            let interval = state.additionalOutputFlushIntervalSeconds
+            t.schedule(deadline: .now() + interval, repeating: interval)
+            t.setEventHandler {
+                timerLifecycle.submit(label: "output-flush") {
+                    for sink in state.additionalOutputs {
+                        await sink.flush()
+                    }
+                }
+            }
+            t.resume()
+            outputFlushTimer = t
+        }
+
         let retainedTimers: [DispatchSourceTimer?] = [
             forensicTimer,
             hourlyTimer,
@@ -5065,6 +5112,7 @@ enum DaemonTimers {
             artifactsPruneTimer,
             inboxPoller,
             coverageCanaryTimer,
+            outputFlushTimer,
         ]
         for timer in retainedTimers.compactMap({ $0 }) {
             timerLifecycle.register(timer)
@@ -5092,7 +5140,8 @@ enum DaemonTimers {
             tracesPruneTimer: tracesPruneTimer,
             artifactsPruneTimer: artifactsPruneTimer,
             inboxPoller: inboxPoller,
-            coverageCanaryTimer: coverageCanaryTimer
+            coverageCanaryTimer: coverageCanaryTimer,
+            outputFlushTimer: outputFlushTimer
         )
     }
 

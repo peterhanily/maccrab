@@ -93,6 +93,15 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Fixed match tables scan candidate markers and sensitive map keys without
   building a normalized string for every field. Redaction rules, Unicode
   matching, and deterministic map-key collision handling remain unchanged.
+- **The optional S3 and SFTP alert sinks now deliver on a schedule and on
+  shutdown.** Nothing previously triggered their upload, so batched alerts
+  stayed in memory. The engine now flushes them on the configured interval
+  (default five minutes) and once more during a graceful stop; a failed upload
+  keeps its batch, bounded, and retries it after a short backoff instead of
+  discarding it. The SFTP upload script now quotes and validates the
+  configured remote directory, and refuses one containing characters that
+  could alter the transfer. Installs without these sinks configured are
+  unaffected.
 
 ### Verification
 - Self-contained fixtures exercise the shipped v1.21.5 schema, lowered caps

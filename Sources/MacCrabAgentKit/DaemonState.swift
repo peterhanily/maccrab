@@ -759,6 +759,12 @@ final class DaemonState {
     /// Phase 7 outputs built from daemon_config.json.outputs[]. Each alert
     /// is fanned out to every entry here via the Output protocol.
     let additionalOutputs: [any Output]
+    /// Cadence of the output-flush timer that drains the batching sinks
+    /// (S3, SFTP) in `additionalOutputs`. Derived from the smallest
+    /// configured `flushIntervalSeconds` (see
+    /// `DaemonTimers.outputFlushIntervalSeconds`); unused when the list is
+    /// empty because the timer is then never armed.
+    let additionalOutputFlushIntervalSeconds: TimeInterval
     let notificationIntegrations: NotificationIntegrations
 
     // MARK: - Self-Defense
@@ -1129,6 +1135,7 @@ final class DaemonState {
         webhookOutput: WebhookOutput?,
         syslogOutput: SyslogOutput?,
         additionalOutputs: [any Output] = [],
+        additionalOutputFlushIntervalSeconds: TimeInterval = 300,
         notificationIntegrations: NotificationIntegrations,
         selfDefense: SelfDefense,
         esHealthMonitor: ESClientMonitor,
@@ -1284,6 +1291,7 @@ final class DaemonState {
         self.webhookOutput = webhookOutput
         self.syslogOutput = syslogOutput
         self.additionalOutputs = additionalOutputs
+        self.additionalOutputFlushIntervalSeconds = additionalOutputFlushIntervalSeconds
         self.notificationIntegrations = notificationIntegrations
         self.selfDefense = selfDefense
         self.esHealthMonitor = esHealthMonitor

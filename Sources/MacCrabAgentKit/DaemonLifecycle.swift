@@ -620,6 +620,28 @@ enum DaemonShutdownCoordinator {
         )
         let workResults = await (detection, advisory, outputs)
 
+        // The output lane is joined, so no further send() can land. Drain the
+        // batching sinks (S3, SFTP) that hold alerts in memory until flush();
+        // the timer plane that normally drives them is already stopped.
+        // Advisory only: a sink that cannot deliver inside its slice is
+        // logged, never a mutation-boundary fault, and its retained batch is
+        // lost with the process exactly as it was before this hook existed.
+        if !state.additionalOutputs.isEmpty {
+            let sinks = state.additionalOutputs
+            let flushed = await bounded(
+                deadline: deadline.remaining(maximum: 0.5)
+            ) {
+                await withTaskGroup(of: Void.self) { group in
+                    for sink in sinks {
+                        group.addTask { await sink.flush() }
+                    }
+                }
+            }
+            if !flushed {
+                logger.warning("Output sinks did not finish flushing inside the shutdown budget during \(context, privacy: .public); buffered records may be lost")
+            }
+        }
+
         // UEBA observations are admitted from the detection lane. Persist only
         // after that lane has quiesced so the file represents an exact terminal
         // prefix, and make a timeout/failure part of shutdown truth rather than
