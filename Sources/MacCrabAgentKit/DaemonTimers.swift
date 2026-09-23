@@ -1655,7 +1655,13 @@ enum DaemonTimers {
                 logger.info("\(context, privacy: .public): discarded stale legacy-evidence measurement for storage generation \(ticket.configurationGeneration); current generation is \(after.configurationGeneration)")
                 return after
             }
-            guard let pending = after.pendingReserveMiB else { return after }
+            guard let pending = after.pendingReserveMiB else {
+                if let candidate = after.measuredCandidateMiB,
+                   candidate < after.appliedReserveMiB {
+                    logger.info("\(context, privacy: .public): legacy evidence reserve held at \(after.appliedReserveMiB) MiB; measured candidate \(candidate) MiB, main file reclaimed \(after.lastReclaimedBytes ?? 0) bytes since the previous measurement")
+                }
+                return after
+            }
             guard after.pendingReserveFitsHardBoundary == true else {
                 logger.warning("\(context, privacy: .public): legacy-evidence reserve candidate \(pending) MiB remains pending; WAL/family footprint does not yet prove the lower hard boundary")
                 return after
@@ -1689,7 +1695,7 @@ enum DaemonTimers {
                     return committed
                 }
                 state.eventRetentionBudgetHealth.recordConfigurationChange()
-                logger.notice("\(context, privacy: .public): applied legacy evidence reserve \(before.appliedReserveMiB)->\(committed.appliedReserveMiB) MiB; events-family cap \(oldCap)->\(newCap) MiB; admission=\(admission?.latchedFailure ?? "active", privacy: .public)")
+                logger.notice("\(context, privacy: .public): applied legacy evidence reserve \(before.appliedReserveMiB)->\(committed.appliedReserveMiB) MiB (measured candidate \(committed.measuredCandidateMiB ?? -1) MiB, main file reclaimed \(committed.lastReclaimedBytes ?? -1) bytes since the previous measurement); events-family cap \(oldCap)->\(newCap) MiB; admission=\(admission?.latchedFailure ?? "active", privacy: .public)")
                 return committed
             } catch {
                 logger.fault("\(context, privacy: .public): failed to apply measured events-family transition cap \(newCap) MiB: \(error.localizedDescription, privacy: .public)")
@@ -3282,6 +3288,14 @@ enum DaemonTimers {
             if let freelist = legacyTransition.freelistBytes {
                 alertEvidenceBudget["legacy_transition_freelist_bytes"] =
                     freelist
+            }
+            if let candidate = legacyTransition.measuredCandidateMiB {
+                alertEvidenceBudget["legacy_transition_measured_candidate_bytes"] =
+                    SQLitePersistentStorePolicy.capBytes(maxSizeMiB: candidate)
+            }
+            if let reclaimed = legacyTransition.lastReclaimedBytes {
+                alertEvidenceBudget["legacy_transition_reclaimed_bytes"] =
+                    reclaimed
             }
             if let evidenceSnapshot {
                 alertEvidenceBudget["row_count"] = evidenceSnapshot.rowCount

@@ -23,6 +23,17 @@ struct LegacyEvidenceTransitionBudgetSnapshot: Sendable, Equatable {
     var transactionReserveBytes: Int64
     var walCheckpointDrained: Bool?
     var freelistBytes: Int64?
+    /// v1.22.2 reclaim bound (`LegacyEvidenceReserveReclaimPolicy`). The
+    /// reserve in force at the previous measurement and the main-file bytes it
+    /// was measured against. `nil` until the first valid measurement, which is
+    /// accepted as measured because it carries the boot-time family proof.
+    var reclaimBaselineReserveMiB: Int?
+    var reclaimBaselineMainFileBytes: Int64?
+    /// Unbounded measured candidate and the main-file shrink credited against
+    /// the previous baseline at the last valid measurement, for operators to
+    /// verify why a pending reserve is higher than the candidate.
+    var measuredCandidateMiB: Int?
+    var lastReclaimedBytes: Int64?
     var configurationGeneration: UInt64
     var staleMeasurementsDiscarded: UInt64
     var measuredAt: Date
@@ -132,6 +143,10 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
                     .eventTransactionReserveBytes,
                 walCheckpointDrained: nil,
                 freelistBytes: nil,
+                reclaimBaselineReserveMiB: nil,
+                reclaimBaselineMainFileBytes: nil,
+                measuredCandidateMiB: nil,
+                lastReclaimedBytes: nil,
                 configurationGeneration: 0,
                 staleMeasurementsDiscarded: 0,
                 measuredAt: Date()
@@ -180,6 +195,10 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
             state.snapshot.familyFootprintBytes = nil
             state.snapshot.walCheckpointDrained = nil
             state.snapshot.freelistBytes = nil
+            state.snapshot.measuredCandidateMiB = nil
+            state.snapshot.lastReclaimedBytes = nil
+            // The reclaim baseline deliberately survives a reload: a new
+            // generation re-measures against the same physical file.
             let candidate = state.snapshot.pendingReserveMiB
                 ?? state.snapshot.appliedReserveMiB
             state.snapshot.proposedHardAdmissionBoundaryBytes =
@@ -242,6 +261,8 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
                 state.snapshot.familyFootprintBytes = nil
                 state.snapshot.walCheckpointDrained = nil
                 state.snapshot.freelistBytes = nil
+                state.snapshot.measuredCandidateMiB = nil
+                state.snapshot.lastReclaimedBytes = nil
                 let candidate = state.snapshot.pendingReserveMiB
                     ?? state.snapshot.appliedReserveMiB
                 state.snapshot.proposedHardAdmissionBoundaryBytes =
@@ -311,7 +332,63 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
                 evidenceCandidate,
                 max(physicalCandidate, startupCandidate)
             )
-            let boundedCandidate = min(maximum, max(0, candidate))
+            let measuredCandidate = min(maximum, max(0, candidate))
+            let physicalMeasurementValid = measurement.familyFootprintBytes >= 0
+                && measurement.pageSizeBytes > 0
+                && measurement.pageCount >= 0
+                && measurement.freelistCount >= 0
+                && measurement.freelistCount <= measurement.pageCount
+            // v1.22.2: the candidate is an instantaneous proof and the family
+            // swings with the WAL between sweeps. The applied reserve may fall
+            // only as far as the main file physically shrank since the previous
+            // measurement, and never rises on a successful one, so a cap step
+            // can never outrun reclaim. The first valid measurement (boot) is
+            // accepted as measured; an invalid one cannot commit a shrink
+            // (`shrinkIsSafe`) and leaves the baseline untouched.
+            let boundedCandidate: Int
+            if physicalMeasurementValid {
+                let mainFileBytes = SQLitePersistentStoreAdmission
+                    .saturatingMultiply(
+                        measurement.pageCount,
+                        by: measurement.pageSizeBytes
+                    )
+                if let baselineReserve = state.snapshot.reclaimBaselineReserveMiB,
+                   let baselineMainFile = state.snapshot
+                        .reclaimBaselineMainFileBytes {
+                    let reclaimed = LegacyEvidenceReserveReclaimPolicy
+                        .reclaimedBytes(
+                            previousMainFileBytes: baselineMainFile,
+                            currentMainFileBytes: mainFileBytes
+                        )
+                    boundedCandidate = LegacyEvidenceReserveReclaimPolicy
+                        .boundedReserveMiB(
+                            candidateMiB: measuredCandidate,
+                            baselineReserveMiB: baselineReserve,
+                            maximumReserveMiB: maximum,
+                            reclaimedBytes: reclaimed
+                        )
+                    state.snapshot.lastReclaimedBytes = reclaimed
+                    state.snapshot.reclaimBaselineMainFileBytes =
+                        LegacyEvidenceReserveReclaimPolicy
+                            .nextBaselineMainFileBytes(
+                                previousMainFileBytes: baselineMainFile,
+                                currentMainFileBytes: mainFileBytes
+                            )
+                } else {
+                    boundedCandidate = measuredCandidate
+                    state.snapshot.lastReclaimedBytes = nil
+                    state.snapshot.reclaimBaselineReserveMiB =
+                        state.snapshot.appliedReserveMiB
+                    state.snapshot.reclaimBaselineMainFileBytes = mainFileBytes
+                }
+            } else {
+                // Unreachable through EventStore (its probe throws on invalid
+                // page accounting); `shrinkIsSafe` below already refuses the
+                // shrink, and the baseline is left untouched.
+                boundedCandidate = measuredCandidate
+                state.snapshot.lastReclaimedBytes = nil
+            }
+            state.snapshot.measuredCandidateMiB = measuredCandidate
             let proposedCapMiB = state.storage
                 .effectiveEventsFamilyMaxSizeMB(
                     appliedLegacyEvidenceTransitionReserveMiB:
@@ -320,11 +397,6 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
             let proposedBoundary = SQLitePersistentStorePolicy.capBytes(
                 maxSizeMiB: proposedCapMiB
             )
-            let physicalMeasurementValid = measurement.familyFootprintBytes >= 0
-                && measurement.pageSizeBytes > 0
-                && measurement.pageCount >= 0
-                && measurement.freelistCount >= 0
-                && measurement.freelistCount <= measurement.pageCount
             let shrinkIsSafe = physicalMeasurementValid
                 && measurement.walCheckpointDrained
                 && required <= proposedBoundary
@@ -375,6 +447,15 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
                 return state.snapshot
             }
             state.snapshot.appliedReserveMiB = max(0, expectedReserveMiB)
+            // A measured commit is the new reclaim baseline. The fail-safe
+            // growth after a failed measurement is deliberately not: the next
+            // valid measurement resumes from the last measured reserve, so a
+            // transient probe failure cannot ratchet the reserve back up.
+            if !state.snapshot.measurementFailed,
+               state.snapshot.reclaimBaselineMainFileBytes != nil {
+                state.snapshot.reclaimBaselineReserveMiB =
+                    state.snapshot.appliedReserveMiB
+            }
             state.snapshot.pendingReserveMiB = nil
             state.snapshot.pendingReserveFitsHardBoundary = nil
             state.snapshot.measuredAt = Date()

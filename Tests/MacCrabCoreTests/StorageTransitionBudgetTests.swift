@@ -37,14 +37,15 @@ struct StorageTransitionBudgetTests {
         evidence: AlertEvidenceBudgetSnapshot,
         familyFootprintBytes: Int64,
         checkpointDrained: Bool = true,
-        freelistCount: Int64 = 0
+        freelistCount: Int64 = 0,
+        pageCount: Int64? = nil
     ) -> LegacyAlertEvidenceTransitionMeasurement {
         LegacyAlertEvidenceTransitionMeasurement(
             evidence: evidence,
             familyFootprintBytes: familyFootprintBytes,
             walCheckpointDrained: checkpointDrained,
             pageSizeBytes: 4_096,
-            pageCount: max(1, familyFootprintBytes / 4_096),
+            pageCount: pageCount ?? max(1, familyFootprintBytes / 4_096),
             freelistCount: freelistCount
         )
     }
@@ -91,11 +92,17 @@ struct StorageTransitionBudgetTests {
         let steadyTarget = EventsSizeCapBoundary(
             maxSizeMiB: storage.effectiveEventsFamilyMaxSizeMB
         ).targetBytes
+        // v1.22.2: the reserve may fall only as far as the main file shrank
+        // since the previous measurement, so each drop to zero below needs the
+        // full 18 MiB physically returned. The credit is spent per measurement:
+        // a refused shrink does not carry it forward.
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
         let oneByteOver = budget.update(
             measurement: transitionMeasurement(
                 evidence: empty,
                 familyFootprintBytes: steadyTarget + 1,
-                freelistCount: 1
+                freelistCount: 1,
+                pageCount: (exactBoundary - 18 * mib) / 4_096
             ),
             ticket: ticket
         )
@@ -103,12 +110,14 @@ struct StorageTransitionBudgetTests {
         #expect(oneByteOver.pendingReserveMiB == 0)
         #expect(oneByteOver.pendingReserveFitsHardBoundary == false)
         #expect(oneByteOver.freelistBytes == 4_096)
+        #expect(oneByteOver.lastReclaimedBytes == 18 * mib)
         #expect(budget.commitPendingReserve(0, ticket: ticket).reserveMiB == 18)
 
         let exactSteadyBoundary = budget.update(
             measurement: transitionMeasurement(
                 evidence: empty,
-                familyFootprintBytes: steadyTarget
+                familyFootprintBytes: steadyTarget,
+                pageCount: (exactBoundary - 36 * mib) / 4_096
             ),
             ticket: ticket
         )
