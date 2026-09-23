@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """Local-only controls for the unpublished-history privacy guard."""
+import base64
 import os
 from pathlib import Path
+import pwd
 import shutil
 import subprocess
 import tempfile
 import unittest
 
 SCRIPT = Path(__file__).resolve().with_name("check-secrets.sh")
+# Synthetic EdDSA-shaped values: a 32-byte seed (44 base64 chars, one '=') and
+# a 64-byte expanded key (88 chars, '=='). Computed, never literal, so this
+# file itself is not a finding.
+SEED = base64.b64encode(bytes(range(32))).decode()
+KEY = base64.b64encode(bytes(range(64))).decode()
+HEX = "0123456789abcdef" * 4
 
 class SecretGuardTests(unittest.TestCase):
     def setUp(self):
@@ -62,6 +70,75 @@ class SecretGuardTests(unittest.TestCase):
         result = self.check()
         self.assertEqual(result.returncode, 1)
         self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_commit_message_credential_is_attributed_to_the_commit(self):
+        token = "ghp_" + "F" * 36
+        # An empty commit has no diff: the message is the only carrier.
+        self.git("commit", "-q", "--allow-empty", "-m", "Note\n\nPasted " + token)
+        sha = self.git("rev-parse", "HEAD").strip()
+        result = self.check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("commit " + sha, result.stderr)
+        self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_commit_message_allowance_and_operator_home_path(self):
+        token = "ghp_" + "G" * 36
+        self.git("commit", "-q", "--allow-empty", "-m",
+                 "Documented\n\n" + token + " secret-scan:allow explicit fake fixture")
+        self.assertEqual(self.check().returncode, 0)
+        me = pwd.getpwuid(os.getuid()).pw_name
+        self.git("commit", "-q", "--allow-empty", "-m", "Measured on /Users/" + me + "/lab")
+        result = self.check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("operator home path", result.stderr)
+
+    def test_annotated_tag_message_in_range_is_scanned(self):
+        token = "ghp_" + "H" * 36
+        (self.root / "fixture.txt").write_text("ordinary change\n")
+        self.commit("Ordinary change")
+        self.git("tag", "-a", "-m", "Release notes\n\n" + token, "leaked-fixture")
+        result = self.check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("tag leaked-fixture", result.stderr)
+        self.assertNotIn(token, result.stdout + result.stderr)
+        self.git("tag", "-d", "leaked-fixture")
+        self.git("tag", "-a", "-m", "Documented " + token + " secret-scan:allow fake", "allowed-fixture")
+        self.assertEqual(self.check().returncode, 0)
+        # A tag outside the unpublished range is already published: not scanned.
+        self.git("tag", "-a", "-m", "Old " + token, "published-fixture", self.base)
+        self.assertEqual(self.check().returncode, 0)
+
+    def test_eddsa_private_key_material_is_detected(self):
+        self.assertEqual((len(SEED), SEED[-1], len(KEY), KEY[-2:]), (44, "=", 88, "=="))
+        for name, content, expected_status in (
+            ("env export", "export SPARKLE_PRIVATE_KEY=" + SEED, 1),
+            ("json expanded key", '"privateEdKey": "' + KEY + '"', 1),
+            ("yaml sparkle name", "SUPrivateEDKey: " + SEED, 1),
+            ("swift seed", 'let ed25519Seed = "' + SEED + '"', 1),
+            ("plist private", "<key>SUPrivateEDKey</key>\n<string>" + SEED + "</string>", 1),
+            ("comment then bare value", "# Sparkle private key\n" + SEED, 1),
+            ("allowed", "SUPrivateEDKey=" + SEED + "  # secret-scan:allow synthetic", 0),
+            ("plist public", "<key>SUPublicEDKey</key>\n<string>" + SEED + "</string>", 0),
+            ("public key constant", 'let publicKey = "' + SEED + '"', 0),
+            ("swift private modifier", 'private let expectedPublicKey = "' + SEED + '"', 0),
+            ("sha256 hex", "private_sha256 = " + HEX, 0),
+            ("appcast signature", 'sparkle:edSignature="' + KEY + '"', 0),
+            ("unpadded", 'secret = "' + SEED[:-1] + '"', 0),
+            ("wrong length", 'secret = "' + SEED + 'A"', 0),
+        ):
+            with self.subTest(case=name):
+                self.base = self.git("rev-parse", "HEAD").strip()
+                (self.root / "fixture.txt").write_text(content + "\n")
+                self.commit("EdDSA shape control")
+                # Tree mode differs only in its line prefix, which matters for
+                # the value-on-the-following-line rule.
+                for args in ((), ("--tree",))[: 2 if "\n" in content else 1]:
+                    result = self.check(*args)
+                    self.assertEqual(result.returncode, expected_status, args)
+                    self.assertNotIn(SEED, result.stdout + result.stderr)
+                    self.assertNotIn(KEY, result.stdout + result.stderr)
+                    if expected_status:
+                        self.assertIn("eddsa private key", result.stderr)
 
     def test_private_baseline_removal_does_not_clean_history(self):
         path = self.root / "docs/RELEASE_RESOURCE_BASELINE.json"
@@ -157,10 +234,13 @@ class SecretGuardTests(unittest.TestCase):
         policy.parent.mkdir()
         policy.write_text('{"status":"accepted"}\n')
         self.commit("Safe policy")
+        self.git("tag", "-a", "-m", "Release fixture", "fixture-tag")
         for label, predicate, args in (
             ("tree inventory", '[[ "$1" == ls-files && "$2" == -z ]]', ("--tree",)),
             ("ignored inventory", '[[ "$1" == ls-files && "$2" == --cached ]]', ()),
             ("diff history", '[[ "$1" == log ]]', ()),
+            ("tag inventory", '[[ "$1" == for-each-ref ]]', ()),
+            ("tag message", '[[ "$1" == cat-file && "$2" == tag ]]', ()),
             ("policy history", '[[ "$1" == rev-list ]]', ()),
             ("policy blob", '[[ "$1" == cat-file ]]', ()),
         ):

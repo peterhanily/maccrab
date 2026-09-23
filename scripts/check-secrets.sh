@@ -31,13 +31,16 @@
 #   than a thorough one they switch off.
 #
 # WHAT IT CHECKS
-#   1. Credential patterns in ADDED lines across every unpublished commit.
+#   1. Credential patterns in ADDED lines across every unpublished commit, in
+#      the commit messages themselves, and in the messages of annotated tags
+#      whose commit lies in the unpublished range — all of it publishes with
+#      the push. Includes a shape detector for Sparkle/EdDSA private keys.
 #   2. Files .gitignore excludes but which are tracked anyway (`git add -f`).
 #      Whole-tree, because it is precise and this is how a key file or a
 #      measurement artifact would actually arrive.
-#   3. The operator's OWN home path in added lines. Not `/Users/<anyone>/` —
-#      detection rules and tests reference other people's home paths for good
-#      reason. The leak is this machine's username.
+#   3. The operator's OWN home path in added lines and messages. Not
+#      `/Users/<anyone>/` — detection rules and tests reference other people's
+#      home paths for good reason. The leak is this machine's username.
 #
 # WHAT THIS IS NOT
 #   Pattern matching. It will not catch a novel credential format, a secret
@@ -70,7 +73,8 @@ FINDINGS="$(mktemp -t maccrab-secret-findings)"
 SUBJECT="$(mktemp -t maccrab-secret-subject)"
 MATCHES="$(mktemp -t maccrab-secret-matches)"
 IGNORED="$(mktemp -t maccrab-secret-ignored)"
-trap 'rm -f "$FINDINGS" "$SUBJECT" "$MATCHES" "$IGNORED"' EXIT
+TAGS="$(mktemp -t maccrab-secret-tags)"
+trap 'rm -f "$FINDINGS" "$SUBJECT" "$MATCHES" "$IGNORED" "$TAGS"' EXIT
 
 if [ "$MODE" = "diff" ]; then
     if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
@@ -85,7 +89,29 @@ if [ "$MODE" = "diff" ]; then
         echo "check-secrets: cannot read the complete unpublished history" >&2
         exit 2
     fi
-    DESC="added lines across every commit in ${BASE}..HEAD"
+    # Messages publish with the push too. Each body follows a header naming
+    # its id so a hit is attributed to the commit rather than a file. No
+    # pathspec here: an empty commit still carries its message.
+    if ! git log --reverse --format='+++ commit %H%n%B' "$BASE"..HEAD >> "$SUBJECT" 2>/dev/null; then
+        echo "check-secrets: cannot read the complete unpublished history" >&2
+        exit 2
+    fi
+    # Annotated tags whose (peeled) commit lies in BASE..HEAD. A tag object is
+    # headers, a blank line, then the message.
+    if ! git for-each-ref --format='%(objecttype)%09%(refname:short)%09%(objectname)' \
+            --merged HEAD --no-merged "$BASE" refs/tags > "$TAGS" 2>/dev/null; then
+        echo "check-secrets: cannot read the complete unpublished history" >&2
+        exit 2
+    fi
+    while IFS=$'\t' read -r kind name oid; do
+        [ "$kind" = "tag" ] || continue
+        printf '+++ tag %s\n' "$name" >> "$SUBJECT"
+        if ! git cat-file tag "$oid" 2>/dev/null | /usr/bin/sed '1,/^$/d' >> "$SUBJECT"; then
+            echo "check-secrets: cannot read the complete unpublished history" >&2
+            exit 2
+        fi
+    done < "$TAGS"
+    DESC="added lines and commit/tag messages across every commit in ${BASE}..HEAD"
 else
     # Read every listed text input or fail. Links are inspected as literal
     # targets, never followed outside the checkout; binary contents are skipped.
@@ -210,6 +236,44 @@ while IFS= read -r pattern; do
 done <<EOF
 $PATTERNS
 EOF
+
+# ── 1b. Sparkle / EdDSA private key material ────────────────────────────
+# An Ed25519 seed is 32 bytes (44 base64 chars ending '=') and the expanded
+# private key 64 bytes (88 chars ending '=='). The public key and a base64
+# SHA-256 share the 44-char shape, so the shape alone is not a finding: the
+# value must be assigned to a key-ish name on the same line, or stand alone on
+# the line after 'private key' text (the Info.plist layout). Hex digests have
+# neither the length nor the '=' and never match. Matching lines are written
+# back for `collect`, which prints only the label and attribution.
+/usr/bin/python3 -I - "$MODE" "$SUBJECT" > "$MATCHES" <<'PY_EDDSA'
+import re, sys
+
+mode, subject = sys.argv[1:]
+value = rb"(?:[A-Za-z0-9+/]{43}=|[A-Za-z0-9+/]{86}==)"
+# Diff lines carry their '+'; tree lines carry their `path:number:` prefix.
+prefix = rb"\+?" if mode == "diff" else rb"(?:.*?:[0-9]+:)?"
+assigned = re.compile(rb"(?:private|secret|ed25519|eddsa|seed)[A-Za-z0-9_.-]*[\"'`]?[ \t]*[=:][ \t]*[\"'`]?"
+                      + value + rb"(?![A-Za-z0-9+/=])", re.IGNORECASE)
+labelled = re.compile(rb"private[ \t_-]*(?:ed)?key", re.IGNORECASE)
+bare = re.compile(rb"^" + prefix + rb"[ \t]*(?:<string>|[\"'`])?" + value
+                  + rb"(?:</string>|[\"'`])?[ \t,;]*$", re.IGNORECASE)
+previous = b""
+try:
+    with open(subject, "rb") as handle:
+        for raw in handle:
+            line = raw.rstrip(b"\r\n")
+            if mode == "diff" and line.startswith(b"+++ "):
+                sys.stdout.buffer.write(line + b"\n")
+                previous = b""
+                continue
+            if assigned.search(line) or (labelled.search(previous) and bare.match(line)):
+                sys.stdout.buffer.write(line + b"\n")
+            previous = line
+except Exception:
+    print("check-secrets: cannot scan the complete subject", file=sys.stderr)
+    raise SystemExit(2)
+PY_EDDSA
+collect "eddsa private key" < "$MATCHES"
 
 # ── 2. Force-added files that .gitignore excludes ───────────────────────
 # Whole-tree regardless of mode: precise, cheap, and this is the path by which

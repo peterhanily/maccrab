@@ -786,7 +786,7 @@ check "SQLCipher provenance fixtures" ./scripts/test-sqlcipher-provenance.sh
 
 # Publication gate. Scan every unpublished commit, including changes later
 # removed before HEAD, and validate the public baseline document separately.
-# Credential patterns scan ADDED lines only —
+# Credential patterns scan ADDED lines and commit/tag messages only —
 # the repo legitimately contains ~100 credential-shaped strings (honeyfile
 # canaries, sanitizer test fixtures) and a whole-tree scan reports all of
 # them every run until someone switches it off.
