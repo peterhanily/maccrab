@@ -3,7 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.22.1] — 2026-09-20
+## [1.22.1] — 2026-09-22
 
 ### Fixed
 - **A rule that fails to parse now fails the build instead of quietly shrinking

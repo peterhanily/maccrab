@@ -810,7 +810,7 @@ struct AutoUpdaterAncestorGateTests {
             name: basename, executable: processPath,
             commandLine: "\(processPath) status", args: [processPath, "status"],
             workingDirectory: "/",
-            userId: 501, userName: "phanily", groupId: 20,
+            userId: 501, userName: "terrance", groupId: 20,
             startTime: Date(),
             codeSignature: codeSig,
             ancestors: ancestors,
@@ -834,7 +834,7 @@ struct AutoUpdaterAncestorGateTests {
                       severity: .medium, description: "", mitreTechniques: [], tags: [])
         ]
         let event = execUnderAncestors(
-            processPath: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+            processPath: "/Users/terrance/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
             ancestors: [
                 ProcessAncestor(pid: 600, executable: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", name: "Google Chrome"),
             ]
@@ -860,17 +860,17 @@ struct AutoUpdaterAncestorGateTests {
                 // Immediate parent — second GoogleUpdater invocation.
                 ProcessAncestor(
                     pid: 7003,
-                    executable: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+                    executable: "/Users/terrance/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
                     name: "GoogleUpdater"
                 ),
                 ProcessAncestor(
                     pid: 7002,
-                    executable: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/Helpers/launcher",
+                    executable: "/Users/terrance/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/Helpers/launcher",
                     name: "launcher"
                 ),
                 ProcessAncestor(
                     pid: 7001,
-                    executable: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+                    executable: "/Users/terrance/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
                     name: "GoogleUpdater"
                 ),
                 ProcessAncestor(pid: 600, executable: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", name: "Google Chrome"),
@@ -895,7 +895,7 @@ struct AutoUpdaterAncestorGateTests {
             ancestors: [
                 ProcessAncestor(
                     pid: 8100,
-                    executable: "/Users/phanily/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/AbCd/EfGh/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+                    executable: "/Users/terrance/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/AbCd/EfGh/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
                     name: "Autoupdate"
                 ),
                 ProcessAncestor(pid: 1, executable: "/sbin/launchd", name: "launchd"),
@@ -916,7 +916,7 @@ struct AutoUpdaterAncestorGateTests {
                       severity: .critical, description: "", mitreTechniques: [], tags: [], suppressible: false)
         ]
         let event = execUnderAncestors(
-            processPath: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+            processPath: "/Users/terrance/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
             ancestors: []
         )
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
