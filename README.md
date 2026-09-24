@@ -4,9 +4,9 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
-[![Tests](https://img.shields.io/badge/tests-4827%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-4843%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
-[![Version](https://img.shields.io/badge/version-1.22.1-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.22.2-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -668,10 +668,16 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-This source tree targets **v1.22.1**. See [CHANGELOG.md](CHANGELOG.md) for the full
+This source tree targets **v1.22.2**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.22.2** — removes the largest false-alarm sources (shared hosting such as
+  GitHub flagged as malicious domains, one correlator alert per file in bulk
+  operations, DGA and idle-daemon alerts); keeps the engine running when the
+  optional trace store cannot start; collector health records completed polls;
+  the Permissions tab and diagnostics export describe only MacCrab's own
+  permissions.
 - **v1.22.1** — fixes legacy event-store upgrades blocked by a lowered storage
   cap, using a fixed temporary allowance that survives Mac restarts and is
   retired before monitoring starts, and an event-processing crash on macOS 14;
