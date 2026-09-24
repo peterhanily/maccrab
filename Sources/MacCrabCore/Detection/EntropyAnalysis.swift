@@ -98,18 +98,21 @@ public enum EntropyAnalysis {
                 }
             }
 
-            // Excessive length with numbers mixed in
-            if labelStr.count > 15 && labelStr.contains(where: { $0.isNumber }) && labelStr.contains(where: { $0.isLetter }) {
+            // Excessive length with numbers mixed in. Measured per hyphen-
+            // separated word: `gsp57-ssl-background` is three readable words,
+            // not a 20-character generated token.
+            if labelStr.split(separator: "-").contains(where: { word in
+                word.count > 15 && word.contains(where: { $0.isNumber }) && word.contains(where: { $0.isLetter })
+            }) {
                 reasons.append("long mixed alphanumeric label (\(labelStr.count) chars)")
             }
         }
 
         let entropy = shannonEntropy(sld)
 
-        // Long subdomain chains (common in DNS tunneling)
-        if parts.count > 4 {
-            reasons.append("deep subdomain nesting (\(parts.count) levels)")
-        }
+        // Label depth alone is not a DGA signal: every Datadog intake and
+        // Akamai/Apple edge name has five or more labels (34 HIGH false
+        // positives in two days). Encoded subdomains are isDNSTunneling's job.
 
         let isDGA = !reasons.isEmpty
         return (entropy, isDGA, isDGA ? reasons.joined(separator: "; ") : nil)

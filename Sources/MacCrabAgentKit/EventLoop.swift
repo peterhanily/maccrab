@@ -1604,18 +1604,15 @@ enum EventLoop {
                     processPath: enrichedEvent.process.executable,
                     timestamp: enrichedEvent.timestamp
                 ) {
-                    // Dedup on the SHARED FILE (not the triggering executable) —
-                    // mirror of the network path's dedup on destination below.
-                    // A cross-process file chain is defined by the file every
-                    // process converged on; keying dedup on the executable (the
-                    // AlertSink default) leaves each converging process emitting a
-                    // fresh alert as the correlator window re-evaluates — the
-                    // residual the earlier shell-utility heuristic
-                    // missed (field: 1344 mostly-benign alerts). Pass
+                    // Dedup on the SET of converging executables. Keying on the
+                    // triggering executable let each converging process emit a
+                    // fresh alert (field: 1344 mostly-benign alerts); keying on
+                    // the file then let one bulk operation emit one alert per
+                    // file (field: 18,313 in a week, 6,000 in 30 minutes). Pass
                     // that identity into AlertSink so reservation + commit stay
                     // transactional with the stored alert.
                     let ruleId = "maccrab.correlator.cross-process"
-                    let dedupKey = file.path
+                    let dedupKey = chain.dedupIdentity
                     let alert = Alert(
                         ruleId: ruleId,
                         ruleTitle: "Cross-Process Attack Chain: \(chain.description.prefix(60))",

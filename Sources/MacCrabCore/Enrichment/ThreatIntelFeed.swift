@@ -125,6 +125,35 @@ public actor ThreatIntelFeed {
         multiTenantPlatforms.contains(host)
     }
 
+    /// Platforms that serve unrelated uploaders from the same hostnames,
+    /// told apart only by URL path. A malware URL on one of them says nothing
+    /// about the host, so the host never becomes a domain IOC and never
+    /// matches as a parent. Unlike `multiTenantPlatforms`, no subdomain here
+    /// belongs to a tenant: every `*.githubusercontent.com` host is GitHub's.
+    /// Field case: URLhaus URLs on raw.githubusercontent.com and github.com
+    /// made `api.github.com` a CRITICAL "known-malicious domain".
+    private static let sharedPathTenantDomains: Set<String> = [
+        "github.com", "githubusercontent.com", "gitlab.com", "bitbucket.org",
+        "google.com", "googleusercontent.com", "doubleclick.net",
+        "dropbox.com", "dropboxusercontent.com",
+        "discord.com", "discordapp.com", "discordapp.net",
+        "live.com", "1drv.ms", "archive.org", "wsimg.com", "cloudinary.com",
+        "sendspace.com", "imgbox.com", "mediafire.com", "catbox.moe",
+        "pythonhosted.org",
+    ]
+
+    static func isSharedPathTenantHost(_ host: String) -> Bool {
+        let lower = host.lowercased()
+        return sharedPathTenantDomains.contains { lower == $0 || lower.hasSuffix("." + $0) }
+    }
+
+    /// Caches written before v1.22.2 hold shared-platform hosts derived from
+    /// URLhaus URLs; drop them on read rather than alert until they age out.
+    /// Operator (Custom) and MISP entries were imported as domains on purpose.
+    static func retainedDomainRecords(_ records: [IOCRecord]) -> [IOCRecord] {
+        records.filter { $0.source != "URLhaus" || !isSharedPathTenantHost($0.value) }
+    }
+
     /// Update interval (default: 4 hours).
     private let updateInterval: TimeInterval
 
@@ -449,7 +478,7 @@ public actor ThreatIntelFeed {
         let parts = lower.split(separator: ".")
         for i in 1..<parts.count {
             let parent = parts[i...].joined(separator: ".")
-            if Self.isMultiTenantPlatformHost(parent) { continue }
+            if Self.isMultiTenantPlatformHost(parent) || Self.isSharedPathTenantHost(parent) { continue }
             if domainRecords[parent] != nil { return true }
         }
         return false
@@ -525,7 +554,7 @@ public actor ThreatIntelFeed {
         return IOCSet(
             hashes: cache.hashes,
             ips: cache.ips,
-            domains: cache.domains,
+            domains: retainedDomainRecords(cache.domains),
             urls: cache.urls,
             lastUpdate: cache.lastUpdate,
             lastSuccessfulPull: cache.lastSuccessfulPull,
@@ -972,7 +1001,7 @@ public actor ThreatIntelFeed {
             // platform set so a hostile feed entry can't blanket-flag
             // siblings.
             if let parsed = URL(string: cols[2]), let host = parsed.host?.lowercased(), !host.isEmpty {
-                if Self.isMultiTenantPlatformHost(host) {
+                if Self.isMultiTenantPlatformHost(host) || Self.isSharedPathTenantHost(host) {
                     logger.info("URLhaus: skipped platform-suffix host \(host, privacy: .public)")
                     continue
                 }
@@ -1270,7 +1299,7 @@ public actor ThreatIntelFeed {
 
         for r in cache.hashes   { hashRecords[r.value]   = r }
         for r in cache.ips      { ipRecords[r.value]     = r }
-        for r in cache.domains  { domainRecords[r.value] = r }
+        for r in Self.retainedDomainRecords(cache.domains) { domainRecords[r.value] = r }
         for r in cache.urls     { urlRecords[r.value]    = r }
         lastUpdate = cache.lastUpdate
         lastSuccessfulPull = cache.lastSuccessfulPull

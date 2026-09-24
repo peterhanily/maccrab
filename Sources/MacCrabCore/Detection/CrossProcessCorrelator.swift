@@ -74,6 +74,16 @@ public actor CrossProcessCorrelator {
         public var processCount: Int { distinctPIDCount }
         public let severity: Severity
         public let description: String
+
+        /// Alert dedup identity: which executables converged, not on what.
+        /// One bulk operation (`find` + `mv` over thousands of files, an agent
+        /// reading a fresh git worktree) yields one chain per file but is one
+        /// finding; keyed per file it raised 6,000 alerts in 30 minutes. A new
+        /// executable set, artifact type or severity is a new finding.
+        public var dedupIdentity: String {
+            "\(artifactType)|\(severity.rawValue)|"
+                + Set(events.map(\.processPath)).sorted().joined(separator: "\n")
+        }
     }
 
     /// Fixed-cardinality capacity accounting for one artifact map. The two
