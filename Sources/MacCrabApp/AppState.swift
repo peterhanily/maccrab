@@ -2844,7 +2844,10 @@ final class AppState: ObservableObject, EventQueryReading {
             flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
         ) == SQLITE_OK else { return false }
         defer { sqlite3_close(db) }
-        let sql = "SELECT auth_value FROM access WHERE service='kTCCServiceSystemPolicyAllFiles' AND client IN ('com.maccrab.agent', 'com.maccrab.agent.systemextension')"
+        // An Endpoint Security extension's Full Disk Access toggle is recorded
+        // as kTCCServiceEndpointSecurityClient; a denied SystemPolicyAllFiles
+        // row can sit beside a working engine.
+        let sql = "SELECT auth_value FROM access WHERE service IN ('kTCCServiceSystemPolicyAllFiles', 'kTCCServiceEndpointSecurityClient') AND client IN ('com.maccrab.agent', 'com.maccrab.agent.systemextension')"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
         defer { sqlite3_finalize(stmt) }

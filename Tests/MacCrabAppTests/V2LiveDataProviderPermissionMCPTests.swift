@@ -54,6 +54,79 @@ struct V2LiveDataProviderPermissionMCPTests {
             service: "kTCCServiceScreenCapture", client: "com.maccrab.app"))
     }
 
+    // MARK: - Engine access and ownership (v1.22.2)
+
+    private func row(_ service: String, _ client: String, granted: Bool) -> V2MockPermission {
+        V2MockPermission(
+            id: "\(service)|\(client)", service: V2LiveDataProvider.prettyTCCService(service),
+            granted: granted,
+            required: V2LiveDataProvider.isRequiredMacCrabPermission(service: service, client: client),
+            description: client, owner: V2LiveDataProvider.permissionOwner(client: client),
+            serviceKey: service)
+    }
+
+    @Test("TCC rows are attributed to the engine, the app, or another app")
+    func ownerAttribution() {
+        #expect(V2LiveDataProvider.permissionOwner(client: "com.maccrab.agent") == .engine)
+        #expect(V2LiveDataProvider.permissionOwner(client: "com.maccrab.agent.systemextension") == .engine)
+        #expect(V2LiveDataProvider.permissionOwner(client: "com.maccrab.app") == .app)
+        #expect(V2LiveDataProvider.permissionOwner(client: "com.apple.Safari") == .other)
+        #expect(V2LiveDataProvider.permissionOwner(client: "com.maccrab.agent.helper") == .other)
+    }
+
+    @Test("a stale denied engine FDA row is satisfied by the engine's verified live access")
+    func engineProbeSatisfiesDeniedRow() {
+        // The field shape: the ES extension's grant sits in
+        // EndpointSecurityClient while an old SystemPolicyAllFiles row is denied.
+        let rows = [
+            row("kTCCServiceSystemPolicyAllFiles", "com.maccrab.agent", granted: false),
+            row("kTCCServiceEndpointSecurityClient", "com.maccrab.agent", granted: true),
+            row("kTCCServiceSystemPolicyAllFiles", "com.maccrab.app", granted: false),
+            row("kTCCServiceSystemPolicyAllFiles", "com.apple.Terminal", granted: false),
+        ]
+        let verified = V2LiveDataProvider.resolvingEngineAccess(rows, engineAccessVerified: true)
+        #expect(verified[0].granted)
+        #expect(verified[0].required)
+        // Only the engine's rows change: the app and other apps keep their TCC state.
+        #expect(!verified[2].granted)
+        #expect(!verified[3].granted)
+        #expect(verified.filter { $0.owner != .other && $0.required && !$0.granted }.map(\.id)
+                == ["kTCCServiceSystemPolicyAllFiles|com.maccrab.app"])
+
+        let unverified = V2LiveDataProvider.resolvingEngineAccess(rows, engineAccessVerified: false)
+        #expect(unverified == rows)
+    }
+
+    @Test("internal TCC service keys get readable labels")
+    func readableServiceLabels() {
+        #expect(V2LiveDataProvider.prettyTCCService("kTCCServiceLiverpool") == "iCloud (CloudKit)")
+        #expect(V2LiveDataProvider.prettyTCCService("kTCCServiceUbiquity") == "iCloud Drive")
+        #expect(V2LiveDataProvider.prettyTCCService("kTCCServiceSystemPolicyDocumentsFolder") == "Documents Folder")
+        #expect(V2LiveDataProvider.prettyTCCService("kTCCServiceEndpointSecurityClient") == "Endpoint Security Client")
+    }
+
+    @Test("diagnostics export lists only MacCrab's own permission rows, with owner and raw service")
+    func exportScopesPermissionsToMacCrab() throws {
+        let rows = [
+            row("kTCCServiceEndpointSecurityClient", "com.maccrab.agent", granted: true),
+            row("kTCCServiceSystemPolicyAllFiles", "com.maccrab.app", granted: true),
+            row("kTCCServiceLiverpool", "com.apple.Maps", granted: true),
+            row("kTCCServiceLiverpool", "com.apple.Safari", granted: true),
+        ]
+        let export = try V2DiagnosticsExport.make(
+            source: .init(directory: "/Library/Application Support/MacCrab"), mode: "Live",
+            heartbeat: nil, failure: nil, permissions: rows, providerReadFailed: false)
+        let object = try #require(JSONSerialization.jsonObject(with: export.data) as? [String: Any])
+        let exported = try #require(object["permissions"] as? [[String: Any]])
+        #expect(exported.count == 2)
+        #expect(exported.map { $0["owner"] as? String } == ["engine", "app"])
+        #expect(exported.map { $0["service"] as? String }
+                == ["kTCCServiceEndpointSecurityClient", "kTCCServiceSystemPolicyAllFiles"])
+        let text = String(decoding: export.data, as: UTF8.self)
+        #expect(!text.contains("com.apple.Maps"))
+        #expect(!text.contains("Liverpool"))
+    }
+
     // MARK: - mcpHost (finding 710)
 
     @Test("stdio server (command/args, no url) resolves to localhost")

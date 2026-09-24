@@ -995,10 +995,10 @@ public final class V2LiveDataProvider: V2DataProvider {
             TCCMonitor.readSnapshot(at: path)
         }.value
         guard let snap else { return [] }
-        return snap.entries.map { e -> V2MockPermission in
+        let rows = snap.entries.map { e -> V2MockPermission in
             V2MockPermission(
                 id: "\(e.service)|\(e.client)",
-                service: prettyTCCService(e.service),
+                service: Self.prettyTCCService(e.service),
                 granted: e.authValue == 2,                          // 2 = allowed
                 // Deep-audit fix (768): scope "required" to MacCrab's OWN
                 // engine/app identity, not by service across ALL clients.
@@ -1006,8 +1006,39 @@ public final class V2LiveDataProvider: V2DataProvider {
                 // counted toward the System tab's "Blocking missing" tally,
                 // producing a false red "investigate" alarm on a healthy Mac.
                 required: Self.isRequiredMacCrabPermission(service: e.service, client: e.client),
-                description: "\(e.client) (\(authValueLabel(e.authValue)))"
+                description: "\(e.client) (\(authValueLabel(e.authValue)))",
+                owner: Self.permissionOwner(client: e.client),
+                serviceKey: e.service
             )
+        }
+        // MacCrab's own rows first; every other app's rows follow.
+        return rows.filter { $0.owner != .other } + rows.filter { $0.owner == .other }
+    }
+
+    nonisolated static func permissionOwner(client: String) -> V2PermissionOwner {
+        switch client {
+        case "com.maccrab.agent", "com.maccrab.agent.systemextension": return .engine
+        case "com.maccrab.app": return .app
+        default: return .other
+        }
+    }
+
+    /// The engine's disk access is proven by its own live probe
+    /// (`sysext_has_fda`), not by a TCC row. An Endpoint Security extension's
+    /// grant is recorded as kTCCServiceEndpointSecurityClient, and a stale
+    /// denied SystemPolicyAllFiles row can sit beside a working engine; without
+    /// this the Permissions tab reported that healthy engine as "Blocking
+    /// missing" with a Fix button.
+    nonisolated static func resolvingEngineAccess(
+        _ permissions: [V2MockPermission], engineAccessVerified: Bool
+    ) -> [V2MockPermission] {
+        guard engineAccessVerified else { return permissions }
+        return permissions.map { p in
+            guard p.owner == .engine, p.required, !p.granted else { return p }
+            return V2MockPermission(
+                id: p.id, service: p.service, granted: true, required: true,
+                description: p.description + ", access verified by the engine",
+                owner: p.owner, serviceKey: p.serviceKey)
         }
     }
 
@@ -1036,7 +1067,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         requiredTCCServices.contains(service) && macCrabTCCClients.contains(client)
     }
 
-    private nonisolated func prettyTCCService(_ raw: String) -> String {
+    nonisolated static func prettyTCCService(_ raw: String) -> String {
         // Strip the kTCCService prefix; insert spaces ahead of capitals
         // for a readable label ("Full Disk Access" instead of
         // "SystemPolicyAllFiles").
@@ -1061,6 +1092,21 @@ public final class V2LiveDataProvider: V2DataProvider {
         case "kTCCServiceCalendar":             return "Calendar"
         case "kTCCServicePhotos":               return "Photos"
         case "kTCCServiceLocation":             return "Location Services"
+        case "kTCCServiceAddressBook":          return "Contacts"
+        case "kTCCServiceAppleEvents":          return "Automation"
+        case "kTCCServiceUbiquity":             return "iCloud Drive"
+        case "kTCCServiceLiverpool":            return "iCloud (CloudKit)"
+        case "kTCCServiceBluetoothAlways":      return "Bluetooth"
+        case "kTCCServiceDeveloperTool":        return "Developer Tools"
+        case "kTCCServiceMediaLibrary":         return "Media & Apple Music"
+        case "kTCCServiceSystemPolicyAppBundles": return "App Management"
+        case "kTCCServiceSystemPolicyAppData":  return "App Data"
+        case "kTCCServiceSystemPolicyDesktopFolder":   return "Desktop Folder"
+        case "kTCCServiceSystemPolicyDocumentsFolder": return "Documents Folder"
+        case "kTCCServiceSystemPolicyDownloadsFolder": return "Downloads Folder"
+        case "kTCCServiceSystemPolicyNetworkVolumes":  return "Network Volumes"
+        case "kTCCServiceSystemPolicyRemovableVolumes": return "Removable Volumes"
+        case "kTCCServiceWebBrowserPublicKeyCredential": return "Passkeys (Web Browsers)"
         default: return out
         }
     }

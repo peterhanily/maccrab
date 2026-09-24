@@ -371,12 +371,21 @@ public struct V2MockCollector: Identifiable, Sendable, Hashable {
 
 // MARK: - TCC permission
 
+/// Which identity a TCC row belongs to. The snapshot holds every app's rows;
+/// only the engine and app rows describe MacCrab's own permissions.
+public enum V2PermissionOwner: String, Sendable, Hashable {
+    case engine, app, other
+}
+
 public struct V2MockPermission: Identifiable, Sendable, Hashable {
     public let id: String
     public let service: String
     public let granted: Bool
     public let required: Bool
     public let description: String
+    public var owner: V2PermissionOwner = .other
+    /// Raw TCC service key (`kTCCService…`); empty for mock rows.
+    public var serviceKey: String = ""
 }
 
 // MARK: - Package freshness
@@ -808,17 +817,17 @@ public enum V2MockRepository {
 
     public static let permissions: [V2MockPermission] = [
         .init(id: "p-1", service: "Full Disk Access", granted: true, required: true,
-              description: "Required for SQLite event store, /Library inspection, and quarantine reads."),
+              description: "Required for SQLite event store, /Library inspection, and quarantine reads.", owner: .engine),
         .init(id: "p-2", service: "Endpoint Security entitlement", granted: true, required: true,
-              description: "Required for the system extension to receive process / file / auth events."),
+              description: "Required for the system extension to receive process / file / auth events.", owner: .engine),
         .init(id: "p-3", service: "Notifications", granted: true, required: false,
-              description: "Allows MacCrab to surface alerts as macOS notifications."),
+              description: "Allows MacCrab to surface alerts as macOS notifications.", owner: .app),
         .init(id: "p-4", service: "Microphone", granted: false, required: false,
-              description: "Required only for the optional ultrasonic / NUIT detector. Off by default."),
+              description: "Required only for the optional ultrasonic / NUIT detector. Off by default.", owner: .engine),
         .init(id: "p-5", service: "Accessibility", granted: false, required: false,
-              description: "Optional — used by the EventTap keylogger heuristic. Off by default."),
+              description: "Optional — used by the EventTap keylogger heuristic. Off by default.", owner: .app),
         .init(id: "p-6", service: "Bluetooth", granted: true, required: false,
-              description: "Used by Bluetooth subsystem log collector."),
+              description: "Used by Bluetooth subsystem log collector.", owner: .engine),
     ]
 
     public static let packages: [V2MockPackage] = [

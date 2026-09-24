@@ -12,7 +12,7 @@ struct V2DiagnosticsExport: Identifiable, Sendable {
                      failure: V2StartupFailure?, permissions: [V2MockPermission],
                      providerReadFailed: Bool, now: Date = Date()) throws -> V2DiagnosticsExport {
         var result: [String: Any] = [
-            "schema_version": 2,
+            "schema_version": 3,
             "generated_at_unix": now.timeIntervalSince1970,
             "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
             "provider_mode": mode,
@@ -67,8 +67,13 @@ struct V2DiagnosticsExport: Identifiable, Sendable {
             report["historical"] = failure.isHistorical(heartbeat: heartbeat)
             result["startup_failure"] = report
         }
-        result["permissions"] = permissions.map { permission -> [String: Any] in
-            ["service": permission.service, "granted": permission.granted, "required": permission.required]
+        // MacCrab's own rows only. The snapshot also holds every other app's
+        // grants: that is inventory, and without the client names those rows
+        // read as duplicates and contradictions.
+        result["permissions"] = permissions.filter { $0.owner != .other }.map { permission -> [String: Any] in
+            ["service": permission.serviceKey.isEmpty ? permission.service : permission.serviceKey,
+             "owner": permission.owner.rawValue,
+             "granted": permission.granted, "required": permission.required]
         }
         let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
         let formatter = DateFormatter()
