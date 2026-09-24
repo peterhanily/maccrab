@@ -183,6 +183,19 @@ struct ESProcessMappingTests {
         #expect(pi.userId == 777)
     }
 
+    @Test("a version-named binary under <tool>/versions/ is named after the tool")
+    func versionNamedToolBinary() {
+        let claude = esProcessInfo(from: fields(exe: "/Users/u/.local/share/claude/versions/2.1.278"))
+        #expect(claude.name == "claude")
+        #expect(claude.executable == "/Users/u/.local/share/claude/versions/2.1.278")
+        // Only that exact layout: ordinary names, non-version basenames and
+        // version files elsewhere keep their basename.
+        #expect(esProcessName(executablePath: "/opt/tool/versions/cursor-agent") == "cursor-agent")
+        #expect(esProcessName(executablePath: "/opt/tool/releases/2.1.278") == "2.1.278")
+        #expect(esProcessName(executablePath: "/versions/1.0") == "1.0")
+        #expect(esProcessName(executablePath: "/usr/bin/python3.12") == "python3.12")
+    }
+
     @Test("codeSignature fields wire through; empty team/signing → nil; platform flag propagates")
     func codesigFlows() {
         let pi = esProcessInfo(from: fields(signingId: "com.x", teamId: "ABC123", flags: 0x2000, platform: true))

@@ -85,8 +85,24 @@ struct ESProcessFields {
 /// `args` / `commandLine` are threaded straight onto the built struct so the
 /// exec path can populate them in a single allocation. Both default to the
 /// empty value non-exec callers already expect, so their behaviour is unchanged.
+/// Executable basename, except for a tool that installs each release as a
+/// bare version-named binary under `<tool>/versions/`, as Claude Code's native
+/// installer does (`~/.local/share/claude/versions/2.1.278`). There the
+/// basename is only a version, so alerts read "Behavioral Score Threshold:
+/// 2.1.278" and every update looked like a new process; use the tool name.
+func esProcessName(executablePath: String) -> String {
+    let path = executablePath as NSString
+    let base = path.lastPathComponent
+    let parent = path.deletingLastPathComponent as NSString
+    guard parent.lastPathComponent == "versions",
+          base.first?.isNumber == true,
+          base.allSatisfy({ $0.isNumber || $0 == "." }) else { return base }
+    let tool = (parent.deletingLastPathComponent as NSString).lastPathComponent
+    return tool.isEmpty || tool == "/" ? base : tool
+}
+
 func esProcessInfo(from f: ESProcessFields, args: [String] = [], commandLine: String = "") -> ProcessInfo {
-    let processName = (f.executablePath as NSString).lastPathComponent
+    let processName = esProcessName(executablePath: f.executablePath)
 
     // v1.17.1: classify via the shared SignerType.classify so the ES and
     // eslogger paths can't drift. See SignerType.classify for the trust model
