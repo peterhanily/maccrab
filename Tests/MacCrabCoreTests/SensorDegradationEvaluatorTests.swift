@@ -146,6 +146,29 @@ struct SensorDegradationEvaluatorTests {
         }
     }
 
+    @Test("a moderate exec dip with zero drops is not a collapse (v1.22.2 field replay)")
+    func moderateDipWithoutDropsIsQuiet() {
+        // Settled host, 2026-09-23: files 7,246 against ~1,958, exec 34
+        // against 69, every loss counter 0. Raised HIGH at the old 0.5 ratio.
+        var b = Eval.Baseline()
+        for _ in 0..<Eval.processBaselineSettleTicks {
+            b = Eval.evaluate(input: Input(fileEventsThisTick: 1_958, processEventsThisTick: 69,
+                                           kernelDropDelta: 0, collectorDropDelta: 0,
+                                           benignHighIOSigner: false), baseline: b).newBaseline
+        }
+        let dip = Eval.evaluate(
+            input: Input(fileEventsThisTick: 7_246, processEventsThisTick: 34,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        #expect(dip.outcome == .noAlert)
+        // The same tick with a counted drop is still degraded.
+        let lossy = Eval.evaluate(
+            input: Input(fileEventsThisTick: 7_246, processEventsThisTick: 34,
+                         kernelDropDelta: 0, collectorDropDelta: 55, benignHighIOSigner: false),
+            baseline: b)
+        #expect({ if case .degraded = lossy.outcome { return true } else { return false } }())
+    }
+
     @Test("benign-signer downgrade: same conjunction, but LOW severity")
     func benignSignerDowngradesToLow() {
         let b = warmedBaseline()
