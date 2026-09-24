@@ -23,6 +23,10 @@ public actor EventTapMonitor {
     private var continuation: AsyncStream<EventTapInfo>.Continuation?
     private var pollTask: Task<Void, Never>?
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    /// Completed polls, independent of findings. This monitor emits only when
+    /// something changes, so without it collector health could not tell a
+    /// quiet, working monitor from one that had stopped polling.
+    public nonisolated let pollingHealth = NetworkPollingHealth()
     private var knownTaps: Set<UInt32> = []  // Tap IDs we've already alerted on
     private let pollInterval: TimeInterval
 
@@ -69,12 +73,14 @@ public actor EventTapMonitor {
     public func start() {
         guard lifecyclePhase == .initialized else { return }
         lifecyclePhase = .running
+        guard let pollGeneration = pollingHealth.begin() else { return }
         logger.info("Event tap monitor starting (poll every \(self.pollInterval)s)")
 
         pollTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
                 await self.scan()
+                self.pollingHealth.completed(generation: pollGeneration)
                 try? await Task.sleep(nanoseconds: UInt64(PowerGate.adjustedInterval(base: self.pollInterval) * 1_000_000_000))
             }
         }
@@ -95,6 +101,7 @@ public actor EventTapMonitor {
     private func beginStop() -> Task<Void, Never>? {
         if lifecyclePhase == .stopped { return nil }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         let task = pollTask
         pollTask?.cancel()
         continuation?.finish()

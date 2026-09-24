@@ -69,7 +69,7 @@ enum MonitorTasks {
             await state.esHealthMonitor.start()
             let esHealth = await state.esHealthMonitor.currentStatus()
             if esHealth.isHealthy {
-                print("ES infrastructure (deferred probe): healthy (xprotectd, syspolicyd, endpointsecurityd running)")
+                print("ES infrastructure (deferred probe): healthy (xprotectd running)")
             } else {
                 print("ES infrastructure (deferred probe): DEGRADED -- \(esHealth.issues.joined(separator: ", "))")
             }
@@ -378,28 +378,31 @@ enum MonitorTasks {
 
         // Clipboard monitoring task
         _ = state.clipboardInjectionDetector  // Available for dashboard/CLI on-demand scanning
-        await supervisor.start("clipboard", collector: "ClipboardMonitor", registry: state.collectorRegistry) {
-            await state.clipboardMonitor.start()
-            print("Clipboard monitor active (supervised, sensitive data + injection detection)")
-            for await clipEvent in state.clipboardMonitor.events {
-                await state.collectorRegistry.recordTick(name: "ClipboardMonitor")
-                if clipEvent.containsSensitiveData {
-                    let alert = Alert(
-                        ruleId: "maccrab.clipboard.sensitive-data",
-                        ruleTitle: "Sensitive Data on Clipboard",
-                        severity: .medium,
-                        eventId: UUID().uuidString,
-                        processPath: nil, processName: "pasteboard",
-                        description: "Sensitive data detected on clipboard (API key, token, SSH key, or credential). Types: \(clipEvent.contentTypes.prefix(3).joined(separator: ", "))",
-                        mitreTactics: "attack.collection", mitreTechniques: "attack.t1115",
-                        suppressed: false
-                    )
-                    do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    print("[CLIP] Sensitive data detected on clipboard")
+        // Root System Extension: no user pasteboard (see the registry row).
+        if !state.isRoot {
+            await supervisor.start("clipboard", collector: "ClipboardMonitor", registry: state.collectorRegistry) {
+                await state.clipboardMonitor.start()
+                print("Clipboard monitor active (supervised, sensitive data + injection detection)")
+                for await clipEvent in state.clipboardMonitor.events {
+                    await state.collectorRegistry.recordTick(name: "ClipboardMonitor")
+                    if clipEvent.containsSensitiveData {
+                        let alert = Alert(
+                            ruleId: "maccrab.clipboard.sensitive-data",
+                            ruleTitle: "Sensitive Data on Clipboard",
+                            severity: .medium,
+                            eventId: UUID().uuidString,
+                            processPath: nil, processName: "pasteboard",
+                            description: "Sensitive data detected on clipboard (API key, token, SSH key, or credential). Types: \(clipEvent.contentTypes.prefix(3).joined(separator: ", "))",
+                            mitreTactics: "attack.collection", mitreTechniques: "attack.t1115",
+                            suppressed: false
+                        )
+                        do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                        print("[CLIP] Sensitive data detected on clipboard")
+                    }
+                    await Task.yield()
                 }
-                await Task.yield()
+                _ = await state.clipboardMonitor.stopAndJoin(deadline: 0.75)
             }
-            _ = await state.clipboardMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // Browser extension monitoring task

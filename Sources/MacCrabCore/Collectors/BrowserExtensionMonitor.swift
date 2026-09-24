@@ -95,6 +95,10 @@ public actor BrowserExtensionMonitor {
     private var continuation: AsyncStream<ExtensionEvent>.Continuation?
     private var pollTask: Task<Void, Never>?
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    /// Completed polls, independent of findings. This monitor emits only when
+    /// something changes, so without it collector health could not tell a
+    /// quiet, working monitor from one that had stopped polling.
+    public nonisolated let pollingHealth = NetworkPollingHealth()
     /// Never key an extension by id alone: ids can legitimately collide across
     /// users, browsers and profiles, and a version update must be observable.
     /// Retain 4096 recent identities per history. An evicted identity may be
@@ -169,12 +173,14 @@ public actor BrowserExtensionMonitor {
     public func start() {
         guard lifecyclePhase == .initialized else { return }
         lifecyclePhase = .running
+        guard let pollGeneration = pollingHealth.begin() else { return }
         logger.info("Browser extension monitor starting (poll every \(self.pollInterval)s)")
 
         pollTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
                 await self.scanNow()
+                self.pollingHealth.completed(generation: pollGeneration)
                 let interval = self.pollInterval
                 // Aggressiveness 2.0: browser-extension scan is a
                 // visibility feature, not time-sensitive. Slower on
@@ -202,6 +208,7 @@ public actor BrowserExtensionMonitor {
     private func beginStop() -> Task<Void, Never>? {
         if lifecyclePhase == .stopped { return nil }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         let task = pollTask
         pollTask?.cancel()
         continuation?.finish()

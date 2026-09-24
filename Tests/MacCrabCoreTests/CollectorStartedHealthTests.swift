@@ -98,6 +98,14 @@ struct CollectorStartedHealthTests {
             setup.contains("name: \"UltrasonicMonitor\", expectedIntervalSeconds: 60,\n            eventDriven: true, started: false"),
             "UltrasonicMonitor is opt-in and must not claim health before its gate opens"
         )
+        #expect(
+            setup.contains("name: \"ClipboardMonitor\", expectedIntervalSeconds: 3,\n            eventDriven: true, enabled: !isRoot"),
+            "the root System Extension has no user pasteboard; ClipboardMonitor must report disabled there"
+        )
+        #expect(
+            setup.contains("name: \"ESClientMonitor\", expectedIntervalSeconds: Int(config.esHealthPollInterval),\n            eventDriven: false, pollingHealth: esHealthMonitor.pollingHealth"),
+            "ESClientMonitor must be registered up front with poll liveness, not lazily by its first alert"
+        )
         // ...and both must flip when their gate actually opens.
         #expect(setup.contains("recordStarted(name: \"FSEventsCollector\")"))
         #expect(setup.contains("recordStarted(name: \"UltrasonicMonitor\")"))

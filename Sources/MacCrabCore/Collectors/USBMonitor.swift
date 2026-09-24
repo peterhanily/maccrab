@@ -41,6 +41,10 @@ public actor USBMonitor {
     private var continuation: AsyncStream<USBDeviceEvent>.Continuation?
     private var pollTask: Task<Void, Never>?
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    /// Completed polls, independent of findings. This monitor emits only when
+    /// something changes, so without it collector health could not tell a
+    /// quiet, working monitor from one that had stopped polling.
+    public nonisolated let pollingHealth = NetworkPollingHealth()
     private var knownDevices: Set<String> = []  // "vendorId:productId:serialNumber"
     private let pollInterval: TimeInterval
 
@@ -66,12 +70,14 @@ public actor USBMonitor {
     public func start() {
         guard lifecyclePhase == .initialized else { return }
         lifecyclePhase = .running
+        guard let pollGeneration = pollingHealth.begin() else { return }
         logger.info("USB monitor starting (poll every \(self.pollInterval)s)")
 
         pollTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
                 await self.scan()
+                self.pollingHealth.completed(generation: pollGeneration)
                 // USB scanning is optional (security-tokens + exfil-device
                 // coverage). Slow down aggressively on battery — USB tampering
                 // that matters is usually a sustained event, not sub-second.
@@ -97,6 +103,7 @@ public actor USBMonitor {
     private func beginStop() -> Task<Void, Never>? {
         if lifecyclePhase == .stopped { return nil }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         let task = pollTask
         pollTask?.cancel()
         continuation?.finish()

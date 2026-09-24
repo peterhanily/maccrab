@@ -1659,6 +1659,35 @@ struct CausalGraphSubstrateRetentionTests {
         await store.close()
     }
 
+    @Test("A TraceGraph store that could not open starts detached instead of aborting the engine")
+    func bootstrapAdmitsDetachedTraceGraph() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let bootstrap = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/DaemonBootstrap.swift"),
+            encoding: .utf8)
+        let setup = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/DaemonSetup.swift"),
+            encoding: .utf8)
+        // The degraded result is never writable, so the guard needs its own
+        // clause; before v1.22.2 a low-disk or key failure in the optional
+        // graph aborted every boot.
+        #expect(!CausalGraphStartupRecoveryResult.unavailable(reason: .lowFreeSpace).writableBeforeProducers)
+        #expect(bootstrap.contains(
+            "let traceGraphAttached = state.causalStore != nil || state.causalGraphBridge != nil"))
+        #expect(bootstrap.contains(
+            "guard traceGraphStartupRecovery.writableBeforeProducers || !traceGraphAttached else"))
+        // The clause admits only a run with no writer: the detached branch
+        // clears both handles.
+        let detached = try #require(setup.range(of:
+            "let unavailable = CausalGraphStartupRecoveryResult.unavailable("))
+        let branch = setup[detached.lowerBound...].prefix(2_000)
+        #expect(branch.contains("causalGraphBridge = nil"))
+        #expect(branch.contains("causalStoreOuter = nil"))
+    }
+
     @Test("Bootstrap fails closed on graph non-convergence before every producer marker")
     func bootstrapRequiresTraceGraphStartupProofBeforeIngestion() throws {
         let root = URL(fileURLWithPath: #filePath)

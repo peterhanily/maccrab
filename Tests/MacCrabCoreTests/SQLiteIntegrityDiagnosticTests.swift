@@ -48,4 +48,29 @@ struct SQLiteIntegrityDiagnosticTests {
         #expect(DaemonSetup.startupFailureReason(
             EventStoreError.storageNotReady("integrity_failure: storage_pressure")) == "initialization_failed")
     }
+
+    @Test("TraceGraph pre-producer failures say whether storage capacity was the cause")
+    func traceGraphStartupReasons() {
+        typealias Failure = DaemonSetup.TraceGraphStartupStorageError
+        func result(_ reason: CausalGraphStartupRecoveryNonconvergenceReason) -> CausalGraphStartupRecoveryResult {
+            CausalGraphStartupRecoveryResult(
+                disposition: .nonconverged(reason), initiallyBlocked: true, passes: 1,
+                attemptedCutoffHours: [1], finalAdmission: nil, lastRecovery: nil, failureDetail: nil)
+        }
+        for reason: CausalGraphStartupRecoveryNonconvergenceReason in [
+            .protectedEvidenceFloor, .boundedPassLimit, .incrementalVacuumUnavailable,
+            .noRecoverableProgress, .admissionRemainsBlocked,
+        ] {
+            #expect(DaemonSetup.startupFailureReason(Failure(recovery: result(reason))) == "storage_pressure")
+        }
+        for reason: CausalGraphStartupRecoveryNonconvergenceReason in [
+            .storeUnavailable, .writableHandleUnavailable, .pinnedReader,
+            .admissionMeasurementUnavailable, .recoveryFailed,
+        ] {
+            #expect(DaemonSetup.startupFailureReason(Failure(recovery: result(reason))) == "initialization_failed")
+        }
+        #expect(DaemonSetup.startupFailureReason(Failure(block: .footprintLimit)) == "storage_pressure")
+        #expect(DaemonSetup.startupFailureReason(Failure(block: .lowFreeSpace)) == "storage_pressure")
+        #expect(DaemonSetup.startupFailureReason(Failure(block: .probeFailure)) == "initialization_failed")
+    }
 }

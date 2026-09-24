@@ -26,6 +26,10 @@ public actor RootkitDetector {
     private let continuation: AsyncStream<HiddenProcess>.Continuation
     private var pollTask: Task<Void, Never>?
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    /// Completed polls, independent of findings. This monitor emits only when
+    /// something changes, so without it collector health could not tell a
+    /// quiet, working monitor from one that had stopped polling.
+    public nonisolated let pollingHealth = NetworkPollingHealth()
     private let pollInterval: TimeInterval
 
     public init(pollInterval: TimeInterval = 120) {
@@ -43,10 +47,12 @@ public actor RootkitDetector {
     public func start() {
         guard lifecyclePhase == .initialized else { return }
         lifecyclePhase = .running
+        guard let pollGeneration = pollingHealth.begin() else { return }
         let base = pollInterval
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.scan()
+                self?.pollingHealth.completed(generation: pollGeneration)
                 // v1.6.22: PowerGate-gated. On battery / thermal pressure the
                 // interval lengthens; the dual-API discrepancy is not latency-
                 // sensitive.
@@ -71,6 +77,7 @@ public actor RootkitDetector {
     private func beginStop() -> Task<Void, Never>? {
         if lifecyclePhase == .stopped { return nil }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         let task = pollTask
         pollTask?.cancel()
         continuation.finish()
