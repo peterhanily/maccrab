@@ -790,12 +790,11 @@ stage_assemble() {
     # UUID like `d1a2b3c4-1003-4000-a000-000000001003`) to
     # `Bundle.main.path(forResource:ofType:"yml", inDirectory:"rules")`,
     # not the filename slug — so we need files named by UUID, not by slug.
-    # We also copy the slug name for human browsing / debugging. Bundle
-    # size cost: ~1 MB total for 463 rules; negligible vs the 80 MB DMG.
+    # v1.22.2: the slug-named duplicates (browsing/debugging only; nothing
+    # reads them) are no longer shipped. Each small file occupies a whole
+    # allocation block, so the second copy of 479 rules cost ~1.9 MiB of the
+    # installed-footprint budget below.
     mkdir -p "$APP/Contents/Resources/rules"
-    # Pass 1: slug-named copies (filename-based browsing / debugging).
-    find Rules -name '*.yml' -not -path 'Rules/graph/*' -exec cp {} "$APP/Contents/Resources/rules/" \;
-    # Pass 2: UUID-named copies (Bundle.main.path lookup target).
     uuid_copied=0
     while IFS= read -r f; do
         uuid=$(grep -m1 '^id:' "$f" | awk '{print $2}' | tr -d "'\"" | tr -d '[:space:]')
