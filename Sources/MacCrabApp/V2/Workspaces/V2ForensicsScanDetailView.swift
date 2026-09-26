@@ -38,6 +38,8 @@ struct V2ForensicsScanDetailView: View {
     @State private var truncatedCTs: Set<String> = []
     // True when the last export query hit `exportRowCap` (output may be partial).
     @State private var exportTruncated = false
+    @State private var preparingReview = false
+    @State private var reviewFailure: String?
 
     /// Per-content-type lazy load cap. Kept bounded (rc.15 memory design) — when
     /// a type exceeds it the viewer surfaces a "showing first N" notice and
@@ -66,6 +68,7 @@ struct V2ForensicsScanDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if let reviewFailure { Text(reviewFailure).font(.caption).foregroundStyle(.orange).padding(.horizontal, 20).padding(.bottom, 8) }
             Divider()
             if encryptionState != .plaintext && !unlocked {
                 encryptedNotice.padding(20)
@@ -110,6 +113,9 @@ struct V2ForensicsScanDetailView: View {
             }
             Spacer()
             if !ctCounts.isEmpty {
+                if ctCounts.contains(where: { $0.contentType.hasPrefix("script_trace.") || $0.contentType.hasPrefix("repo_tripwire.") || $0.contentType.hasPrefix("secret_trail.") || $0.contentType.hasPrefix("clickfix_review.") }) {
+                    Button(preparingReview ? "Preparing…" : "Review evidence") { Task { await prepareReview() } }.disabled(preparingReview || caseHandle == nil)
+                }
                 exportMenu
             }
             Button(String(localized: "scanDetail.close", defaultValue: "Close")) { isPresented = false }
@@ -301,7 +307,9 @@ struct V2ForensicsScanDetailView: View {
                     ArtifactViewerDispatcher(
                         contentType: ct,
                         artifacts: selectedArtifacts,
-                        hint: hints[ct] ?? nil
+                        hint: hints[ct] ?? nil,
+                        reviewCaseHandle: caseHandle,
+                        reviewSaved: { await refreshSavedReviews() }
                     )
                     .padding(8)
                 }
@@ -363,6 +371,29 @@ struct V2ForensicsScanDetailView: View {
             .cornerRadius(8)
     }
 
+    private func refreshSavedReviews() async {
+        guard let handle = caseHandle else { return }
+        do {
+            ctCounts = try await handle.store.contentTypeCounts(caseID: scanID).filter { OperatorVisibilityFilter.isOperatorVisible(contentType: $0.contentType, pluginID: "") }
+            loadedArtifacts[ReviewCaseWorkflow.contentType] = nil
+            await loadCT(ReviewCaseWorkflow.contentType)
+        } catch { reviewFailure = "Review saved, but the case list could not refresh. Reopen the scan to load it." }
+    }
+
+    private func prepareReview() async {
+        guard let handle = caseHandle else { return }
+        preparingReview = true; reviewFailure = nil
+        defer { preparingReview = false }
+        do {
+            let document = try await ReviewCaseWorkflow.prepare(handle: handle)
+            try await ReviewCaseWorkflow.save(document, handle: handle)
+            ctCounts = try await handle.store.contentTypeCounts(caseID: scanID).filter { OperatorVisibilityFilter.isOperatorVisible(contentType: $0.contentType, pluginID: "") }
+            let type = ReviewCaseWorkflow.contentType
+            loadedArtifacts[type] = nil; selectedContentType = type
+            await loadCT(type)
+        } catch { reviewFailure = "Review could not be prepared. Use supported report versions with at most 5,000 source rows; original evidence remains available." }
+    }
+
     // MARK: - Loading
 
     /// Initial load: opens the case, fetches counts only, and
@@ -388,7 +419,9 @@ struct V2ForensicsScanDetailView: View {
             hints = await ViewerHintResolver.resolveAll(
                 contentTypes: Set(ctCounts.map { $0.contentType })
             )
-            if let first = ctCounts.first?.contentType {
+            let expansionPreferred = ctCounts.first(where: { ExpansionFinding.identities[$0.contentType] != nil && $0.contentType.hasSuffix(".finding") })?.contentType
+            let preferred = ctCounts.contains(where: { $0.contentType == ReviewCaseWorkflow.contentType }) ? ReviewCaseWorkflow.contentType : ctCounts.first(where: { ["trust_delta.review", "first_hour.review", "secret_trail.credential", "repo_tripwire.finding", "script_trace.finding"].contains($0.contentType) })?.contentType
+            if let first = expansionPreferred ?? preferred ?? ctCounts.first?.contentType {
                 selectedContentType = first
                 await loadCT(first)
             }

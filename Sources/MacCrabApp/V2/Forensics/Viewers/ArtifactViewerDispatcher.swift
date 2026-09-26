@@ -15,10 +15,21 @@ struct ArtifactViewerDispatcher: View {
     let contentType: String
     let artifacts: [CommittedArtifact]
     let hint: ViewerHint?
+    var reviewCaseHandle: CaseHandle? = nil
+    var reviewSaved: (() async -> Void)? = nil
 
     var body: some View {
         Group {
-            if let hint {
+            if ExpansionFinding.accepts(contentType: contentType, artifacts: artifacts) {
+                ExpansionFindingsView(artifacts: artifacts)
+            } else if NativeReview.identities[contentType] != nil {
+                ReviewFindingsView(artifacts: artifacts, caseHandle: reviewCaseHandle, onSaved: reviewSaved)
+            } else if contentType == "secret_trail.credential", !artifacts.isEmpty,
+               artifacts.allSatisfy({ $0.record.pluginID == SecretTrailScope.pluginID }) {
+                SecretTrailFindingsView(artifacts: artifacts)
+            } else if InspectionFinding.accepts(contentType: contentType, artifacts: artifacts) {
+                InspectionFindingsView(artifacts: artifacts)
+            } else if let hint {
                 switch hint.viewer {
                 case .table:      ArtifactTableView(artifacts: artifacts, hint: hint)
                 case .timeline:   ArtifactTimelineView(artifacts: artifacts, hint: hint)
