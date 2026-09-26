@@ -64,17 +64,17 @@ struct InspectionFindingsView: View {
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("STATIC INSPECTION").font(.system(size: 10, weight: .semibold))
+                Text(String(localized: "rave.inspection.staticBadge", defaultValue: "STATIC INSPECTION")).font(.system(size: 10, weight: .semibold))
                     .padding(7).background(.secondary.opacity(0.1)).cornerRadius(5)
             }
-            Text("Commands were not run. These findings explain what to review; they do not establish execution or compromise.")
+            Text(String(localized: "rave.inspection.limitations", defaultValue: "Commands were not run. These findings explain what to review; they do not establish execution or compromise."))
                 .font(.callout).foregroundStyle(.secondary)
             if gaps > 0 {
                 HStack {
-                    Label("Some behavior remains uninspected.", systemImage: "exclamationmark.circle")
+                    Label(String(localized: "rave.inspection.uninspected", defaultValue: "Some behavior remains uninspected."), systemImage: "exclamationmark.circle")
                         .font(.callout).foregroundStyle(.orange)
                     Spacer()
-                    Button("Show coverage") { showAll = true; query = "coverage-gap" }.buttonStyle(.link)
+                    Button(String(localized: "rave.inspection.showCoverage", defaultValue: "Show coverage")) { showAll = true; query = "coverage-gap" }.buttonStyle(.link)
                 }
             }
             HStack {
@@ -84,10 +84,10 @@ struct InspectionFindingsView: View {
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    if visible.isEmpty { Text("No findings match this filter.").foregroundStyle(.secondary).padding(.vertical, 16) }
+                    if visible.isEmpty { Text(String(localized: "rave.inspection.noMatches", defaultValue: "No findings match this filter.")).foregroundStyle(.secondary).padding(.vertical, 16) }
                     ForEach(visible) { finding in card(finding) }
                     if artifacts.count > findings.count {
-                        Text("\(artifacts.count - findings.count) rows could not be displayed. Review their raw artifacts and coverage before drawing conclusions.")
+                        Text(String(localized: "rave.inspection.hiddenRows", defaultValue: "Rows not displayed: \(artifacts.count - findings.count). Review their raw artifacts and coverage before drawing conclusions."))
                             .font(.caption).foregroundStyle(.orange)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
@@ -108,7 +108,7 @@ struct InspectionFindingsView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(finding.handoff, forType: .string)
                 } label: { Image(systemName: "doc.on.doc") }
-                    .buttonStyle(.plain).help("Copy redacted review note")
+                    .buttonStyle(.plain).help(String(localized: "rave.inspection.copyNote", defaultValue: "Copy redacted review note"))
             }
             if !finding.path.isEmpty {
                 Text(finding.path + " · " + finding.lineLabel + " \(finding.line)")

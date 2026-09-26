@@ -50,12 +50,12 @@ struct ExpansionFindingsView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(title).font(.title2.weight(.semibold))
-                    Text("\(findings.count) results in this evidence category").font(.subheadline).foregroundStyle(.secondary)
+                    Text(String(localized: "rave.expansion.categoryCount", defaultValue: "Results in this evidence category: \(findings.count)")).font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("SELECTED EVIDENCE").font(.system(size: 10, weight: .semibold)).padding(7).background(.secondary.opacity(0.1)).cornerRadius(5)
+                Text(String(localized: "rave.expansion.selectedEvidence", defaultValue: "SELECTED EVIDENCE")).font(.system(size: 10, weight: .semibold)).padding(7).background(.secondary.opacity(0.1)).cornerRadius(5)
             }
-            Text("Each result states what its source can establish. Review collection coverage and unavailable sources alongside these findings.")
+            Text(String(localized: "rave.expansion.coverageNote", defaultValue: "Each result states what its source can establish. Review collection coverage and unavailable sources alongside these findings."))
                 .font(.callout).foregroundStyle(.secondary)
             TextField("Filter by source or finding", text: $query).textFieldStyle(.roundedBorder)
             Divider()
@@ -70,7 +70,7 @@ struct ExpansionFindingsView: View {
                                 }
                                 Spacer()
                                 Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(finding.note, forType: .string) }
-                                    label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain).help("Copy review note")
+                                    label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain).help(String(localized: "rave.expansion.copyNote", defaultValue: "Copy review note"))
                             }
                             if !finding.path.isEmpty { Text(finding.path).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
                             Text(finding.detail).font(.callout).fixedSize(horizontal: false, vertical: true)
@@ -81,8 +81,8 @@ struct ExpansionFindingsView: View {
                             .background(Color(nsColor: .controlBackgroundColor))
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.18))).cornerRadius(8)
                     }
-                    if visible.isEmpty { Text("No displayable results match this filter. Check the original artifacts and collection coverage.").foregroundStyle(.secondary).padding(.vertical, 16) }
-                    if artifacts.count > findings.count { Text("\(artifacts.count-findings.count) rows are not displayed here. Use Export → JSON to inspect them; they were not assessed by this view.").font(.caption).foregroundStyle(.orange) }
+                    if visible.isEmpty { Text(String(localized: "rave.expansion.noMatches", defaultValue: "No displayable results match this filter. Check the original artifacts and collection coverage.")).foregroundStyle(.secondary).padding(.vertical, 16) }
+                    if artifacts.count > findings.count { Text(String(localized: "rave.expansion.hiddenRows", defaultValue: "Rows not displayed: \(artifacts.count-findings.count). Use Export → JSON to inspect them; they were not assessed by this view.")).font(.caption).foregroundStyle(.orange) }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
         }.padding(20).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

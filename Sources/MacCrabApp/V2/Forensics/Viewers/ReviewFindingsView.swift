@@ -142,16 +142,16 @@ struct ReviewFindingsView: View {
             if review != nil {
                 HStack {
                     Menu("Save & share") {
-                        Button("Save in encrypted case", action: saveInCase).disabled(caseHandle == nil)
-                        Button("Export review…", action: exportReview)
-                        Button("Copy investigation brief", action: copyBrief)
+                        Button(String(localized: "rave.review.saveCase", defaultValue: "Save in encrypted case"), action: saveInCase).disabled(caseHandle == nil)
+                        Button(String(localized: "rave.review.export", defaultValue: "Export review…"), action: exportReview)
+                        Button(String(localized: "rave.review.copyBrief", defaultValue: "Copy investigation brief"), action: copyBrief)
                         Divider()
-                        Button("Open saved review…", action: openReview)
+                        Button(String(localized: "rave.review.open", defaultValue: "Open saved review…"), action: openReview)
                     }
-                    Button("Verify…", action: verify)
-                    Button("Recheck", action: recheck).disabled(review?.snapshot.domain == "app")
-                        .help("Apply current supported rules to these retained facts.")
-                    Button("Record decision…") { showDecision = true }
+                    Button(String(localized: "rave.review.verify", defaultValue: "Verify…"), action: verify)
+                    Button(String(localized: "rave.review.recheck", defaultValue: "Recheck"), action: recheck).disabled(review?.snapshot.domain == "app")
+                        .help(String(localized: "rave.review.recheckHelp", defaultValue: "Apply current supported rules to these retained facts."))
+                    Button(String(localized: "rave.review.recordDecision", defaultValue: "Record decision…")) { showDecision = true }
                     Spacer()
                     if busy { ProgressView().controlSize(.small) }
                 }.disabled(busy)
@@ -174,16 +174,16 @@ struct ReviewFindingsView: View {
                 DisclosureGroup("Scope, coverage and provenance") {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(review.snapshot.provenance == "unverified-import" ? "Imported observations · provenance not authenticated" : "Local static observations · signatures not validated")
-                        Text("Rules \(review.snapshot.ruleVersion) · " + review.snapshot.scope.joined(separator: ", "))
-                        ForEach(review.snapshot.gaps, id: \.self) { Text("Current: " + $0) }
-                        ForEach(review.previous?.gaps ?? [], id: \.self) { Text("Earlier: " + $0) }
-                        if let digest = try? RaveReviewDocumentIO.digest(review.document) { Text("Review SHA-256: " + digest).textSelection(.enabled) }
+                        Text(String(localized: "rave.review.rulesPrefix", defaultValue: "Rules \(review.snapshot.ruleVersion) · ") + review.snapshot.scope.joined(separator: ", "))
+                        ForEach(review.snapshot.gaps, id: \.self) { Text(String(localized: "rave.review.currentPrefix", defaultValue: "Current: ") + $0) }
+                        ForEach(review.previous?.gaps ?? [], id: \.self) { Text(String(localized: "rave.review.earlierPrefix", defaultValue: "Earlier: ") + $0) }
+                        if let digest = try? RaveReviewDocumentIO.digest(review.document) { Text(String(localized: "rave.review.digestPrefix", defaultValue: "Review SHA-256: ") + digest).textSelection(.enabled) }
                     }.font(.caption).foregroundStyle(.secondary).padding(.top, 5)
                 }.font(.caption)
                 if !review.document.decisions.isEmpty {
                     DisclosureGroup("\(review.document.decisions.count) recorded operator decisions") {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Unsigned notes tied to these retained facts. Reviewer names are self-reported.").foregroundStyle(.secondary)
+                            Text(String(localized: "rave.review.unsignedNotes", defaultValue: "Unsigned notes tied to these retained facts. Reviewer names are self-reported.")).foregroundStyle(.secondary)
                             ForEach(review.document.decisions, id: \.id) { decision in
                                 Text("\(decision.reviewer) · \(decision.disposition) · \(decision.recordedAt)").bold()
                                 if !decision.note.isEmpty { Text(decision.note).textSelection(.enabled) }
@@ -196,7 +196,7 @@ struct ReviewFindingsView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     if findings.isEmpty, review != nil {
-                        Text("No new findings under these rules. Review coverage before drawing a conclusion.").foregroundStyle(.secondary)
+                        Text(String(localized: "rave.review.noNewFindings", defaultValue: "No new findings under these rules. Review coverage before drawing a conclusion.")).foregroundStyle(.secondary)
                     }
                     ForEach(visible, id: \.id) { finding in
                         VStack(alignment: .leading, spacing: 8) {
@@ -206,7 +206,7 @@ struct ReviewFindingsView: View {
                                 Text(finding.title).font(.headline)
                                 Spacer()
                                 Button { copy([finding.title, finding.explanation, finding.action, finding.references.joined(separator: "\n")].joined(separator: "\n\n")) }
-                                    label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain).help("Copy finding")
+                                    label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain).help(String(localized: "rave.review.copyFinding", defaultValue: "Copy finding"))
                             }
                             Text(finding.explanation).font(.callout).textSelection(.enabled)
                             DisclosureGroup("Evidence and next check") {
@@ -241,20 +241,20 @@ struct ReviewFindingsView: View {
     }
     private var decisionSheet: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Record your review decision").font(.headline)
-            Text("The note is tied to this review's scope, facts, comparison and rule version. It does not approve future code or establish containment.")
+            Text(String(localized: "rave.review.decisionTitle", defaultValue: "Record your review decision")).font(.headline)
+            Text(String(localized: "rave.review.decisionScope", defaultValue: "The note is tied to this review's scope, facts, comparison and rule version. It does not approve future code or establish containment."))
                 .font(.callout).foregroundStyle(.secondary)
             TextField("Reviewer name", text: $reviewer)
             Picker("Decision", selection: $disposition) {
-                Text("Expected within reviewed scope").tag("expected")
-                Text("Investigate further").tag("investigate")
-                Text("Inconclusive").tag("inconclusive")
+                Text(String(localized: "rave.review.expected", defaultValue: "Expected within reviewed scope")).tag("expected")
+                Text(String(localized: "rave.review.investigate", defaultValue: "Investigate further")).tag("investigate")
+                Text(String(localized: "rave.review.inconclusive", defaultValue: "Inconclusive")).tag("inconclusive")
             }
             TextField("Reason or next action", text: $note)
             if let failure { Text(failure).foregroundStyle(.orange).font(.caption) }
             HStack {
                 Spacer()
-                Button("Cancel") { showDecision = false }.keyboardShortcut(.cancelAction)
+                Button(String(localized: "common.cancel", defaultValue: "Cancel")) { showDecision = false }.keyboardShortcut(.cancelAction)
                 Button(caseHandle == nil ? "Add to review" : "Record in case", action: recordDecision)
                     .disabled(busy || reviewer.trimmingCharacters(in: .whitespaces).isEmpty).keyboardShortcut(.defaultAction)
             }

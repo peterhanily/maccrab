@@ -79,20 +79,20 @@ struct SecretTrailFindingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Credential copies").font(.title2.bold())
+                Text(String(localized: "rave.secretTrail.title", defaultValue: "Credential copies")).font(.title2.bold())
                 Spacer()
-                Text("\(findings.filter(\.reviewFirst).count) to review first").font(.subheadline).foregroundStyle(.secondary)
+                Text(String(localized: "rave.secretTrail.priorityCount", defaultValue: "Review first: \(findings.filter(\.reviewFirst).count)")).font(.subheadline).foregroundStyle(.secondary)
             }
-            Text("Matching candidates in your selected files. Locations are redacted; validity and transmission have not been established.")
+            Text(String(localized: "rave.secretTrail.limitations", defaultValue: "Matching candidates in your selected files. Locations are redacted; validity and transmission have not been established."))
                 .font(.caption).foregroundStyle(.secondary)
             TextField("Filter by credential family, file or source type", text: $search)
                 .textFieldStyle(.roundedBorder)
-            if visible.isEmpty { Text("No groups match this filter.").foregroundStyle(.secondary).padding() }
+            if visible.isEmpty { Text(String(localized: "rave.secretTrail.noMatches", defaultValue: "No groups match this filter.")).foregroundStyle(.secondary).padding() }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(Array(visible.prefix(128))) { finding in card(finding) }
                     if visible.count > 128 {
-                        Text("Showing 128 of \(visible.count) groups. Export the scan for the remaining records.")
+                        Text(String(localized: "rave.secretTrail.groupLimit", defaultValue: "Showing 128 of \(visible.count) groups. Export the scan for the remaining records."))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -104,18 +104,18 @@ struct SecretTrailFindingsView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(finding.family).font(.headline)
-                    Text("\(finding.files) files · \(finding.occurrences) occurrences")
+                    Text(String(localized: "rave.secretTrail.counts", defaultValue: "Files: \(finding.files) · Occurrences: \(finding.occurrences)"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if finding.reviewFirst {
-                    Label("Review first", systemImage: "flag.fill")
+                    Label(String(localized: "rave.secretTrail.reviewFirst", defaultValue: "Review first"), systemImage: "flag.fill")
                         .font(.caption.weight(.semibold)).foregroundStyle(.orange)
                 }
             }
             Text(finding.reason).font(.callout)
             if finding.partial {
-                Label("Coverage incomplete — these counts are lower bounds.", systemImage: "exclamationmark.triangle")
+                Label(String(localized: "rave.secretTrail.incomplete", defaultValue: "Coverage incomplete — these counts are lower bounds."), systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundStyle(.orange)
             }
             ForEach(Array(finding.locations.prefix(4))) { location in locationRow(location) }
@@ -125,7 +125,7 @@ struct SecretTrailFindingsView: View {
                 }.font(.caption)
             }
             if finding.omitted > 0 {
-                Text("\(finding.omitted) additional occurrences are available under Occurrences or in the scan export.")
+                Text(String(localized: "rave.secretTrail.additionalOccurrences", defaultValue: "Additional occurrences: \(finding.omitted). See Occurrences or the scan export."))
                     .font(.caption).foregroundStyle(.secondary)
             }
             if !finding.steps.isEmpty {

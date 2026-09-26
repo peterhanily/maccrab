@@ -27,7 +27,7 @@ struct SecretTrailSourcePicker: View {
                             changed()
                         } label: {
                             Image(systemName: "minus.circle")
-                        }.buttonStyle(.plain).accessibilityLabel("Remove selected source")
+                        }.buttonStyle(.plain).accessibilityLabel(String(localized: "rave.sources.remove", defaultValue: "Remove selected source"))
                     }
                     Picker("Source type", selection: $source.kind) {
                         ForEach(profile.kinds) { kind in Text(kind.title).tag(kind) }
@@ -46,7 +46,7 @@ struct SecretTrailSourcePicker: View {
                 Text(didSave ? "Selection saved. Ready to scan." : ready ? "\(sources.count) selected · encrypted results" : "Save your selection to enable Run.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("Save selection") { save() }.disabled(sources.isEmpty || sources == saved)
+                Button(String(localized: "rave.sources.save", defaultValue: "Save selection")) { save() }.disabled(sources.isEmpty || sources == saved)
             }
         }
         .task {
