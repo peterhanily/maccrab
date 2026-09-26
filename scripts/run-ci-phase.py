@@ -67,6 +67,10 @@ def run_phase(args):
                 os.killpg(process.pid, 0)
             except ProcessLookupError:
                 return
+            except PermissionError:
+                # A denied existence probe does not prove the group is gone.
+                # Keep the grace period and still attempt actual termination.
+                pass
             time.sleep(min(0.1, max(0, until - time.monotonic())))
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -94,17 +98,31 @@ def run_phase(args):
                     except subprocess.TimeoutExpired:
                         pass
                 if interrupted is not None:
-                    stop_group()
                     record.update(status="INTERRUPTED", exit_code=128 + interrupted,
                                   signal=interrupted)
                 elif process.poll() is None:
-                    stop_group()
-                    output.write(b"\nCI phase exceeded its deadline; process group terminated.\n")
                     record.update(status="TIMED_OUT", exit_code=124)
                 else:
                     code = process.returncode
                     record.update(status="PASSED" if code == 0 else "FAILED",
                                   exit_code=code if code >= 0 else 128 - code)
+                if record["status"] in ("INTERRUPTED", "TIMED_OUT"):
+                    try:
+                        stop_group()
+                    except Exception as error:
+                        # Retain the original non-success outcome even when
+                        # cleanup fails; never describe termination as verified.
+                        record["cleanup_error"] = {
+                            "type": type(error).__name__,
+                            "message": str(error),
+                        }
+                        if isinstance(error, OSError):
+                            record["cleanup_error"]["errno"] = error.errno
+                        output.write(("\nCI phase process-group cleanup failed: " +
+                                      str(error) + "\n").encode())
+                    else:
+                        if record["status"] == "TIMED_OUT":
+                            output.write(b"\nCI phase exceeded its deadline; process group terminated.\n")
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

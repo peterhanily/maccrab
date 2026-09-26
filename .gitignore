@@ -263,3 +263,7 @@ RELEASE_CHECKLIST.md
 CONTRIBUTING_CHECKLIST.md
 # Research notes (referenced during development, not part of public docs)
 PREVENTION_RESEARCH.md
+
+# Native review-engine source must survive the broad local review/ ignore rule.
+!Sources/MacCrabForensics/Review/
+!Sources/MacCrabForensics/Review/*.swift
