@@ -60,8 +60,8 @@ struct PluginDetailModel: Identifiable, Equatable {
                 : "Operator-trusted · key \(publicKeyHex.prefix(12))…",
             reads: consent?.fileReads ?? [],
             emits: [],
-            networkLabel: endpoints.isEmpty ? "No network egress" : "Network: " + endpoints.joined(separator: ", "),
-            privacyLabel: (consent?.derivedHighestPrivacy ?? "metadata").capitalized,
+            networkLabel: endpoints.isEmpty ? "No network requests declared" : "Declared network: " + endpoints.joined(separator: ", "),
+            privacyLabel: pluginID == SecretTrailScope.pluginID ? "Credential-adjacent · encrypted scan" : (consent?.derivedHighestPrivacy ?? "metadata").capitalized,
             tcc: consent?.tccReads ?? [],
             installedLabel: installedLabel,
             runnable: true)
@@ -79,6 +79,7 @@ struct PluginDetailInspector: View {
     var onUpdate: (() -> Void)? = nil
     var onUninstall: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
+    @State private var secretTrailReady = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -89,6 +90,9 @@ struct PluginDetailInspector: View {
                     section("What it does") {
                         Text(model.summary).scaledSystem(12).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let profile = SecretTrailScope.Profile(pluginID: model.id) {
+                        section("Selected sources") { SecretTrailSourcePicker(ready: $secretTrailReady, profile: profile) }
                     }
                     section("Publisher") {
                         Text(model.publisher).scaledSystem(12).foregroundStyle(.secondary)
@@ -102,7 +106,7 @@ struct PluginDetailInspector: View {
             Divider()
             footer
         }
-        .frame(width: 440, height: 540)
+        .frame(width: SecretTrailScope.Profile(pluginID: model.id) != nil ? 620 : 440, height: SecretTrailScope.Profile(pluginID: model.id) != nil ? 700 : 540)
     }
 
     // MARK: - Header
@@ -190,6 +194,7 @@ struct PluginDetailInspector: View {
                     Label(String(localized: "raveDetail.run.button", defaultValue: "Run on this Mac"), systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(SecretTrailScope.Profile(pluginID: model.id) != nil && !secretTrailReady)
             }
             if let onUpdate {
                 Button { onUpdate() } label: { Label(String(localized: "ui.PluginDetailInspector.update", defaultValue: "Update"), systemImage: "arrow.up.circle.fill") }

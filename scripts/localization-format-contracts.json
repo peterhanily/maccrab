@@ -1478,6 +1478,58 @@
         "expression": "remainingEvents",
         "type": "lld"
       }
+    ],
+    "rave.expansion.categoryCount": [
+      {
+        "expression": "findings.count",
+        "type": "lld"
+      }
+    ],
+    "rave.expansion.hiddenRows": [
+      {
+        "expression": "artifacts.count-findings.count",
+        "type": "lld"
+      }
+    ],
+    "rave.inspection.hiddenRows": [
+      {
+        "expression": "artifacts.count - findings.count",
+        "type": "lld"
+      }
+    ],
+    "rave.review.rulesPrefix": [
+      {
+        "expression": "review.snapshot.ruleVersion",
+        "type": "lld"
+      }
+    ],
+    "rave.secretTrail.priorityCount": [
+      {
+        "expression": "findings.filter(\\.reviewFirst).count",
+        "type": "lld"
+      }
+    ],
+    "rave.secretTrail.groupLimit": [
+      {
+        "expression": "visible.count",
+        "type": "lld"
+      }
+    ],
+    "rave.secretTrail.counts": [
+      {
+        "expression": "finding.files",
+        "type": "lld"
+      },
+      {
+        "expression": "finding.occurrences",
+        "type": "lld"
+      }
+    ],
+    "rave.secretTrail.additionalOccurrences": [
+      {
+        "expression": "finding.omitted",
+        "type": "lld"
+      }
     ]
   }
 }

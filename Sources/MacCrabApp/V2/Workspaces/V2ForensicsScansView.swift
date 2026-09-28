@@ -609,6 +609,10 @@ struct V2ForensicsScansView: View {
     }
 
     private func runThirdPartyScanner(_ p: InstalledPlugin) {
+        if let profile = SecretTrailScope.Profile(pluginID: p.pluginID), (try? SecretTrailScope.load(profile: profile).isEmpty) != false {
+            detailModel = thirdPartyDetail(p)
+            return
+        }
         let m = thirdPartyManifests[p.pluginID]
         let name = m?.displayName ?? p.pluginID
         let encrypted = (m?.consentSummary().derivedHighestPrivacy ?? "metadata") != "metadata"
