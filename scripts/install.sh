@@ -334,6 +334,28 @@ maccrab_install_app_atomically() {
     /bin/rmdir "$work_root"
 }
 
+# Unattended installs (`sudo ./install.sh < /dev/null`, MDM, automation) have
+# no one to answer the closing prompt: `read` hit EOF, returned 1, and `set -e`
+# turned a fully successful install into exit 1.  Offer the launch only on a
+# terminal.  Returns non-zero only when an accepted launch failed.
+maccrab_offer_app_launch() {
+    local app="$1"
+    local reply=""
+    [ -t 0 ] || return 0
+    read -p "Open MacCrab.app now? [Y/n] " -n 1 -r reply || return 0
+    echo
+    if [[ $reply =~ ^[Nn]$ ]]; then
+        return 0
+    fi
+    # The dashboard is a per-user GUI app.  Under sudo, launch it as the user
+    # who ran the installer (uninstall.sh's guard and command) instead of root.
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        sudo -u "$SUDO_USER" /usr/bin/open "$app" 2>/dev/null
+    else
+        open "$app" 2>/dev/null
+    fi
+}
+
 # Tests source this file for the pure helpers above.  Never run the privileged
 # installer body merely because another script imported those functions.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
@@ -521,9 +543,5 @@ echo "╚═══════════════════════�
 echo ""
 
 # Optionally open System Settings to the right pane
-read -p "Open MacCrab.app now? [Y/n] " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    open "/Applications/MacCrab.app" 2>/dev/null || \
-        warn "Could not launch MacCrab.app automatically. Open it from /Applications."
-fi
+maccrab_offer_app_launch "/Applications/MacCrab.app" || \
+    warn "Could not launch MacCrab.app automatically. Open it from /Applications."

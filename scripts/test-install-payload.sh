@@ -59,6 +59,33 @@ write_fixture_manifest \
     || fail "DMG-root install.sh layout did not resolve to the mount root"
 pass "repo and DMG roots resolve deterministically"
 
+# `sudo ./install.sh < /dev/null` exited 1 after a complete install: the closing
+# prompt's `read` hit EOF under `set -e`.  With no terminal on stdin (EOF, or an
+# automation pipe answering "y"), the ending must neither fail nor launch.
+LAUNCH_MARKER="$TMP_ROOT/app-launch-attempted"
+for launch_stdin in eof pipe; do
+    if ! (
+        open() { : > "$LAUNCH_MARKER"; }
+        sudo() { : > "$LAUNCH_MARKER"; }
+        SUDO_USER=fixture-user
+        if [ "$launch_stdin" = pipe ]; then
+            printf 'y\n' | maccrab_offer_app_launch "$TMP_ROOT/MacCrab.app"
+        else
+            maccrab_offer_app_launch "$TMP_ROOT/MacCrab.app" < /dev/null
+        fi
+    ); then
+        fail "non-interactive ($launch_stdin) install ending returned non-zero"
+    fi
+    [ ! -e "$LAUNCH_MARKER" ] \
+        || fail "non-interactive ($launch_stdin) install ending launched the app"
+done
+/usr/bin/grep -qF 'maccrab_offer_app_launch "/Applications/MacCrab.app" ||' \
+    "$SCRIPT_DIR/install.sh" \
+    || fail "installer ending does not go through the terminal-gated launch offer"
+[ "$(/usr/bin/grep -c 'read -p' "$SCRIPT_DIR/install.sh")" = 1 ] \
+    || fail "installer prompts outside the terminal-gated launch offer"
+pass "non-interactive install skips the launch prompt and exits cleanly"
+
 MODE_APP="$TMP_ROOT/mode/MacCrab.app"
 /bin/mkdir -p "$MODE_APP/Contents/MacOS" \
     "$MODE_APP/Contents/Frameworks/Sparkle.framework/Versions" \
