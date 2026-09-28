@@ -1530,6 +1530,12 @@
         "expression": "finding.omitted",
         "type": "lld"
       }
+    ],
+    "scans.pluginPreparationError": [
+      {
+        "expression": "String(describing: error)",
+        "type": "@"
+      }
     ]
   }
 }

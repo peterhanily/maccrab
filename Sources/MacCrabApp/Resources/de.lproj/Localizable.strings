@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "Kopien von Anmeldedaten";
 "rave.sources.remove" = "Ausgewählte Quelle entfernen";
 "rave.sources.save" = "Auswahl speichern";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "Plugin konnte nicht überprüft werden";
+"scans.verifyingPlugin" = "Installiertes Plugin wird überprüft…";
+"scans.pluginPreparationError" = "Es wurde kein Scan gestartet. Überprüfen Sie dieses Plugin erneut oder installieren Sie es neu, bevor Sie es ausführen. %@";
+"scans.pluginUnavailable" = "Es wurde kein Scan gestartet. Die Metadaten dieses installierten Plugins sind nicht verfügbar. Überprüfen Sie es erneut oder installieren Sie es neu, bevor Sie es ausführen.";

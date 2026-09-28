@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "Kopior av inloggningsuppgifter";
 "rave.sources.remove" = "Ta bort vald källa";
 "rave.sources.save" = "Spara urval";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "Insticksprogrammet kunde inte verifieras";
+"scans.verifyingPlugin" = "Verifierar installerat insticksprogram…";
+"scans.pluginPreparationError" = "Ingen skanning startades. Verifiera insticksprogrammet igen eller installera om det innan du kör det. %@";
+"scans.pluginUnavailable" = "Ingen skanning startades. Metadata för det installerade insticksprogrammet är inte tillgängliga. Verifiera insticksprogrammet igen eller installera om det innan du kör det.";

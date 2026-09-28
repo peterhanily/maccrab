@@ -1946,3 +1946,9 @@
 "rave.secretTrail.title" = "Credential copies";
 "rave.sources.remove" = "Remove selected source";
 "rave.sources.save" = "Save selection";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "Plugin could not be verified";
+"scans.verifyingPlugin" = "Verifying installed plugin…";
+"scans.pluginPreparationError" = "No scan was started. Re-verify or reinstall this plugin before running it. %@";
+"scans.pluginUnavailable" = "No scan was started. This plugin's installed metadata is unavailable. Re-verify or reinstall it before running it.";

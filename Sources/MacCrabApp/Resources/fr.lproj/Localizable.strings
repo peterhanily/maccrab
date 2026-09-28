@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "Copies d’identifiants";
 "rave.sources.remove" = "Retirer la source sélectionnée";
 "rave.sources.save" = "Enregistrer la sélection";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "Impossible de vérifier le plugin";
+"scans.verifyingPlugin" = "Vérification du plugin installé…";
+"scans.pluginPreparationError" = "Aucune analyse n’a été lancée. Vérifiez à nouveau ce plugin ou réinstallez-le avant de l’exécuter. %@";
+"scans.pluginUnavailable" = "Aucune analyse n’a été lancée. Les métadonnées du plugin installé sont indisponibles. Vérifiez à nouveau ce plugin ou réinstallez-le avant de l’exécuter.";

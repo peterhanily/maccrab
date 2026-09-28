@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "認證資訊副本";
 "rave.sources.remove" = "移除所選來源";
 "rave.sources.save" = "儲存選擇";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "無法驗證外掛";
+"scans.verifyingPlugin" = "正在驗證已安裝的外掛…";
+"scans.pluginPreparationError" = "未啟動掃描。執行此外掛前，請重新驗證或重新安裝。%@";
+"scans.pluginUnavailable" = "未啟動掃描。已安裝外掛的中繼資料無法使用。執行前，請重新驗證或重新安裝此外掛。";

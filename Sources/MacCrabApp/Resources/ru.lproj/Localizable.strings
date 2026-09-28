@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "Копии учётных данных";
 "rave.sources.remove" = "Удалить выбранный источник";
 "rave.sources.save" = "Сохранить выбор";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "Не удалось проверить плагин";
+"scans.verifyingPlugin" = "Проверка установленного плагина…";
+"scans.pluginPreparationError" = "Сканирование не запущено. Повторно проверьте или переустановите этот плагин перед запуском. %@";
+"scans.pluginUnavailable" = "Сканирование не запущено. Метаданные установленного плагина недоступны. Повторно проверьте или переустановите плагин перед запуском.";

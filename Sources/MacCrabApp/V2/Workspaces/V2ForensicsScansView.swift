@@ -41,6 +41,9 @@ struct V2ForensicsScansView: View {
     @State private var builtinScanners: [PluginManifest] = []
     @State private var thirdPartyScanners: [InstalledPlugin] = []
     @State private var thirdPartyManifests: [String: TierBManifest] = [:]
+    @State private var preparingPluginIntent: InstalledPluginRunPreparation.Intent? = nil
+    @State private var pluginPreparationTask: Task<Void, Never>? = nil
+    @State private var pluginPreparationError: String? = nil
     @State private var detailModel: PluginDetailModel? = nil   // issue #5: tap a scanner → inspector
     @State private var scanBuiltinShowAll = false
     // The Run-a-scan tab is the à-la-carte scanner inventory: built-in scanners
@@ -80,6 +83,18 @@ struct V2ForensicsScansView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                if let pluginPreparationError {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(String(localized: "scans.pluginPreparationFailed", defaultValue: "Plugin could not be verified"))
+                            .font(V2Theme.cardTitle()).foregroundStyle(V2Theme.warning)
+                        Text(pluginPreparationError).font(V2Theme.body())
+                            .foregroundStyle(V2Theme.primaryText).textSelection(.enabled)
+                    }
+                    .v2Panel()
+                }
+                if preparingPluginIntent != nil {
+                    ProgressView(String(localized: "scans.verifyingPlugin", defaultValue: "Verifying installed plugin…"))
+                }
                 if let uninstallError {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(String(localized: "scans.uninstall.failed", defaultValue: "Plugin removal failed"))
@@ -125,6 +140,7 @@ struct V2ForensicsScansView: View {
         .onAppear {
             fdaStatus = PermissionsProbe.fullDiskAccess()
         }
+        .onDisappear { invalidatePluginPreparation() }
         .onChange(of: runnerStateID) { _ in
             if case .done = runner.state {
                 Task { await reload() }
@@ -359,7 +375,7 @@ struct V2ForensicsScansView: View {
                                 scannerRow(icon: scannerIcon(m.type), name: m.displayName,
                                            subtitle: scannerSubtitle(m),
                                            badge: nil,
-                                           detail: { detailModel = .builtIn(m) }) { Task { await runBuiltinScanner(m) } }
+                                           detail: { invalidatePluginPreparation(); detailModel = .builtIn(m) }) { requestBuiltinScanner(m) }
                             }
                             if builtinScanners.count > scannerPageSize {
                                 Button(scanBuiltinShowAll ? String(localized: "scans.showFewer", defaultValue: "Show fewer") : String(localized: "scans.showAllBuiltins", defaultValue: "Show all \(builtinScanners.count)")) {
@@ -393,7 +409,9 @@ struct V2ForensicsScansView: View {
                                                ? String(localized: "scans.updateBadge", defaultValue: "Update → v\(availableVersions[p.pluginID] ?? "")")
                                                : nil,
                                            provenance: provenance(for: p),
-                                           detail: { detailModel = thirdPartyDetail(p) }) { runThirdPartyScanner(p) }
+                                           detail: { requestThirdPartyScanner(p, openDetails: true) }) {
+                                    requestThirdPartyScanner(p)
+                                }
                             }
                             Button { Task { await reverifyAll() } } label: {
                                 Label(reverifying
@@ -513,7 +531,7 @@ struct V2ForensicsScansView: View {
         return receiptProv  // .thirdParty (sideloaded)
     }
 
-    private func thirdPartyDetail(_ p: InstalledPlugin) -> PluginDetailModel {
+    private func thirdPartyDetail(_ p: InstalledPlugin, prepared: InstalledPluginRunPreparation) -> PluginDetailModel {
         let prov = provenance(for: p)
         var installed = String(localized: "scans.installed", defaultValue: "Installed")
         if let attrs = try? FileManager.default.attributesOfItem(atPath: p.installRoot),
@@ -521,13 +539,12 @@ struct V2ForensicsScansView: View {
             let f = DateFormatter(); f.dateStyle = .medium
             installed = String(localized: "scans.addedDate", defaultValue: "Added \(f.string(from: d))")
         }
-        return .thirdParty(pluginID: p.pluginID, publicKeyHex: p.publicKeyHex,
-                           manifest: thirdPartyManifests[p.pluginID], provenance: prov, installedLabel: installed)
+        return prepared.detail(provenance: prov, installedLabel: installed)
     }
 
     private func runScanner(id: String) {
-        if let bm = builtinScanners.first(where: { $0.id == id }) { Task { await runBuiltinScanner(bm) } }
-        else if let p = thirdPartyScanners.first(where: { $0.pluginID == id }) { runThirdPartyScanner(p) }
+        if let bm = builtinScanners.first(where: { $0.id == id }) { requestBuiltinScanner(bm) }
+        else if let p = thirdPartyScanners.first(where: { $0.pluginID == id }) { requestThirdPartyScanner(p) }
     }
 
     /// Collapsible section header (chevron + title + optional hint + count) shared
@@ -604,19 +621,53 @@ struct V2ForensicsScansView: View {
     }
 
     @MainActor private func runBuiltinScanner(_ m: PluginManifest) async {
+        guard !Task.isCancelled else { return }
         guard let reg = await PluginRegistry.shared.registration(forID: m.id) else { return }
+        guard !Task.isCancelled else { return }
         runOrConfirm(Kit.adHoc(pluginID: m.id, name: m.displayName, encrypted: deriveEncrypted(reg)))
     }
 
-    private func runThirdPartyScanner(_ p: InstalledPlugin) {
-        if let profile = SecretTrailScope.Profile(pluginID: p.pluginID), (try? SecretTrailScope.load(profile: profile).isEmpty) != false {
-            detailModel = thirdPartyDetail(p)
+    private func requestBuiltinScanner(_ manifest: PluginManifest) {
+        invalidatePluginPreparation()
+        pluginPreparationTask = Task { await runBuiltinScanner(manifest) }
+    }
+
+    private func invalidatePluginPreparation() {
+        pluginPreparationTask?.cancel()
+        pluginPreparationTask = nil
+        preparingPluginIntent = nil
+    }
+
+    private func requestThirdPartyScanner(_ plugin: InstalledPlugin, openDetails: Bool = false) {
+        invalidatePluginPreparation()
+        pluginPreparationTask = Task { await prepareThirdPartyScanner(plugin, openDetails: openDetails) }
+    }
+
+    @MainActor private func prepareThirdPartyScanner(_ p: InstalledPlugin, openDetails: Bool = false, catalogIntentID: String? = nil) async {
+        guard !Task.isCancelled else { return }
+        let intent = InstalledPluginRunPreparation.Intent(pluginID: p.pluginID, catalogPluginID: catalogIntentID)
+        preparingPluginIntent = intent
+        pluginPreparationError = nil
+        defer { if preparingPluginIntent == intent { preparingPluginIntent = nil } }
+        do {
+            let prepared = try await InstalledPluginRunPreparation.resolve(pluginID: p.pluginID)
+            guard intent.isCurrent(active: preparingPluginIntent, pendingCatalogPluginID: state.pendingForensicsRunPluginID,
+                                   cancelled: Task.isCancelled) else { return }
+            thirdPartyManifests[p.pluginID] = prepared.manifest
+            if openDetails || SecretTrailScope.Profile(pluginID: p.pluginID).map({
+                (try? SecretTrailScope.load(profile: $0).isEmpty) != false
+            }) == true {
+                detailModel = thirdPartyDetail(p, prepared: prepared)
+                return
+            }
+            runOrConfirm(prepared.kit)
+        } catch is CancellationError {
             return
+        } catch {
+            guard intent.isCurrent(active: preparingPluginIntent, pendingCatalogPluginID: state.pendingForensicsRunPluginID,
+                                   cancelled: Task.isCancelled) else { return }
+            pluginPreparationError = String(localized: "scans.pluginPreparationError", defaultValue: "No scan was started. Re-verify or reinstall this plugin before running it. \(String(describing: error))")
         }
-        let m = thirdPartyManifests[p.pluginID]
-        let name = m?.displayName ?? p.pluginID
-        let encrypted = (m?.consentSummary().derivedHighestPrivacy ?? "metadata") != "metadata"
-        runOrConfirm(Kit.adHoc(pluginID: p.pluginID, name: name, encrypted: encrypted))
     }
 
     /// Encrypted-kit confirmation gate: once-per-profile alert
@@ -629,8 +680,11 @@ struct V2ForensicsScansView: View {
     @MainActor
     private func consumePendingRun() async {
         guard let id = state.pendingForensicsRunPluginID else { return }
-        if let reg = await PluginRegistry.shared.registration(forID: id) {
+        let registration = await PluginRegistry.shared.registration(forID: id)
+        guard !Task.isCancelled, state.pendingForensicsRunPluginID == id else { return }
+        if let reg = registration {
             // Built-in scanner.
+            invalidatePluginPreparation()
             runOrConfirm(Kit.adHoc(
                 pluginID: id,
                 name: ScannerDisplay.name(forPluginID: id),
@@ -643,9 +697,16 @@ struct V2ForensicsScansView: View {
             if plugin == nil {
                 plugin = (try? await PluginInstaller().list())?.first(where: { $0.pluginID == id })
             }
-            if let p = plugin { runThirdPartyScanner(p) }
+            guard !Task.isCancelled, state.pendingForensicsRunPluginID == id else { return }
+            if let p = plugin {
+                await prepareThirdPartyScanner(p, catalogIntentID: id)
+            } else {
+                pluginPreparationError = String(localized: "scans.pluginUnavailable", defaultValue: "No scan was started. This plugin's installed metadata is unavailable. Re-verify or reinstall it before running it.")
+            }
         }
-        state.pendingForensicsRunPluginID = nil
+        if !Task.isCancelled, state.pendingForensicsRunPluginID == id {
+            state.pendingForensicsRunPluginID = nil
+        }
     }
 
     /// A single scanner has no `kit.encrypted` flag — derive it from the

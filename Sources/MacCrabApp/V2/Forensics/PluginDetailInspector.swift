@@ -49,6 +49,15 @@ struct PluginDetailModel: Identifiable, Equatable {
                            provenance: PluginProvenance, installedLabel: String) -> PluginDetailModel {
         let consent = manifest?.consentSummary()
         let endpoints = consent?.networkEndpoints ?? []
+        // Disclose the higher of enforced read exposure and signed declared
+        // output privacy (a collector can produce sensitive output without reads).
+        let classes = ["metadata", "content", "personalComms", "credentialAdjacent", "secret"]
+        let derived = consent?.derivedHighestPrivacy ?? "metadata"
+        let derivedRank = classes.firstIndex(of: derived) ?? 0
+        let declaredRank = (manifest?.privacyClass).flatMap { declared in
+            classes.firstIndex { $0.lowercased() == declared.lowercased() }
+        } ?? 0
+        let privacy = classes[max(derivedRank, declaredRank)]
         return PluginDetailModel(
             id: pluginID,
             displayName: manifest?.displayName ?? pluginID,
@@ -61,7 +70,7 @@ struct PluginDetailModel: Identifiable, Equatable {
             reads: consent?.fileReads ?? [],
             emits: [],
             networkLabel: endpoints.isEmpty ? "No network requests declared" : "Declared network: " + endpoints.joined(separator: ", "),
-            privacyLabel: pluginID == SecretTrailScope.pluginID ? "Credential-adjacent · encrypted scan" : (consent?.derivedHighestPrivacy ?? "metadata").capitalized,
+            privacyLabel: pluginID == SecretTrailScope.pluginID ? "Credential-adjacent · encrypted scan" : privacy.capitalized,
             tcc: consent?.tccReads ?? [],
             installedLabel: installedLabel,
             runnable: true)

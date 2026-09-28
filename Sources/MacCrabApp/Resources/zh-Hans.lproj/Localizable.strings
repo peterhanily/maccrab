@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "凭据副本";
 "rave.sources.remove" = "移除所选来源";
 "rave.sources.save" = "保存选择";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "无法验证插件";
+"scans.verifyingPlugin" = "正在验证已安装的插件…";
+"scans.pluginPreparationError" = "未启动扫描。运行此插件前，请重新验证或重新安装。%@";
+"scans.pluginUnavailable" = "未启动扫描。已安装插件的元数据不可用。运行前，请重新验证或重新安装此插件。";

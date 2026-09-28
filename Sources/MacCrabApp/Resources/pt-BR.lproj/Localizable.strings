@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "Cópias de credenciais";
 "rave.sources.remove" = "Remover fonte selecionada";
 "rave.sources.save" = "Salvar seleção";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "Não foi possível verificar o plugin";
+"scans.verifyingPlugin" = "Verificando o plugin instalado…";
+"scans.pluginPreparationError" = "Nenhuma varredura foi iniciada. Verifique novamente ou reinstale este plugin antes de executá-lo. %@";
+"scans.pluginUnavailable" = "Nenhuma varredura foi iniciada. Os metadados do plugin instalado estão indisponíveis. Verifique o plugin novamente ou reinstale-o antes de executá-lo.";

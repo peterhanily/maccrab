@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "Kopieën van inloggegevens";
 "rave.sources.remove" = "Geselecteerde bron verwijderen";
 "rave.sources.save" = "Selectie opslaan";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "Plug-in kon niet worden geverifieerd";
+"scans.verifyingPlugin" = "Geïnstalleerde plug-in wordt geverifieerd…";
+"scans.pluginPreparationError" = "Er is geen scan gestart. Verifieer deze plug-in opnieuw of installeer deze opnieuw voordat u deze uitvoert. %@";
+"scans.pluginUnavailable" = "Er is geen scan gestart. De metadata van deze geïnstalleerde plug-in zijn niet beschikbaar. Verifieer de plug-in opnieuw of installeer deze opnieuw voordat u deze uitvoert.";

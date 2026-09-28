@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "Kopie danych uwierzytelniających";
 "rave.sources.remove" = "Usuń wybrane źródło";
 "rave.sources.save" = "Zapisz wybór";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "Nie udało się zweryfikować wtyczki";
+"scans.verifyingPlugin" = "Weryfikowanie zainstalowanej wtyczki…";
+"scans.pluginPreparationError" = "Nie rozpoczęto skanowania. Przed uruchomieniem ponownie zweryfikuj tę wtyczkę lub zainstaluj ją ponownie. %@";
+"scans.pluginUnavailable" = "Nie rozpoczęto skanowania. Metadane zainstalowanej wtyczki są niedostępne. Przed uruchomieniem ponownie zweryfikuj wtyczkę lub zainstaluj ją ponownie.";

@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "자격 증명 사본";
 "rave.sources.remove" = "선택한 출처 제거";
 "rave.sources.save" = "선택 항목 저장";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "플러그인을 검증할 수 없습니다";
+"scans.verifyingPlugin" = "설치된 플러그인 검증 중…";
+"scans.pluginPreparationError" = "검사가 시작되지 않았습니다. 실행하기 전에 이 플러그인을 다시 검증하거나 재설치하세요. %@";
+"scans.pluginUnavailable" = "검사가 시작되지 않았습니다. 설치된 플러그인의 메타데이터를 사용할 수 없습니다. 실행하기 전에 플러그인을 다시 검증하거나 재설치하세요.";

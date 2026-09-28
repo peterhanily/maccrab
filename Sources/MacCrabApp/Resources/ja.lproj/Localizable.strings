@@ -1907,3 +1907,9 @@
 "rave.secretTrail.title" = "認証情報のコピー";
 "rave.sources.remove" = "選択した情報源を削除";
 "rave.sources.save" = "選択内容を保存";
+
+/* Installed plugin verification */
+"scans.pluginPreparationFailed" = "プラグインを検証できませんでした";
+"scans.verifyingPlugin" = "インストール済みプラグインを検証中…";
+"scans.pluginPreparationError" = "スキャンは開始されませんでした。実行する前に、このプラグインを再検証するか、再インストールしてください。%@";
+"scans.pluginUnavailable" = "スキャンは開始されませんでした。インストール済みプラグインのメタデータを取得できません。実行する前に、プラグインを再検証するか、再インストールしてください。";

@@ -36,6 +36,14 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   network egress", which matches what a plugin's manifest actually states.
 
 ### Fixed
+- **A catalog "Run on this Mac" verifies the installed plugin before it
+  starts.** The run could begin before the installed plugin manifests had
+  loaded, so case encryption defaulted to metadata-only and a plugin whose
+  listing requires an encrypted scan could write its findings to a plaintext
+  case; content plugins then had their rows refused and the scan was silently
+  partial. The host now reads the installed plugin's signed manifest before
+  choosing case encryption and run disclosures, and a missing or unverifiable
+  manifest fails the run with a visible reason instead of a degraded scan.
 - **Terminal output no longer counts as an AI tool writing outside its
   project.** A coding agent's children write to their pseudo-terminal on every
   line of output, and each write was reported as a boundary violation: about
