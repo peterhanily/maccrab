@@ -94,3 +94,79 @@ struct ThreatIntelAnchoredURLTests {
         #expect(await feed.isURLMalicious("https://safe.example.com/?ref=http://evil.com/payload.exe") == false)
     }
 }
+
+@Suite("ThreatIntelFeed: shared path-tenant hosts are never domain IOCs")
+struct ThreatIntelSharedHostTests {
+
+    private static func makeDir() -> String {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ti-shared-\(UUID().uuidString)").path
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// The shape a v1.22.1 cache holds after a URLhaus pull: hosts of
+    /// malware URLs on GitHub and Google Drive stored as domain IOCs.
+    private static func writeCache(to dir: String, domains: [(String, String)]) throws {
+        func record(_ value: String, _ source: String) -> [String: Any] {
+            ["value": value, "source": source, "lastSeenInFeed": Date().timeIntervalSinceReferenceDate,
+             "tags": [String]()]
+        }
+        let cache: [String: Any] = [
+            "hashes": [[String: Any]](), "ips": [[String: Any]](), "urls": [[String: Any]](),
+            "domains": domains.map { record($0.0, $0.1) },
+        ]
+        let data = try JSONSerialization.data(withJSONObject: cache)
+        try data.write(to: URL(fileURLWithPath: dir + "/feed_cache.json"))
+    }
+
+    @Test("shared platforms are recognised by suffix; tenant hosts and dedicated domains are not")
+    func classification() {
+        for host in ["github.com", "api.github.com", "raw.githubusercontent.com", "codeload.github.com",
+                     "drive.google.com", "www.dropbox.com", "cdn.discordapp.com", "img1.wsimg.com",
+                     "web.archive.org", "files.pythonhosted.org", "RAW.GITHUBUSERCONTENT.COM"] {
+            #expect(ThreatIntelFeed.isSharedPathTenantHost(host), "\(host)")
+        }
+        for host in ["attacker.github.io", "evil-github.com", "notgithub.com", "wer-ldr.duckdns.org",
+                     "lively-fog-af49.pablosoftwareplus.workers.dev", "pingu.ltd"] {
+            #expect(!ThreatIntelFeed.isSharedPathTenantHost(host), "\(host)")
+        }
+    }
+
+    @Test("a v1.22.1 cache's URLhaus-derived shared hosts are dropped on load and never match")
+    func poisonedCacheIsCleaned() async throws {
+        let dir = Self.makeDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try Self.writeCache(to: dir, domains: [
+            ("github.com", "URLhaus"), ("raw.githubusercontent.com", "URLhaus"),
+            ("drive.google.com", "URLhaus"), ("evil-dedicated.top", "URLhaus"),
+            ("docs.google.com", "Custom"),
+        ])
+
+        let cached = Set(ThreatIntelFeed.cachedIOCs(at: dir)?.domains.map(\.value) ?? [])
+        #expect(cached == ["evil-dedicated.top", "docs.google.com"])
+
+        let feed = ThreatIntelFeed(cacheDir: dir)
+        _ = await feed.start(networkRefresh: false)
+        await feed.stop()
+        // The field false positives: CRITICAL alerts for GitHub and Drive.
+        #expect(await feed.isDomainMalicious("api.github.com") == false)
+        #expect(await feed.isDomainMalicious("github.com") == false)
+        #expect(await feed.isDomainMalicious("raw.githubusercontent.com") == false)
+        #expect(await feed.isDomainMalicious("drive.google.com") == false)
+        // A dedicated malicious domain still matches, subdomains included.
+        #expect(await feed.isDomainMalicious("evil-dedicated.top"))
+        #expect(await feed.isDomainMalicious("cdn.evil-dedicated.top"))
+        // An operator pin stays authoritative.
+        #expect(await feed.isDomainMalicious("docs.google.com"))
+    }
+
+    @Test("a shared host imported on purpose matches exactly but never blanket-flags its subdomains")
+    func importedSharedHostDoesNotWalk() async {
+        let feed = ThreatIntelFeed(cacheDir: Self.makeDir())
+        await feed.addMISPIOCs(domains: ["github.com", "githubusercontent.com"])
+        #expect(await feed.isDomainMalicious("github.com"))
+        #expect(await feed.isDomainMalicious("api.github.com") == false)
+        #expect(await feed.isDomainMalicious("raw.githubusercontent.com") == false)
+    }
+}

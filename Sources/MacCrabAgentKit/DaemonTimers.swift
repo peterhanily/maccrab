@@ -44,7 +44,11 @@ enum SensorDegradationEvaluator {
     /// the divide-by-tiny-baseline FP on an idle box / at daemon start).
     static let minFileEventsForSpike = 2000.0
     /// Process/exec events collapse when they fall below baseline × this.
-    static let processCollapseRatio = 0.5
+    /// The collapse only decides a fire when no stage counted a drop (any drop
+    /// already satisfies the conjunction), so it must be deep enough to mean
+    /// lost exec telemetry. At 0.5 a settled host raised HIGH with every loss
+    /// counter at 0: exec 34/tick against a 69 baseline during a file burst.
+    static let processCollapseRatio = 0.25
     /// The process/exec baseline must have been at least this busy for a
     /// "collapse" to mean anything — stops a near-idle box (trivial exec rate)
     /// from tripping the collapse branch on ordinary noise. The kernel-drop
@@ -1128,6 +1132,18 @@ enum CoverageCanaryEvaluator {
             storePresence: foundInDB ? .present : .absent,
             droppedAtHandoff: droppedAtHandoff
         )
+    }
+
+    /// Alert severity for a probe verdict, or nil when no alert is due. Loss
+    /// before evaluation (kernel/ingest, hand-off) is active telemetry loss:
+    /// HIGH. Store-stage verdicts are retention or admission pressure: MEDIUM,
+    /// and only when the late-arrival window also failed to find the probe.
+    static func alertSeverity(verdict: Verdict, reconciled: Bool) -> Severity? {
+        switch verdict {
+        case .healthy: return nil
+        case .kernelGap, .ingestHandoffGap: return .high
+        case .evictionGap, .storeQueryUnknown: return reconciled ? nil : .medium
+        }
     }
 
     static func verdict(
@@ -3722,8 +3738,8 @@ enum DaemonTimers {
                 // operator an attacker was suppressing telemetry when the real
                 // condition was the userspace worker shedding load.
                 let dropped = "\(sensorResult.kernelDropDelta) kernel-dropped, "
-                    + "\(sensorResult.collectorDropDelta) dropped at the collector stage "
-                    + "(backpressure/stream-yield)"
+                    + "\(sensorResult.collectorDropDelta) dropped at the collector or pipeline stage "
+                    + "(backpressure, stream-yield or merged-stream eviction)"
                 switch sensorResult.reason {
                 case .sustainedLoss:
                     esSensorDegradedDetail =
@@ -5308,10 +5324,35 @@ enum DaemonTimers {
             outcome: Task.isCancelled ? .cancelled : healthOutcome)
         guard verdict != .healthy, let stage = verdict.stageLabel else { return }
 
-        // A kernel/ingest gap and a hand-off drop are both ACTIVE telemetry loss
-        // (the event reached us and we lost it before evaluation); an eviction
-        // gap is retention pressure — surface all three, weighted accordingly.
-        let severity: Severity = (verdict == .evictionGap) ? .medium : .high
+        // The initial deadline is unchanged and its failure remains visible.
+        // A probe can still be waiting behind ordinary ingress at that point.
+        // Keep this supervised timer task, not an additional task or fast lane,
+        // until this same nonce is verified, superseded, stopped, or expires.
+        // Only then decide whether to alert: in the field two HIGH alerts were
+        // probes that reached FTS 90-120 s after the initial deadline.
+        var reconciled = false
+        if seenAtCallback, !droppedAtHandoff,
+           await reconcileCoverageCanary(
+               health: collector.deliveryHealth,
+               healthToken: healthToken,
+               pause: {
+                   try await Task.sleep(nanoseconds: canaryDBRecheckSeconds * 1_000_000_000)
+               },
+               isPresent: {
+                   try await state.eventStore.containsProjectedFTSMatch(
+                       text: nonce, since: since, until: Date()
+                   )
+               }
+           ) {
+            reconciled = true
+            Logger(subsystem: "com.maccrab", category: "coverage-canary")
+                .notice("Coverage canary verified in FTS after its initial storage deadline; the earlier failure remains accounted.")
+        }
+        guard !Task.isCancelled,
+              let severity = CoverageCanaryEvaluator.alertSeverity(
+                  verdict: verdict, reconciled: reconciled
+              ) else { return }
+
         let stageDetail: String
         switch verdict {
         case .kernelGap:
@@ -5321,7 +5362,7 @@ enum DaemonTimers {
         case .evictionGap:
             stageDetail = "was seen at the ES callback but is absent from events.db — the store/eviction path lost it (retention sweep or insert gap). "
         case .storeQueryUnknown:
-            stageDetail = "was seen at the ES callback, but its presence in retained storage could not be verified: the store query failed or returned an incomplete empty result. This does not prove the event was lost. "
+            stageDetail = "was seen at the ES callback but was not found in retained storage within the verification window. The store query cannot prove absence, so the event was either refused at storage admission or delayed past the window. "
         case .healthy:
             stageDetail = ""
         }
@@ -5355,27 +5396,6 @@ enum DaemonTimers {
         // Route via AlertSink so it inherits dedup/suppression (backstops the
         // per-cycle cadence if a gap persists across several probes).
         _ = try? await state.alertSink.submit(alert: alert)
-
-        // The initial deadline is unchanged and its failure remains visible.
-        // A probe can still be waiting behind ordinary ingress at that point.
-        // Keep this supervised timer task, not an additional task or fast lane,
-        // until this same nonce is verified, superseded, stopped, or expires.
-        if seenAtCallback, !droppedAtHandoff,
-           await reconcileCoverageCanary(
-               health: collector.deliveryHealth,
-               healthToken: healthToken,
-               pause: {
-                   try await Task.sleep(nanoseconds: canaryDBRecheckSeconds * 1_000_000_000)
-               },
-               isPresent: {
-                   try await state.eventStore.containsProjectedFTSMatch(
-                       text: nonce, since: since, until: Date()
-                   )
-               }
-           ) {
-            Logger(subsystem: "com.maccrab", category: "coverage-canary")
-                .notice("Coverage canary verified in FTS after its initial storage deadline; the earlier failure remains accounted.")
-        }
     }
 
     /// Bounded reconciliation of one failed storage proof. Misses and query

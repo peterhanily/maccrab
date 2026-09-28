@@ -3,7 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.22.2] — 2026-09-25
 
 ### Fixed
 - **Event writes no longer pause right after upgrading a large store at the
@@ -33,6 +33,83 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   configured remote directory, and refuses one containing characters that
   could alter the transfer. Installs without these sinks configured are
   unaffected.
+- **GitHub, Google Drive and other shared hosting no longer match as
+  known-malicious domains.** URLhaus lists malware by URL, and the host of each
+  URL was also recorded as a malicious domain, so one bad file on
+  raw.githubusercontent.com made every query to that host, and through parent
+  matching every github.com subdomain such as api.github.com, a CRITICAL
+  alert. Hosts on shared platforms (GitHub, GitLab, Bitbucket, Google, Dropbox,
+  Discord, OneDrive, archive.org and similar) are no longer turned into domain
+  indicators, never match as a parent domain, and existing cache entries are
+  dropped on load. URL matching, dedicated malicious domains and operator
+  indicators are unchanged.
+- **One bulk file operation now raises one cross-process chain alert, not one
+  per file.** Chains were deduplicated per file, so a `find`/`mv` pass over a
+  few thousand files, or a coding agent reading a fresh git worktree, raised
+  thousands of identical alerts within minutes. Chains are now deduplicated on
+  the set of programs involved; a chain involving different programs still
+  alerts.
+- **DGA detection no longer flags ordinary service hostnames.** Label depth
+  alone counted as a DGA signal, so names such as
+  `http-intake.logs.us5.datadoghq.com` and Apple's Akamai edge hosts raised
+  HIGH alerts, and `gsp57-ssl-background.ls.apple.com` counted as one long
+  random token. Depth is no longer a DGA indicator (encoded subdomains remain
+  covered by DNS-tunneling detection), and the mixed-alphanumeric check applies
+  to each hyphen-separated word.
+- **"Endpointsecurityd Down" no longer fires when macOS idles the daemon out.**
+  endpointsecurityd and syspolicyd are launched on demand and exit when idle
+  while Endpoint Security keeps delivering. Only xprotectd, which launchd keeps
+  running, is alerted on. ESClientMonitor now reports its own poll liveness, so
+  collector health no longer shows it as stalled, or omits it.
+- **The coverage canary no longer raises HIGH alerts for probes that arrive
+  late.** A probe the store query cannot yet see is now reported only after the
+  late-arrival window has also missed it, and at MEDIUM, since that query cannot
+  prove a loss. Losses before evaluation (kernel or hand-off) stay HIGH and
+  immediate.
+- **Sensor Degraded no longer fires on a moderate dip in exec activity with no
+  counted loss.** With zero drops at every stage, exec throughput must now fall
+  below a quarter of its baseline, not half, to count as a collapse. The alert
+  text now names the collector and pipeline stages its drop count includes.
+- **Clipboard monitoring reports disabled in the System Extension instead of
+  healthy.** A root System Extension has no user pasteboard, so every
+  three-second poll failed and logged an error. The monitor no longer runs
+  there; ClickFix clipboard detection continues through the app.
+- **The Permissions tab no longer reports a working engine's Full Disk Access as
+  missing.** An Endpoint Security extension's grant is recorded under the
+  Endpoint Security client service, and a stale denied Full Disk Access row for
+  the extension showed as "Blocking missing" with a Fix button while the
+  engine's own probe confirmed access. That probe now satisfies the row, the
+  summary counts only MacCrab's own permissions, and internal service names
+  such as `Liverpool` and `Ubiquity` read "iCloud (CloudKit)" and "iCloud
+  Drive". The app's fallback check, used when the heartbeat is stale, also
+  recognizes the Endpoint Security client grant.
+- **The diagnostics export lists only MacCrab's own permissions.** It listed
+  every app's privacy rows without the app name, which read as duplicated and
+  contradictory entries. Each row now carries its owner (engine or app) and the
+  raw service identifier; the export is schema version 3.
+- **A TraceGraph startup failure caused by storage capacity is reported as
+  storage pressure,** with the matching recovery steps, instead of a generic
+  initialization failure.
+- **The engine starts when the optional trace store cannot.** When
+  `tracegraph.db` could not open (low disk space, an unavailable encryption
+  key, a failed corruption quarantine), startup correctly detached trace
+  materialization, but the outer bootstrap check still required a writable
+  trace store and stopped the engine, so it relaunched into the same failure
+  with no detection running. A run with no trace store and no trace writer now
+  starts and logs that trace recording is off; an attached store still needs
+  its writable proof.
+- **Collector health records completed polls for the monitors that report only
+  on change.** EDR, event-tap, rootkit, SDR, system-policy, USB, MCP and
+  browser-extension monitors showed "started, no events yet" indefinitely
+  whether or not they were still polling. Each now records completed polls, so
+  a stopped monitor reads stalled. Registered intervals now match the
+  configured ones and allow for battery and thermal slowdown. TCCMonitor
+  reports unavailable when it cannot watch any TCC database.
+- **Claude Code is named `claude`, not its version number.** Its native
+  installer runs each release as a version-named binary under
+  `claude/versions/`, so alerts and process details read `2.1.278` and the name
+  changed on every update. A version-named binary in a `versions` directory now
+  takes the tool directory's name; the executable path is unchanged.
 
 ### Verification
 - The installed-host runtime gate no longer counts the routine "full VACUUM not

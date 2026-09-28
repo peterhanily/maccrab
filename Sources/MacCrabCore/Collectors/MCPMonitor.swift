@@ -26,6 +26,10 @@ public actor MCPMonitor {
     private var pollTask: Task<Void, Never>?
     private var dispatchSources: [DispatchSourceFileSystemObject] = []
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    /// Completed polls, independent of findings. This monitor emits only when
+    /// something changes, so without it collector health could not tell a
+    /// quiet, working monitor from one that had stopped polling.
+    public nonisolated let pollingHealth = NetworkPollingHealth()
     private let callbackTasks = CollectorCallbackTaskLifecycle(maximumInFlight: 16)
     private let sourceCancellationGroup = DispatchGroup()
 
@@ -247,11 +251,13 @@ public actor MCPMonitor {
             return
         }
         lifecyclePhase = .running
+        guard let pollGeneration = pollingHealth.begin() else { return }
         logger.info("MCP monitor starting")
 
         // Perform initial baseline scan
         scanAllConfigs()
         baselined = true
+        pollingHealth.completed(generation: pollGeneration)
 
         // Set up file watchers for each config that exists
         setupFileWatchers()
@@ -263,6 +269,7 @@ public actor MCPMonitor {
                 try? await Task.sleep(nanoseconds: UInt64(PowerGate.adjustedInterval(base: self.pollInterval) * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await self.scanAllConfigs()
+                self.pollingHealth.completed(generation: pollGeneration)
             }
         }
     }
@@ -291,6 +298,7 @@ public actor MCPMonitor {
     private func beginStop() -> [Task<Void, Never>] {
         if lifecyclePhase == .stopped { return [] }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         var tasks = callbackTasks.sealAndCancel()
         if let pollTask { tasks.append(pollTask) }
         pollTask?.cancel()

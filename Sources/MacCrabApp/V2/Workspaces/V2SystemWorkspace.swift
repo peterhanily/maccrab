@@ -109,7 +109,9 @@ public struct V2SystemWorkspace: View {
             }.value
             await MainActor.run { self.auditLines = audit.0; self.auditStatus = audit.1 }
 
-            let p = await state.provider.permissions()
+            let p = V2LiveDataProvider.resolvingEngineAccess(
+                await state.provider.permissions(),
+                engineAccessVerified: h.map { !$0.isStale && $0.sysextHasFDA } ?? false)
             await MainActor.run { self.permissions = p }
         }
         .sheet(item: $diagnosticsPreview) { preview in
@@ -1229,10 +1231,13 @@ public struct V2SystemWorkspace: View {
     }
 
     private var permissionsSummaryRow: some View {
-        let granted = permissions.filter { $0.granted }.count
-        let required = permissions.filter { $0.required }.count
-        let blockingMissing = permissions.filter { $0.required && !$0.granted }.count
-        let optionalMissing = permissions.filter { !$0.required && !$0.granted }.count
+        // Count MacCrab's own rows only. The table also lists every other
+        // app's grants, which say nothing about whether MacCrab can run.
+        let own = permissions.filter { $0.owner != .other }
+        let granted = own.filter { $0.granted }.count
+        let required = own.filter { $0.required }.count
+        let blockingMissing = own.filter { $0.required && !$0.granted }.count
+        let optionalMissing = own.filter { !$0.required && !$0.granted }.count
         // Engine (System Extension) Full Disk Access — the authoritative signal
         // is the heartbeat boolean the sysext writes after probing itself, NOT
         // the app-side TCC dump above (which is the menubar app's own grants).
@@ -1257,9 +1262,9 @@ public struct V2SystemWorkspace: View {
             engineFDATrend = String(localized: "system.engineFDANoEvents", defaultValue: "engine can't read events")
         }
         return HStack(spacing: 12) {
-            metricCard(title: String(localized: "system.permGranted", defaultValue: "Granted"), value: "\(granted) / \(permissions.count)",
-                       trend: permissions.isEmpty ? String(localized: "system.permNoData", defaultValue: "no data") : String(localized: "system.permRequiredCount", defaultValue: "required: \(required)"),
-                       trendKind: permissions.isEmpty ? .neutral : .healthy,
+            metricCard(title: String(localized: "system.permGranted", defaultValue: "Granted"), value: "\(granted) / \(own.count)",
+                       trend: own.isEmpty ? String(localized: "system.permNoData", defaultValue: "no data") : String(localized: "system.permRequiredCount", defaultValue: "required: \(required)"),
+                       trendKind: own.isEmpty ? .neutral : .healthy,
                        icon: "checkmark.shield.fill", iconColor: V2Theme.healthy)
             metricCard(title: String(localized: "system.engineFDA", defaultValue: "Engine FDA"), value: engineFDAValue,
                        trend: engineFDATrend, trendKind: engineFDAKind,

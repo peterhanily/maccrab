@@ -23,6 +23,10 @@ public actor SystemPolicyMonitor {
     private var continuation: AsyncStream<SystemPolicyEvent>.Continuation?
     private var pollTask: Task<Void, Never>?
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    /// Completed polls, independent of findings. This monitor emits only when
+    /// something changes, so without it collector health could not tell a
+    /// quiet, working monitor from one that had stopped polling.
+    public nonisolated let pollingHealth = NetworkPollingHealth()
     private let pollInterval: TimeInterval
     private let homesProvider: @Sendable () -> [RealUserHome]
 
@@ -118,6 +122,7 @@ public actor SystemPolicyMonitor {
     public func start() {
         guard lifecyclePhase == .initialized else { return }
         lifecyclePhase = .running
+        guard let pollGeneration = pollingHealth.begin() else { return }
         logger.info("System policy monitor starting")
 
         // Initial baseline
@@ -127,6 +132,7 @@ public actor SystemPolicyMonitor {
             guard let self else { return }
             // Immediate first scan
             await self.fullScan()
+            self.pollingHealth.completed(generation: pollGeneration)
             while !Task.isCancelled {
                 // v1.6.21: gate poll interval through PowerGate so the 5-min
                 // SIP/XProtect/plugin scan throttles on battery / thermal
@@ -137,6 +143,7 @@ public actor SystemPolicyMonitor {
                 try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await self.fullScan()
+                self.pollingHealth.completed(generation: pollGeneration)
             }
         }
     }
@@ -156,6 +163,7 @@ public actor SystemPolicyMonitor {
     private func beginStop() -> Task<Void, Never>? {
         if lifecyclePhase == .stopped { return nil }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         let task = pollTask
         pollTask?.cancel()
         continuation?.finish()

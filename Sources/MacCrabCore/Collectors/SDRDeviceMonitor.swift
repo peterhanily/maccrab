@@ -49,6 +49,10 @@ public actor SDRDeviceMonitor {
     /// Active task.
     private var scanTask: Task<Void, Never>?
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    /// Completed polls, independent of findings. This monitor emits only when
+    /// something changes, so without it collector health could not tell a
+    /// quiet, working monitor from one that had stopped polling.
+    public nonisolated let pollingHealth = NetworkPollingHealth()
 
     // MARK: - Types
 
@@ -132,6 +136,7 @@ public actor SDRDeviceMonitor {
     public func start() {
         guard lifecyclePhase == .initialized else { return }
         lifecyclePhase = .running
+        guard let pollGeneration = pollingHealth.begin() else { return }
         logger.info("SDR device monitor starting (USB SDR scan every \(self.pollInterval)s)")
 
         // Record initial display state
@@ -142,6 +147,7 @@ public actor SDRDeviceMonitor {
             await self?.scanSDRDevices()
             guard !Task.isCancelled else { return }
             await self?.checkDisplayState()
+            self?.pollingHealth.completed(generation: pollGeneration)
 
             while !Task.isCancelled {
                 let interval = PowerGate.adjustedInterval(base: self?.pollInterval ?? 60)
@@ -150,6 +156,7 @@ public actor SDRDeviceMonitor {
                 await self?.scanSDRDevices()
                 guard !Task.isCancelled else { break }
                 await self?.checkDisplayState()
+                self?.pollingHealth.completed(generation: pollGeneration)
             }
         }
     }
@@ -170,6 +177,7 @@ public actor SDRDeviceMonitor {
     private func beginStop() -> Task<Void, Never>? {
         if lifecyclePhase == .stopped { return nil }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         let task = scanTask
         scanTask?.cancel()
         continuation?.finish()

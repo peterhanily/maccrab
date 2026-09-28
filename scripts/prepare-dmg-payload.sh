@@ -393,7 +393,7 @@ if [ -e "$PAYLOAD_ROOT/compiled_rules" ] || [ -L "$PAYLOAD_ROOT/compiled_rules" 
 fi
 
 # rules_source/ is an unsigned-build input. Assembly copies every YAML into the
-# signed Resources/rules directory (both slug and UUID names) and every graph
+# signed Resources/rules directory under its Sigma id (UUID) and every graph
 # JSON into the signed compiled corpus. Validate those exact counterparts and
 # reject any new unhandled file type before dropping the intermediate tree.
 if [ -e "$PAYLOAD_ROOT/rules_source" ] || [ -L "$PAYLOAD_ROOT/rules_source" ]; then
@@ -408,7 +408,10 @@ if [ -e "$PAYLOAD_ROOT/rules_source" ] || [ -L "$PAYLOAD_ROOT/rules_source" ]; t
             || fail "unexpected entry in loose rule-source payload: $source_rule"
         case "$source_rule" in
             *.yml)
-                signed_rule="$APP_RULE_SOURCES/$(/usr/bin/basename "$source_rule")"
+                rule_id=$(/usr/bin/grep -m1 '^id:' "$source_rule" | /usr/bin/awk '{print $2}' \
+                    | /usr/bin/tr -d "'\"" | /usr/bin/tr -d '[:space:]' || true)
+                [ -n "$rule_id" ] || fail "rule YAML has no id: $source_rule"
+                signed_rule="$APP_RULE_SOURCES/$rule_id.yml"
                 if [ ! -f "$signed_rule" ] || [ -L "$signed_rule" ] \
                         || ! /usr/bin/cmp -s "$source_rule" "$signed_rule"; then
                     fail "rule YAML lacks an identical signed in-app copy: $source_rule"

@@ -206,6 +206,25 @@ struct EntropyTests {
 
         let (_, isLegit, _) = EntropyAnalysis.analyzeDomain("google.com")
         #expect(!isLegit, "google.com should NOT be flagged as DGA")
+
+        let (_, isToken, _) = EntropyAnalysis.analyzeDomain("a1b2c3d4e5f6g7h8i9j0.net")
+        #expect(isToken, "a 20-character generated token is still flagged")
+    }
+
+    @Test("DGA detection does not flag deep or hyphenated service names (v1.22.2 field set)")
+    func dgaFieldFalsePositives() {
+        // Every domain behind the 34 HIGH DGA alerts on one host in two days.
+        for domain in [
+            "http-intake.logs.us5.datadoghq.com",
+            "api.apple-cloudkit.fe2.apple-dns.net",
+            "mesu-cdn.origin-apple.com.akadns.net",
+            "gsp57-ssl-background.ls.apple.com",
+            "configuration-lb.ls-apple.com.akadns.net",
+            "background-weighted.ls4-apple.com.akadns.net",
+        ] {
+            let (_, isDGA, reason) = EntropyAnalysis.analyzeDomain(domain)
+            #expect(!isDGA, "\(domain): \(reason ?? "")")
+        }
     }
 
     @Test("DNS tunneling detection flags long high-entropy subdomains")

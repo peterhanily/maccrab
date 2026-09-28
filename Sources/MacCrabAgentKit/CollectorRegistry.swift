@@ -203,6 +203,16 @@ public actor CollectorRegistry {
     /// register a collector but then skip starting it (platform gate, opt-in
     /// flag, missing permission) must NOT call this — that is exactly the state
     /// the operator needs to see.
+    /// Attach poll-completion liveness to a collector registered before its
+    /// instance existed. Completed polls then decide its state: a quiet monitor
+    /// that is still polling reads healthy, one that stopped reads stalled,
+    /// whatever it has or has not emitted.
+    public func attachPollingHealth(name: String, _ health: NetworkPollingHealth) {
+        guard var entry = entries[name] else { return }
+        entry.pollingHealth = health
+        entries[name] = entry
+    }
+
     public func recordStarted(name: String) {
         guard var entry = entries[name] else { return }
         guard entry.enabled else { return }

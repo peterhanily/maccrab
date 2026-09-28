@@ -115,8 +115,37 @@ enum DaemonSetup {
         }
     }
 
+    /// TraceGraph could not prove writable headroom before producers. Typed so
+    /// the startup report says whether storage capacity was the cause; passing
+    /// no error made every such failure "initialization_failed".
+    struct TraceGraphStartupStorageError: Error {
+        let storagePressure: Bool
+
+        init(recovery: CausalGraphStartupRecoveryResult) {
+            guard case .nonconverged(let reason) = recovery.disposition else {
+                storagePressure = false
+                return
+            }
+            switch reason {
+            case .protectedEvidenceFloor, .boundedPassLimit, .incrementalVacuumUnavailable,
+                 .noRecoverableProgress, .admissionRemainsBlocked:
+                storagePressure = true
+            case .storeUnavailable, .writableHandleUnavailable, .pinnedReader,
+                 .admissionMeasurementUnavailable, .recoveryFailed:
+                storagePressure = false
+            }
+        }
+
+        init(block reason: CausalGraphStorageBlockReason?) {
+            storagePressure = reason == .footprintLimit || reason == .lowFreeSpace
+        }
+    }
+
     static func startupFailureReason(_ error: Error) -> String {
         if error is DatabaseEncryptionAvailabilityError { return "key_unavailable" }
+        if let graph = error as? TraceGraphStartupStorageError {
+            return graph.storagePressure ? "storage_pressure" : "initialization_failed"
+        }
         if let admission = error as? SQLitePersistentStoreAdmissionError,
            admission.isOperationalPressure { return "storage_pressure" }
         if let store = error as? EventStoreError, case .diskFull = store {
@@ -1484,7 +1513,8 @@ enum DaemonSetup {
                     supportDir: supportDir,
                     startedAt: startedAt,
                     component: "TraceGraph",
-                    reason: detail
+                    reason: detail,
+                    failure: TraceGraphStartupStorageError(recovery: recovery)
                 )
             }
             causalStoreStartupRecovery = recovery
@@ -1627,7 +1657,8 @@ enum DaemonSetup {
                     supportDir: supportDir,
                     startedAt: startedAt,
                     component: "TraceGraph",
-                    reason: detail
+                    reason: detail,
+                    failure: TraceGraphStartupStorageError(block: activationAdmission.reason)
                 )
             }
             causalStoreStartupRecovery = activationProof
@@ -1786,9 +1817,20 @@ enum DaemonSetup {
             eventDriven: true, started: false, enabled: !isRoot,
             disabledReason: "Endpoint Security provides file monitoring in the System Extension")
         await collectorRegistry.register(name: "TCCMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        // Monitors below that emit only on findings get poll-completion
+        // liveness attached once each instance exists. The stall budget is 5x
+        // the registered interval; PowerGate stretches a poll by up to 3x, and
+        // by up to 5x at aggressiveness 2.0 (USB, browser extensions), so those
+        // two register twice their base interval.
         await collectorRegistry.register(name: "EDRMonitor", expectedIntervalSeconds: 120, eventDriven: true)
-        await collectorRegistry.register(name: "USBMonitor", expectedIntervalSeconds: 10, eventDriven: true)
-        await collectorRegistry.register(name: "ClipboardMonitor", expectedIntervalSeconds: 3, eventDriven: true)
+        await collectorRegistry.register(name: "USBMonitor", expectedIntervalSeconds: Int(config.usbPollInterval * 2), eventDriven: true)
+        // The root System Extension has no user pasteboard: every poll failed
+        // (a CFPasteboard lookup error each 3 s) while this row said Healthy.
+        // The app forwards ClickFix-shaped payloads to ClickFixDetector itself.
+        await collectorRegistry.register(
+            name: "ClipboardMonitor", expectedIntervalSeconds: 3,
+            eventDriven: true, enabled: !isRoot,
+            disabledReason: "No user pasteboard in the System Extension; the app forwards ClickFix payloads")
         // Ultrasonic requires microphone access and is opt-in; its consumer task
         // is started unconditionally but the monitor behind it is not, so it
         // must not claim health until the opt-in gate actually opens.
@@ -1797,14 +1839,21 @@ enum DaemonSetup {
             name: "UltrasonicMonitor", expectedIntervalSeconds: 60,
             eventDriven: true, started: false, enabled: ultrasonicEnabled,
             disabledReason: "Optional microphone monitoring is turned off")
-        await collectorRegistry.register(name: "RootkitDetector", expectedIntervalSeconds: 120, eventDriven: true)
-        await collectorRegistry.register(name: "EventTapMonitor", expectedIntervalSeconds: 60, eventDriven: true)
-        await collectorRegistry.register(name: "SystemPolicyMonitor", expectedIntervalSeconds: 300, eventDriven: true)
-        await collectorRegistry.register(name: "BrowserExtensionMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        await collectorRegistry.register(name: "RootkitDetector", expectedIntervalSeconds: Int(config.rootkitPollInterval), eventDriven: true)
+        await collectorRegistry.register(name: "EventTapMonitor", expectedIntervalSeconds: Int(config.eventTapPollInterval), eventDriven: true)
+        await collectorRegistry.register(name: "SystemPolicyMonitor", expectedIntervalSeconds: Int(config.systemPolicyPollInterval), eventDriven: true)
+        await collectorRegistry.register(name: "BrowserExtensionMonitor", expectedIntervalSeconds: Int(config.browserExtensionPollInterval * 2), eventDriven: true)
         await collectorRegistry.register(name: "MCPMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        await collectorRegistry.attachPollingHealth(name: "MCPMonitor", mcpMonitor.pollingHealth)
         await collectorRegistry.register(name: "SDRDeviceMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "BTMSnapshotMonitor", expectedIntervalSeconds: 300, eventDriven: true)
-        print("Collector registry initialized — 17 collectors tracked")
+        // Emits only on daemon transitions; liveness comes from completed polls.
+        // Previously registered lazily by its first alert, so it was absent on a
+        // quiet host and "stalled" five intervals after the first transition.
+        await collectorRegistry.register(
+            name: "ESClientMonitor", expectedIntervalSeconds: Int(config.esHealthPollInterval),
+            eventDriven: false, pollingHealth: esHealthMonitor.pollingHealth)
+        print("Collector registry initialized — 18 collectors tracked")
 
         // Trust substrate -- ECDSA P-256 keypair for trace-bundle
         // signing. v1.10.0 audit fix: daemon was never instantiating
@@ -1829,6 +1878,7 @@ enum DaemonSetup {
         // happy path but blocks if IOKit power-management is mid-state.
         // Defer to a Task.
         let usbMonitor = USBMonitor(pollInterval: config.usbPollInterval)
+        await collectorRegistry.attachPollingHealth(name: "USBMonitor", usbMonitor.pollingHealth)
 
         // Database encryption -- AES-256 field encryption, key in Keychain.
         // v1.9.0 (audit Sec-H2): default ON to match the dashboard's
@@ -1893,6 +1943,7 @@ enum DaemonSetup {
         // v1.12.0 RC21 (TURBO): startup scans 5 browser profile dirs +
         // enumerates each extension manifest — disk-heavy. Defer.
         let browserExtMonitor = BrowserExtensionMonitor(pollInterval: config.browserExtensionPollInterval)
+        await collectorRegistry.attachPollingHealth(name: "BrowserExtensionMonitor", browserExtMonitor.pollingHealth)
 
         // Ultrasonic attack monitor -- FFT mic sampling for DolphinAttack/NUIT
         // Opt-in: requires microphone access which triggers a TCC permission popup.
@@ -1934,6 +1985,7 @@ enum DaemonSetup {
         // Rootkit detector — dual-API cross-reference of process tables.
         // v1.12.0 RC21 (TURBO): polled (120 s default) — defer .start().
         let rootkitDetector = RootkitDetector(pollInterval: config.rootkitPollInterval)
+        await collectorRegistry.attachPollingHealth(name: "RootkitDetector", rootkitDetector.pollingHealth)
 
         // EDR/RMM tool monitor — scans for EDR, insider threat, MDM, and remote access tools.
         // v1.12.0 RC21 (TURBO): scans for 30+ tool signatures = disk +
@@ -1941,10 +1993,12 @@ enum DaemonSetup {
         // already deferred for SecurityToolIntegrations, but EDRMonitor
         // is a SEPARATE actor doing similar work. Defer.
         let edrMonitor = EDRMonitor(pollInterval: 120)
+        await collectorRegistry.attachPollingHealth(name: "EDRMonitor", edrMonitor.pollingHealth)
 
         // SDR device + display-hotplug monitor (USB SDR enumeration + display
         // hotplug anomalies; no electromagnetic analysis).
         let sdrDeviceMonitor = SDRDeviceMonitor(pollInterval: 60)
+        await collectorRegistry.attachPollingHealth(name: "SDRDeviceMonitor", sdrDeviceMonitor.pollingHealth)
 
         // BTM / SMAppService reconciliation monitor (read-only `sfltool dumpbtm`
         // snapshot; flags newly-seen enabled launch items with weak attribution —
@@ -2364,11 +2418,13 @@ enum DaemonSetup {
 
         // Event tap monitor (keylogger detection)
         let eventTapMonitor = EventTapMonitor(pollInterval: config.eventTapPollInterval)
+        await collectorRegistry.attachPollingHealth(name: "EventTapMonitor", eventTapMonitor.pollingHealth)
         await eventTapMonitor.start()
         print("Event tap monitor active (keylogger detection)")
 
         // System policy monitor (SIP, auth plugins, quarantine, XProtect)
         let systemPolicyMonitor = SystemPolicyMonitor(pollInterval: config.systemPolicyPollInterval)
+        await collectorRegistry.attachPollingHealth(name: "SystemPolicyMonitor", systemPolicyMonitor.pollingHealth)
         await systemPolicyMonitor.start()
         print("System policy monitor active (SIP, plugins, quarantine, XProtect, XPC, MDM)")
 

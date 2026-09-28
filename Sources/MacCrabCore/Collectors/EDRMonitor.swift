@@ -32,6 +32,10 @@ public actor EDRMonitor {
     /// Active task.
     private var scanTask: Task<Void, Never>?
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    /// Completed polls, independent of findings. This monitor emits only when
+    /// something changes, so without it collector health could not tell a
+    /// quiet, working monitor from one that had stopped polling.
+    public nonisolated let pollingHealth = NetworkPollingHealth()
 
     // MARK: - Types
 
@@ -298,11 +302,13 @@ public actor EDRMonitor {
     public func start() {
         guard lifecyclePhase == .initialized else { return }
         lifecyclePhase = .running
+        guard let pollGeneration = pollingHealth.begin() else { return }
         logger.info("EDR monitor starting (scan every \(self.pollInterval)s)")
 
         scanTask = Task { [weak self] in
             // Initial scan immediately
             await self?.scan()
+            self?.pollingHealth.completed(generation: pollGeneration)
 
             while !Task.isCancelled {
                 // EDR scan is 120s baseline — already a sparse poll, so use
@@ -313,6 +319,7 @@ public actor EDRMonitor {
                 try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await self?.scan()
+                self?.pollingHealth.completed(generation: pollGeneration)
             }
         }
     }
@@ -333,6 +340,7 @@ public actor EDRMonitor {
     private func beginStop() -> Task<Void, Never>? {
         if lifecyclePhase == .stopped { return nil }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         let task = scanTask
         scanTask?.cancel()
         continuation?.finish()

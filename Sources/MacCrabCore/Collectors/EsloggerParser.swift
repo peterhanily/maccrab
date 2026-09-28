@@ -144,7 +144,7 @@ public enum EsloggerParser {
 
         let executableDict = dict(processDict, "executable") ?? [:]
         let executablePath = str(executableDict, "path")
-        let processName = (executablePath as NSString).lastPathComponent
+        let processName = esProcessName(executablePath: executablePath)
 
         // Code signing info
         let signingId = str(processDict, "signing_id")

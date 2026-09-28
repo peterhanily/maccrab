@@ -51,6 +51,19 @@ struct CoverageCanaryEvaluatorTests {
         #expect(Eval.verdict(seenAtCallback: true, foundInDB: true) == .healthy)
     }
 
+    @Test("store-stage verdicts alert at MEDIUM only if the late window also misses")
+    func alertSeverityByStage() {
+        // Active loss before evaluation stays HIGH; reconciliation never applies.
+        #expect(Eval.alertSeverity(verdict: .kernelGap, reconciled: false) == .high)
+        #expect(Eval.alertSeverity(verdict: .ingestHandoffGap, reconciled: false) == .high)
+        // Field case: probes that reached FTS 90-120 s late raised HIGH alerts.
+        #expect(Eval.alertSeverity(verdict: .storeQueryUnknown, reconciled: true) == nil)
+        #expect(Eval.alertSeverity(verdict: .evictionGap, reconciled: true) == nil)
+        #expect(Eval.alertSeverity(verdict: .storeQueryUnknown, reconciled: false) == .medium)
+        #expect(Eval.alertSeverity(verdict: .evictionGap, reconciled: false) == .medium)
+        #expect(Eval.alertSeverity(verdict: .healthy, reconciled: false) == nil)
+    }
+
     @Test("incomplete empty search stays coverage-unknown, never eviction")
     func incompleteEmptySearchIsUnknown() {
         #expect(Eval.verdict(

@@ -4,10 +4,11 @@
 // Deep-audit rc.4 reconciliation coverage for two MacCrabAgentKit runtime
 // invariants that have no live-daemon harness:
 //
-//   #2 (EventLoop.swift ~863) — the cross-process FILE chain must dedup on the
-//      SHARED FILE PATH, not the triggering executable. Pinned here at the
-//      AlertDeduplicator layer (the exact mechanism EventLoop now uses), since
-//      EventLoop.run itself is only reachable with a fully-wired DaemonState.
+//   #2 (EventLoop.swift) — the cross-process FILE chain must dedup on the SET
+//      of converging executables, neither the triggering executable nor the
+//      file. Pinned here with the real correlator and the AlertDeduplicator
+//      (the exact mechanism EventLoop uses), since EventLoop.run itself is only
+//      reachable with a fully-wired DaemonState.
 //
 //   #3 (DaemonTimers.swift) — a fresh AES-GCM decrypt failure (DB tamper) must
 //      raise a rate-limited alert, driven by a rising-edge latch. The latch
@@ -20,56 +21,80 @@ import Foundation
 
 /// #2 — cross-process file-chain dedup contract.
 ///
-/// Field symptom: 1344 mostly-benign cross-process file-chain alerts, because
-/// each converging process's DISTINCT executable produced its own alert (the
-/// AlertSink default dedups on the triggering executable). The fix keys the
-/// dedup on the shared file the chain converged on — a mirror of the
-/// network-convergence path, which dedups on the destination.
-@Suite("Cross-process file-chain dedup (audit #237)")
+/// Two field floods bracket the key. Keyed on the triggering executable, each
+/// converging process emitted its own alert (1344 mostly-benign alerts). Keyed
+/// on the file, one bulk operation emitted one alert per file: `find` + `mv`
+/// over a 3,000-file directory raised 3,000 alerts in 64 s, and 18,313 in a
+/// week. The chain's `dedupIdentity` keys on the executable set instead.
+@Suite("Cross-process file-chain dedup (audit #237, v1.22.2)")
 struct CrossProcessFileChainDedupTests {
 
     private let ruleId = "maccrab.correlator.cross-process"
 
-    @Test("converging processes on ONE shared file collapse to a single alert (file-path key)")
-    func fileKeyCollapsesConvergence() async {
-        let dedup = AlertDeduplicator(suppressionWindow: 60)
-        let sharedFile = "/Users/x/Library/LaunchAgents/com.evil.target.plist"
-
-        // Three distinct triggering executables all touch the same file inside
-        // the correlator window — the fan-out scenario. EventLoop now keys the
-        // dedup on `file.path`, so only the first emits.
-        var emitted = 0
-        for _ in 0..<3 {
-            let suppressed = await dedup.shouldSuppressAndRecord(ruleId: ruleId, processPath: sharedFile)
-            if !suppressed { emitted += 1 }
+    private func emitted(_ chains: [CrossProcessCorrelator.CorrelationChain]) async -> Int {
+        let dedup = AlertDeduplicator(suppressionWindow: 3_600)
+        var count = 0
+        for chain in chains {
+            let suppressed = await dedup.shouldSuppressAndRecord(
+                ruleId: ruleId, processPath: chain.dedupIdentity)
+            if !suppressed { count += 1 }
         }
-        #expect(emitted == 1)
+        return count
     }
 
-    @Test("pre-fix executable key does NOT collapse — proving the file-path key is the fix")
-    func executableKeyDoesNotCollapse() async {
-        let dedup = AlertDeduplicator(suppressionWindow: 60)
-        // Same chain, but keyed on each converging process's executable (the
-        // pre-fix behavior). Each distinct executable is a fresh key → every
-        // process emits, reproducing the 1344-alert fan-out.
-        let executables = ["/bin/cp", "/bin/mv", "/usr/bin/tee"]
-        var emitted = 0
-        for exe in executables {
-            let suppressed = await dedup.shouldSuppressAndRecord(ruleId: ruleId, processPath: exe)
-            if !suppressed { emitted += 1 }
+    @Test("one bulk operation over thousands of files is one alert")
+    func bulkOperationCollapses() async {
+        let correlator = CrossProcessCorrelator()
+        let now = Date()
+        var chains: [CrossProcessCorrelator.CorrelationChain] = []
+        for i in 0..<3_000 {
+            let path = "/Users/Shared/Runtime/renamed-\(i).txt"
+            let at = now.addingTimeInterval(Double(i) * 0.02)
+            await correlator.recordFileEvent(path: path, action: "rename", pid: 100,
+                processName: "mv", processPath: "/bin/mv", timestamp: at)
+            if let chain = await correlator.recordFileEvent(path: path, action: "unlink", pid: 200,
+                processName: "find", processPath: "/usr/bin/find", timestamp: at) {
+                chains.append(chain)
+            }
         }
-        #expect(emitted == 3)
+        #expect(chains.count == 3_000)
+        #expect(await emitted(chains) == 1)
     }
 
-    @Test("distinct shared files still alert independently (dedup doesn't over-collapse)")
-    func distinctFilesStillAlert() async {
-        let dedup = AlertDeduplicator(suppressionWindow: 60)
-        var emitted = 0
-        for path in ["/tmp/a.plist", "/tmp/b.plist", "/tmp/c.plist"] {
-            let suppressed = await dedup.shouldSuppressAndRecord(ruleId: ruleId, processPath: path)
-            if !suppressed { emitted += 1 }
+    @Test("re-evaluating one converged file does not re-alert")
+    func stableConvergenceCollapses() async {
+        let correlator = CrossProcessCorrelator()
+        let now = Date()
+        let path = "/Users/x/Library/LaunchAgents/com.evil.target.plist"
+        var chains: [CrossProcessCorrelator.CorrelationChain] = []
+        for i in 0..<6 {
+            let (pid, name, exe): (Int32, String, String) = i.isMultiple(of: 2)
+                ? (100, "cp", "/bin/cp") : (200, "tee", "/usr/bin/tee")
+            if let chain = await correlator.recordFileEvent(path: path, action: i < 2 ? "write" : "read",
+                pid: pid, processName: name, processPath: exe, timestamp: now.addingTimeInterval(Double(i))) {
+                chains.append(chain)
+            }
         }
-        #expect(emitted == 3)
+        #expect(!chains.isEmpty)
+        #expect(await emitted(chains) == 1)
+    }
+
+    @Test("a different executable set is a new finding, even in the same directory")
+    func differentExecutablesStillAlert() async {
+        let correlator = CrossProcessCorrelator()
+        let now = Date()
+        var chains: [CrossProcessCorrelator.CorrelationChain] = []
+        for (i, pair) in [("/bin/mv", "/usr/bin/find"), ("/usr/bin/curl", "/bin/bash")].enumerated() {
+            let path = "/tmp/shared/file-\(i)"
+            await correlator.recordFileEvent(path: path, action: "write", pid: 100,
+                processName: "a", processPath: pair.0, timestamp: now)
+            if let chain = await correlator.recordFileEvent(path: path, action: "execute", pid: 200,
+                processName: "b", processPath: pair.1, timestamp: now.addingTimeInterval(1)) {
+                chains.append(chain)
+            }
+        }
+        #expect(chains.count == 2)
+        #expect(await emitted(chains) == 2)
     }
 }
 

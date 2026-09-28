@@ -418,6 +418,10 @@ public actor TCCMonitor {
 
     // MARK: - File Watching
 
+    /// Watchers installed by `start()`. The monitor is change-driven, so with
+    /// none installed it would read healthy while unable to see any change.
+    public var installedWatcherCount: Int { watchSources.count }
+
     /// Installs a `DispatchSource` file-system watcher on the given path.
     ///
     /// Watches for `.write` events and triggers a diff when the file changes.

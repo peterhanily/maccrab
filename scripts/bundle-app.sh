@@ -12,7 +12,7 @@ APP_BUNDLE="$BUILD_DIR/MacCrab.app"
 # VERSION env var, else fall back to the latest git tag, else the current
 # release version.
 VERSION="${VERSION:-$(cd "$PROJECT_DIR" && git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
-VERSION="${VERSION:-1.22.1}"
+VERSION="${VERSION:-1.22.2}"
 
 # Clean old bundle
 rm -rf "$APP_BUNDLE"

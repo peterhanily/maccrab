@@ -6,7 +6,9 @@
 //
 // Checks ES health via observable side effects: whether the key security
 // daemons (xprotectd, syspolicyd, endpointsecurityd) are running, and
-// estimates ES client slot occupancy from known consumers.
+// estimates ES client slot occupancy from known consumers. Only xprotectd is
+// kept alive by launchd; endpointsecurityd and syspolicyd are launched on
+// demand and idle-exit, so their absence is reported but never alerted.
 
 import Foundation
 import os.log
@@ -53,19 +55,27 @@ public actor ESClientMonitor {
 
     /// Events stream for health changes
     public nonisolated let events: AsyncStream<ESHealthEvent>
+    /// Poll completion, independent of whether a poll found a change. The
+    /// monitor emits only on transitions, so its registry health used to be
+    /// driven by alerts: absent until the first one, "stalled" after it.
+    public nonisolated let pollingHealth = NetworkPollingHealth()
     private var continuation: AsyncStream<ESHealthEvent>.Continuation?
     private var pollTask: Task<Void, Never>?
     private var lifecyclePhase: CollectorLifecyclePhase = .initialized
 
     /// Previous health state for change detection
     private var previousXprotectd: Bool = true
-    private var previousSyspolicyd: Bool = true
-    private var previousEndpointsecurityd: Bool = true
 
     private let pollInterval: TimeInterval
+    private let isRunning: @Sendable (String) -> Bool
 
     public init(pollInterval: TimeInterval = 60) {
+        self.init(pollInterval: pollInterval, isRunning: Self.isProcessRunning)
+    }
+
+    init(pollInterval: TimeInterval, isRunning: @escaping @Sendable (String) -> Bool) {
         self.pollInterval = pollInterval
+        self.isRunning = isRunning
         var capturedContinuation: AsyncStream<ESHealthEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { continuation in
             capturedContinuation = continuation
@@ -76,12 +86,14 @@ public actor ESClientMonitor {
     public func start() {
         guard lifecyclePhase == .initialized else { return }
         lifecyclePhase = .running
+        guard let generation = pollingHealth.begin() else { return }
         logger.info("ES client monitor starting (poll every \(self.pollInterval)s)")
 
         pollTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
                 await self.checkHealth()
+                self.pollingHealth.completed(generation: generation)
                 try? await Task.sleep(nanoseconds: UInt64(self.pollInterval * 1_000_000_000))
             }
         }
@@ -108,6 +120,7 @@ public actor ESClientMonitor {
     private func beginStop() -> Task<Void, Never>? {
         if lifecyclePhase == .stopped { return nil }
         lifecyclePhase = .stopping
+        pollingHealth.stop()
         let task = pollTask
         pollTask?.cancel()
         continuation?.finish()
@@ -119,18 +132,17 @@ public actor ESClientMonitor {
     public func currentStatus() -> ESHealthStatus {
         var issues: [String] = []
 
-        let xprotectd = Self.isProcessRunning("xprotectd")
-        let syspolicyd = Self.isProcessRunning("syspolicyd")
-        let endpointsecurityd = Self.isProcessRunning("endpointsecurityd")
+        let xprotectd = isRunning("xprotectd")
+        let syspolicyd = isRunning("syspolicyd")
+        let endpointsecurityd = isRunning("endpointsecurityd")
 
+        // syspolicyd and endpointsecurityd idle-exit by design: not issues.
         if !xprotectd { issues.append("xprotectd is not running") }
-        if !syspolicyd { issues.append("syspolicyd is not running") }
-        if !endpointsecurityd { issues.append("endpointsecurityd is not running") }
 
         // Estimate free ES slots: xprotectd uses 1, third-party EDR tools use additional slots
         let occupied = (xprotectd ? 1 : 0)
-            + (Self.isProcessRunning("CrowdStrike") ? 1 : 0)
-            + (Self.isProcessRunning("SentinelOne") ? 1 : 0)
+            + (isRunning("CrowdStrike") ? 1 : 0)
+            + (isRunning("SentinelOne") ? 1 : 0)
         let freeSlots = max(0, 3 - occupied)
 
         return ESHealthStatus(
@@ -145,10 +157,16 @@ public actor ESClientMonitor {
 
     // MARK: - Private
 
-    private func checkHealth() {
-        let xprotectd = Self.isProcessRunning("xprotectd")
-        let syspolicyd = Self.isProcessRunning("syspolicyd")
-        let endpointsecurityd = Self.isProcessRunning("endpointsecurityd")
+    /// One poll. Internal so tests can drive transitions with a fake probe.
+    ///
+    /// Only xprotectd (launchd KeepAlive) is alerted on. endpointsecurityd is
+    /// launched on demand and idle-exits under memory pressure while ES
+    /// delivery continues (field: a CRITICAL "Endpointsecurityd Down" whose
+    /// launchd exit reason was JETSAM_REASON_MEMORY_IDLE_EXIT); syspolicyd is
+    /// likewise on demand. ES liveness itself is proven by ESCollector's native
+    /// callbacks and coverage canary.
+    func checkHealth() {
+        let xprotectd = isRunning("xprotectd")
 
         // Detect state changes
         if previousXprotectd && !xprotectd {
@@ -168,43 +186,7 @@ public actor ESClientMonitor {
             continuation?.yield(event)
         }
 
-        if previousSyspolicyd && !syspolicyd {
-            let event = ESHealthEvent(
-                type: .syspolicydDown,
-                description: "syspolicyd is no longer running — Gatekeeper enforcement may be disabled",
-                severity: .critical
-            )
-            continuation?.yield(event)
-            logger.critical("syspolicyd DOWN — Gatekeeper compromised")
-        } else if !previousSyspolicyd && syspolicyd {
-            let event = ESHealthEvent(
-                type: .securityDaemonRestarted,
-                description: "syspolicyd restarted",
-                severity: .medium
-            )
-            continuation?.yield(event)
-        }
-
-        if previousEndpointsecurityd && !endpointsecurityd {
-            let event = ESHealthEvent(
-                type: .endpointsecuritydDown,
-                description: "endpointsecurityd is no longer running — ES client management disabled",
-                severity: .critical
-            )
-            continuation?.yield(event)
-            logger.critical("endpointsecurityd DOWN")
-        } else if !previousEndpointsecurityd && endpointsecurityd {
-            let event = ESHealthEvent(
-                type: .securityDaemonRestarted,
-                description: "endpointsecurityd restarted",
-                severity: .medium
-            )
-            continuation?.yield(event)
-        }
-
         previousXprotectd = xprotectd
-        previousSyspolicyd = syspolicyd
-        previousEndpointsecurityd = endpointsecurityd
     }
 
     /// Check if a process is running by name using /usr/bin/pgrep (lightweight).
@@ -224,7 +206,10 @@ public actor ESClientMonitor {
     /// `false` into a CRITICAL "xprotectd DOWN — ES infrastructure compromised"
     /// alert. Returning `false` here would convert process-table pressure into a
     /// self-inflicted critical-alert storm.
-    private nonisolated static func isProcessRunning(_ name: String) -> Bool {
+    ///
+    /// pgrep exits 1 when nothing matched and 2/3 on its own errors; only 1 is
+    /// evidence that the process is absent.
+    nonisolated static func isProcessRunning(_ name: String) -> Bool {
         guard let result = BoundedPrivilegedProcessRunner.run(
             executable: "/usr/bin/pgrep",
             arguments: ["-x", name],
@@ -240,6 +225,6 @@ public actor ESClientMonitor {
                 .error("pgrep did not complete safely while probing \(name, privacy: .public) — reporting it as running")
             return true
         }
-        return result.terminationStatus == 0
+        return result.terminationStatus != 1
     }
 }

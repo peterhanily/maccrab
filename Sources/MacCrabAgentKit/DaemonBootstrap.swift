@@ -113,7 +113,14 @@ public enum DaemonBootstrap {
         // that proof here at the outer bootstrap boundary as well: the first
         // qualifying event epoch cannot start on an unproven graph store.
         let traceGraphStartupRecovery = state.causalStoreStartupRecovery
-        guard traceGraphStartupRecovery.writableBeforeProducers else {
+        // TraceGraph is optional. When DaemonSetup could not open its store
+        // (low disk, unavailable key, failed quarantine) it detached trace
+        // materialization for this run: no store and no bridge, so nothing can
+        // write to an unproven graph. That run must start. This guard used to
+        // abort it anyway, turning a problem in the optional graph into a
+        // relaunch loop with no detection at all.
+        let traceGraphAttached = state.causalStore != nil || state.causalGraphBridge != nil
+        guard traceGraphStartupRecovery.writableBeforeProducers || !traceGraphAttached else {
             let admission = traceGraphStartupRecovery.finalAdmission
             let disposition: String
             switch traceGraphStartupRecovery.disposition {
@@ -135,10 +142,15 @@ public enum DaemonBootstrap {
             try Self.failPreIngestionStorage(
                 state: state,
                 component: "TraceGraph",
-                reason: detail
+                reason: detail,
+                failure: DaemonSetup.TraceGraphStartupStorageError(
+                    recovery: traceGraphStartupRecovery
+                )
             )
         }
-        if traceGraphStartupRecovery.normalWriteAdmissionRestored {
+        if !traceGraphAttached {
+            logger.warning("TraceGraph is detached this run (\(traceGraphStartupRecovery.failureDetail ?? "store unavailable", privacy: .public)); event detection, alerting and storage start without trace materialization")
+        } else if traceGraphStartupRecovery.normalWriteAdmissionRestored {
             logger.notice("TraceGraph startup recovery restored normal writable admission before producers after \(traceGraphStartupRecovery.passes) bounded pass(es); cutoffs=\(traceGraphStartupRecovery.attemptedCutoffHours)")
         } else if traceGraphStartupRecovery.passes > 0 {
             logger.notice("TraceGraph startup recovery established durable pre-producer headroom in \(traceGraphStartupRecovery.passes) bounded pass(es); cutoffs=\(traceGraphStartupRecovery.attemptedCutoffHours)")
@@ -179,6 +191,11 @@ public enum DaemonBootstrap {
         // and consumer joins are declared clean.
         await state.networkCollector.start()
         await state.tccMonitor.start()
+        if await state.tccMonitor.installedWatcherCount == 0 {
+            await state.collectorRegistry.recordSetupStatus(
+                name: "TCCMonitor",
+                status: .unavailable(reason: "no TCC database could be watched; check Full Disk Access"))
+        }
         logger.info("Network and TCC primary collectors active")
 
         let startTime = Date()

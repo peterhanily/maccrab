@@ -262,14 +262,17 @@ for cli in maccrabctl maccrab-mcp; do
     /bin/cp "$PUBLISH_APP/Contents/Resources/bin/$cli" "$PUBLISH_FIXTURE/bin/$cli"
 done
 printf 'rule\n' > "$PUBLISH_APP/Contents/Resources/compiled_rules/rule.json"
-printf 'yaml rule\n' > "$PUBLISH_APP/Contents/Resources/rules/sample.yml"
+# Signed copies are named by the rule's Sigma id; the loose source keeps its slug.
+printf 'id: 00000000-0000-4000-a000-000000000001\ntitle: sample\n' \
+    > "$PUBLISH_APP/Contents/Resources/rules/00000000-0000-4000-a000-000000000001.yml"
 printf 'graph rule\n' > "$PUBLISH_APP/Contents/Resources/compiled_rules/graph/sample.json"
 printf 'yaml module\n' > "$PUBLISH_APP/Contents/Resources/Compiler/yaml/__init__.py"
 write_fixture_manifest "$PUBLISH_APP/Contents/Resources/compiled_rules" "9.9.9"
 /bin/cp -R "$PUBLISH_APP/Contents/Resources/compiled_rules/." "$PUBLISH_FIXTURE/compiled_rules/"
 /bin/cp -R "$PUBLISH_APP/Contents/Resources/compiled_rules/." \
     "$PUBLISH_APP/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension/Contents/Resources/compiled_rules/"
-/bin/cp "$PUBLISH_APP/Contents/Resources/rules/sample.yml" "$PUBLISH_FIXTURE/rules_source/sample.yml"
+/bin/cp "$PUBLISH_APP/Contents/Resources/rules/00000000-0000-4000-a000-000000000001.yml" \
+    "$PUBLISH_FIXTURE/rules_source/sample.yml"
 /bin/cp "$PUBLISH_APP/Contents/Resources/compiled_rules/graph/sample.json" \
     "$PUBLISH_FIXTURE/rules_source/graph/sample.json"
 printf 'source documentation\n' > "$PUBLISH_FIXTURE/rules_source/README.md"
