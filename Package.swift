@@ -163,6 +163,9 @@ let package = Package(
                 "MacCrabForensics",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
+            // Release assembly copies the icon to Contents/Resources for
+            // CFBundleIconFile; Bundle.module does not need a second copy.
+            exclude: ["Resources/AppIcon.icns"],
             resources: [
                 .process("Resources", localization: nil),
             ]
