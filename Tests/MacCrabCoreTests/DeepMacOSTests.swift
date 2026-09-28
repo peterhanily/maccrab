@@ -227,6 +227,30 @@ struct EntropyTests {
         }
     }
 
+    @Test("DGA detection does not flag names under special-use TLDs (v1.22.3 field probe)")
+    func dgaSpecialUseTLDs() {
+        // The connectivity probe that raised a HIGH DGA alert, then the same
+        // generated label under every special-use TLD. DNS names are case-
+        // insensitive and may arrive fully qualified with a trailing dot.
+        for domain in [
+            "this-url-does-not-exist-6b1a4afc-4d00-4527-b970-d99d773a8f9a.invalid",
+            "THIS-URL-DOES-NOT-EXIST-6B1A4AFC-4D00-4527-B970-D99D773A8F9A.INVALID.",
+            "xk7q2m9p4rj8w3n5bv6tc1.test",
+            "xk7q2m9p4rj8w3n5bv6tc1.example",
+            "xk7q2m9p4rj8w3n5bv6tc1.localhost",
+            "xk7q2m9p4rj8w3n5bv6tc1.local",
+            "xk7q2m9p4rj8w3n5bv6tc1.home.arpa",
+        ] {
+            let (_, isDGA, reason) = EntropyAnalysis.analyzeDomain(domain)
+            #expect(!isDGA, "\(domain): \(reason ?? "")")
+        }
+
+        // The exemption is the TLD, not the label: under a registrable TLD the
+        // same label is still a DGA candidate.
+        let (_, isDGA, _) = EntropyAnalysis.analyzeDomain("xk7q2m9p4rj8w3n5bv6tc1.com")
+        #expect(isDGA, "a generated label under a registrable TLD is still flagged")
+    }
+
     @Test("DNS tunneling detection flags long high-entropy subdomains")
     func dnsTunneling() {
         // Very long encoded subdomains — classic DNS tunneling

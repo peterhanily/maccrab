@@ -62,6 +62,12 @@ public enum EntropyAnalysis {
         return (highestEntropy, suspicious, maxSegment)
     }
 
+    /// Reserved TLDs (RFC 2606 / RFC 6761), mDNS `.local` (RFC 6762) and the
+    /// infrastructure `.arpa` zone: none is open for registration.
+    private static let specialUseTLDs: Set<String> = [
+        "invalid", "test", "example", "localhost", "local", "arpa",
+    ]
+
     /// Check if a domain name looks like a DGA (Domain Generation Algorithm) output.
     /// DGA domains have high entropy and unusual character distributions.
     public static func analyzeDomain(_ domain: String) -> (entropy: Double, isDGA: Bool, reason: String?) {
@@ -72,6 +78,14 @@ public enum EntropyAnalysis {
         // Analyze the registrable domain (SLD) AND any subdomains
         // For "abc123.evil.com", SLD is "evil" but we also check subdomains
         let sld = String(parts[parts.count - 2])
+
+        // A DGA only works if its output can be registered. A connectivity
+        // probe for `this-url-does-not-exist-<uuid>.invalid` raised a HIGH DGA
+        // alert, yet no name under a special-use TLD can ever be registered.
+        if specialUseTLDs.contains(parts[parts.count - 1].lowercased()) {
+            return (shannonEntropy(sld), false, nil)
+        }
+
         // Check all non-TLD labels for DGA indicators
         let allLabels = parts.dropLast() // Remove TLD
         // DGA indicators
