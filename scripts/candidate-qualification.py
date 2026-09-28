@@ -900,11 +900,47 @@ def inventory_mounted_payload(mountpoint: pathlib.Path) -> Tuple[List[Dict[str, 
     return entries, sha256_bytes(canonical_json_bytes(entries))
 
 
+def refuse_attached_candidate_image(dmg: pathlib.Path) -> None:
+    """Name the operator's existing mount instead of an opaque attach failure.
+
+    v1.22.2: record-runtime died with "hdiutil: attach failed - Resource busy"
+    because the candidate DMG was still mounted from installing it.
+    """
+    result = run_checked(
+        [fixed_tool("/usr/bin/hdiutil"), "info", "-plist"], "disk image attachment inventory"
+    )
+    try:
+        info = plistlib.loads(result.stdout.encode("utf-8"))
+    except plistlib.InvalidFileException as exc:
+        fail(f"hdiutil did not return a readable info plist: {exc}")
+    images = info.get("images") if isinstance(info, dict) else None
+    for image in images if isinstance(images, list) else []:
+        image_path = image.get("image-path") if isinstance(image, dict) else None
+        if not isinstance(image_path, str):
+            continue
+        try:
+            same = os.path.samefile(image_path, dmg)
+        except OSError:
+            same = False
+        if not same and os.path.realpath(image_path) != os.path.realpath(dmg):
+            continue
+        entities = image.get("system-entities")
+        entities = [e for e in entities if isinstance(e, dict)] if isinstance(entities, list) else []
+        mounts = [str(e["mount-point"]) for e in entities if e.get("mount-point")]
+        devices = [str(e["dev-entry"]) for e in entities if e.get("dev-entry")]
+        attached_at = mounts or devices or [image_path]
+        fail(
+            f"candidate DMG is already attached at {', '.join(attached_at)}; "
+            f"detach it first with: hdiutil detach '{attached_at[0]}'"
+        )
+
+
 def inspect_artifact_full(dmg: pathlib.Path) -> Dict[str, Any]:
     codesign = fixed_tool("/usr/bin/codesign")
     xcrun = fixed_tool("/usr/bin/xcrun")
     spctl = fixed_tool("/usr/sbin/spctl")
     hdiutil = fixed_tool("/usr/bin/hdiutil")
+    refuse_attached_candidate_image(dmg)
 
     run_checked([codesign, "--verify", "--deep", "--strict", str(dmg)], "DMG codesign verification")
     dmg_identity = codesign_identity(dmg, label="DMG signing identity inspection")
@@ -2246,6 +2282,26 @@ def read_private_resource_baseline(source_root: pathlib.Path, commitment: Mappin
         return dict(document)
     except (OSError, ValueError, UnicodeError):
         fail("release qualification incomplete: exact private resource evidence is unavailable or invalid")
+
+
+def require_private_resource_baseline(source_root: pathlib.Path) -> None:
+    """Refuse to start an installed epoch whose verdict is already decided.
+
+    v1.22.2: a fresh clone ran the full 900 s record-runtime epoch and only
+    then failed, because the gitignored private receipt never travels with Git.
+    """
+    document = read_json_file(source_root / RESOURCE_BASELINE_PATH, "public reference resource policy")
+    commitment = object_value(document.get("private_evidence"), "private resource evidence commitment")
+    expected = (source_root.resolve() / PRIVATE_RESOURCE_BASELINE_DIRECTORY
+                / (require_sha(commitment.get("sha256"), "private resource evidence SHA") + ".json"))
+    try:
+        read_private_resource_baseline(source_root, commitment)
+    except QualificationError as exc:
+        fail(
+            f"{exc}. record-runtime needs {expected} before any capture; it is never "
+            "in Git, so copy it from the reference checkout with its permissions "
+            "(directory 0700, file 0600, owned by the checkout user)"
+        )
 
 
 def release_resource_limits(
@@ -7925,6 +7981,9 @@ def source_runtime_probe_evidence(
 
 def mounted_tool_probes(dmg: pathlib.Path, version: str, normal_policy: bool) -> Dict[str, Any]:
     hdiutil = fixed_tool("/usr/bin/hdiutil")
+    # Attaching an image the operator already mounted hands back that mount,
+    # which the finally-detach below would then pull out from under them.
+    refuse_attached_candidate_image(dmg)
     attached: str | None = None
     try:
         result = run_checked(
@@ -10540,6 +10599,7 @@ def command_record_runtime(args: argparse.Namespace) -> None:
     # Fail before spending the installed epoch when independent acceptance is
     # missing. Host equivalence is checked again against the actual capture.
     release_resource_limits(root, source_commit)
+    require_private_resource_baseline(root)
     heartbeat_path = absolute_path(args.heartbeat_path)
     data_dirs = [
         absolute_path(value)

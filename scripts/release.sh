@@ -394,6 +394,13 @@ print_qualification_next_steps() {
     echo "     --candidate-manifest '$CANDIDATE_MANIFEST' \\" >&2
     echo "     --dmg '$PROJECT_DIR/$DMG_PATH' --source-root '$PROJECT_DIR' \\" >&2
     echo "     --output '$RUNTIME_REPORT'" >&2
+    # v1.22.2: a fresh clone ran the whole 900 s epoch before discovering this
+    # gitignored receipt was missing. Say so before the operator starts.
+    echo "   It requires the private resource baseline committed to by" >&2
+    echo "   docs/RELEASE_RESOURCE_BASELINE.json, which Git never carries:" >&2
+    echo "     $PROJECT_DIR/.qualification-evidence/resource-baseline/<private_evidence.sha256>.json" >&2
+    echo "   In a fresh clone, copy it from the reference checkout with its permissions" >&2
+    echo "   (directory 0700, file 0600, owned by you)." >&2
     echo "2. Run 'VERSION=$VERSION make test-corpus' for the on-device containment JSON." >&2
     echo "3. Re-run this same release command. It will reuse, rehash, and re-verify" >&2
     echo "   these exact candidate bytes; it will not rebuild them." >&2
@@ -696,13 +703,58 @@ echo "  Deterministic CFBundleVersion: $BUILD_NUMBER"
 # shipped release. Enforce the property the derivation assumes — this commit
 # must descend from every release already published — rather than hoping for it.
 require_canonical_origin
-published_tags=$($GIT_BIN ls-remote --tags origin 'refs/tags/v*' \
+published_tag_refs=$($GIT_BIN ls-remote --tags origin 'refs/tags/v*')
+published_tags=$(printf '%s\n' "$published_tag_refs" \
     | $AWK_BIN '{ print $2 }' \
     | /usr/bin/sed -e 's|^refs/tags/||' -e 's|\^{}$||' \
     | LC_ALL=C /usr/bin/sort -u)
+# v1.22.2 pushed its tag and then failed the branch push. The remote v$VERSION
+# then named that attempt's metadata commit, a CHILD of this source rather than
+# an ancestor, so this check refused the very --respin meant to recover, and
+# with the local tag deleted it could not even resolve the tag. Under --respin,
+# resolve the remote v$VERSION itself (fetching only that tag when its objects
+# are absent) and exempt it only when it is provably an earlier metadata commit
+# for this exact source: single parent SOURCE_COMMIT, changing exactly the GA
+# metadata allowlist committed below. Its commit count is the one this run
+# publishes, so replacing it cannot regress CFBundleVersion. Anything else is
+# checked, and refused, exactly like every other published tag.
+respin_tag_commit=""
+respin_tag_replaceable=0
+if [ "$RESPIN" = "1" ]; then
+    respin_tag_object=$(printf '%s\n' "$published_tag_refs" \
+        | $AWK_BIN -v ref="refs/tags/v$VERSION" '$2 == ref && !found { print $1; found = 1 }')
+    if [ -n "$respin_tag_object" ]; then
+        if ! $GIT_BIN cat-file -e "$respin_tag_object" 2>/dev/null; then
+            echo "  Re-spin: fetching published tag v$VERSION to check whether it may be replaced"
+            if ! $GIT_BIN fetch --quiet --no-tags --no-prune --no-write-fetch-head \
+                    origin "refs/tags/v$VERSION"; then
+                echo "ERROR: could not fetch published tag v$VERSION to check its ancestry" >&2
+                exit 1
+            fi
+        fi
+        respin_tag_commit=$($GIT_BIN rev-parse --verify --quiet "${respin_tag_object}^{commit}" || true)
+        if [ -n "$respin_tag_commit" ] \
+                && [ "$($GIT_BIN rev-list --parents -n 1 "$respin_tag_commit")" \
+                    = "$respin_tag_commit $SOURCE_COMMIT" ] \
+                && [ "$($GIT_BIN diff-tree --no-commit-id --name-only -r \
+                    "$SOURCE_COMMIT" "$respin_tag_commit" | LC_ALL=C /usr/bin/sort)" \
+                    = $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]; then
+            respin_tag_replaceable=1
+        fi
+    fi
+fi
 while IFS= read -r prior_tag; do
     [ -n "$prior_tag" ] || continue
-    prior_commit=$($GIT_BIN rev-parse --verify --quiet "refs/tags/${prior_tag}^{commit}" || true)
+    if [ -n "$respin_tag_commit" ] && [ "$prior_tag" = "v$VERSION" ]; then
+        if [ "$respin_tag_replaceable" = "1" ]; then
+            echo "  Re-spin: published v$VERSION is this source's earlier metadata commit" \
+                "(${respin_tag_commit:0:12}); it will be replaced"
+            continue
+        fi
+        prior_commit=$respin_tag_commit
+    else
+        prior_commit=$($GIT_BIN rev-parse --verify --quiet "refs/tags/${prior_tag}^{commit}" || true)
+    fi
     if [ -z "$prior_commit" ]; then
         echo "ERROR: published tag '$prior_tag' is not present locally, so its ancestry" >&2
         echo "       cannot be checked. Run: git fetch --tags origin" >&2
@@ -715,6 +767,10 @@ while IFS= read -r prior_tag; do
         echo "       publish a version BELOW one already released — Sparkle would then never" >&2
         echo "       offer it to anyone running the higher build. Merge (do NOT squash) the" >&2
         echo "       published history into this branch and re-cut." >&2
+        if [ -n "$respin_tag_commit" ] && [ "$prior_tag" = "v$VERSION" ]; then
+            echo "       --respin replaces v$VERSION only when it names this source's single" >&2
+            echo "       child changing exactly release.json and both casks; this tag does not." >&2
+        fi
         exit 1
     fi
 done <<PUBLISHED_TAGS
