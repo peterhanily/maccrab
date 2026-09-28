@@ -41,6 +41,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/ci-local.sh
     scripts/run-ci-phase.py
     scripts/check-swift-toolchain.py
+    scripts/ci-receipt.py
     scripts/release.sh
     scripts/build-release.sh
     scripts/prepare-dmg-payload.sh
@@ -141,7 +142,9 @@ TAG_DMG_PATHS=()
 TAG_COMMIT=""
 TAG_OBJECT=""
 CREATED_TAG_COUNT=0
+PUSHED_REFS=""
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    PUSHED_REFS="${PUSHED_REFS}${_local_ref} ${_local_sha} ${remote_ref} ${_remote_sha}"$'\n'
     if [[ "$_local_ref" == refs/private/* || "$remote_ref" == refs/private/* ]]; then
         echo "ERROR: private recovery refs must never be published" >&2
         exit 2
@@ -264,5 +267,15 @@ if [ "$CLEAN_TREE" = "1" ]; then
         exit 2
     fi
     exec ./scripts/ci-local.sh "${CI_ARGS[@]}"
+fi
+
+# A release pushes its tag first, and that push has just run the clean CI on the
+# exact commit the branch push then sends; repeating the suite there cost ~30
+# minutes during v1.22.2 and proved nothing. A tag-free push may reuse a passing
+# clean run's receipt, but only when every pushed commit has one that still
+# matches this hook, ci-local.sh and the toolchain. The helper answers "run CI"
+# for anything else, including its own failure.
+if printf '%s' "$PUSHED_REFS" | /usr/bin/python3 -I scripts/ci-receipt.py check; then
+    exit 0
 fi
 exec ./scripts/ci-local.sh

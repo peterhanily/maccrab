@@ -61,6 +61,23 @@ and timeout. Evidence directories are private temporary siblings of the build
 workspace, so a clean build does not erase the failing phase. A timeout is a
 failure; a partial or filtered Swift run cannot establish a passing suite.
 
+Before the first build, the gate refuses to start unless the volumes holding
+`$TMPDIR` and the checkout each have at least 14 GiB free: the debug build plus
+the 1.5M-row legacy-upgrade test fixture otherwise exhaust the disk about 25
+minutes in (the v1.22.2 release CI failed twice that way).
+
+A passing `--clean` run over a checkout identical to `HEAD` records a receipt
+under `$(git rev-parse --git-common-dir)/maccrab-ci-receipts/<tree>.json`
+(directory `0700`, file `0600`) binding the commit, tree, toolchain identity,
+completion time and the blobs of `ci-local.sh`, the hook and
+`scripts/ci-receipt.py`. A push with no tag ref skips CI only when every pushed
+commit has such a receipt that is under six hours old, names that exact commit,
+matches the current hook, CI script, helper and toolchain, and is a private,
+non-symlinked file owned by the current user; the hook prints each receipt it
+reused. Anything else, including any read error, runs CI as before. Tag pushes
+always run the clean gate. This removes the third full run from a release,
+whose branch push sends the commit the tag push has just verified.
+
 ## The tradeoff, stated plainly
 
 Local CI runs on a machine that already has the toolchain, a warm `.build` and

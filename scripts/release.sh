@@ -41,6 +41,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/ci-local.sh
     scripts/run-ci-phase.py
     scripts/check-swift-toolchain.py
+    scripts/ci-receipt.py
     scripts/release.sh
     scripts/build-release.sh
     scripts/prepare-dmg-payload.sh
