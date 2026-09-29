@@ -718,6 +718,12 @@ published_tags=$(printf '%s\n' "$published_tag_refs" \
 # metadata allowlist committed below. Its commit count is the one this run
 # publishes, so replacing it cannot regress CFBundleVersion. Anything else is
 # checked, and refused, exactly like every other published tag.
+# Replacing the tag is only a recovery if the later non-force branch push can
+# still fast-forward. By the time v1.22.2 was recovered, origin/main had taken
+# PR #8, which the source does not contain. A re-spin from that state would
+# force the public tag onto a new metadata commit and then fail the branch
+# push, leaving the tag on a commit main cannot reach. Each retry would repeat
+# this, so the release branch is checked before anything is built or moved.
 respin_tag_commit=""
 respin_tag_replaceable=0
 if [ "$RESPIN" = "1" ]; then
@@ -740,6 +746,22 @@ if [ "$RESPIN" = "1" ]; then
                     "$SOURCE_COMMIT" "$respin_tag_commit" | LC_ALL=C /usr/bin/sort)" \
                     = $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]; then
             respin_tag_replaceable=1
+        fi
+    fi
+    if [ "$respin_tag_replaceable" = "1" ]; then
+        respin_branch_commit=$($GIT_BIN ls-remote origin "refs/heads/$RELEASE_BRANCH" \
+            | $AWK_BIN -v ref="refs/heads/$RELEASE_BRANCH" '$2 == ref && !found { print $1; found = 1 }')
+        if [ -z "$respin_branch_commit" ] \
+                || ! $GIT_BIN rev-parse --verify --quiet "${respin_branch_commit}^{commit}" >/dev/null \
+                || ! $GIT_BIN merge-base --is-ancestor "$respin_branch_commit" "$SOURCE_COMMIT"; then
+            echo "ERROR: --respin would replace published v$VERSION, but origin's $RELEASE_BRANCH" >&2
+            echo "       (${respin_branch_commit:-<missing>}) is not an ancestor of source $SOURCE_COMMIT." >&2
+            echo "       The branch push after the tag push could not fast-forward, leaving the" >&2
+            echo "       replaced public tag on a commit $RELEASE_BRANCH cannot reach." >&2
+            echo "       Do not re-spin. Bring $RELEASE_BRANCH to the published tag commit" >&2
+            echo "       $respin_tag_commit (merge it if $RELEASE_BRANCH moved), push it," >&2
+            echo "       then resume the post-push publication steps." >&2
+            exit 1
         fi
     fi
 fi

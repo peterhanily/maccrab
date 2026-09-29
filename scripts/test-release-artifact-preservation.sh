@@ -2779,6 +2779,8 @@ make_respin_prior_attempt() {
     printf '%s\n' "$remote" > "$fixture/.fixture-remote-repo"
     /usr/bin/git -C "$remote" rev-parse refs/tags/v9.9.11 > "$fixture/.fixture-remote-tag-object"
     printf 'refs/tags/v9.9.11\n' > "$fixture/.fixture-remote-tag-name"
+    # The branch push failed, so origin's main still names the source.
+    /usr/bin/git -C "$fixture" rev-parse HEAD > "$fixture/.fixture-remote-branch-commit"
 }
 
 run_respin_release() {
@@ -2860,6 +2862,40 @@ grep -q 'does not descend from published tag' "$respin_foreign/output.log" \
     && [ ! -s "$respin_foreign/build.log" ] \
     && ! grep -q 'release create' "$respin_foreign/gh.log" 2>/dev/null \
     || fail "refused re-spin built, moved the published tag, or reached GitHub"
+
+# A replaceable tag is still refused when origin's main would not fast-forward to
+# the re-spun commit. By v1.22.2's recovery, main had taken PR #8, a commit the
+# source lacks ("moved", objects absent locally); "pushed" is main already on
+# the earlier metadata commit. Force-replacing the tag and then failing the
+# non-force branch push would leave the public tag unreachable from main.
+for respin_branch_variant in moved pushed; do
+    respin_branch="$TEST_ROOT/release-respin-branch-$respin_branch_variant"
+    make_release_fixture "$respin_branch"
+    make_respin_prior_attempt "$respin_branch"
+    if [ "$respin_branch_variant" = moved ]; then
+        respin_branch_source=$(/usr/bin/git -C "$respin_branch" rev-parse HEAD)
+        /usr/bin/git -C "$respin_branch-origin" commit-tree -p "$respin_branch_source" \
+            -m 'concurrent change on main' "$respin_branch_source^{tree}" \
+            > "$respin_branch/.fixture-remote-branch-commit"
+    else
+        /usr/bin/git -C "$respin_branch-origin" rev-parse 'refs/tags/v9.9.11^{commit}' \
+            > "$respin_branch/.fixture-remote-branch-commit"
+    fi
+    respin_branch_tag=$(cat "$respin_branch/.fixture-remote-tag-object")
+    respin_branch_main=$(cat "$respin_branch/.fixture-remote-branch-commit")
+    run_respin_release "$respin_branch" --respin
+    [ "$respin_status" -ne 0 ] \
+        || fail "--respin replaced the tag although main cannot fast-forward ($respin_branch_variant)"
+    grep -q "origin's main" "$respin_branch/output.log" \
+        && grep -q "($respin_branch_main) is not an ancestor of source" "$respin_branch/output.log" \
+        && grep -q 'Do not re-spin' "$respin_branch/output.log" \
+        || fail "refused re-spin did not explain the unreachable release branch ($respin_branch_variant)"
+    [ "$(cat "$respin_branch/.fixture-remote-tag-object")" = "$respin_branch_tag" ] \
+        && [ "$(cat "$respin_branch/.fixture-remote-branch-commit")" = "$respin_branch_main" ] \
+        && [ ! -s "$respin_branch/build.log" ] \
+        && ! grep -q 'release create' "$respin_branch/gh.log" 2>/dev/null \
+        || fail "refused re-spin built, pushed, or reached GitHub ($respin_branch_variant)"
+done
 
 # Without --respin the same earlier metadata commit stays a hard stop.
 respin_unflagged="$TEST_ROOT/release-respin-flag-required"
