@@ -72,8 +72,13 @@ git switch --create "pause-v<BAD_VERSION>" origin/main
 # Delete only the item whose sparkle:version matches the bad full build ID.
 # Preserve every other item, especially the previous good release.
 $EDITOR appcast.xml
-# Restore the previous good release.json from the app repo's release tag:
-git -C <APP_CHECKOUT> show "v<GOOD_VERSION>:release.json" > release.json
+# Restore the previous good release.json from the app repo's release tag.
+# Write a temporary file first: a failed `git show` must not leave an empty
+# release.json to be committed with the appcast change.
+git -C <APP_CHECKOUT> show "v<GOOD_VERSION>:release.json" > release.json.new
+python3 -c 'import json; print(json.load(open("release.json.new"))["version"])'
+# expect: <GOOD_VERSION>
+mv release.json.new release.json
 git diff -- appcast.xml release.json
 git add -- appcast.xml release.json
 git commit -m "Roll back v<BAD_VERSION>: pull the appcast item and restore release.json"

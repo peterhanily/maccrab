@@ -40,9 +40,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Names under special-use TLDs (`.invalid`, `.test`, `.example`, `.localhost`,
   `.local`, `.arpa`) can never be registered, so a connectivity probe such as
   `this-url-does-not-exist-<uuid>.invalid` no longer raises a HIGH alert. The
-  vowel-ratio check now measures each hyphen-separated word, so service names
-  such as `gsp64-ssl.ls.apple.com` and `glb-db52c2cf8be544.github.com` are not
-  read as generated tokens; a vowel-free generated word is still flagged.
+  vowel-ratio check now measures each hyphen-separated word and leaves hex
+  tokens (words with digits) to the entropy checks, so service names such as
+  `gsp64-ssl.ls.apple.com` and the `glb-<hex>.github.com` family are not read
+  as generated text. Vowel-free generated text is still flagged, including when
+  it is split into short words.
 - **A non-interactive `install.sh` run exits 0 after a successful install.**
   Without a terminal (`sudo ./install.sh < /dev/null`, automation), the closing
   "Open MacCrab.app now?" prompt hit end of input and made the script exit 1.

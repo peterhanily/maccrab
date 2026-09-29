@@ -105,8 +105,12 @@ public enum EntropyAnalysis {
             // the mixed-alphanumeric check below: `gsp64-ssl` and
             // `glb-db52c2cf8be544` (Apple and GitHub service names) read as
             // one vowel-starved label but are short abbreviations joined up.
+            // Pronounceability is a letters-only signal, so words carrying
+            // digits (hex tokens) are left to the entropy and mixed checks.
             let vowels = Set("aeiou")
-            for word in labelStr.lowercased().split(separator: "-") where word.count > 6 {
+            let letterWords = labelStr.lowercased().split(separator: "-")
+                .filter { !$0.contains(where: { $0.isNumber }) }
+            for word in letterWords where word.count > 6 {
                 let vowelCount = word.filter { vowels.contains($0) }.count
                 let consonantCount = word.filter { $0.isLetter && !vowels.contains($0) }.count
                 guard consonantCount > 0 else { continue }
@@ -115,6 +119,12 @@ public enum EntropyAnalysis {
                     reasons.append("low vowel ratio in '\(labelStr.prefix(20))' (\(String(format: "%.2f", ratio)))")
                     break
                 }
+            }
+            // Splitting generated text into short words must not slip past the
+            // per-word check: 12+ letters with no vowel anywhere is still odd.
+            let letterCount = letterWords.reduce(0) { $0 + $1.filter(\.isLetter).count }
+            if letterCount >= 12, !letterWords.contains(where: { $0.contains(where: { vowels.contains($0) }) }) {
+                reasons.append("no vowels in \(letterCount) letters of '\(labelStr.prefix(20))'")
             }
 
             // Excessive length with numbers mixed in. Measured per hyphen-
