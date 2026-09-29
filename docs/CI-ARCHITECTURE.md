@@ -62,9 +62,14 @@ workspace, so a clean build does not erase the failing phase. A timeout is a
 failure; a partial or filtered Swift run cannot establish a passing suite.
 
 Before the first build, the gate refuses to start unless the volumes holding
-`$TMPDIR` and the checkout each have at least 14 GiB free: the debug build plus
-the 1.5M-row legacy-upgrade test fixture otherwise exhaust the disk about 25
-minutes in (the v1.22.2 release CI failed twice that way).
+`$TMPDIR` and the checkout each have room for what the run still needs: 10 GiB
+for the 1.5M-row legacy-upgrade test fixture, the store's 1 GiB free-space floor
+and 3 GiB for the debug build. With less, the run exhausts the disk about 25
+minutes in (the v1.22.2 release CI failed twice that way). A `--clean` run
+removes `.build` and the assessment harness build first and needs all 14 GiB; a
+warm run is credited the part of the 3 GiB already in `.build` (release DMGs
+excluded), so a complete warm build needs 11.3-11.7 GiB. A failed measurement
+refuses the run.
 
 A passing `--clean` run over a checkout identical to `HEAD` records a receipt
 under `$(git rev-parse --git-common-dir)/maccrab-ci-receipts/<tree>.json`
@@ -77,6 +82,13 @@ non-symlinked file owned by the current user; the hook prints each receipt it
 reused. Anything else, including any read error, runs CI as before. Tag pushes
 always run the clean gate. This removes the third full run from a release,
 whose branch push sends the commit the tag push has just verified.
+
+Git runs the hook even when it will push nothing, with empty input: every ref
+was rejected (non-fast-forward, stale `--force-with-lease`) or is already up to
+date. The hook then exits at once and lets git report why. A push that carries
+`release.sh`'s release manifest but no created or moved version tag, such as a
+`--respin` tag push whose lease went stale, fails immediately instead of
+running CI.
 
 A receipt is a convenience for the same local account, not an attestation to
 anyone else: that account can write one without running the suite, just as it
