@@ -209,6 +209,9 @@ struct EntropyTests {
 
         let (_, isToken, _) = EntropyAnalysis.analyzeDomain("a1b2c3d4e5f6g7h8i9j0.net")
         #expect(isToken, "a 20-character generated token is still flagged")
+
+        let (_, isHyphenated, _) = EntropyAnalysis.analyzeDomain("login-qwrtzpsdfghk.com")
+        #expect(isHyphenated, "a vowel-free generated word is flagged even beside a readable one")
     }
 
     @Test("DGA detection does not flag deep or hyphenated service names (v1.22.2 field set)")
@@ -221,6 +224,9 @@ struct EntropyTests {
             "gsp57-ssl-background.ls.apple.com",
             "configuration-lb.ls-apple.com.akadns.net",
             "background-weighted.ls4-apple.com.akadns.net",
+            // v1.22.3: seen on the same host after the v1.22.2 fixes.
+            "gsp64-ssl.ls.apple.com",
+            "glb-db52c2cf8be544.github.com",
         ] {
             let (_, isDGA, reason) = EntropyAnalysis.analyzeDomain(domain)
             #expect(!isDGA, "\(domain): \(reason ?? "")")

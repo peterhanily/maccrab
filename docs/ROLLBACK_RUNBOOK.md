@@ -50,11 +50,15 @@ use the protected release environment (`SITE_REPO_TOKEN` for the site and
 remote URLs, shell history or trace output, and never source the private
 environment file as shell code.
 
-## Step 1 — Halt the Sparkle rollout (appcast.xml)
+## Step 1 — Halt the Sparkle rollout and revert release.json (one site commit)
 
 Remove the bad `<item>` from the site repo's `appcast.xml`. With the bad item
 gone, the previous good version's retained `<item>` becomes the newest offer.
-Clients already on the bad build are not downgraded.
+Clients already on the bad build are not downgraded. Restore the previous good
+`release.json` in the **same commit**: the site deploys each commit separately
+and builds can finish out of order, so two commits seconds apart can leave the
+older tree live (v1.22.1's `release.json` served the previous build for six
+days that way).
 
 `publish-appcast-entry.sh` **only inserts** (and refuses to double-publish a
 version), so removal is a manual edit of the site repo. Use a clean checkout
@@ -68,9 +72,11 @@ git switch --create "pause-v<BAD_VERSION>" origin/main
 # Delete only the item whose sparkle:version matches the bad full build ID.
 # Preserve every other item, especially the previous good release.
 $EDITOR appcast.xml
-git diff -- appcast.xml
-git add -- appcast.xml
-git commit -m "Roll back appcast: pull v<BAD_VERSION>"
+# Restore the previous good release.json from the app repo's release tag:
+git -C <APP_CHECKOUT> show "v<GOOD_VERSION>:release.json" > release.json
+git diff -- appcast.xml release.json
+git add -- appcast.xml release.json
+git commit -m "Roll back v<BAD_VERSION>: pull the appcast item and restore release.json"
 git push origin HEAD:main
 # Cloudflare Pages redeploys in ~30–60s.
 ```
@@ -86,11 +92,12 @@ curl -fsS https://maccrab.com/appcast.xml | grep -Fc '<sparkle:version>GOOD_BUIL
 # expect: 1
 ```
 
-## Step 2 — Revert release.json (website version)
+## Step 2 — Verify release.json (website version)
 
-`release.json` at the repo root is the site's source of truth for the version
-pill and JSON-LD. Restore the previous good `release.json` and re-publish so the
-website stops advertising the bad build:
+`release.json` is the site's source of truth for the version pill and JSON-LD.
+Step 1 restored it together with the appcast. Only if it could not be included
+there, publish it separately as below, then re-check **both** live files once
+every deploy has finished, because the separate commit reintroduces the race:
 
 ```bash
 # In a clean maccrab (app) checkout — restore the prior release.json:

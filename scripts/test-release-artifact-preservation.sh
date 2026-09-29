@@ -1787,7 +1787,7 @@ set -e
 [ "$qualification_missing_status" -ne 0 ] || fail "release accepted missing installed-host evidence"
 /usr/bin/grep -q 'PUBLICATION STOPPED' "$qualification_missing/output.log" \
     || fail "missing runtime evidence did not explain the phase boundary"
-/usr/bin/grep -qF '/.qualification-evidence/resource-baseline/<private_evidence.sha256>.json' \
+/usr/bin/grep -qE '/\.qualification-evidence/resource-baseline/([0-9a-f]{64}|<private_evidence\.sha256>)\.json \((present|MISSING)\)' \
         "$qualification_missing/output.log" \
     || fail "next steps did not name the private resource baseline a fresh clone lacks"
 [ ! -s "$qualification_missing/build.log" ] || fail "missing evidence caused a qualified candidate rebuild"

@@ -78,6 +78,12 @@ reused. Anything else, including any read error, runs CI as before. Tag pushes
 always run the clean gate. This removes the third full run from a release,
 whose branch push sends the commit the tag push has just verified.
 
+A receipt is a convenience for the same local account, not an attestation to
+anyone else: that account can write one without running the suite, just as it
+can already bypass the hook with `git push --no-verify`. It carries no weight
+beyond the machine that wrote it, and publication still re-verifies the exact
+candidate's clean-CI transcript through `candidate-qualification.py`.
+
 ## The tradeoff, stated plainly
 
 Local CI runs on a machine that already has the toolchain, a warm `.build` and

@@ -101,14 +101,19 @@ public enum EntropyAnalysis {
                 reasons.append("high entropy label '\(labelStr.prefix(20))' (\(String(format: "%.2f", entropy)))")
             }
 
-            // Unusual consonant-to-vowel ratio
+            // Unusual consonant-to-vowel ratio, per hyphen-separated word like
+            // the mixed-alphanumeric check below: `gsp64-ssl` and
+            // `glb-db52c2cf8be544` (Apple and GitHub service names) read as
+            // one vowel-starved label but are short abbreviations joined up.
             let vowels = Set("aeiou")
-            let vowelCount = labelStr.lowercased().filter { vowels.contains($0) }.count
-            let consonantCount = labelStr.lowercased().filter { $0.isLetter && !vowels.contains($0) }.count
-            if consonantCount > 0 {
+            for word in labelStr.lowercased().split(separator: "-") where word.count > 6 {
+                let vowelCount = word.filter { vowels.contains($0) }.count
+                let consonantCount = word.filter { $0.isLetter && !vowels.contains($0) }.count
+                guard consonantCount > 0 else { continue }
                 let ratio = Double(vowelCount) / Double(consonantCount)
-                if ratio < 0.15 && labelStr.count > 6 {
+                if ratio < 0.15 {
                     reasons.append("low vowel ratio in '\(labelStr.prefix(20))' (\(String(format: "%.2f", ratio)))")
+                    break
                 }
             }
 

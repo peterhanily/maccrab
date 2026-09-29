@@ -398,9 +398,18 @@ print_qualification_next_steps() {
     echo "     --output '$RUNTIME_REPORT'" >&2
     # v1.22.2: a fresh clone ran the whole 900 s epoch before discovering this
     # gitignored receipt was missing. Say so before the operator starts.
+    local baseline_sha baseline_path
+    baseline_sha=$($GIT_BIN show "$SOURCE_COMMIT:docs/RELEASE_RESOURCE_BASELINE.json" 2>/dev/null \
+        | /usr/bin/python3 -I -c 'import json, sys; print(json.load(sys.stdin)["private_evidence"]["sha256"])' \
+            2>/dev/null || true)
+    baseline_path="$PROJECT_DIR/.qualification-evidence/resource-baseline/${baseline_sha:-<private_evidence.sha256>}.json"
     echo "   It requires the private resource baseline committed to by" >&2
     echo "   docs/RELEASE_RESOURCE_BASELINE.json, which Git never carries:" >&2
-    echo "     $PROJECT_DIR/.qualification-evidence/resource-baseline/<private_evidence.sha256>.json" >&2
+    if [ -n "$baseline_sha" ] && [ -f "$baseline_path" ] && [ ! -L "$baseline_path" ]; then
+        echo "     $baseline_path (present)" >&2
+    else
+        echo "     $baseline_path (MISSING)" >&2
+    fi
     echo "   In a fresh clone, copy it from the reference checkout with its permissions" >&2
     echo "   (directory 0700, file 0600, owned by you)." >&2
     echo "2. Run 'VERSION=$VERSION make test-corpus' for the on-device containment JSON." >&2
@@ -1226,6 +1235,8 @@ assert_release_state_unchanged() {
 
 assert_release_state_unchanged "tag push"
 if [ "$RESPIN" = "1" ]; then
+    # Replace only the tag object proven replaceable before the build (or no
+    # tag at all): a tag moved during the long CI gate must not be overwritten.
     MACCRAB_RELEASE_EXPECTED_DMG="$DMG_PATH" \
     MACCRAB_RELEASE_EXPECTED_SHA256="$gate_dmg_sha" \
     MACCRAB_RELEASE_EXPECTED_COMMIT="$FINAL_COMMIT" \
@@ -1234,7 +1245,8 @@ if [ "$RESPIN" = "1" ]; then
     MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" \
     MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" \
     MACCRAB_RELEASE_METADATA_TREE="$METADATA_TREE" \
-        $GIT_BIN push --force origin "refs/tags/v$VERSION"
+        $GIT_BIN push --force-with-lease="refs/tags/v$VERSION:${respin_tag_object:-}" \
+            origin "refs/tags/v$VERSION"
 else
     MACCRAB_RELEASE_EXPECTED_DMG="$DMG_PATH" \
     MACCRAB_RELEASE_EXPECTED_SHA256="$gate_dmg_sha" \
@@ -1610,9 +1622,9 @@ os.execve(sys.argv[1], sys.argv[1:], environment)
     else
         if [ -n "$APPCAST_ITEM" ]; then
             keep_appcast_item=1
-            release_fail "site publish failed — appcast.xml and release.json are published together or not at all; existing Sparkle users will not receive v$VERSION and maccrab.com advertises the PREVIOUS release until it lands. The generated item remains at $APPCAST_ITEM; after fixing the cause rerun 'SITE_REPO_TOKEN=<pat> scripts/publish-site-release.sh --item $APPCAST_ITEM --release-json release.json --site-repo $SITE_REPO --version $VERSION'"
+            release_fail "site publish failed — appcast.xml and release.json are published together or not at all; existing Sparkle users will not receive v$VERSION and maccrab.com advertises the PREVIOUS release until it lands. The generated item remains at $APPCAST_ITEM; after fixing the cause rerun, with the publisher profile loaded as in docs/ROLLBACK_RUNBOOK.md (never a token on the command line), 'scripts/publish-site-release.sh --item $APPCAST_ITEM --release-json release.json --site-repo $SITE_REPO --version $VERSION'"
         else
-            release_fail "release.json publish failed — maccrab.com is still advertising the PREVIOUS release; after fixing the cause rerun 'SITE_REPO_TOKEN=<pat> scripts/publish-site-release.sh --skip-appcast --release-json release.json --site-repo $SITE_REPO --version $VERSION'"
+            release_fail "release.json publish failed — maccrab.com is still advertising the PREVIOUS release; after fixing the cause rerun, with the publisher profile loaded as in docs/ROLLBACK_RUNBOOK.md (never a token on the command line), 'scripts/publish-site-release.sh --skip-appcast --release-json release.json --site-repo $SITE_REPO --version $VERSION'"
         fi
     fi
 if [ -n "$APPCAST_ITEM" ]; then

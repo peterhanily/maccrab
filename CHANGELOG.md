@@ -3,6 +3,76 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Rave forensic plugins show their results in dedicated views inside the
+  scan detail.** Secret Trail lists where copies of each credential type
+  appear, by file and line, with review-first candidates at the top and without
+  showing the secret itself. Repo Tripwire and Script Trace list their static
+  findings with the trigger and the review each one calls for. Remote Hands,
+  Skill Check, Localhost Lens, Dependency Autopsy, Decoy, Exit Check, Side Door,
+  Identity Aftershock, Build Witness and Last Good share one findings view.
+  Every view can be filtered, copies a hand-off note per finding, and keeps
+  coverage gaps and limitations next to the results.
+- **You choose what each file-reading Rave plugin may scan.** The plugin detail
+  panel has a "Selected sources" picker, and Run stays disabled until a
+  selection is saved. Up to 32 regular files or folders inside your home folder
+  can be selected; symbolic links are refused, and each plugin's selection is
+  stored with private permissions.
+- **Scan evidence can be turned into a review kept inside the encrypted case.**
+  "Review evidence" on Script Trace, Repo Tripwire, Secret Trail and ClickFix
+  Review scans (up to 5,000 records) gathers their findings, coverage and gaps
+  into a review stored in the same encrypted case. Reviewers can record
+  decisions, compare against an earlier report or review, recheck the retained
+  facts with current rules, and reopen reviews; a review leaves the case only
+  when explicitly exported to a file. Trust Delta app-update and First Hour
+  investigation results open in the same view. Reviews collect no new evidence,
+  reviewer names are self-reported, and a plaintext case cannot save a review.
+
+### Changed
+- **Plugin detail panels describe network access as declared.** They read
+  "No network requests declared" or "Declared network: ..." instead of "No
+  network egress", which matches what a plugin's manifest actually states.
+
+### Fixed
+- **DGA detection no longer flags reserved or abbreviated service names.**
+  Names under special-use TLDs (`.invalid`, `.test`, `.example`, `.localhost`,
+  `.local`, `.arpa`) can never be registered, so a connectivity probe such as
+  `this-url-does-not-exist-<uuid>.invalid` no longer raises a HIGH alert. The
+  vowel-ratio check now measures each hyphen-separated word, so service names
+  such as `gsp64-ssl.ls.apple.com` and `glb-db52c2cf8be544.github.com` are not
+  read as generated tokens; a vowel-free generated word is still flagged.
+- **A non-interactive `install.sh` run exits 0 after a successful install.**
+  Without a terminal (`sudo ./install.sh < /dev/null`, automation), the closing
+  "Open MacCrab.app now?" prompt hit end of input and made the script exit 1.
+  The prompt is offered only on a terminal; otherwise the app is not opened.
+  When accepted under sudo, the app opens as the user who ran the installer.
+
+### Release tooling
+- **The site's appcast and release.json are published in one commit.** Two
+  commits seconds apart let the site deploy the older tree last, which left
+  maccrab.com/release.json advertising the previous build for six days after
+  v1.22.1. `scripts/publish-site-release.sh` writes both files in a single,
+  non-forced commit, and release.sh verifies both live files afterwards. The
+  rollback runbook reverts both in one commit as well.
+- **`release.sh --respin` can finish a release whose tag push succeeded but
+  whose branch push failed.** It replaces the version's own published tag only
+  when that tag names the source's single metadata-only child commit and the
+  release branch can still fast-forward to the source, and the tag push is bound
+  to the exact tag object it checked. Any other same-version tag is refused.
+- **The installed-host recorder checks its inputs before the 900-second
+  capture.** It refuses to start without the private resource baseline, naming
+  the exact file to copy from the reference checkout, and while the candidate
+  DMG is still mounted, naming the mount point to detach.
+- **A release no longer runs the full suite a third time for its branch push.**
+  A passing clean CI records a local receipt for the exact commit, and a
+  tag-free push of that commit within six hours reuses it. Tag pushes always
+  run the clean gate.
+- **Local CI checks free disk space before building.** It fails at the start
+  with a clear message below about 14 GiB, instead of about 25 minutes in when
+  the 1.5M-row legacy-upgrade test exhausts the disk.
+
 ## [1.22.2] — 2026-09-25
 
 ### Fixed
