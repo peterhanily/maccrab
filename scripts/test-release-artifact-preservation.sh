@@ -1407,6 +1407,15 @@ fixture_cli = '''def _release_fixture_main():
         for flag in ("--dmg", "--candidate-manifest", "--runtime-report", "--containment-report"):
             path = pathlib.Path(value(flag))
             assert path.is_file() and path.stat().st_size > 0
+        # Like the real gate, hash the rule corpus under --source-root (the
+        # checkout, not the source commit) against the digest the runtime
+        # report recorded for the qualified source, when it records one.
+        recorded = json.loads(pathlib.Path(value("--runtime-report")).read_text()).get("source_rule_corpus_sha256")
+        if recorded is not None:
+            if recorded != rule_corpus_digest(pathlib.Path(value("--source-root"))):
+                print("file fidelity source rule corpus digest does not match the reviewed source", file=sys.stderr)
+                return 1
+            print("fixture gate: source rule corpus matches " + recorded)
     elif command in ("record-candidate", "runtime-template"):
         path = pathlib.Path(value("--output"))
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3083,7 +3092,9 @@ for respin_branch_variant in moved pushed; do
         && grep -q 'Do not re-spin' "$respin_branch/output.log" \
         || fail "refused re-spin did not explain the unreachable release branch ($respin_branch_variant)"
     grep -qF 'scripts/release.sh 9.9.11 --resume-publish' "$respin_branch/output.log" \
-        || fail "refused re-spin did not point at --resume-publish ($respin_branch_variant)"
+        && grep -qF "git checkout --detach $(/usr/bin/git -C "$respin_branch-origin" rev-parse 'refs/tags/v9.9.11^{commit}')" \
+            "$respin_branch/output.log" \
+        || fail "refused re-spin did not point at --resume-publish from the tagged commit ($respin_branch_variant)"
     [ "$(cat "$respin_branch/.fixture-remote-tag-object")" = "$respin_branch_tag" ] \
         && [ "$(cat "$respin_branch/.fixture-remote-branch-commit")" = "$respin_branch_main" ] \
         && [ ! -e "$respin_branch/ci.log" ] && [ ! -s "$respin_branch/build.log" ] \
@@ -3114,6 +3125,8 @@ run_respin_release "$own_tag_plain"
 [ "$respin_status" -ne 0 ] || fail "a plain run accepted its own published version"
 grep -q 'an earlier run of this candidate pushed its tag' "$own_tag_plain/output.log" \
     && grep -qF 'scripts/release.sh 9.9.11 --resume-publish' "$own_tag_plain/output.log" \
+    && grep -qF "git checkout --detach $(/usr/bin/git -C "$own_tag_plain" rev-parse 'refs/tags/v9.9.11^{commit}')" \
+        "$own_tag_plain/output.log" \
     && grep -q -- '--respin can replace the tag' "$own_tag_plain/output.log" \
     || fail "a plain run did not point its own earlier attempt at --resume-publish/--respin"
 ! grep -q 'published history into this branch and re-cut' "$own_tag_plain/output.log" \
@@ -3202,11 +3215,22 @@ write_resume_manifest() {
 }
 
 # v1.22.2 end to end: the qualified candidate's tag push succeeds, its branch
-# push fails, and another change reaches origin's main before a retry.
+# push fails, and another change reaches origin's main before a retry. The
+# source carries a rule corpus whose digest the runtime report records, and the
+# fixture gate compares it with the checkout's, as the real gate does.
 resume_flow="$TEST_ROOT/release-resume-publish"
 make_qualified_ga_sparkle_fixture "$resume_flow"
+/bin/mkdir -p "$resume_flow/Rules/fixture"
+printf 'title: qualified fixture rule\n' > "$resume_flow/Rules/fixture/source.yml"
+/usr/bin/git -C "$resume_flow" add Rules/fixture/source.yml
+/usr/bin/git -C "$resume_flow" -c core.hooksPath=.no-hooks commit -q -m 'add a fixture rule corpus'
 resume_source=$(/usr/bin/git -C "$resume_flow" rev-parse HEAD)
 write_resume_manifest "$resume_flow" 9.9.11
+resume_rules_sha=$(/usr/bin/python3 -I -B -c \
+    'import pathlib, runpy, sys; print(runpy.run_path(sys.argv[1])["rule_corpus_digest"](pathlib.Path(sys.argv[2])))' \
+    "$resume_flow/scripts/candidate-qualification.py" "$resume_flow")
+printf '{"source_rule_corpus_sha256":"%s"}\n' "$resume_rules_sha" \
+    > "$resume_flow/.qualification-evidence/MacCrab-v9.9.11.runtime.json"
 run_release_with "$resume_flow" 9.9.11 MACCRAB_TEST_BRANCH_PUSH_STATUS=1
 [ "$release_with_status" -ne 0 ] || fail "a failed branch push was reported as success"
 resume_final=$(/usr/bin/git -C "$resume_flow" rev-parse HEAD)
@@ -3218,16 +3242,24 @@ resume_tag=$(/usr/bin/git -C "$resume_flow" rev-parse refs/tags/v9.9.11)
 grep -q 'PUBLICATION STOPPED: the main push failed after the release tag was pushed' "$resume_flow/output.log" \
     && grep -q "v9.9.11 is public and verified: annotated tag $resume_tag on $resume_final" "$resume_flow/output.log" \
     && grep -qF 'scripts/release.sh 9.9.11 --resume-publish' "$resume_flow/output.log" \
+    && grep -qF "git checkout --detach $resume_final" "$resume_flow/output.log" \
     && grep -qF "git update-ref refs/heads/main $resume_source $resume_final" "$resume_flow/output.log" \
-    || fail "branch-push failure did not explain the public tag, --resume-publish, and the moved local branch"
+    || fail "branch-push failure did not explain the public tag, --resume-publish from the tagged commit, and the moved local branch"
+grep -q "fixture gate: source rule corpus matches $resume_rules_sha" "$resume_flow/output.log" \
+    || fail "resume fixture: the gate did not check the source's rule corpus"
 
-# Another change lands on origin's main, a child of what origin had.
+# Another change lands on origin's main, a child of what origin had. It adds a
+# rule, so after the merge the checkout's rule corpus is not the qualified one.
 resume_origin_before=$(cat "$resume_flow/.fixture-remote-branch-commit")
 resume_index="$resume_flow/tmp/concurrent.index"
 GIT_INDEX_FILE="$resume_index" /usr/bin/git -C "$resume_flow" read-tree "$resume_origin_before"
 resume_blob=$(printf 'concurrent change\n' | /usr/bin/git -C "$resume_flow" hash-object -w --stdin)
 GIT_INDEX_FILE="$resume_index" /usr/bin/git -C "$resume_flow" \
     update-index --add --cacheinfo "100644,$resume_blob,docs/CONCURRENT.md"
+resume_rule_blob=$(printf 'title: rule added on main after qualification\n' \
+    | /usr/bin/git -C "$resume_flow" hash-object -w --stdin)
+GIT_INDEX_FILE="$resume_index" /usr/bin/git -C "$resume_flow" \
+    update-index --add --cacheinfo "100644,$resume_rule_blob,Rules/fixture/concurrent.yml"
 resume_concurrent=$(/usr/bin/git -C "$resume_flow" commit-tree \
     -p "$resume_origin_before" -m 'concurrent change on main' \
     "$(GIT_INDEX_FILE="$resume_index" /usr/bin/git -C "$resume_flow" write-tree)")
@@ -3240,15 +3272,15 @@ run_release_with "$resume_flow" 9.9.11 -- --resume-publish
 grep -q "origin's main ($resume_concurrent) does not contain" "$resume_flow/output.log" \
     && grep -qF "git merge $resume_final" "$resume_flow/output.log" \
     && grep -q 'never squash, rebase or cherry-pick' "$resume_flow/output.log" \
-    || fail "--resume-publish did not print the exact merge-and-push steps"
+    && grep -qF "git checkout --detach $resume_final" "$resume_flow/output.log" \
+    || fail "--resume-publish did not print the exact merge, push and return-to-tag steps"
 [ ! -e "$resume_flow/gh.log" ] && [ ! -e "$resume_flow/publish.log" ] \
     && [ "$(cat "$resume_flow/.fixture-remote-tag-object")" = "$resume_tag" ] \
     && [ "$(cat "$resume_flow/.fixture-remote-branch-commit")" = "$resume_concurrent" ] \
     || fail "refused --resume-publish reached GitHub, a publisher, or a remote ref"
 
-# The operator follows those steps (origin's main merged into local main,
-# already at the metadata commit), then main moves on and rewrites
-# release.json and the casks, so the checkout no longer holds the tagged bytes.
+# The operator merges (origin's main into local main, already at the metadata
+# commit), then main moves on and rewrites release.json and the casks.
 /usr/bin/git -C "$resume_flow" -c core.hooksPath=.no-hooks merge -q --no-edit "$resume_concurrent"
 printf '{"version":"9.9.12-dev","sha256":"%064d"}\n' 2 > "$resume_flow/release.json"
 printf 'cask "maccrab" do\n  version "9.9.12-dev"\n  sha256 "%064d"\nend\n' 2 > "$resume_flow/Casks/maccrab.rb"
@@ -3260,6 +3292,39 @@ printf '%s\n' "$resume_head" > "$resume_flow/.fixture-remote-branch-commit"
 /usr/bin/git -C "$resume_flow" merge-base --is-ancestor "$resume_final" "$resume_head" \
     || fail "resume fixture: main does not contain the tagged commit"
 
+# The gate re-reads the checkout, so on this merge it would fail: the merged
+# rule is not in the corpus the candidate was qualified with.
+set +e
+/usr/bin/python3 -I "$resume_flow/scripts/candidate-qualification.py" verify-release \
+    --source-root "$resume_flow" --dmg "$resume_flow/.build/MacCrab-v9.9.11.dmg" \
+    --candidate-manifest "$resume_flow/.qualification-evidence/MacCrab-v9.9.11.candidate.json" \
+    --runtime-report "$resume_flow/.qualification-evidence/MacCrab-v9.9.11.runtime.json" \
+    --containment-report "$resume_flow/.qualification-evidence/MacCrab-v9.9.11.containment.json" \
+    > "$resume_flow/tmp/merge-gate.log" 2>&1
+resume_merge_gate_status=$?
+set -e
+[ "$resume_merge_gate_status" -ne 0 ] \
+    && grep -q 'rule corpus digest does not match the reviewed source' "$resume_flow/tmp/merge-gate.log" \
+    || fail "resume fixture: the gate accepted the merge checkout's changed rule corpus"
+
+# Resume from that merge is refused before the gate runs, with the way out.
+rm -f "$resume_flow/gh.log" "$resume_flow/publish.log" "$resume_flow/git.log"
+run_release_with "$resume_flow" 9.9.11 -- --resume-publish
+[ "$release_with_status" -ne 0 ] || fail "--resume-publish ran from a merge checkout"
+grep -q 'runs from the commit v9.9.11 names' "$resume_flow/output.log" \
+    && grep -q "but this checkout is $resume_head" "$resume_flow/output.log" \
+    && grep -qF 'git fetch origin tag v9.9.11' "$resume_flow/output.log" \
+    && grep -qF 'git checkout --detach v9.9.11' "$resume_flow/output.log" \
+    || fail "--resume-publish from a merge did not point at a detached checkout of the tag"
+! grep -q 'Qualification preflight' "$resume_flow/output.log" \
+    && [ ! -e "$resume_flow/gh.log" ] && [ ! -e "$resume_flow/publish.log" ] \
+    && [ ! -e "$resume_flow/git.log" ] \
+    && [ "$(/usr/bin/git -C "$resume_flow" rev-parse HEAD)" = "$resume_head" ] \
+    || fail "refused --resume-publish from a merge ran the gate, reached GitHub, or moved a ref"
+
+# Following the printed steps: a detached checkout of the tag, in this same
+# directory. Its release.json and casks are the tagged ones; main's differ.
+/usr/bin/git -C "$resume_flow" -c core.hooksPath=.no-hooks checkout -q --detach v9.9.11
 rm -f "$resume_flow/gh.log" "$resume_flow/publish.log" "$resume_flow/git.log"
 resume_ci_runs=$(/usr/bin/wc -l < "$resume_flow/ci.log" | /usr/bin/tr -d ' ')
 run_release_with "$resume_flow" 9.9.11 -- --resume-publish
@@ -3270,6 +3335,8 @@ fi
 grep -q 'MacCrab v9.9.11 Released!' "$resume_flow/output.log" \
     && grep -q 'Steps 0-1: skipped under --resume-publish' "$resume_flow/output.log" \
     || fail "--resume-publish did not complete through the post-push steps alone"
+grep -q "fixture gate: source rule corpus matches $resume_rules_sha" "$resume_flow/output.log" \
+    || fail "--resume-publish from the tag did not pass the gate's rule-corpus check"
 [ "$(grep -c 'release create' "$resume_flow/gh.log")" = 1 ] \
     && grep -qE 'release create --repo peterhanily/maccrab v9\.9\.11 /private/tmp/maccrab-release-upload\.[^/]*/MacCrab-v9\.9\.11\.dmg' "$resume_flow/gh.log" \
     && grep -qE -- '--notes-file /private/tmp/maccrab-release-metadata\.[^/]*/RELEASE_NOTES/v9\.9\.11\.md' "$resume_flow/gh.log" \
@@ -3282,13 +3349,14 @@ done
 /usr/bin/git -C "$resume_flow" cat-file blob "$resume_final:Casks/maccrab.rb" > "$resume_flow/tmp/tagged-cask.rb"
 cmp -s "$resume_flow/.fixture-site/release.json" "$resume_flow/tmp/tagged-release.json" \
     && cmp -s "$resume_flow/.fixture-published-cask" "$resume_flow/tmp/tagged-cask.rb" \
-    || fail "--resume-publish published the checkout's metadata instead of the tagged commit's"
+    || fail "--resume-publish published main's metadata instead of the tagged commit's"
 resume_metadata_dir=$(dirname "$(dirname "$(cat "$resume_flow/.fixture-published-cask-path")")")
 [[ "$resume_metadata_dir" == /private/tmp/maccrab-release-metadata.* ]] && [ ! -e "$resume_metadata_dir" ] \
     || fail "--resume-publish did not read, then remove, its private metadata copy"
 [ "$(cat "$resume_flow/.fixture-remote-tag-object")" = "$resume_tag" ] \
     && [ "$(cat "$resume_flow/.fixture-remote-branch-commit")" = "$resume_head" ] \
-    && [ "$(/usr/bin/git -C "$resume_flow" rev-parse HEAD)" = "$resume_head" ] \
+    && [ "$(/usr/bin/git -C "$resume_flow" rev-parse HEAD)" = "$resume_final" ] \
+    && [ "$(/usr/bin/git -C "$resume_flow" rev-parse refs/heads/main)" = "$resume_head" ] \
     && [ "$(/usr/bin/git -C "$resume_flow" rev-parse refs/tags/v9.9.11)" = "$resume_tag" ] \
     && [ ! -e "$resume_flow/git.log" ] \
     || fail "--resume-publish moved or pushed a tag or branch"
@@ -3305,8 +3373,23 @@ grep -q 'GitHub release v9.9.11 already exists' "$resume_flow/output.log" \
     && ! grep -q 'release create' "$resume_flow/gh.log" && [ ! -e "$resume_flow/publish.log" ] \
     || fail "--resume-publish did not refuse an existing GitHub release before any publication"
 
+# Checks out, detached, a metadata-only child of the fixture's source that names
+# its preserved DMG, as a release run commits it: a checkout resume accepts.
+checkout_local_metadata_commit() {
+    local fixture="$1" message="$2" dmg_sha
+    dmg_sha=$(/usr/bin/shasum -a 256 "$fixture/.build/MacCrab-v9.9.11.dmg" | /usr/bin/cut -c1-64)
+    /usr/bin/git -C "$fixture" -c core.hooksPath=.no-hooks checkout -q --detach
+    printf '{"version":"9.9.11","sha256":"%s"}\n' "$dmg_sha" > "$fixture/release.json"
+    printf 'cask "maccrab" do\n  version "9.9.11"\n  sha256 "%s"\nend\n' "$dmg_sha" \
+        > "$fixture/Casks/maccrab.rb"
+    cp "$fixture/Casks/maccrab.rb" "$fixture/homebrew/maccrab.rb"
+    /usr/bin/git -C "$fixture" add release.json Casks/maccrab.rb homebrew/maccrab.rb
+    /usr/bin/git -C "$fixture" -c core.hooksPath=.no-hooks commit -q -m "$message"
+}
+
 # Resume publishes only the metadata-only child a release run of this candidate
-# pushed; any other same-version tag is refused before anything runs.
+# pushed; any other same-version tag is refused before anything is published,
+# even from a checkout that passes the pre-gate check.
 resume_foreign="$TEST_ROOT/release-resume-not-metadata-only"
 make_release_fixture "$resume_foreign"
 write_resume_manifest "$resume_foreign" 9.9.11
@@ -3315,14 +3398,39 @@ printf 'preserved qualified GA candidate\n' > "$resume_foreign/.build/MacCrab-v9
 printf '{}\n' > "$resume_foreign/.qualification-evidence/MacCrab-v9.9.11.runtime.json"
 make_respin_prior_attempt "$resume_foreign" README.md
 resume_foreign_tag=$(cat "$resume_foreign/.fixture-remote-tag-object")
+resume_foreign_commit=$(/usr/bin/git -C "$resume_foreign-origin" rev-parse 'refs/tags/v9.9.11^{commit}')
+checkout_local_metadata_commit "$resume_foreign" 'chore: update release metadata to v9.9.11'
 run_release_with "$resume_foreign" 9.9.11 -- --resume-publish
 [ "$release_with_status" -ne 0 ] || fail "--resume-publish accepted a tag that is not a metadata-only child"
-grep -q 'single child of the qualified source' "$resume_foreign/output.log" \
+grep -q "published v9.9.11 names $resume_foreign_commit, which is not the" "$resume_foreign/output.log" \
+    && grep -q 'single child of the qualified source' "$resume_foreign/output.log" \
     || fail "--resume-publish did not explain why the tag cannot be resumed"
 [ "$(cat "$resume_foreign/.fixture-remote-tag-object")" = "$resume_foreign_tag" ] \
     && [ ! -e "$resume_foreign/gh.log" ] && [ ! -e "$resume_foreign/publish.log" ] \
     && [ ! -e "$resume_foreign/ci.log" ] && [ ! -s "$resume_foreign/build.log" ] \
     || fail "refused --resume-publish ran CI, built, moved the tag, or reached GitHub"
+
+# A re-spin can leave more than one metadata commit of the same source; resume
+# runs only from the one origin's tag names.
+resume_other="$TEST_ROOT/release-resume-other-attempt"
+make_release_fixture "$resume_other"
+write_resume_manifest "$resume_other" 9.9.11
+/bin/mkdir -p "$resume_other/.build"
+printf 'preserved qualified GA candidate\n' > "$resume_other/.build/MacCrab-v9.9.11.dmg"
+printf '{}\n' > "$resume_other/.qualification-evidence/MacCrab-v9.9.11.runtime.json"
+make_respin_prior_attempt "$resume_other"
+resume_other_tag=$(cat "$resume_other/.fixture-remote-tag-object")
+resume_other_commit=$(/usr/bin/git -C "$resume_other-origin" rev-parse 'refs/tags/v9.9.11^{commit}')
+checkout_local_metadata_commit "$resume_other" 'chore: update release metadata to v9.9.11 (unpushed attempt)'
+run_release_with "$resume_other" 9.9.11 -- --resume-publish
+[ "$release_with_status" -ne 0 ] || fail "--resume-publish ran from a metadata commit the tag does not name"
+grep -q "published v9.9.11 names $resume_other_commit, but this checkout is" "$resume_other/output.log" \
+    && grep -qF "git checkout --detach $resume_other_commit" "$resume_other/output.log" \
+    || fail "--resume-publish did not point at the commit the published tag names"
+[ "$(cat "$resume_other/.fixture-remote-tag-object")" = "$resume_other_tag" ] \
+    && [ ! -e "$resume_other/gh.log" ] && [ ! -e "$resume_other/publish.log" ] \
+    && [ ! -e "$resume_other/ci.log" ] && [ ! -s "$resume_other/build.log" ] \
+    || fail "refused --resume-publish from another attempt ran CI, built, moved the tag, or reached GitHub"
 
 # An RC publishes the exact source commit, so its tag names the source itself.
 resume_rc="$TEST_ROOT/release-resume-rc"
@@ -3336,6 +3444,20 @@ resume_rc_tag=$(/usr/bin/git -C "$resume_rc" rev-parse refs/tags/v9.9.11-rc.1)
 printf '%s\n' "$resume_rc_tag" > "$resume_rc/.fixture-remote-tag-object"
 printf 'refs/tags/v9.9.11-rc.1\n' > "$resume_rc/.fixture-remote-tag-name"
 resume_rc_main=$(cat "$resume_rc/.fixture-remote-branch-commit")
+# From a later commit on main the RC resume is refused before its gate, with
+# the RC's own resume command.
+printf 'later change on main\n' >> "$resume_rc/docs/COVERAGE.md"
+/usr/bin/git -C "$resume_rc" add docs/COVERAGE.md
+/usr/bin/git -C "$resume_rc" -c core.hooksPath=.no-hooks commit -q -m 'later change on main'
+run_release_with "$resume_rc" 9.9.11-rc.1 -- --publish-rc --resume-publish
+[ "$release_with_status" -ne 0 ] || fail "RC --resume-publish ran from a later commit"
+grep -q 'runs from its qualified source' "$resume_rc/output.log" \
+    && grep -qF 'git checkout --detach v9.9.11-rc.1' "$resume_rc/output.log" \
+    && grep -qF 'scripts/release.sh 9.9.11-rc.1 --publish-rc --resume-publish' "$resume_rc/output.log" \
+    && ! grep -q 'Qualification preflight' "$resume_rc/output.log" \
+    && [ ! -e "$resume_rc/gh.log" ] \
+    || fail "RC --resume-publish from a later commit did not stop before the gate with the RC resume steps"
+/usr/bin/git -C "$resume_rc" -c core.hooksPath=.no-hooks checkout -q --detach v9.9.11-rc.1
 run_release_with "$resume_rc" 9.9.11-rc.1 -- --publish-rc --resume-publish
 if [ "$release_with_status" -ne 0 ]; then
     tail -60 "$resume_rc/output.log" >&2

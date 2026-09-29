@@ -6,7 +6,8 @@ set +x
 # Usage:
 #   ./scripts/release.sh 1.1.0
 #   ./scripts/release.sh 1.1.0 --resume-publish   # finish a release whose tag is
-#                                                 # public but whose branch push failed
+#                                                 # public but whose branch push failed;
+#                                                 # run from a checkout of the tag's commit
 #
 # Requires: DEVELOPER_ID and NOTARIZE_KEYCHAIN_PROFILE for a new candidate.
 # Set these in ~/.maccrab-release-env (parsed as data) or export them.
@@ -363,8 +364,9 @@ require_versioned_pre_push_gate() {
 require_versioned_pre_push_gate
 current_branch=$($GIT_BIN symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
 # --resume-publish moves no local or remote ref and checks origin's branch
-# itself, so it may also run from a detached checkout of the published tag
-# (useful when the branch has since changed files the qualification gate reads).
+# itself. It runs from the published tag's own commit, usually a detached
+# checkout, because the branch may since have changed files the qualification
+# gate reads (checked below, before the gate).
 if [ "$current_branch" != "$RELEASE_BRANCH" ] && [ "$RESUME_PUBLISH" != "1" ]; then
     echo "ERROR: on branch '$current_branch' but releases must be cut from '$RELEASE_BRANCH'." >&2
     exit 1
@@ -385,11 +387,26 @@ is_regular_evidence_file() {
     [ -f "$1" ] && [ ! -L "$1" ] && [ -s "$1" ]
 }
 
-# Under --resume-publish HEAD is the published metadata commit or a merge that
-# contains it, not the qualified source. Take the source commit/tree from the
-# candidate manifest instead; the qualification gate then verifies that
-# manifest, the DMG's signed source attestation and both host reports against
-# them exactly as it does for a normal second phase.
+# A published same-version tag is an earlier attempt of THIS candidate only when
+# it names the source's single child changing exactly the GA metadata allowlist:
+# the commit a release run creates just before its tag push.
+is_release_metadata_child() {
+    [ "$($GIT_BIN rev-list --parents -n 1 "$1")" = "$1 $SOURCE_COMMIT" ] \
+        && [ "$($GIT_BIN diff-tree --no-commit-id --name-only -r "$SOURCE_COMMIT" "$1" \
+            | LC_ALL=C /usr/bin/sort)" = $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]
+}
+
+# Every recovery message prints this; an RC is refused without --publish-rc.
+RESUME_COMMAND="scripts/release.sh $VERSION --resume-publish"
+if [ "$VERSION_IS_RC" = "1" ]; then
+    RESUME_COMMAND="scripts/release.sh $VERSION --publish-rc --resume-publish"
+fi
+
+# Under --resume-publish HEAD is the commit the published tag names, which for a
+# GA is the metadata commit, not the qualified source. Take the source
+# commit/tree from the candidate manifest instead; the qualification gate then
+# verifies that manifest, the DMG's signed source attestation and both host
+# reports against them exactly as it does for a normal second phase.
 if [ "$RESUME_PUBLISH" = "1" ]; then
     if ! is_regular_evidence_file "$CANDIDATE_MANIFEST"; then
         echo "ERROR: --resume-publish needs the qualified candidate manifest: $CANDIDATE_MANIFEST" >&2
@@ -412,6 +429,36 @@ print(*values)
         exit 1
     fi
     echo "Resume: qualified candidate source $SOURCE_COMMIT (checkout HEAD $($GIT_BIN rev-parse HEAD))"
+    # The gate re-reads this checkout, not the source commit: it compares the
+    # rule corpus, the runtime workload executors, the committed resource
+    # baseline and the Tier-B containment sources with the evidence recorded
+    # for the source, and the containment evidence names this directory. The
+    # v1.22.2 recovery merged main before publishing, and a merge checkout
+    # carrying a later rule edit fails that gate with no hint why. Require the
+    # tag's own commit, which matches the source in every file except
+    # release.json and the casks, and check it here, before the gate runs.
+    resume_head=$($GIT_BIN rev-parse HEAD)
+    if { [ "$VERSION_IS_RC" = "1" ] && [ "$resume_head" != "$SOURCE_COMMIT" ]; } \
+            || { [ "$VERSION_IS_RC" != "1" ] && ! is_release_metadata_child "$resume_head"; }; then
+        if [ "$VERSION_IS_RC" = "1" ]; then
+            echo "ERROR: --resume-publish of an RC runs from its qualified source $SOURCE_COMMIT," >&2
+        else
+            echo "ERROR: --resume-publish runs from the commit v$VERSION names: the single child of" >&2
+            echo "       the qualified source $SOURCE_COMMIT changing exactly release.json and both casks," >&2
+        fi
+        echo "       but this checkout is $resume_head. The qualification gate re-reads this" >&2
+        echo "       checkout's rules, workload scripts, resource baseline and containment" >&2
+        echo "       sources, so a later commit can fail it. In this same directory, which" >&2
+        echo "       holds the candidate and its evidence, run:" >&2
+        echo "         git fetch origin tag v$VERSION" >&2
+        echo "         git checkout --detach v$VERSION" >&2
+        echo "         $RESUME_COMMAND" >&2
+        echo "       Nothing was published, and no tag or branch was moved." >&2
+        exit 1
+    fi
+    # The gate and every executor below are then the ones this candidate was
+    # qualified with, not whatever a later commit carries.
+    verify_release_executor_blobs "$SOURCE_COMMIT"
 fi
 BUILD_NUMBER="${VERSION%%-rc.*}.$($GIT_BIN rev-list --count "$SOURCE_COMMIT")"
 
@@ -605,15 +652,6 @@ echo ""
 # they used to run after the ~30-minute clean CI, so a refusal cost the whole
 # gate. The tag push re-reads origin immediately before it goes out.
 
-# A published same-version tag is an earlier attempt of THIS candidate only when
-# it names the source's single child changing exactly the GA metadata allowlist:
-# the commit a release run creates just before its tag push.
-is_release_metadata_child() {
-    [ "$($GIT_BIN rev-list --parents -n 1 "$1")" = "$1 $SOURCE_COMMIT" ] \
-        && [ "$($GIT_BIN diff-tree --no-commit-id --name-only -r "$SOURCE_COMMIT" "$1" \
-            | LC_ALL=C /usr/bin/sort)" = $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]
-}
-
 # The branch push after the tag push is a plain, non-force push of the release
 # commit (the source's metadata child, or the source itself for an RC), so it
 # lands only when origin's branch is an ancestor of the source. v1.22.2's did
@@ -705,6 +743,18 @@ if [ "$RESUME_PUBLISH" = "1" ]; then
             echo "       metadata commit a release run of this candidate pushed." >&2
             exit 1
         fi
+        # The check before the gate proved HEAD matches the source in every
+        # file the gate reads. A re-spin can leave more than one metadata
+        # commit, so also bind HEAD to the one origin's tag names. (An RC's
+        # HEAD and tag were both checked against the source itself.)
+        if [ "$release_tag_commit" != "$resume_head" ]; then
+            echo "ERROR: published v$VERSION names $release_tag_commit, but this checkout is" >&2
+            echo "       $resume_head. Run --resume-publish from the tag's commit, in this directory:" >&2
+            echo "         git checkout --detach $release_tag_commit" >&2
+            echo "         $RESUME_COMMAND" >&2
+            echo "       Nothing was published, and no tag or branch was moved." >&2
+            exit 1
+        fi
         for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
             case "$metadata_path" in
                 release.json) metadata_sha_pattern='"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' ;;
@@ -725,13 +775,16 @@ if [ "$RESUME_PUBLISH" = "1" ]; then
         echo "       $release_tag_commit, the commit published v$VERSION names, so the" >&2
         echo "       release would announce a commit $RELEASE_BRANCH cannot reach." >&2
         echo "       Merge it into $RELEASE_BRANCH, never squash, rebase or cherry-pick it (each" >&2
-        echo "       makes a different commit and leaves the tag unreachable), push, and rerun:" >&2
+        echo "       makes a different commit and leaves the tag unreachable), and push. Then" >&2
+        echo "       return to the tag's commit, because the qualification gate re-reads this" >&2
+        echo "       checkout and the merge can bring in later rule or workload changes, and rerun:" >&2
         echo "         git fetch origin" >&2
         echo "         git switch $RELEASE_BRANCH" >&2
         echo "         git merge origin/$RELEASE_BRANCH" >&2
         echo "         git merge $release_tag_commit" >&2
         echo "         git push origin $RELEASE_BRANCH" >&2
-        echo "         scripts/release.sh $VERSION --resume-publish" >&2
+        echo "         git checkout --detach $release_tag_commit" >&2
+        echo "         $RESUME_COMMAND" >&2
         echo "       Nothing was published, and no tag or branch was moved." >&2
         exit 1
     fi
@@ -760,8 +813,9 @@ elif [ -n "$release_tag_commit" ]; then
         echo "ERROR: v$VERSION is already published on origin, on this source's metadata commit" >&2
         echo "       $release_tag_commit: an earlier run of this candidate pushed its tag and" >&2
         echo "       stopped before publishing, as v1.22.2 did when its branch push failed." >&2
-        echo "       Publish that tag without rebuilding:" >&2
-        echo "         scripts/release.sh $VERSION --resume-publish" >&2
+        echo "       Publish that tag without rebuilding, from its commit in this directory:" >&2
+        echo "         git checkout --detach $release_tag_commit" >&2
+        echo "         $RESUME_COMMAND" >&2
         echo "       It explains how to merge the tag's commit if origin's $RELEASE_BRANCH lacks it." >&2
         if origin_release_branch_fast_forwards; then
             echo "       Or, because origin's $RELEASE_BRANCH has not moved past this source," >&2
@@ -820,7 +874,9 @@ if [ "$RESUME_PUBLISH" != "1" ]; then
             echo "       replaced public tag on a commit $RELEASE_BRANCH cannot reach." >&2
             echo "       Do not re-spin. Publish the existing tag instead: make origin's" >&2
             echo "       $RELEASE_BRANCH contain $release_tag_commit (merge it; never squash or" >&2
-            echo "       rebase), then run: scripts/release.sh $VERSION --resume-publish" >&2
+            echo "       rebase), then run from that commit, in this directory:" >&2
+            echo "         git checkout --detach $release_tag_commit" >&2
+            echo "         $RESUME_COMMAND" >&2
         else
             echo "ERROR: origin's $RELEASE_BRANCH (${origin_branch_commit:-<missing>}) is not an ancestor" >&2
             echo "       of source $SOURCE_COMMIT, so the branch push after the tag push could not" >&2
@@ -1548,11 +1604,15 @@ if [ "$RESUME_PUBLISH" != "1" ]; then
         echo "  or cask was published. Do not move or delete the tag, and do not rebuild." >&2
         echo "" >&2
         echo "  Fix the push failure above, make origin's $RELEASE_BRANCH contain $FINAL_COMMIT" >&2
-        echo "  by a merge (never squash or rebase), then publish from the existing tag:" >&2
+        echo "  by a merge (never squash or rebase), then publish from the existing tag. Run the" >&2
+        echo "  resume from the tagged commit in this directory, not from the merge: the" >&2
+        echo "  qualification gate re-reads this checkout, and the merge can bring in later rule" >&2
+        echo "  or workload changes that fail it." >&2
         echo "    git fetch origin" >&2
         echo "    git merge origin/$RELEASE_BRANCH" >&2
         echo "    git push origin $RELEASE_BRANCH" >&2
-        echo "    scripts/release.sh $VERSION --resume-publish" >&2
+        echo "    git checkout --detach $FINAL_COMMIT" >&2
+        echo "    $RESUME_COMMAND" >&2
         if [ "$FINAL_COMMIT" != "$SOURCE_COMMIT" ]; then
             echo "" >&2
             echo "  This run already moved local refs/heads/$RELEASE_BRANCH from $SOURCE_COMMIT" >&2
