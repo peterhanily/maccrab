@@ -144,7 +144,9 @@ TAG_COMMIT=""
 TAG_OBJECT=""
 CREATED_TAG_COUNT=0
 PUSHED_REFS=""
-while read -r _local_ref _local_sha remote_ref _remote_sha; do
+# `|| [ -n ... ]` keeps a final line with no trailing newline, so an unterminated
+# ref list is still gated instead of reading as "nothing to push".
+while read -r _local_ref _local_sha remote_ref _remote_sha || [ -n "${_local_ref:-}" ]; do
     PUSHED_REFS="${PUSHED_REFS}${_local_ref} ${_local_sha} ${remote_ref} ${_remote_sha}"$'\n'
     if [[ "$_local_ref" == refs/private/* || "$remote_ref" == refs/private/* ]]; then
         echo "ERROR: private recovery refs must never be published" >&2

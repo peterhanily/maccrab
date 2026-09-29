@@ -73,9 +73,12 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   with a clear message below about 14 GiB (11.3-11.7 GiB when a warm build is
   already on disk), instead of about 25 minutes in when the 1.5M-row
   legacy-upgrade test exhausts the disk.
-- **A push that git rejects no longer runs local CI first.** When every ref is
-  rejected or already up to date, the pre-push hook exits at once and git
-  reports why, instead of after a full CI run.
+- **A push that git has already rejected in full no longer runs local CI
+  first.** When git drops every ref before the hook runs (a non-fast-forward
+  push, a stale `--force-with-lease`, or a push that is already up to date),
+  the pre-push hook exits at once and git reports why, instead of after a full
+  CI run. A push git will still send, including one it later rejects, is gated
+  as before.
 
 ## [1.22.2] — 2026-09-25
 
