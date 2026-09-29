@@ -15,6 +15,7 @@ import json
 import io
 import os
 import pathlib
+import plistlib
 import signal
 import sqlite3
 import subprocess
@@ -1881,6 +1882,42 @@ class CandidateQualificationTests(unittest.TestCase):
                 mock.patch.object(qualification.os, "fstat", return_value=foreign):
             with self.assertRaisesRegex(qualification.QualificationError, "single private file"):
                 qualification.read_private_resource_baseline(directory, commitment)
+
+    def test_record_runtime_checks_the_private_baseline_before_any_capture(self) -> None:
+        # v1.22.2: a fresh clone spent the full 900 s epoch before this failed.
+        directory = self.resource_baseline_source()
+        policy = self.write_resource_policy_fixture(directory)
+        raw = (directory / qualification.RESOURCE_BASELINE_PATH).read_text()
+        private = (directory.resolve() / qualification.PRIVATE_RESOURCE_BASELINE_DIRECTORY
+                   / (policy["private_evidence"]["sha256"] + ".json"))
+        args = qualification.parser().parse_args([
+            "record-runtime", "--candidate-manifest", str(self.manifest_path),
+            "--dmg", str(self.dmg), "--source-root", str(directory),
+            "--output", str(self.root / "runtime-output.json"),
+        ])
+        guidance = (re.escape(str(private)) + r" before any capture.*copy it from the reference "
+                    r"checkout with its permissions \(directory 0700, file 0600")
+        capture_started = RuntimeError("capture started")
+        with mock.patch.object(qualification, "validate_candidate_document", return_value=self.manifest["candidate"]), \
+                mock.patch.object(qualification, "assert_exact_clean_source"), \
+                mock.patch.object(qualification, "run_checked",
+                                  return_value=subprocess.CompletedProcess([], 0, raw, "")), \
+                mock.patch.object(qualification, "live_runtime_recording", side_effect=capture_started) as live:
+            with self.assertRaises(RuntimeError):
+                qualification.command_record_runtime(args)
+            live.assert_called_once()
+            saved = private.read_bytes()
+            for state in ("missing", "readable-by-others"):
+                with self.subTest(state=state):
+                    live.reset_mock()
+                    if state == "missing":
+                        private.unlink()
+                    else:
+                        private.write_bytes(saved)
+                        private.chmod(0o644)
+                    with self.assertRaisesRegex(qualification.QualificationError, guidance):
+                        qualification.command_record_runtime(args)
+                    live.assert_not_called()
 
     def test_private_resource_validation_recomputes_measurements_and_requires_same_host(self) -> None:
         directory = self.resource_baseline_source()
@@ -6422,6 +6459,68 @@ class StorageConvergenceEvidenceTests(unittest.TestCase):
                 line_filter=qualification.storage_convergence_refill_loop_line,
             )
         self.assertEqual(count, 0)
+
+
+class CandidateImageAttachmentTests(unittest.TestCase):
+    """v1.22.2: record-runtime failed "attach failed - Resource busy" on the operator's own mount."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="maccrab-attachment-test.")
+        self.dmg = pathlib.Path(self.temporary.name) / "MacCrab-v9.9.9.dmg"
+        self.dmg.write_bytes(b"candidate\n")
+        self.commands: list = []
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    @staticmethod
+    def image(path: pathlib.Path, mount_point: str | None = "/Volumes/MacCrab") -> dict:
+        volume = {"content-hint": "Apple_HFS", "dev-entry": "/dev/disk9s1"}
+        if mount_point:
+            volume["mount-point"] = mount_point
+        return {"image-path": str(path), "system-entities": [
+            {"content-hint": "GUID_partition_scheme", "dev-entry": "/dev/disk9"}, volume,
+        ]}
+
+    def hdiutil(self, *images: dict):
+        info = plistlib.dumps({"framework": "fixture", "images": list(images)}).decode("utf-8")
+
+        def run(command, label):
+            self.commands.append(list(command))
+            if list(command) == ["/usr/bin/hdiutil", "info", "-plist"]:
+                return subprocess.CompletedProcess(command, 0, info, "")
+            raise AssertionError(f"ran {command} although the candidate is already attached")
+        return mock.patch.object(qualification, "run_checked", side_effect=run)
+
+    def test_full_inspection_names_the_mount_to_detach_before_any_attach(self) -> None:
+        with self.hdiutil(self.image(self.dmg)):
+            with self.assertRaisesRegex(
+                qualification.QualificationError,
+                r"already attached at /Volumes/MacCrab; detach it first with: hdiutil detach '/Volumes/MacCrab'",
+            ):
+                qualification.inspect_artifact_full(self.dmg)
+        self.assertEqual(self.commands, [["/usr/bin/hdiutil", "info", "-plist"]])
+
+    def test_tool_probes_refuse_instead_of_reusing_and_detaching_the_operators_mount(self) -> None:
+        with self.hdiutil(self.image(self.dmg)), \
+                mock.patch.object(qualification.subprocess, "run") as run:
+            with self.assertRaisesRegex(qualification.QualificationError, "already attached at /Volumes/MacCrab"):
+                qualification.mounted_tool_probes(self.dmg, "9.9.9", True)
+        run.assert_not_called()
+        self.assertEqual(self.commands, [["/usr/bin/hdiutil", "info", "-plist"]])
+
+    def test_the_same_file_through_another_path_or_without_a_volume_is_still_named(self) -> None:
+        alias = self.dmg.with_name("alias.dmg")
+        alias.symlink_to(self.dmg.name)
+        with self.hdiutil(self.image(alias, mount_point=None)):
+            with self.assertRaisesRegex(qualification.QualificationError, "hdiutil detach '/dev/disk9'"):
+                qualification.refuse_attached_candidate_image(self.dmg)
+
+    def test_other_attached_images_do_not_block_the_candidate(self) -> None:
+        other = self.dmg.with_name("MacCrab-v9.9.8.dmg")
+        other.write_bytes(self.dmg.read_bytes())
+        with self.hdiutil(self.image(other), self.image(pathlib.Path("/missing/elsewhere.dmg"))):
+            qualification.refuse_attached_candidate_image(self.dmg)
 
 
 class InvokingUserHandoffTests(unittest.TestCase):

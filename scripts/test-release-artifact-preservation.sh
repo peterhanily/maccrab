@@ -1149,6 +1149,12 @@ make_release_fixture() {
         '                [ -s .fixture-remote-tag-object ] || exit 0' \
         '                printf "%s\t%s\n" "$(cat .fixture-remote-tag-object)" "$(cat .fixture-remote-tag-name 2>/dev/null || printf "%s" "$want")" ;;' \
         '        esac ;;' \
+        '    fetch)' \
+        '        [ -s .fixture-remote-repo ] || exit 128' \
+        '        printf "%s\n" "$*" >> .fixture-fetch.log' \
+        '        fetch_args=()' \
+        '        for arg in "$@"; do if [ "$arg" = origin ]; then fetch_args+=("$(cat .fixture-remote-repo)"); else fetch_args+=("$arg"); fi; done' \
+        '        exec /usr/bin/git "${fetch_args[@]}" ;;' \
         '    push)' \
         '        case "$*" in' \
         '            *refs/tags/*)' \
@@ -1681,6 +1687,9 @@ set -e
 [ "$qualification_missing_status" -ne 0 ] || fail "release accepted missing installed-host evidence"
 /usr/bin/grep -q 'PUBLICATION STOPPED' "$qualification_missing/output.log" \
     || fail "missing runtime evidence did not explain the phase boundary"
+/usr/bin/grep -qF '/.qualification-evidence/resource-baseline/<private_evidence.sha256>.json' \
+        "$qualification_missing/output.log" \
+    || fail "next steps did not name the private resource baseline a fresh clone lacks"
 [ ! -s "$qualification_missing/build.log" ] || fail "missing evidence caused a qualified candidate rebuild"
 [ ! -s "$qualification_missing/gh.log" ] || fail "missing evidence reached GitHub"
 
@@ -2745,6 +2754,159 @@ grep -q 'RELEASE INCOMPLETE' "$release_multi_fail/output.log" \
 multi_recovery_item=$(sed -n 's/^  ! Appcast recovery item retained: //p' \
     "$release_multi_fail/output.log" | tail -1)
 [ -z "$multi_recovery_item" ] || rm -f "$multi_recovery_item"
+
+# v1.22.2 pushed its tag, then failed the branch push. origin's v9.9.11 named
+# that attempt's metadata commit, a child of the source rather than an ancestor,
+# so the published-tag ancestry check refused the --respin meant to recover.
+# The earlier attempt is committed in a separate clone standing in for origin,
+# so its tag objects are genuinely absent locally unless release.sh fetches them.
+make_respin_prior_attempt() {
+    local fixture="$1" extra_path="${2:-}" remote="$1-origin"
+    /usr/bin/git -c core.hooksPath=.no-hooks clone -q "$fixture" "$remote"
+    /usr/bin/git -C "$remote" config user.name 'MacCrab release fixture'
+    /usr/bin/git -C "$remote" config user.email 'release-fixture@invalid.example'
+    /usr/bin/git -C "$remote" config commit.gpgSign false
+    /usr/bin/git -C "$remote" config tag.gpgSign false
+    /usr/bin/git -C "$remote" config core.hooksPath .no-hooks
+    printf '{"version":"9.9.11","sha256":"%064d"}\n' 1 > "$remote/release.json"
+    printf 'cask "maccrab" do\n  version "9.9.11"\n  sha256 "%064d"\nend\n' 1 \
+        > "$remote/Casks/maccrab.rb"
+    cp "$remote/Casks/maccrab.rb" "$remote/homebrew/maccrab.rb"
+    [ -z "$extra_path" ] || printf 'outside the GA metadata allowlist\n' >> "$remote/$extra_path"
+    /usr/bin/git -C "$remote" add -A
+    /usr/bin/git -C "$remote" commit -q -m 'chore: update release metadata to v9.9.11'
+    /usr/bin/git -C "$remote" tag -a v9.9.11 -m 'MacCrab v9.9.11'
+    printf '%s\n' "$remote" > "$fixture/.fixture-remote-repo"
+    /usr/bin/git -C "$remote" rev-parse refs/tags/v9.9.11 > "$fixture/.fixture-remote-tag-object"
+    printf 'refs/tags/v9.9.11\n' > "$fixture/.fixture-remote-tag-name"
+    # The branch push failed, so origin's main still names the source.
+    /usr/bin/git -C "$fixture" rev-parse HEAD > "$fixture/.fixture-remote-branch-commit"
+}
+
+run_respin_release() {
+    local fixture="$1"
+    shift
+    set +e
+    (
+        cd "$fixture"
+        env PATH="$fixture/fake-bin:/usr/bin:/bin" HOME="$fixture/home" TMPDIR="$fixture/tmp" \
+            DEVELOPER_ID="fixture identity" SITE_REPO_TOKEN="fixture token" RELEASE_BRANCH=main \
+            MACCRAB_TEST_GH_LOG="$fixture/gh.log" MACCRAB_TEST_GIT_LOG="$fixture/git.log" \
+            MACCRAB_TEST_PUBLISH_LOG="$fixture/publish.log" \
+            ./scripts/release.sh 9.9.11 --skip-prerelease-check "$@"
+    ) > "$fixture/output.log" 2>&1
+    respin_status=$?
+    set -e
+}
+
+# "fetched": the operator deleted the local tag, so only origin has it.
+# "local-tag": the operator kept it; Existing-tag handling must re-point it.
+for respin_variant in fetched local-tag; do
+    respin_fixture="$TEST_ROOT/release-respin-$respin_variant"
+    make_release_fixture "$respin_fixture"
+    respin_source=$(/usr/bin/git -C "$respin_fixture" rev-parse HEAD)
+    make_respin_prior_attempt "$respin_fixture"
+    respin_prior_tag=$(cat "$respin_fixture/.fixture-remote-tag-object")
+    if [ "$respin_variant" = local-tag ]; then
+        /usr/bin/git -C "$respin_fixture" -c core.hooksPath=.no-hooks fetch -q \
+            "$respin_fixture-origin" refs/tags/v9.9.11:refs/tags/v9.9.11
+    elif /usr/bin/git -C "$respin_fixture" cat-file -e "$respin_prior_tag" 2>/dev/null; then
+        fail "respin fixture: the earlier attempt's tag object is already local"
+    fi
+    run_respin_release "$respin_fixture" --respin
+    if [ "$respin_status" -ne 0 ]; then
+        tail -60 "$respin_fixture/output.log" >&2
+        fail "--respin could not replace the tag an interrupted release published ($respin_variant)"
+    fi
+    grep -q "Re-spin: published v9.9.11 is this source's earlier metadata commit" \
+            "$respin_fixture/output.log" \
+        || fail "--respin did not identify the earlier metadata commit ($respin_variant)"
+    if [ "$respin_variant" = fetched ]; then
+        [ "$(cat "$respin_fixture/.fixture-fetch.log")" \
+                = 'fetch --quiet --no-tags --no-prune --no-write-fetch-head origin refs/tags/v9.9.11' ] \
+            || fail "--respin did not fetch exactly the published v9.9.11 tag"
+    else
+        [ ! -e "$respin_fixture/.fixture-fetch.log" ] \
+            || fail "--respin fetched a tag whose objects were already local"
+        grep -q 'Re-spin: moving tag v9.9.11' "$respin_fixture/output.log" \
+            || fail "--respin did not re-point the retained local tag"
+    fi
+    respin_final=$(/usr/bin/git -C "$respin_fixture" rev-parse HEAD)
+    [ "$(/usr/bin/git -C "$respin_fixture" rev-list --parents -n 1 "$respin_final")" \
+            = "$respin_final $respin_source" ] \
+        || fail "re-spun metadata commit is not the source's single child ($respin_variant)"
+    respin_new_tag=$(/usr/bin/git -C "$respin_fixture" rev-parse refs/tags/v9.9.11)
+    [ "$respin_new_tag" != "$respin_prior_tag" ] \
+        && [ "$(/usr/bin/git -C "$respin_fixture" rev-parse "$respin_new_tag^{commit}")" = "$respin_final" ] \
+        || fail "--respin did not create a replacement tag on the new metadata commit ($respin_variant)"
+    [ "$(cat "$respin_fixture/.fixture-remote-tag-object")" = "$respin_new_tag" ] \
+        && grep -q "tag=$respin_new_tag " "$respin_fixture/git.log" \
+        || fail "--respin did not push the replacement tag through the tag gate ($respin_variant)"
+    grep -q 'MacCrab v9.9.11 Released!' "$respin_fixture/output.log" \
+        || fail "--respin recovery did not complete the release ($respin_variant)"
+done
+
+# The exemption is narrow: a same-version tag whose commit changes anything
+# beyond the GA metadata allowlist is not an earlier attempt of this candidate.
+respin_foreign="$TEST_ROOT/release-respin-not-metadata-only"
+make_release_fixture "$respin_foreign"
+make_respin_prior_attempt "$respin_foreign" README.md
+respin_foreign_tag=$(cat "$respin_foreign/.fixture-remote-tag-object")
+run_respin_release "$respin_foreign" --respin
+[ "$respin_status" -ne 0 ] \
+    || fail "--respin replaced a same-version tag that is not a metadata-only child"
+grep -q 'does not descend from published tag' "$respin_foreign/output.log" \
+    && grep -q -- '--respin replaces v9.9.11 only when' "$respin_foreign/output.log" \
+    || fail "refused re-spin did not explain why the published tag cannot be replaced"
+[ "$(cat "$respin_foreign/.fixture-remote-tag-object")" = "$respin_foreign_tag" ] \
+    && [ ! -s "$respin_foreign/build.log" ] \
+    && ! grep -q 'release create' "$respin_foreign/gh.log" 2>/dev/null \
+    || fail "refused re-spin built, moved the published tag, or reached GitHub"
+
+# A replaceable tag is still refused when origin's main would not fast-forward to
+# the re-spun commit. By v1.22.2's recovery, main had taken PR #8, a commit the
+# source lacks ("moved", objects absent locally); "pushed" is main already on
+# the earlier metadata commit. Force-replacing the tag and then failing the
+# non-force branch push would leave the public tag unreachable from main.
+for respin_branch_variant in moved pushed; do
+    respin_branch="$TEST_ROOT/release-respin-branch-$respin_branch_variant"
+    make_release_fixture "$respin_branch"
+    make_respin_prior_attempt "$respin_branch"
+    if [ "$respin_branch_variant" = moved ]; then
+        respin_branch_source=$(/usr/bin/git -C "$respin_branch" rev-parse HEAD)
+        /usr/bin/git -C "$respin_branch-origin" commit-tree -p "$respin_branch_source" \
+            -m 'concurrent change on main' "$respin_branch_source^{tree}" \
+            > "$respin_branch/.fixture-remote-branch-commit"
+    else
+        /usr/bin/git -C "$respin_branch-origin" rev-parse 'refs/tags/v9.9.11^{commit}' \
+            > "$respin_branch/.fixture-remote-branch-commit"
+    fi
+    respin_branch_tag=$(cat "$respin_branch/.fixture-remote-tag-object")
+    respin_branch_main=$(cat "$respin_branch/.fixture-remote-branch-commit")
+    run_respin_release "$respin_branch" --respin
+    [ "$respin_status" -ne 0 ] \
+        || fail "--respin replaced the tag although main cannot fast-forward ($respin_branch_variant)"
+    grep -q "origin's main" "$respin_branch/output.log" \
+        && grep -q "($respin_branch_main) is not an ancestor of source" "$respin_branch/output.log" \
+        && grep -q 'Do not re-spin' "$respin_branch/output.log" \
+        || fail "refused re-spin did not explain the unreachable release branch ($respin_branch_variant)"
+    [ "$(cat "$respin_branch/.fixture-remote-tag-object")" = "$respin_branch_tag" ] \
+        && [ "$(cat "$respin_branch/.fixture-remote-branch-commit")" = "$respin_branch_main" ] \
+        && [ ! -s "$respin_branch/build.log" ] \
+        && ! grep -q 'release create' "$respin_branch/gh.log" 2>/dev/null \
+        || fail "refused re-spin built, pushed, or reached GitHub ($respin_branch_variant)"
+done
+
+# Without --respin the same earlier metadata commit stays a hard stop.
+respin_unflagged="$TEST_ROOT/release-respin-flag-required"
+make_release_fixture "$respin_unflagged"
+make_respin_prior_attempt "$respin_unflagged"
+run_respin_release "$respin_unflagged"
+[ "$respin_status" -ne 0 ] || fail "a published same-version tag was replaced without --respin"
+grep -q "published tag 'v9.9.11' is not present locally" "$respin_unflagged/output.log" \
+    || fail "published tag without --respin did not fail as before"
+[ ! -e "$respin_unflagged/.fixture-fetch.log" ] \
+    || fail "release fetched a published tag without --respin"
 
 while IFS= read -r github_log; do
     assert_no_github_delete "$github_log"
