@@ -16,6 +16,11 @@ set +x
 #
 # Reads ./release.json (produced by build-release.sh) and PUTs it to
 # peterhanily/maccrab-site/release.json on main.
+#
+# Manual single-file recovery only. release.sh publishes appcast.xml and
+# release.json together through publish-site-release.sh: two site commits
+# seconds apart can deploy out of order (2026-09-22), so after running this,
+# check the live file rather than trusting the commit.
 
 set -euo pipefail
 

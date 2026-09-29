@@ -500,6 +500,15 @@ done
 /usr/bin/grep -q -- '--dmg "\$UPLOAD_SNAPSHOT"' "$PROJECT_DIR/scripts/release.sh"
 /usr/bin/grep -q 'BUILD_WORKSPACE/scripts/generate-appcast-entry.sh' \
     "$PROJECT_DIR/scripts/release.sh"
+# Two site commits seconds apart deployed out of order on 2026-09-22; the
+# release must keep publishing appcast.xml and release.json as one commit.
+/usr/bin/grep -q 'BUILD_WORKSPACE/scripts/publish-site-release.sh' "$PROJECT_DIR/scripts/release.sh" \
+    || { echo "  ✗ release.sh no longer publishes the site through one commit" >&2; exit 1; }
+if /usr/bin/grep -qE 'BUILD_WORKSPACE/scripts/publish-(appcast-entry|release-json)\.sh' \
+        "$PROJECT_DIR/scripts/release.sh"; then
+    echo "  ✗ release.sh publishes appcast.xml and release.json as separate site commits" >&2
+    exit 1
+fi
 
 extract_executor_list() {
     /usr/bin/awk '

@@ -62,6 +62,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/generate-appcast-entry.sh
     scripts/publish-appcast-entry.sh
     scripts/publish-release-json.sh
+    scripts/publish-site-release.sh
     scripts/publish-cask.sh
     Compiler/compile_rules.py
 )
@@ -1408,7 +1409,7 @@ if [ "$VERSION_IS_RC" = "1" ]; then
     exit 0
 fi
 
-# Step 6: Publish appcast entry. Pre-fix this script stopped after
+# Step 6: Generate the appcast entry. Pre-fix this script stopped after
 # `gh release create` and the operator had to remember to run
 # generate-appcast-entry.sh + publish-appcast-entry.sh manually. The
 # procedural gap meant several point releases shipped to GitHub but
@@ -1418,15 +1419,18 @@ fi
 # a public GitHub tag/asset, so those surfaces must not be reported complete
 # while serving an older version.
 SITE_REPO="${SITE_REPO:-peterhanily/maccrab-site}"
+APPCAST_ITEM=""
+keep_appcast_item=0
+SITE_PUBLISH_ARGS=(--release-json "$PROJECT_DIR/release.json" --site-repo "$SITE_REPO" --version "$VERSION")
 if [ "${SKIP_APPCAST:-0}" = "1" ]; then
     echo ""
     echo "  Step 6/6: Skipping appcast publish (SKIP_APPCAST=1)"
+    SITE_PUBLISH_ARGS+=(--skip-appcast)
 else
     echo ""
-    echo "Step 6/6: Publishing appcast entry..."
+    echo "Step 6/6: Generating appcast entry..."
     verify_immutable_upload_snapshot
     APPCAST_ITEM=$(/usr/bin/mktemp /private/tmp/maccrab-appcast-item.XXXXXX)
-    keep_appcast_item=0
     APPCAST_ROLLOUT_ARGS=()
     if [ "${MACCRAB_APPCAST_IMMEDIATE:-0}" = "1" ]; then
         APPCAST_ROLLOUT_ARGS+=(--immediate)
@@ -1443,60 +1447,70 @@ else
             --dmg "$UPLOAD_SNAPSHOT" --version "$VERSION" --build-number "$BUILD_NUMBER" \
             "${APPCAST_ROLLOUT_ARGS[@]}" \
             > "$APPCAST_ITEM"; then
-        # The publisher receives only the one PAT it needs; Apple credentials,
-        # other PATs and signing configuration are not inherited.
-        if SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" /usr/bin/python3 -I -B -c '
-import os, sys
-environment = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"],
-               "TMPDIR": "/private/tmp", "LC_ALL": "C", "LANG": "C",
-               "SITE_REPO_TOKEN": os.environ["SITE_REPO_TOKEN"]}
-os.execve(sys.argv[1], sys.argv[1:], environment)
-' "$BUILD_WORKSPACE/scripts/publish-appcast-entry.sh" \
-                --item "$APPCAST_ITEM" \
-                --site-repo "$SITE_REPO" \
-                --version "$VERSION"; then
-            echo "  ✓ Appcast entry published; existing v1.x users will see the update within ~30s"
-        else
-            keep_appcast_item=1
-            release_fail "appcast publish failed — the generated item remains at $APPCAST_ITEM; rerun 'scripts/publish-appcast-entry.sh --item $APPCAST_ITEM --site-repo $SITE_REPO --version $VERSION' after fixing credentials; existing Sparkle users will not receive v$VERSION"
-        fi
+        SITE_PUBLISH_ARGS+=(--item "$APPCAST_ITEM")
     else
         release_fail "appcast generation failed — fix Sparkle sign_update + private key and retry; existing Sparkle users will not receive v$VERSION"
-    fi
-    if [ "$keep_appcast_item" = "0" ]; then
+        # release.json still ships alone: the GitHub release is already public.
         rm -f "$APPCAST_ITEM"
-    else
-        echo "  ! Appcast recovery item retained: $APPCAST_ITEM" >&2
+        APPCAST_ITEM=""
+        SITE_PUBLISH_ARGS+=(--skip-appcast)
     fi
 fi
 
-# Step 6b: Push the freshly built release.json into the site repo.
+# Step 6b: Publish appcast.xml and release.json to the site in ONE commit.
     # publish-release-json.sh has existed since v1.8 (created exactly
     # to fix a class of v1.7.12 / 929-tests post-release drift bug) but
     # was never wired into release.sh, so https://maccrab.com/release.json
     # silently lagged the actual release every cycle. v1.10.1 closed
     # that gap by adding this step. The site's JSON-LD softwareVersion +
     # the JS-rendered version pill both read this file.
+    # The two files used to be two commits seconds apart, and Workers Builds
+    # deploys each commit on its own, not necessarily in order: on 2026-09-22
+    # the older appcast commit's build started 17 s after the newer
+    # release.json commit's build and deployed last, so release.json served
+    # 1.22.0 for six days while both steps reported success. One commit, one
+    # deploy.
 echo ""
-echo "Step 6b: Publishing release.json to site..."
+if [ -n "$APPCAST_ITEM" ]; then
+    echo "Step 6b: Publishing appcast.xml + release.json to the site in one commit..."
+else
+    echo "Step 6b: Publishing release.json to the site..."
+fi
 verify_immutable_upload_snapshot
-if SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" SITE_REPO="$SITE_REPO" \
-            "$BUILD_WORKSPACE/scripts/publish-release-json.sh"; then
-        echo "  ✓ release.json pushed to the site repo"
-        # Verify the PUBLISHED file, not the local one. Step 6c below only ever
-        # read ./release.json — which build-release.sh regenerated minutes
-        # earlier from this very DMG, so it always agrees with itself and can
-        # NEVER detect that maccrab.com is serving a stale file. Poll the live
-        # URL until Cloudflare Pages has redeployed (~30-60s), then assert both
-        # the version and the DMG sha256 the site actually advertises.
+# The publisher receives only the one PAT it needs; Apple credentials,
+# other PATs and signing configuration are not inherited.
+if SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" /usr/bin/python3 -I -B -c '
+import os, sys
+environment = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"],
+               "TMPDIR": "/private/tmp", "LC_ALL": "C", "LANG": "C",
+               "SITE_REPO_TOKEN": os.environ["SITE_REPO_TOKEN"]}
+os.execve(sys.argv[1], sys.argv[1:], environment)
+' "$BUILD_WORKSPACE/scripts/publish-site-release.sh" "${SITE_PUBLISH_ARGS[@]}"; then
+        echo "  ✓ Site commit landed; waiting for maccrab.com to serve it"
+        # Verify the LIVE files, not the commit or the local copy. Step 6c below
+        # only ever reads ./release.json, which always agrees with itself, and a
+        # landed commit proves nothing about which deploy is serving. Poll until
+        # the site serves BOTH the new Sparkle build and the new version + DMG
+        # sha256. A fresh query string per attempt keeps a CDN cache from
+        # answering for the site.
         published_ok=0
         live_ver=""
         live_sha=""
-        for _ in $(seq 1 12); do
-            live=$($CURL_BIN -fsS --max-time 10 "https://maccrab.com/release.json" 2>/dev/null || true)
+        live_appcast_ok=0
+        for attempt in $(seq 1 12); do
+            cache_bust="release-check=${BUILD_NUMBER}-$(/bin/date +%s)-${attempt}"
+            live=$($CURL_BIN -fsS --max-time 10 "https://maccrab.com/release.json?${cache_bust}" 2>/dev/null || true)
             live_ver=$(printf '%s' "$live" | $GREP_BIN -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | /usr/bin/head -1 | $SED_BIN -E 's/.*"([^"]+)"$/\1/' || true)
             live_sha=$(printf '%s' "$live" | $GREP_BIN -oE '"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
-            if [ "$live_ver" = "$VERSION" ] && [ "$live_sha" = "$SHA" ]; then
+            live_appcast_ok=1
+            if [ -n "$APPCAST_ITEM" ]; then
+                live_appcast=$($CURL_BIN -fsS --max-time 10 "https://maccrab.com/appcast.xml?${cache_bust}" 2>/dev/null || true)
+                case "$live_appcast" in
+                    *"<sparkle:version>${BUILD_NUMBER}</sparkle:version>"*) ;;
+                    *) live_appcast_ok=0 ;;
+                esac
+            fi
+            if [ "$live_ver" = "$VERSION" ] && [ "$live_sha" = "$SHA" ] && [ "$live_appcast_ok" = "1" ]; then
                 published_ok=1
                 break
             fi
@@ -1504,12 +1518,31 @@ if SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" SITE_REPO="$SITE_REPO" \
         done
         if [ "$published_ok" = "1" ]; then
             echo "  ✓ https://maccrab.com/release.json serves v$VERSION / sha ${SHA:0:16}..."
+            [ -z "$APPCAST_ITEM" ] \
+                || echo "  ✓ https://maccrab.com/appcast.xml offers Sparkle build $BUILD_NUMBER to existing users"
         else
-            release_fail "maccrab.com/release.json still does not serve v$VERSION + sha ${SHA:0:16}... after ~2min (live: version=${live_ver:-<unreadable>} sha=${live_sha:0:16}) — the site is advertising a DIFFERENT build's hash to anyone verifying their download. Re-run 'SITE_REPO_TOKEN=<pat> scripts/publish-release-json.sh' and re-check with: curl -s https://maccrab.com/release.json"
+            if [ "$live_ver" != "$VERSION" ] || [ "$live_sha" != "$SHA" ]; then
+                release_fail "maccrab.com/release.json still does not serve v$VERSION + sha ${SHA:0:16}... after ~2min although the site commit landed (live: version=${live_ver:-<unreadable>} sha=${live_sha:0:16}) — the site is advertising a DIFFERENT build's hash to anyone verifying their download. Redeploy $SITE_REPO main in Cloudflare Workers Builds and re-check with: curl -s \"https://maccrab.com/release.json?nocache=\$(date +%s)\""
+            fi
+            if [ "$live_appcast_ok" != "1" ]; then
+                release_fail "maccrab.com/appcast.xml still does not offer Sparkle build $BUILD_NUMBER after ~2min although the site commit landed — existing Sparkle users will not receive v$VERSION. Redeploy $SITE_REPO main in Cloudflare Workers Builds and re-check with: curl -s \"https://maccrab.com/appcast.xml?nocache=\$(date +%s)\" | grep sparkle:version"
+            fi
         fi
     else
-        release_fail "release.json publish failed — run 'SITE_REPO_TOKEN=<pat> scripts/publish-release-json.sh' manually; maccrab.com is still advertising the PREVIOUS release"
+        if [ -n "$APPCAST_ITEM" ]; then
+            keep_appcast_item=1
+            release_fail "site publish failed — appcast.xml and release.json are published together or not at all; existing Sparkle users will not receive v$VERSION and maccrab.com advertises the PREVIOUS release until it lands. The generated item remains at $APPCAST_ITEM; after fixing the cause rerun 'SITE_REPO_TOKEN=<pat> scripts/publish-site-release.sh --item $APPCAST_ITEM --release-json release.json --site-repo $SITE_REPO --version $VERSION'"
+        else
+            release_fail "release.json publish failed — maccrab.com is still advertising the PREVIOUS release; after fixing the cause rerun 'SITE_REPO_TOKEN=<pat> scripts/publish-site-release.sh --skip-appcast --release-json release.json --site-repo $SITE_REPO --version $VERSION'"
+        fi
     fi
+if [ -n "$APPCAST_ITEM" ]; then
+    if [ "$keep_appcast_item" = "0" ]; then
+        rm -f "$APPCAST_ITEM"
+    else
+        echo "  ! Appcast recovery item retained: $APPCAST_ITEM" >&2
+    fi
+fi
 
     # Step 6c: Cross-source SHA sanity check. v1.12.7 shipped with
     # release.json's SHA pointing at RC2's DMG (96d408db...) while

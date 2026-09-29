@@ -46,7 +46,7 @@ data on the build machine. None are committed or copied into build outputs.
 | Developer ID Application certificate (Peter Hanily, team `79S425CW99`) | `codesign` during build, `notarytool` for Apple submission | Until revoked: attacker can sign any Mach-O as MacCrab. Apple revocation is the only mitigation. |
 | App-specific password for the Apple ID associated with team `79S425CW99` | `notarytool submit --password ...` | Attacker can submit other binaries for notarization under this team. Limited blast radius — revoke at appleid.apple.com. |
 | Sparkle EdDSA private key (matching `SUPublicEDKey` baked into shipped Info.plist) | `sign_update` during appcast entry generation | **Catastrophic.** Existing v1.x Sparkle clients verify against the embedded public key. If the private key leaks, an attacker can sign a malicious appcast XML and `MacCrab.app` will auto-update to a malicious DMG. **No rotation path** without shipping a new bundle (and convincing every existing user to install it manually). |
-| GitHub fine-grained PAT (`SITE_REPO_TOKEN`), scoped to `contents:write` on `peterhanily/maccrab-site` | `publish-appcast-entry.sh` to commit the appcast entry | Attacker with this token can modify `appcast.xml` to advertise a malicious DMG. Mitigated because the DMG itself still needs a valid EdDSA signature (above), but combined with that key it's a complete supply-chain compromise. |
+| GitHub fine-grained PAT (`SITE_REPO_TOKEN`), scoped to `contents:write` on `peterhanily/maccrab-site` | `publish-site-release.sh` to commit the appcast entry and `release.json` | Attacker with this token can modify `appcast.xml` to advertise a malicious DMG. Mitigated because the DMG itself still needs a valid EdDSA signature (above), but combined with that key it's a complete supply-chain compromise. |
 
 The non-Keychain values are stored in `~/.maccrab-release-env`, which is
 gitignored, owned by the release user, `chmod 600`, and excluded from sync.
@@ -431,25 +431,35 @@ via Sparkle auto-update:
    and at completion; the private tracked-source build workspace remains the
    source of the publisher executors throughout.
 
-2. `scripts/publish-appcast-entry.sh --item <xml> --site-repo
-   peterhanily/maccrab-site --version <version>` commits the
-   updated `appcast.xml` to the site repo via the GitHub Contents
-   API, using `SITE_REPO_TOKEN`. The script refuses to double-
-   publish a version already in the appcast (idempotency guard).
+2. `scripts/publish-site-release.sh --item <xml> --release-json release.json
+   --site-repo peterhanily/maccrab-site --version <version>` merges the item
+   into the site's current `appcast.xml` (the same validation as
+   `publish-appcast-entry.sh`: it refuses a duplicate or non-increasing Sparkle
+   build) and commits it together with the built `release.json` as ONE commit
+   through the GitHub Git Data API, using `SITE_REPO_TOKEN`. The branch update
+   is fast-forward only (`force: false`): if the site's `main` moved after it
+   was read, the publish fails and the other change is kept. One commit matters
+   because Workers Builds deploys each commit on its own and not necessarily in
+   order: on 2026-09-22 two commits seconds apart deployed oldest-last and kept
+   `release.json` at the previous version for six days.
 
-3. If appcast publication fails, the generated XML is retained at the printed
-   temporary path for an exact manual retry. `SKIP_APPCAST=1` is the only
-   intentional Sparkle bypass.
+3. A failed site publish never updates one file without the other, and the
+   generated XML is retained at the printed temporary path for an exact manual
+   retry. `SKIP_APPCAST=1` is the only intentional Sparkle bypass; it, like a
+   failed appcast generation, publishes `release.json` alone
+   (`--skip-appcast`). `publish-appcast-entry.sh` and `publish-release-json.sh`
+   remain for single-file manual recovery.
 
-4. `scripts/publish-release-json.sh` publishes the built manifest to the site.
-   The release script polls the live `https://maccrab.com/release.json` until
-   its version and DMG SHA match the local artifact, then cross-checks that SHA
-   against both `Casks/maccrab.rb` and the GitHub release asset digest.
+4. The release script polls the live site, with a fresh cache-busting query on
+   each attempt, until `https://maccrab.com/appcast.xml` offers the new
+   `<sparkle:version>` and `https://maccrab.com/release.json` serves the new
+   version and DMG SHA. It then cross-checks that SHA against both
+   `Casks/maccrab.rb` and the GitHub release asset digest.
 
 5. `scripts/publish-cask.sh` publishes the validated cask to
    `peterhanily/homebrew-maccrab`.
 
-6. Cloudflare Pages auto-deploys the site repo, typically within
+6. Cloudflare Workers Builds deploys the site commit, typically within
    30-60 seconds.
 
 7. Existing v(N-1) clients with auto-update on poll `appcast.xml`

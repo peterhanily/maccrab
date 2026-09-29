@@ -62,6 +62,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/generate-appcast-entry.sh
     scripts/publish-appcast-entry.sh
     scripts/publish-release-json.sh
+    scripts/publish-site-release.sh
     scripts/publish-cask.sh
     Compiler/compile_rules.py
 )

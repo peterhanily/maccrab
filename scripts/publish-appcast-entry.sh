@@ -4,6 +4,11 @@ set +x
 # Insert a locally generated, schema-validated Sparkle item through GitHub's
 # optimistic-locking Contents API. No PUT occurs until both the fragment and the
 # complete post-insertion feed have parsed successfully.
+#
+# Manual single-file recovery only. release.sh publishes appcast.xml and
+# release.json together through publish-site-release.sh: two site commits
+# seconds apart can deploy out of order (2026-09-22), so after running this,
+# check the live file rather than trusting the commit.
 
 set -euo pipefail
 umask 077
