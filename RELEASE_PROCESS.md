@@ -502,6 +502,9 @@ its compensating controls.
   expected DMG SHA (same-filesystem staging,
   `.build` wiped, dependencies re-resolved, manifest-verified restoration), so
   every release is gated on a from-scratch build without risking the sole DMG.
+  A tag-free push of a commit that a passing clean run has already verified
+  within six hours, under the same hook, CI script and toolchain, reuses that
+  run's receipt instead of repeating the suite (see `docs/CI-ARCHITECTURE.md`).
 - **`make hooks`** — activates the hook. Required once per clone: git does not
   track `.git/hooks/`, so a fresh checkout has no gate until this is run.
   `release.sh` enforces this precondition and will not build or push otherwise.

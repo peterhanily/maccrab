@@ -30,6 +30,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/ci-local.sh
     scripts/run-ci-phase.py
     scripts/check-swift-toolchain.py
+    scripts/ci-receipt.py
     scripts/release.sh
     scripts/build-release.sh
     scripts/prepare-dmg-payload.sh
@@ -278,6 +279,17 @@ verify_release_source_snapshot() {
 }
 
 verify_release_source_snapshot
+
+# A passing clean run records a receipt so the branch push of this exact commit
+# need not repeat the suite (see .githooks/pre-push). Capture the checkout before
+# anything runs: the receipt is written only if it is unchanged at the end, so a
+# run over uncommitted or mid-run-edited inputs never vouches for HEAD.
+CI_RECEIPT_START=""
+if [ "$CLEAN_TREE" = "1" ]; then
+    if ! CI_RECEIPT_START=$(/usr/bin/python3 -I "$SCRIPT_DIR/ci-receipt.py" snapshot); then
+        CI_RECEIPT_START=""
+    fi
+fi
 
 # The bundled Testing module follows this compiler. Verify its complete build
 # identity before cleanup, dependency resolution, or any build/test phase.
@@ -635,6 +647,32 @@ if [ "$CLEAN_TREE" = "1" ]; then
         -- swift package resolve
 fi
 
+# EventStoreLegacyUpgradeTests builds a 1.5M-row legacy store under the
+# production 1 GiB free-space floor, peaking around 8-10 GiB in $TMPDIR on top
+# of a ~2.5 GiB debug build in the checkout. With less room the v1.22.2 release
+# CI died twice ~25 minutes in with SQLITE_FULL/ENOSPC. 14 GiB covers build +
+# fixture peak + floor with a little margin. Measured after --clean's wipe so a
+# build tree it has just deleted does not count against it, and before any build.
+CI_MIN_FREE_KIB=$((14 * 1024 * 1024))
+require_ci_free_space() {
+    local dir="$1" free_kib
+    free_kib=$(/bin/df -Pk "$dir" | $AWK_BIN 'NR == 2 { print $4 }') || free_kib=""
+    case "$free_kib" in
+        ''|*[!0-9]*)
+            echo "ERROR: could not measure free space on the volume holding $dir" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$free_kib" -lt "$CI_MIN_FREE_KIB" ]; then
+        echo "ERROR: local CI needs at least $((CI_MIN_FREE_KIB / 1048576)) GiB free on the volume holding $dir; found $((free_kib / 1024)) MiB." >&2
+        echo "       The debug build plus the 1.5M-row legacy-upgrade test fixture otherwise" >&2
+        echo "       fail with SQLITE_FULL/ENOSPC about 25 minutes in. Free space and rerun." >&2
+        exit 1
+    fi
+}
+require_ci_free_space "${TMPDIR:-/tmp}"
+require_ci_free_space "$PROJECT_DIR"
+
 # Never redirect CI output or compiler artifacts through fixed shared `/tmp`
 # names. This script is the release gate on the signing Mac; a second local
 # user can pre-create a predictable symlink/tree and turn an otherwise harmless
@@ -751,6 +789,7 @@ assert_readme_tests_badge() {
 }
 check "README tests badge matches suite" assert_readme_tests_badge "$OBSERVED_TEST_COUNT"
 check "CI phase deadline and evidence tests" /usr/bin/python3 -I scripts/test-ci-phase.py
+check "CI receipt reuse fixtures" /usr/bin/python3 -I scripts/test-ci-receipt.py
 check "Toolchain identity fixtures" /usr/bin/python3 -I scripts/test-swift-toolchain.py
 check "Localization catalog contracts" /usr/bin/python3 -I scripts/check-localizations.py
 check "Localization checker tests" /usr/bin/python3 -I scripts/test-localizations.py
@@ -844,5 +883,12 @@ if [ "$FAIL" -gt 0 ]; then
     echo -e "\n${RED}CI FAILED${NC}"
     exit 1
 else
+    # Only a fully passing clean run reaches this point. A receipt that cannot
+    # be recorded costs a later push its shortcut, never this run its verdict.
+    if [ -n "$CI_RECEIPT_START" ]; then
+        /usr/bin/python3 -I "$SCRIPT_DIR/ci-receipt.py" write \
+            --start "$CI_RECEIPT_START" --toolchain-log "$CI_TOOLCHAIN_DIR/toolchain.log" \
+            || echo "WARNING: the next push of this commit will run local CI again." >&2
+    fi
     echo -e "\n${GREEN}ALL CHECKS PASSED${NC}"
 fi

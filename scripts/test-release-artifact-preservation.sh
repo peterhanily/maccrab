@@ -34,6 +34,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/ci-local.sh
     scripts/run-ci-phase.py
     scripts/check-swift-toolchain.py
+    scripts/ci-receipt.py
     scripts/release.sh
     scripts/build-release.sh
     scripts/prepare-dmg-payload.sh
@@ -70,6 +71,10 @@ install_missing_critical_executor_fixtures() {
                 # Artifact lifecycle fixtures never query the real toolchain;
                 # the checker has separate canned identity contract tests.
                 printf 'raise SystemExit(0)\n' > "$fixture/$path"
+            elif [ "$path" = "scripts/ci-receipt.py" ]; then
+                # Lifecycle fixtures must always reach CI; receipt reuse has
+                # its own real-Git fixtures in test-ci-receipt.py.
+                printf 'raise SystemExit(1)\n' > "$fixture/$path"
             else
                 printf '#!/bin/bash\nexit 0\n' > "$fixture/$path"
             fi
@@ -177,10 +182,18 @@ make_ci_fixture() {
         '    exit 0' \
         'fi' \
         'exec /bin/mv "${args[@]}"'
-    # Production pins the rename primitive to /bin/mv. Only this disposable
-    # fixture redirects those calls so it can simulate kernel/filesystem faults.
+    # The free-space preflight must see a deterministic volume, not whatever
+    # the host running this probe happens to have left.
+    write_executable "$fixture/fake-bin/df" \
+        '#!/bin/bash' \
+        'printf "Filesystem 1024-blocks Used Available Capacity Mounted on\n"' \
+        'printf "fixture 209715200 0 %s 0%% /\n" "${MACCRAB_TEST_CI_FREE_KIB:-104857600}"'
+    # Production pins the rename and free-space primitives to /bin. Only this
+    # disposable fixture redirects those calls so it can simulate kernel and
+    # filesystem conditions.
     /usr/bin/sed -i '' \
-        "s#/bin/mv -n#${fixture}/fake-bin/mv -n#g" \
+        -e "s#/bin/mv -n#${fixture}/fake-bin/mv -n#g" \
+        -e "s#/bin/df -Pk#${fixture}/fake-bin/df -Pk#g" \
         "$fixture/scripts/ci-local.sh"
 
     local stub
@@ -202,6 +215,7 @@ make_ci_fixture() {
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-release-privacy.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-secret-guard.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-ci-phase.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-ci-receipt.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-swift-toolchain.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/check-localizations.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-localizations.py"
@@ -588,6 +602,79 @@ for expected_swift in 'build' 'build --build-tests' 'test --no-parallel'; do
     grep -q "^${expected_swift}$" "$ci_branch/swift.log" \
         || fail "ordinary branch hook did not run swift $expected_swift"
 done
+
+# The v1.22.2 release CI ran out of disk ~25 minutes into the suite. Too little
+# free space must stop local CI before its first Swift build, with a diagnosis.
+ci_low_disk="$TEST_ROOT/ci-low-disk"
+make_ci_fixture "$ci_low_disk"
+set +e
+(
+    export MACCRAB_TEST_CI_FREE_KIB=$((13 * 1024 * 1024))
+    invoke_branch_hook "$ci_low_disk"
+) > "$ci_low_disk/output.log" 2>&1
+low_disk_status=$?
+set -e
+[ "$low_disk_status" -ne 0 ] || fail "local CI started with too little free disk"
+grep -q 'needs at least 14 GiB free on the volume holding' "$ci_low_disk/output.log" \
+    || fail "low free space was not diagnosed"
+if [ -s "$ci_low_disk/swift.log" ] && grep -q '^build' "$ci_low_disk/swift.log"; then
+    fail "low free space was diagnosed only after a Swift build started"
+fi
+
+# A receipt lets a later branch push skip CI, so only a clean run that passed
+# every check may ask for one. Record the helper calls ci-local makes: a warm
+# run never snapshots, a failing clean run never writes.
+install_receipt_call_recorder() {
+    printf '%s\n' \
+        'import os, sys' \
+        'with open(os.environ["MACCRAB_TEST_RECEIPT_LOG"], "a") as log:' \
+        '    log.write(" ".join(sys.argv[1:]) + "\n")' \
+        'if sys.argv[1:2] == ["snapshot"]:' \
+        '    print("{\"fixture\": \"start\"}")' \
+        'raise SystemExit(1 if sys.argv[1:2] == ["check"] else 0)' \
+        > "$1/scripts/ci-receipt.py"
+}
+ci_receipt_pass="$TEST_ROOT/ci-receipt-pass"
+make_ci_fixture "$ci_receipt_pass"
+install_receipt_call_recorder "$ci_receipt_pass"
+mkdir -p "$ci_receipt_pass/.build"
+printf 'signed-notarized-stapled-receipt\n' > "$ci_receipt_pass/.build/MacCrab-v9.9.22.dmg"
+(
+    export MACCRAB_TEST_RECEIPT_LOG="$ci_receipt_pass/receipt.log"
+    invoke_tag_hook "$ci_receipt_pass" v9.9.22
+) > "$ci_receipt_pass/output.log" 2>&1 || fail "passing clean CI fixture failed"
+[ "$(/usr/bin/sed -n 1p "$ci_receipt_pass/receipt.log")" = "snapshot" ] \
+    || fail "clean CI did not capture its checkout before running"
+/usr/bin/sed -n 2p "$ci_receipt_pass/receipt.log" \
+    | grep -qE '^write --start \{"fixture": "start"\} --toolchain-log .*/toolchain\.log$' \
+    || fail "passing clean CI did not record a receipt bound to its start snapshot"
+
+ci_receipt_fail="$TEST_ROOT/ci-receipt-fail"
+make_ci_fixture "$ci_receipt_fail"
+install_receipt_call_recorder "$ci_receipt_fail"
+printf 'raise SystemExit(1)\n' > "$ci_receipt_fail/scripts/test-ci-phase.py"
+mkdir -p "$ci_receipt_fail/.build"
+printf 'signed-notarized-stapled-receipt-fail\n' > "$ci_receipt_fail/.build/MacCrab-v9.9.23.dmg"
+set +e
+(
+    export MACCRAB_TEST_RECEIPT_LOG="$ci_receipt_fail/receipt.log"
+    invoke_tag_hook "$ci_receipt_fail" v9.9.23
+) > "$ci_receipt_fail/output.log" 2>&1
+receipt_fail_status=$?
+set -e
+[ "$receipt_fail_status" -ne 0 ] || fail "clean CI fixture with a failing check passed"
+[ "$(cat "$ci_receipt_fail/receipt.log")" = "snapshot" ] \
+    || fail "a failing clean CI run asked for a receipt"
+
+ci_receipt_warm="$TEST_ROOT/ci-receipt-warm"
+make_ci_fixture "$ci_receipt_warm"
+install_receipt_call_recorder "$ci_receipt_warm"
+(
+    export MACCRAB_TEST_RECEIPT_LOG="$ci_receipt_warm/receipt.log"
+    invoke_branch_hook "$ci_receipt_warm"
+) > "$ci_receipt_warm/output.log" 2>&1 || fail "warm CI fixture failed"
+[ "$(cat "$ci_receipt_warm/receipt.log")" = "check" ] \
+    || fail "a warm run snapshotted or recorded a receipt"
 
 # Exercise the release-ref policy against Git's real object database in fully
 # disposable repositories. These probes never contact a remote: they feed the
