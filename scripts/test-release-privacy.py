@@ -57,7 +57,7 @@ class PublisherArgvControls(unittest.TestCase):
     def test_shell_tracing_is_disabled_before_credential_expansion(self):
         for name in ('publish-release-json.sh','publish-cask.sh'):
             with self.subTest(name=name):self.run_copy(name,trace=True)
-        for name in ('release.sh','build-release.sh','notarize.sh','publish-appcast-entry.sh'):
+        for name in ('release.sh','build-release.sh','notarize.sh','publish-appcast-entry.sh','publish-site-release.sh'):
             text=(BASE/'scripts'/name).read_text()
             first_statement=next(line.strip() for line in text.splitlines() if line.strip() and not line.startswith('#'))
             self.assertEqual(first_statement,'set +x')
@@ -70,10 +70,11 @@ class PublisherArgvControls(unittest.TestCase):
         for name in ('publish-release-json.sh','publish-cask.sh'):
             with self.subTest(name=name):self.run_copy(name,fail=True)
 
-    def test_appcast_launcher_transfers_only_expected_environment(self):
+    def test_site_launcher_transfers_only_expected_environment(self):
         source=(BASE/'scripts/release.sh').read_text()
-        start=source.index('        if SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" /usr/bin/python3 -I -B -c ')
-        literal=source[start:].split("-c '\n",1)[1].split("\n' \"$BUILD_WORKSPACE",1)[0]
+        start=source.index('\nif SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" /usr/bin/python3 -I -B -c ')
+        literal,rest=source[start:].split("-c '\n",1)[1].split("\n' \"$BUILD_WORKSPACE",1)
+        self.assertTrue(rest.startswith('/scripts/publish-site-release.sh" '))
         with tempfile.TemporaryDirectory() as directory:
             target=Path(directory)/'fake-publisher.sh'
             target.write_text('#!/bin/bash\n[[ "$SITE_REPO_TOKEN" == "'+FAKE+'" && "$1" == --fixture ]] || exit 8\ncompgen -e\n')

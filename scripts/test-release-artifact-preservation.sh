@@ -55,6 +55,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/generate-appcast-entry.sh
     scripts/publish-appcast-entry.sh
     scripts/publish-release-json.sh
+    scripts/publish-site-release.sh
     scripts/publish-cask.sh
     Compiler/compile_rules.py
 )
@@ -189,6 +190,7 @@ make_ci_fixture() {
         check-secrets.sh \
         check-release-dependencies.sh \
         test-release-supply-chain.sh \
+        test-site-release-publish.sh \
         test-install-payload.sh \
         test-sqlcipher-provenance.sh \
         test-rules-trust-anchor.sh \
@@ -1193,31 +1195,33 @@ make_release_fixture() {
         '#!/bin/bash' \
         'if env | grep -qE "^(DEVELOPER_ID|APPLE_ID|APPLE_TEAM_ID|NOTARIZE_PASSWORD|NOTARIZE_KEYCHAIN_PROFILE|GH_TOKEN|GITHUB_TOKEN|SITE_REPO_TOKEN|TAP_REPO_TOKEN)="; then exit 86; fi' \
         'fixture_root=__FIXTURE_ROOT__' \
-        'dmg=; previous=' \
-        'for argument in "$@"; do if [ "$previous" = "--dmg" ]; then dmg=$argument; fi; previous=$argument; done' \
+        'dmg=; build=; previous=' \
+        'for argument in "$@"; do case "$previous" in --dmg) dmg=$argument ;; --build-number) build=$argument ;; esac; previous=$argument; done' \
         '[ -f "$dmg" ] && [ ! -L "$dmg" ] && [ -s "$dmg" ] || exit 88' \
         'snapshot_sha=$(/usr/bin/shasum -a 256 "$dmg" | /usr/bin/awk '\''{print $1}'\'')' \
         '[ "$snapshot_sha" = "$(cat "$fixture_root/.fixture-remote-digest")" ] || exit 89' \
         'printf "%s\n" "$dmg" > "$fixture_root/snapshot.path"' \
         'printf "appcast-generate\n" >> "${MACCRAB_TEST_PUBLISH_LOG:-$fixture_root/publish.log}"' \
         '[ ! -f "$fixture_root/fail-appcast-generate" ] || exit 1' \
-        'printf "<item/>\n"' \
+        'printf "<item><sparkle:version>%s</sparkle:version></item>\n" "$build"' \
         'exit 0'
-    write_executable "$fixture/scripts/publish-appcast-entry.sh" \
+    # One invocation stands in for one site commit: appcast.xml and
+    # release.json land in .fixture-site together or not at all, and the fake
+    # curl below serves exactly what landed.
+    write_executable "$fixture/scripts/publish-site-release.sh" \
         '#!/bin/bash' \
         'if env | grep -qE "^(DEVELOPER_ID|APPLE_ID|APPLE_TEAM_ID|NOTARIZE_PASSWORD|NOTARIZE_KEYCHAIN_PROFILE|GH_TOKEN|GITHUB_TOKEN|TAP_REPO_TOKEN)="; then exit 86; fi' \
         '[ -n "${SITE_REPO_TOKEN:-}" ] || exit 87' \
-        'fixture_root=__FIXTURE_ROOT__; snapshot=$(cat "$fixture_root/snapshot.path"); [ -s "$snapshot" ] || exit 88' \
-        'printf "appcast-publish\n" >> "${MACCRAB_TEST_PUBLISH_LOG:-$fixture_root/publish.log}"' \
-        '[ ! -f "$fixture_root/fail-appcast-publish" ] || exit 1' \
+        'fixture_root=__FIXTURE_ROOT__; item=; release_json=; skip=0; previous=' \
+        'for argument in "$@"; do case "$previous" in --item) item=$argument ;; --release-json) release_json=$argument ;; esac; if [ "$argument" = --skip-appcast ]; then skip=1; fi; previous=$argument; done' \
+        '[ -s "$release_json" ] || exit 89' \
+        'if [ "$skip" = 1 ]; then [ -z "$item" ] || exit 2; else [ -s "$item" ] || exit 2; [ -s "$(cat "$fixture_root/snapshot.path")" ] || exit 88; fi' \
+        '[ ! -f "$fixture_root/fail-site-publish" ] || exit 1' \
+        'mkdir -p "$fixture_root/.fixture-site"' \
+        'if [ -n "$item" ]; then cp "$item" "$fixture_root/.fixture-site/appcast.xml"; printf "appcast-publish\n" >> "$fixture_root/publish.log"; fi' \
+        'cp "$release_json" "$fixture_root/.fixture-site/release.json"' \
+        'printf "release-json\n" >> "$fixture_root/publish.log"' \
         'exit 0'
-    write_executable "$fixture/scripts/publish-release-json.sh" \
-        '#!/bin/bash' \
-        'if env | grep -qE "^(DEVELOPER_ID|APPLE_ID|APPLE_TEAM_ID|NOTARIZE_PASSWORD|NOTARIZE_KEYCHAIN_PROFILE|GH_TOKEN|GITHUB_TOKEN|TAP_REPO_TOKEN)="; then exit 86; fi' \
-        '[ -n "${SITE_REPO_TOKEN:-}" ] || exit 87' \
-        'fixture_root=__FIXTURE_ROOT__; [ -s "$(cat "$fixture_root/snapshot.path" 2>/dev/null || true)" ] || [ "${SKIP_APPCAST:-0}" = "1" ] || exit 88' \
-        'if [ -n "${MACCRAB_TEST_PUBLISH_LOG:-}" ]; then printf "release-json\n" >> "$MACCRAB_TEST_PUBLISH_LOG"; fi' \
-        'exit "${MACCRAB_TEST_RELEASE_JSON_STATUS:-0}"'
     write_executable "$fixture/scripts/publish-cask.sh" \
         '#!/bin/bash' \
         'if env | grep -qE "^(DEVELOPER_ID|APPLE_ID|APPLE_TEAM_ID|NOTARIZE_PASSWORD|NOTARIZE_KEYCHAIN_PROFILE|GH_TOKEN|GITHUB_TOKEN|SITE_REPO_TOKEN)="; then exit 86; fi' \
@@ -1225,9 +1229,18 @@ make_release_fixture() {
         'fixture_root=__FIXTURE_ROOT__; [ -s "$(cat "$fixture_root/snapshot.path" 2>/dev/null || true)" ] || [ "${SKIP_APPCAST:-0}" = "1" ] || exit 88' \
         'if [ -n "${MACCRAB_TEST_PUBLISH_LOG:-}" ]; then printf "cask\n" >> "$MACCRAB_TEST_PUBLISH_LOG"; fi' \
         'exit "${MACCRAB_TEST_CASK_PUBLISH_STATUS:-0}"'
+    # Only cache-busted live URLs are served; fail-live-<file> simulates a
+    # deploy that never picked up the landed commit.
     write_executable "$fixture/fake-bin/curl" \
         '#!/bin/bash' \
-        'cat release.json'
+        'fixture_root=__FIXTURE_ROOT__; url=${!#}' \
+        'case "$url" in' \
+        '    https://maccrab.com/release.json\??*) file=release.json ;;' \
+        '    https://maccrab.com/appcast.xml\??*) file=appcast.xml ;;' \
+        '    *) exit 22 ;;' \
+        'esac' \
+        '[ ! -f "$fixture_root/fail-live-$file" ] || exit 0' \
+        'cat "$fixture_root/.fixture-site/$file" 2>/dev/null || exit 22'
     # release.sh deliberately waits between remote-state retries in production.
     # These disposable fixtures provide every remote transition synchronously,
     # so real 2s/10s sleeps add minutes without exercising another state. Keep
@@ -1399,8 +1412,8 @@ PYTHON
     fi
     /usr/bin/sed -i '' "s#__FIXTURE_ROOT__#${fixture}#g" \
         "$fixture/scripts/generate-appcast-entry.sh" \
-        "$fixture/scripts/publish-appcast-entry.sh" \
-        "$fixture/scripts/publish-release-json.sh" \
+        "$fixture/scripts/publish-site-release.sh" \
+        "$fixture/fake-bin/curl" \
         "$fixture/scripts/publish-cask.sh"
 
     (
@@ -1478,12 +1491,12 @@ lock_path.write_text(lock_text)
 (root / ".build/artifacts/sparkle/Sparkle/bin/unrelated-private-input").write_text("fixture poison\n")
 generator = root / "scripts/generate-appcast-entry.sh"
 body = generator.read_text()
-needle = "dmg=; previous=\n"
+needle = "dmg=; build=; previous=\n"
 assert body.count(needle) == 1
 body = body.replace(needle, '''export_root="$(cd "$(dirname "$0")/.." && pwd)"
 /bin/bash "$export_root/scripts/check-release-dependencies.sh" >/dev/null || exit 91
 [ ! -e "$export_root/.build/artifacts/sparkle/Sparkle/bin/unrelated-private-input" ] || exit 93
-dmg=; previous=
+dmg=; build=; previous=
 ''')
 generator.write_text(body)
 PYTHON
@@ -2673,7 +2686,7 @@ run_publish_failure() {
     make_release_fixture "$fixture"
     case "$failure" in
         APPCAST_GENERATE_STATUS) : > "$fixture/fail-appcast-generate" ;;
-        APPCAST_PUBLISH_STATUS) : > "$fixture/fail-appcast-publish" ;;
+        SITE_PUBLISH_STATUS) : > "$fixture/fail-site-publish" ;;
     esac
     set +e
     (
@@ -2699,31 +2712,76 @@ run_publish_failure() {
         || fail "release.sh did not print the incomplete banner after $failure"
     ! grep -q 'MacCrab v9.9.11 Released!' "$fixture/output.log" \
         || fail "release.sh printed a success banner after $failure"
-    grep -q '^release-json$' "$fixture/publish.log" \
-        || fail "release.json publication did not run after $failure"
+    # appcast.xml and release.json share one site commit, so a failed site
+    # publish lands neither; any other failure still lets release.json land.
+    if [ "$failure" = "SITE_PUBLISH_STATUS" ]; then
+        ! grep -qE '^(appcast-publish|release-json)$' "$fixture/publish.log" \
+            || fail "a failed site publish still landed one of its two files"
+    else
+        grep -q '^release-json$' "$fixture/publish.log" \
+            || fail "release.json publication did not run after $failure"
+    fi
+    if [ "$failure" = "APPCAST_GENERATE_STATUS" ]; then
+        ! grep -q '^appcast-publish$' "$fixture/publish.log" \
+            || fail "appcast was published without a generated item"
+    fi
     grep -q '^cask$' "$fixture/publish.log" \
         || fail "cask publication did not run after $failure"
-    if [ "$failure" = "APPCAST_PUBLISH_STATUS" ]; then
+    if [ "$failure" = "SITE_PUBLISH_STATUS" ]; then
         grep -q 'Appcast recovery item retained:' "$fixture/output.log" \
-            || fail "appcast publish failure did not print a retained recovery item"
+            || fail "site publish failure did not print a retained recovery item"
         recovery_item=$(sed -n 's/^  ! Appcast recovery item retained: //p' \
             "$fixture/output.log" | tail -1)
         [ -n "$recovery_item" ] && [ -f "$recovery_item" ] \
-            || fail "appcast publish failure deleted the advertised recovery item"
+            || fail "site publish failure deleted the advertised recovery item"
+        grep -qF "scripts/publish-site-release.sh --item $recovery_item --release-json release.json" \
+                "$fixture/output.log" \
+            || fail "site publish failure did not name the one-commit recovery command"
         rm -f "$recovery_item"
     fi
 }
 
 run_publish_failure APPCAST_GENERATE_STATUS 'appcast generation failed'
-run_publish_failure APPCAST_PUBLISH_STATUS 'appcast publish failed'
+run_publish_failure SITE_PUBLISH_STATUS 'site publish failed'
 run_publish_failure CASK_PUBLISH_STATUS 'cask publish failed'
+
+# A landed commit is not a served file. On 2026-09-22 every publish step
+# reported success while an out-of-order deploy kept maccrab.com/release.json
+# at the previous release for six days. Each live file is checked on its own.
+for stale_live in release.json appcast.xml; do
+    release_stale_live="$TEST_ROOT/release-stale-live-$stale_live"
+    make_release_fixture "$release_stale_live"
+    : > "$release_stale_live/fail-live-$stale_live"
+    set +e
+    (
+        cd "$release_stale_live"
+        PATH="$release_stale_live/fake-bin:/usr/bin:/bin" \
+            HOME="$release_stale_live/home" \
+            TMPDIR="$release_stale_live/tmp" \
+            DEVELOPER_ID="fixture identity" \
+            SITE_REPO_TOKEN="fixture token" \
+            RELEASE_BRANCH=main \
+            MACCRAB_TEST_GH_STATUS=0 \
+            MACCRAB_TEST_GH_LOG="$release_stale_live/gh.log" \
+            MACCRAB_TEST_PUBLISH_LOG="$release_stale_live/publish.log" \
+            ./scripts/release.sh 9.9.11 --skip-prerelease-check
+    ) > "$release_stale_live/output.log" 2>&1
+    stale_live_status=$?
+    set -e
+    [ "$stale_live_status" -ne 0 ] \
+        || fail "release.sh exited 0 while maccrab.com served a stale $stale_live"
+    grep -q "maccrab.com/$stale_live still does not" "$release_stale_live/output.log" \
+        || fail "stale live $stale_live was not reported"
+    grep -q '1 publish step(s) did not land' "$release_stale_live/output.log" \
+        || fail "stale live $stale_live was not the only reported failure"
+done
 
 # Aggregation must count multiple independent failures while still attempting
 # every later publisher. This is the contract that prevents the first outage
 # from hiding a second stale distribution surface.
 release_multi_fail="$TEST_ROOT/release-multiple-publish-failures"
 make_release_fixture "$release_multi_fail"
-: > "$release_multi_fail/fail-appcast-publish"
+: > "$release_multi_fail/fail-site-publish"
 set +e
 (
     cd "$release_multi_fail"
@@ -2736,7 +2794,7 @@ set +e
         MACCRAB_TEST_GH_STATUS=0 \
         MACCRAB_TEST_GH_LOG="$release_multi_fail/gh.log" \
         MACCRAB_TEST_PUBLISH_LOG="$release_multi_fail/publish.log" \
-        MACCRAB_TEST_APPCAST_PUBLISH_STATUS=1 \
+        MACCRAB_TEST_SITE_PUBLISH_STATUS=1 \
         MACCRAB_TEST_CASK_PUBLISH_STATUS=1 \
         ./scripts/release.sh 9.9.11 --skip-prerelease-check
 ) > "$release_multi_fail/output.log" 2>&1
@@ -2745,8 +2803,8 @@ set -e
 [ "$multi_fail_status" -ne 0 ] || fail "release.sh exited 0 after multiple publisher failures"
 grep -q '2 publish step(s) did not land' "$release_multi_fail/output.log" \
     || fail "release.sh did not aggregate exactly two independent failures"
-grep -q '^release-json$' "$release_multi_fail/publish.log" \
-    || fail "release.json did not run between multiple publisher failures"
+grep -q 'site publish failed' "$release_multi_fail/output.log" \
+    || fail "site publish failure was not counted between multiple publisher failures"
 grep -q '^cask$' "$release_multi_fail/publish.log" \
     || fail "cask publisher was not attempted in the multiple-failure case"
 grep -q 'RELEASE INCOMPLETE' "$release_multi_fail/output.log" \

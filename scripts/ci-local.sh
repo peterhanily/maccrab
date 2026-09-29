@@ -51,6 +51,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/generate-appcast-entry.sh
     scripts/publish-appcast-entry.sh
     scripts/publish-release-json.sh
+    scripts/publish-site-release.sh
     scripts/publish-cask.sh
     Compiler/compile_rules.py
 )
@@ -778,6 +779,7 @@ check "Architectural audit (deterministic)" \
     env MACCRAB_AUDIT_SCOPE=deterministic ./scripts/pre-release-audit.sh
 check "Release dependency provenance" ./scripts/check-release-dependencies.sh
 check "Release supply-chain fixtures" ./scripts/test-release-supply-chain.sh
+check "Site publisher one-commit fixtures" ./scripts/test-site-release-publish.sh
 check "Exact-candidate qualification fixtures" /usr/bin/python3 -I ./scripts/test-candidate-qualification.py
 check "Resource baseline provenance fixtures" /usr/bin/python3 -I ./scripts/test-resource-baseline-provenance.py
 check "Release privacy fixtures" /usr/bin/python3 -I ./scripts/test-release-privacy.py
