@@ -70,8 +70,12 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   tag-free push of that commit within six hours reuses it. Tag pushes always
   run the clean gate.
 - **Local CI checks free disk space before building.** It fails at the start
-  with a clear message below about 14 GiB, instead of about 25 minutes in when
-  the 1.5M-row legacy-upgrade test exhausts the disk.
+  with a clear message below about 14 GiB (11.3-11.7 GiB when a warm build is
+  already on disk), instead of about 25 minutes in when the 1.5M-row
+  legacy-upgrade test exhausts the disk.
+- **A push that git rejects no longer runs local CI first.** When every ref is
+  rejected or already up to date, the pre-push hook exits at once and git
+  reports why, instead of after a full CI run.
 
 ## [1.22.2] — 2026-09-25
 

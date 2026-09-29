@@ -181,6 +181,37 @@ while read -r _local_ref _local_sha remote_ref _remote_sha; do
     esac
 done
 
+# release.sh exports this manifest for its tag push alone. Without a created or
+# moved version tag line the clean release gate it asks for cannot run, and the
+# warm run this used to fall through to spent ~25 minutes before git reported
+# why. Git leaves out a ref it has already rejected (non-fast-forward, or a
+# stale --force-with-lease such as a --respin tag push) or that the remote
+# already has, and it prints no per-ref reason once a hook declines.
+if [ "$CREATED_TAG_COUNT" -eq 0 ] && {
+        [ -n "${MACCRAB_RELEASE_EXPECTED_DMG:-}" ] \
+        || [ -n "${MACCRAB_RELEASE_EXPECTED_SHA256:-}" ] \
+        || [ -n "${MACCRAB_RELEASE_EXPECTED_COMMIT:-}" ] \
+        || [ -n "${MACCRAB_RELEASE_EXPECTED_TAG_OBJECT:-}" ] \
+        || [ -n "${MACCRAB_RELEASE_EXPECTED_HOOK_BLOB:-}" ] \
+        || [ -n "${MACCRAB_RELEASE_SOURCE_COMMIT:-}" ] \
+        || [ -n "${MACCRAB_RELEASE_SOURCE_TREE:-}" ] \
+        || [ -n "${MACCRAB_RELEASE_METADATA_TREE:-}" ]; }; then
+    echo "ERROR: release manifest was supplied but no created/moved version tag was pushed" >&2
+    echo "       Git omits a tag it rejected (stale --force-with-lease, non-fast-forward) or" >&2
+    echo "       one the remote already has. Nothing was pushed; compare the local tag with" >&2
+    echo "       'git ls-remote origin refs/tags/<tag>' before retrying." >&2
+    exit 2
+fi
+
+# Git runs this hook even when it will push nothing: every ref was rejected
+# (non-fast-forward, stale --force-with-lease) or is already up to date, and
+# stdin is empty. There is nothing to gate. Falling through ran a full warm CI
+# before git reported the rejection; exiting lets git report it at once.
+if [ -z "$PUSHED_REFS" ]; then
+    echo "pre-push: git has no ref to update (rejected or already up to date); nothing to gate."
+    exit 0
+fi
+
 if [ "$CLEAN_TREE" = "1" ]; then
     echo "Tag push detected — running local CI from a CLEAN tree."
     CI_ARGS=(--clean)
@@ -235,12 +266,6 @@ if [ "$CLEAN_TREE" = "1" ]; then
         CI_ARGS+=(--expect-release-commit "$expected_env_commit" \
             --expect-release-source "$expected_env_source_commit" "$expected_env_source_tree" \
             --expect-release-metadata-tree "$expected_env_metadata_tree")
-    elif [ -n "$expected_env_path" ] || [ -n "$expected_env_sha" ] \
-            || [ -n "$expected_env_commit" ] || [ -n "$expected_env_tag_object" ] \
-            || [ -n "$expected_env_hook_blob" ] || [ -n "$expected_env_source_commit" ] \
-            || [ -n "$expected_env_source_tree" ] || [ -n "$expected_env_metadata_tree" ]; then
-        echo "ERROR: release manifest was supplied but no created/moved version tag was pushed" >&2
-        exit 2
     fi
     expected_env_matched=0
     index=0

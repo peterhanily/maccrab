@@ -635,8 +635,14 @@ if [ "$CLEAN_TREE" = "1" ]; then
         echo "Clean run: preserving $PRESERVED_RELEASE_COUNT release DMG(s) by same-filesystem rename at $PRESERVED_RELEASE_DIR."
     fi
 
-    echo "Clean run: removing .build and re-resolving dependencies…"
+    echo "Clean run: removing .build and the assessment harness build, then re-resolving dependencies…"
     rm -rf .build
+    # The harness is a nested package with its own ignored build directory.
+    # Root `swift package resolve` does not clean it, so a release gate could
+    # otherwise pass entirely on stale harness objects. Wiping it here rather
+    # than just before the harness build keeps its ~0.7 GiB from counting
+    # against the free-space preflight below.
+    /bin/rm -rf "$PROJECT_DIR/Tools/AssessmentHarness/.build"
     # Resolution can stall on a transport as readily as compilation. Keep its
     # evidence outside the build tree that this clean run just removed.
     CI_RESOLVE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-ci-resolve.XXXXXX")
@@ -648,12 +654,32 @@ if [ "$CLEAN_TREE" = "1" ]; then
 fi
 
 # EventStoreLegacyUpgradeTests builds a 1.5M-row legacy store under the
-# production 1 GiB free-space floor, peaking around 8-10 GiB in $TMPDIR on top
-# of a ~2.5 GiB debug build in the checkout. With less room the v1.22.2 release
-# CI died twice ~25 minutes in with SQLITE_FULL/ENOSPC. 14 GiB covers build +
-# fixture peak + floor with a little margin. Measured after --clean's wipe so a
-# build tree it has just deleted does not count against it, and before any build.
-CI_MIN_FREE_KIB=$((14 * 1024 * 1024))
+# production 1 GiB free-space floor, peaking around 8-10 GiB in $TMPDIR while the
+# debug build occupies the checkout. With less room the v1.22.2 release CI died
+# twice ~25 minutes in with SQLITE_FULL/ENOSPC. The budget is that peak: 10 GiB
+# of fixture, the 1 GiB floor, and 3 GiB of debug build (2.3-2.7 GiB measured
+# with test products and resolved dependencies; rounding up is the margin).
+# A clean run has just deleted both build trees and needs all 14 GiB. A warm run
+# keeps its build, so the part of that 3 GiB already in .build is credited:
+# 11.3-11.7 GiB with a complete build, the full 14 with none. Release DMGs are not
+# build output, and a symlinked or unmeasurable .build earns no credit. Both
+# volumes are held to the whole budget, as they are normally one volume.
+# Measured after --clean's wipe and before any build.
+CI_FIXTURE_PEAK_KIB=$((10 * 1024 * 1024))
+CI_STORE_FLOOR_KIB=$((1 * 1024 * 1024))
+CI_DEBUG_BUILD_KIB=$((3 * 1024 * 1024))
+CI_BUILD_ON_DISK_KIB=0
+if [ "$CLEAN_TREE" != "1" ] && [ -d .build ] && [ ! -L .build ]; then
+    CI_BUILD_ON_DISK_KIB=$(/usr/bin/du -sk -I 'MacCrab-v*.dmg' .build 2>/dev/null \
+        | $AWK_BIN 'NR == 1 { print $1 }') || CI_BUILD_ON_DISK_KIB=0
+    case "$CI_BUILD_ON_DISK_KIB" in
+        ''|*[!0-9]*) CI_BUILD_ON_DISK_KIB=0 ;;
+    esac
+    if [ "$CI_BUILD_ON_DISK_KIB" -gt "$CI_DEBUG_BUILD_KIB" ]; then
+        CI_BUILD_ON_DISK_KIB=$CI_DEBUG_BUILD_KIB
+    fi
+fi
+CI_MIN_FREE_KIB=$((CI_FIXTURE_PEAK_KIB + CI_STORE_FLOOR_KIB + CI_DEBUG_BUILD_KIB - CI_BUILD_ON_DISK_KIB))
 require_ci_free_space() {
     local dir="$1" free_kib
     free_kib=$(/bin/df -Pk "$dir" | $AWK_BIN 'NR == 2 { print $4 }') || free_kib=""
@@ -664,9 +690,10 @@ require_ci_free_space() {
             ;;
     esac
     if [ "$free_kib" -lt "$CI_MIN_FREE_KIB" ]; then
-        echo "ERROR: local CI needs at least $((CI_MIN_FREE_KIB / 1048576)) GiB free on the volume holding $dir; found $((free_kib / 1024)) MiB." >&2
-        echo "       The debug build plus the 1.5M-row legacy-upgrade test fixture otherwise" >&2
-        echo "       fail with SQLITE_FULL/ENOSPC about 25 minutes in. Free space and rerun." >&2
+        echo "ERROR: local CI needs at least $((CI_MIN_FREE_KIB / 1024)) MiB free on the volume holding $dir; found $((free_kib / 1024)) MiB." >&2
+        echo "       Budget: 10 GiB legacy-upgrade test fixture + 1 GiB store floor + 3 GiB debug" >&2
+        echo "       build, less $((CI_BUILD_ON_DISK_KIB / 1024)) MiB of that build already on disk. Otherwise the run" >&2
+        echo "       fails with SQLITE_FULL/ENOSPC about 25 minutes in. Free space and rerun." >&2
         exit 1
     fi
 }
@@ -842,12 +869,7 @@ echo -e "${BOLD}Assessment harness (non-shipping sub-package)${NC}"
 # referenced by nothing in .github/workflows, this script, or the Makefile —
 # the component that grades the detection engine was itself ungated, and could
 # have stopped compiling without anyone noticing.
-if [ "$CLEAN_TREE" = "1" ]; then
-    # The harness is a nested package with its own ignored build directory.
-    # Root `swift package resolve` does not clean it, so a release gate could
-    # otherwise pass entirely on stale harness objects.
-    /bin/rm -rf "$PROJECT_DIR/Tools/AssessmentHarness/.build"
-fi
+# A --clean run removed the harness build directory together with .build.
 check "Harness builds" swift build --package-path Tools/AssessmentHarness
 check "Harness tests" swift test --no-parallel --package-path Tools/AssessmentHarness
 check "Harness stays out of the shipped build" ./Tools/AssessmentHarness/scripts/check-harness-isolation.sh

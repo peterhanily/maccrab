@@ -37,6 +37,18 @@ print(json.dumps({"result": "PASSED", "schema_version": 1,
                   "xcode_version": "26.4.1", "xcode_build": "17E202"}, sort_keys=True))
 """
 CI_STUB = '#!/bin/bash\nprintf "ci-local:%s\\n" "$*" >> "$FIXTURE_CI_LOG"\n'
+# What release.sh exports for its tag push; the hook must not need real values
+# to notice that no created or moved tag line came with them.
+MANIFEST = {
+    "MACCRAB_RELEASE_EXPECTED_DMG": ".build/MacCrab-v9.9.9.dmg",
+    "MACCRAB_RELEASE_EXPECTED_SHA256": "a" * 64,
+    "MACCRAB_RELEASE_EXPECTED_COMMIT": "b" * 40,
+    "MACCRAB_RELEASE_EXPECTED_TAG_OBJECT": "c" * 40,
+    "MACCRAB_RELEASE_EXPECTED_HOOK_BLOB": "d" * 40,
+    "MACCRAB_RELEASE_SOURCE_COMMIT": "b" * 40,
+    "MACCRAB_RELEASE_SOURCE_TREE": "e" * 40,
+    "MACCRAB_RELEASE_METADATA_TREE": "e" * 40,
+}
 
 
 def same_identity(_repo):
@@ -391,6 +403,97 @@ class HookTests(FixtureCase):
         result = self.fx.hook([self.branch()])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.fx.ci_runs(), ["ci-local:"])
+
+    def test_push_with_no_ref_to_update_skips_ci(self):
+        result = self.fx.hook([])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("nothing to gate", result.stdout)
+        self.assertEqual(self.fx.ci_runs(), [])
+
+    def test_release_manifest_without_a_created_tag_fails_before_ci(self):
+        pushes = {
+            "no ref at all": [],
+            "branch only": [self.branch()],
+            "tag deletion": [f"(delete) {ZERO} refs/tags/v9.9.9 {self.fx.head()}"],
+        }
+        for variable, value in MANIFEST.items():
+            for name, lines in pushes.items():
+                with self.subTest(variable=variable, push=name):
+                    result = self.fx.hook(lines, **{variable: value})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("no created/moved version tag was pushed", result.stderr)
+                    self.assertEqual(self.fx.ci_runs(), [])
+
+
+class RealPushTests(FixtureCase):
+    """git itself drives the hook while pushing to a disposable local bare remote."""
+
+    def setUp(self):
+        super().setUp()
+        self.remote = self.fx.root / "remote.git"
+        self.run_git(self.fx.root, "init", "-q", "--bare", str(self.remote))
+        self.fx.git("remote", "add", "origin", str(self.remote))
+        self.fx.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        # Another clone moves main on. Fetching it makes this checkout's own
+        # commit a known non-fast-forward, which git leaves out of the hook's
+        # stdin; a remote commit missing locally ("fetch first") is still sent.
+        other = self.fx.root / "other"
+        self.run_git(self.fx.root, "clone", "-q", "-b", "main", str(self.remote), str(other))
+        (other / "source.txt").write_text("moved on elsewhere\n")
+        self.run_git(other, "commit", "-q", "-am", "elsewhere")
+        self.run_git(other, "push", "-q", "origin", "HEAD:refs/heads/main")
+        (self.fx.repo / "source.txt").write_text("diverged here\n")
+        self.fx.git("commit", "-q", "-am", "diverged")
+        self.fx.git("fetch", "-q", "origin")
+
+    def run_git(self, cwd, *args):
+        return subprocess.run(["/usr/bin/git", "-c", "user.name=MacCrab receipt fixture",
+                               "-c", "user.email=receipt@invalid.example",
+                               "-c", "commit.gpgSign=false", "-c", "core.hooksPath=.no-hooks",
+                               *args], cwd=cwd, env=self.fx.env(), check=True,
+                              capture_output=True, text=True)
+
+    def push(self, *args, **env):
+        result = subprocess.run(["/usr/bin/git", "-c", "core.hooksPath=.githooks", "push", *args],
+                                cwd=self.fx.repo, env=self.fx.env(**env),
+                                capture_output=True, text=True, timeout=60)
+        return result, result.stdout + result.stderr
+
+    def replaced_tag_with_stale_lease(self, **env):
+        """A --respin-shaped tag push whose lease no longer matches the remote."""
+        self.fx.git("tag", "-a", "v9.9.9", "-m", "published elsewhere", "origin/main")
+        self.fx.git("push", "-q", "origin", "refs/tags/v9.9.9")
+        self.fx.git("tag", "-d", "v9.9.9")
+        self.fx.git("tag", "-a", "v9.9.9", "-m", "replacement")
+        return self.push("--force-with-lease=refs/tags/v9.9.9:", "origin", "refs/tags/v9.9.9", **env)
+
+    def test_non_fast_forward_branch_push_leaves_the_rejection_to_git(self):
+        result, output = self.push("origin", "HEAD:refs/heads/main")
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("(non-fast-forward)", output)
+        self.assertIn("nothing to gate", output)
+        self.assertEqual(self.fx.ci_runs(), [])
+
+    def test_up_to_date_push_skips_ci(self):
+        result, output = self.push("origin", "refs/remotes/origin/main:refs/heads/main")
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Everything up-to-date", output)
+        self.assertEqual(self.fx.ci_runs(), [])
+
+    def test_stale_lease_tag_push_leaves_the_rejection_to_git(self):
+        result, output = self.replaced_tag_with_stale_lease()
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("(stale info)", output)
+        self.assertIn("nothing to gate", output)
+        self.assertEqual(self.fx.ci_runs(), [])
+
+    def test_stale_lease_release_tag_push_fails_fast_without_ci(self):
+        result, output = self.replaced_tag_with_stale_lease(**MANIFEST)
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("no created/moved version tag was pushed", output)
+        self.assertEqual(self.fx.ci_runs(), [])
+        self.assertNotEqual(self.fx.git("ls-remote", "origin", "refs/tags/v9.9.9").split()[0],
+                            self.fx.git("rev-parse", "refs/tags/v9.9.9"))
 
 
 if __name__ == "__main__":

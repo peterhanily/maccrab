@@ -182,18 +182,39 @@ make_ci_fixture() {
         '    exit 0' \
         'fi' \
         'exec /bin/mv "${args[@]}"'
-    # The free-space preflight must see a deterministic volume, not whatever
-    # the host running this probe happens to have left.
+    # The free-space preflight must see deterministic volumes, not whatever
+    # the host running this probe happens to have left. $TMPDIR and the
+    # checkout answer separately so each check is proven on its own, and the
+    # shim records which stale build trees still existed when it was asked.
     write_executable "$fixture/fake-bin/df" \
         '#!/bin/bash' \
+        'volume=project' \
+        'if [ "${2:-}" = "${TMPDIR:-/tmp}" ]; then volume=tmp; fi' \
+        'stale=' \
+        'if [ -e .build/stale-build-object.o ]; then stale="$stale build"; fi' \
+        'if [ -e Tools/AssessmentHarness/.build ]; then stale="$stale harness"; fi' \
+        'printf "%s stale:%s\n" "$volume" "$stale" >> "${MACCRAB_TEST_DF_LOG:-/dev/null}"' \
+        'if [ "${MACCRAB_TEST_CI_DF_FAIL:-}" = "$volume" ]; then echo "df: fixture cannot stat ${2:-}" >&2; exit 1; fi' \
+        'if [ "$volume" = tmp ]; then free=${MACCRAB_TEST_CI_TMP_FREE_KIB:-${MACCRAB_TEST_CI_FREE_KIB:-104857600}}' \
+        'else free=${MACCRAB_TEST_CI_PROJECT_FREE_KIB:-${MACCRAB_TEST_CI_FREE_KIB:-104857600}}; fi' \
         'printf "Filesystem 1024-blocks Used Available Capacity Mounted on\n"' \
-        'printf "fixture 209715200 0 %s 0%% /\n" "${MACCRAB_TEST_CI_FREE_KIB:-104857600}"'
-    # Production pins the rename and free-space primitives to /bin. Only this
-    # disposable fixture redirects those calls so it can simulate kernel and
-    # filesystem conditions.
+        'printf "fixture 209715200 0 %s 0%% /\n" "$free"'
+    # A warm run credits the build already in .build. The real du measures the
+    # fixture's tiny tree unless a case pins a multi-GiB footprint no fixture
+    # can afford to write, or a failed measurement with plausible output.
+    write_executable "$fixture/fake-bin/du" \
+        '#!/bin/bash' \
+        'printf "%s\n" "$*" >> "${MACCRAB_TEST_DU_LOG:-/dev/null}"' \
+        'if [ "${MACCRAB_TEST_CI_DU_FAIL:-0}" = "1" ]; then printf "3145728\t.build\n"; echo "du: .build/private: Permission denied" >&2; exit 1; fi' \
+        'if [ -n "${MACCRAB_TEST_CI_BUILD_KIB:-}" ]; then printf "%s\t.build\n" "$MACCRAB_TEST_CI_BUILD_KIB"; exit 0; fi' \
+        'exec /usr/bin/du "$@"'
+    # Production pins the rename and disk-measurement primitives to /bin and
+    # /usr/bin. Only this disposable fixture redirects those calls so it can
+    # simulate kernel and filesystem conditions.
     /usr/bin/sed -i '' \
         -e "s#/bin/mv -n#${fixture}/fake-bin/mv -n#g" \
         -e "s#/bin/df -Pk#${fixture}/fake-bin/df -Pk#g" \
+        -e "s#/usr/bin/du -sk#${fixture}/fake-bin/du -sk#g" \
         "$fixture/scripts/ci-local.sh"
 
     local stub
@@ -615,11 +636,145 @@ set +e
 low_disk_status=$?
 set -e
 [ "$low_disk_status" -ne 0 ] || fail "local CI started with too little free disk"
-grep -q 'needs at least 14 GiB free on the volume holding' "$ci_low_disk/output.log" \
+grep -q 'needs at least 14336 MiB free on the volume holding' "$ci_low_disk/output.log" \
     || fail "low free space was not diagnosed"
 if [ -s "$ci_low_disk/swift.log" ] && grep -q '^build' "$ci_low_disk/swift.log"; then
     fail "low free space was diagnosed only after a Swift build started"
 fi
+
+# The budget is 10 GiB fixture + 1 GiB floor + 3 GiB debug build. A warm run is
+# credited the build it already has, a clean run nothing, and each volume and
+# each measurement is checked on its own. These cases call ci-local.sh directly.
+GIB_KIB=$((1024 * 1024))
+run_free_space_case() {
+    local fixture="$1"
+    shift
+    set +e
+    (
+        cd "$fixture"
+        /usr/bin/env PATH="$fixture/fake-bin:/usr/bin:/bin" TMPDIR="$fixture/tmp" \
+            MACCRAB_TEST_SWIFT_LOG="$fixture/swift.log" \
+            MACCRAB_TEST_DF_LOG="$fixture/df.log" MACCRAB_TEST_DU_LOG="$fixture/du.log" \
+            "$@"
+    ) > "$fixture/output.log" 2>&1
+    free_space_status=$?
+    set -e
+}
+assert_free_space_refused() {
+    local fixture="$1" label="$2" diagnosis="$3"
+    [ "$free_space_status" -ne 0 ] || fail "$label: local CI started anyway"
+    grep -qF -- "$diagnosis" "$fixture/output.log" || {
+        tail -20 "$fixture/output.log" >&2
+        fail "$label: expected diagnosis missing: $diagnosis"
+    }
+    if [ -s "$fixture/swift.log" ] && grep -q '^build' "$fixture/swift.log"; then
+        fail "$label: refused only after a Swift build started"
+    fi
+}
+
+# A complete warm build (2.7 GiB) is already on disk: 12 GiB is enough.
+ci_free_warm="$TEST_ROOT/ci-free-warm-credit"
+make_ci_fixture "$ci_free_warm"
+mkdir -p "$ci_free_warm/.build"
+run_free_space_case "$ci_free_warm" MACCRAB_TEST_CI_FREE_KIB=$((12 * GIB_KIB)) \
+    MACCRAB_TEST_CI_BUILD_KIB=2831155 ./scripts/ci-local.sh
+[ "$free_space_status" -eq 0 ] || {
+    tail -20 "$ci_free_warm/output.log" >&2
+    fail "warm run with its debug build on disk was refused 12 GiB"
+}
+grep -q '^build$' "$ci_free_warm/swift.log" || fail "credited warm run did not build"
+grep -qxF -- '-sk -I MacCrab-v*.dmg .build' "$ci_free_warm/du.log" \
+    || fail "warm credit did not measure .build without its release DMGs"
+
+# The same free space without a build tree, or with one that is symlinked
+# (its bytes may live on another volume), earns no credit.
+ci_free_cold="$TEST_ROOT/ci-free-warm-cold"
+make_ci_fixture "$ci_free_cold"
+run_free_space_case "$ci_free_cold" MACCRAB_TEST_CI_FREE_KIB=$((12 * GIB_KIB)) \
+    MACCRAB_TEST_CI_BUILD_KIB=2831155 ./scripts/ci-local.sh
+assert_free_space_refused "$ci_free_cold" "warm run with no .build" \
+    'needs at least 14336 MiB free'
+[ ! -s "$ci_free_cold/du.log" ] || fail "a missing .build was credited"
+ci_free_link="$TEST_ROOT/ci-free-warm-symlink"
+make_ci_fixture "$ci_free_link"
+mkdir -p "$ci_free_link/elsewhere"
+ln -s elsewhere "$ci_free_link/.build"
+run_free_space_case "$ci_free_link" MACCRAB_TEST_CI_FREE_KIB=$((12 * GIB_KIB)) \
+    MACCRAB_TEST_CI_BUILD_KIB=2831155 ./scripts/ci-local.sh
+assert_free_space_refused "$ci_free_link" "warm run with symlinked .build" \
+    'needs at least 14336 MiB free'
+[ ! -s "$ci_free_link/du.log" ] || fail "a symlinked .build was credited"
+
+# Credit never exceeds the build's 3 GiB share: an oversized tree still leaves
+# the full fixture peak and floor (11 GiB) to find.
+ci_free_big="$TEST_ROOT/ci-free-warm-oversized"
+make_ci_fixture "$ci_free_big"
+mkdir -p "$ci_free_big/.build"
+run_free_space_case "$ci_free_big" MACCRAB_TEST_CI_FREE_KIB=$((11 * GIB_KIB - 1024)) \
+    MACCRAB_TEST_CI_BUILD_KIB=$((8 * GIB_KIB)) ./scripts/ci-local.sh
+assert_free_space_refused "$ci_free_big" "warm run with an oversized .build" \
+    'needs at least 11264 MiB free'
+
+# A build footprint du could not measure earns no credit, whatever it printed.
+ci_free_du="$TEST_ROOT/ci-free-warm-du-failure"
+make_ci_fixture "$ci_free_du"
+mkdir -p "$ci_free_du/.build"
+run_free_space_case "$ci_free_du" MACCRAB_TEST_CI_FREE_KIB=$((12 * GIB_KIB)) \
+    MACCRAB_TEST_CI_DU_FAIL=1 ./scripts/ci-local.sh
+assert_free_space_refused "$ci_free_du" "warm run with an unmeasurable .build" \
+    'needs at least 14336 MiB free'
+
+# A clean run wipes .build and the harness build before measuring and takes no
+# credit, so a large stale tree neither counts against it nor for it.
+ci_free_clean="$TEST_ROOT/ci-free-clean"
+make_ci_fixture "$ci_free_clean"
+mkdir -p "$ci_free_clean/.build" "$ci_free_clean/Tools/AssessmentHarness/.build"
+printf 'stale-object\n' > "$ci_free_clean/.build/stale-build-object.o"
+printf 'stale-harness-object\n' > "$ci_free_clean/Tools/AssessmentHarness/.build/stale.o"
+run_free_space_case "$ci_free_clean" MACCRAB_TEST_CI_FREE_KIB=$((12 * GIB_KIB)) \
+    MACCRAB_TEST_CI_BUILD_KIB=$((3 * GIB_KIB)) ./scripts/ci-local.sh --clean
+assert_free_space_refused "$ci_free_clean" "clean run with 12 GiB" \
+    'needs at least 14336 MiB free'
+[ "$(cat "$ci_free_clean/df.log")" = "tmp stale:" ] \
+    || fail "clean free-space check ran before both build trees were wiped: $(cat "$ci_free_clean/df.log")"
+[ ! -e "$ci_free_clean/Tools/AssessmentHarness/.build" ] \
+    || fail "clean run did not wipe the harness build"
+[ ! -s "$ci_free_clean/du.log" ] || fail "a clean run credited a build tree"
+
+# $TMPDIR and the checkout are separate checks: either volume alone refuses,
+# and a measurement that fails or cannot be parsed refuses too.
+for volume in tmp project; do
+    ci_free_volume="$TEST_ROOT/ci-free-low-$volume"
+    make_ci_fixture "$ci_free_volume"
+    if [ "$volume" = tmp ]; then
+        low_variable=MACCRAB_TEST_CI_TMP_FREE_KIB
+        holder="$ci_free_volume/tmp"
+        expected_df_log='tmp stale:'
+    else
+        low_variable=MACCRAB_TEST_CI_PROJECT_FREE_KIB
+        holder=$(cd "$ci_free_volume" && pwd -P)
+        expected_df_log=$'tmp stale:\nproject stale:'
+    fi
+    run_free_space_case "$ci_free_volume" "$low_variable=$((13 * GIB_KIB))" ./scripts/ci-local.sh
+    assert_free_space_refused "$ci_free_volume" "low $volume volume" \
+        "needs at least 14336 MiB free on the volume holding $holder;"
+    [ "$(cat "$ci_free_volume/df.log")" = "$expected_df_log" ] \
+        || fail "low $volume volume was not the check that refused"
+
+    ci_free_unmeasured="$TEST_ROOT/ci-free-unmeasured-$volume"
+    make_ci_fixture "$ci_free_unmeasured"
+    if [ "$volume" = tmp ]; then
+        holder="$ci_free_unmeasured/tmp"
+    else
+        holder=$(cd "$ci_free_unmeasured" && pwd -P)
+    fi
+    run_free_space_case "$ci_free_unmeasured" "MACCRAB_TEST_CI_DF_FAIL=$volume" ./scripts/ci-local.sh
+    assert_free_space_refused "$ci_free_unmeasured" "failed $volume measurement" \
+        "could not measure free space on the volume holding $holder"
+    run_free_space_case "$ci_free_unmeasured" "$low_variable=unknown" ./scripts/ci-local.sh
+    assert_free_space_refused "$ci_free_unmeasured" "unparseable $volume measurement" \
+        "could not measure free space on the volume holding $holder"
+done
 
 # A receipt lets a later branch push skip CI, so only a clean run that passed
 # every check may ask for one. Record the helper calls ci-local makes: a warm
