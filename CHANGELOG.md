@@ -61,6 +61,16 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   when that tag names the source's single metadata-only child commit and the
   release branch can still fast-forward to the source, and the tag push is bound
   to the exact tag object it checked. Any other same-version tag is refused.
+- **`release.sh --resume-publish` finishes a release stranded after its tag
+  push** without rebuilding or moving any ref. Once the release branch contains
+  the tagged commit by a merge, it re-verifies the qualified candidate and runs
+  only the GitHub, site and cask publication, taking release.json and the casks
+  from the tagged commit. A failed branch push now says the tag is public and
+  prints these steps.
+- **release.sh reads origin before its clean CI.** A published version, a
+  non-replaceable tag under `--respin`, or a release branch that cannot
+  fast-forward to the source now stops the run in seconds, and origin is
+  re-read immediately before the tag push.
 - **The installed-host recorder checks its inputs before the 900-second
   capture.** It refuses to start without the private resource baseline, naming
   the exact file to copy from the reference checkout, and while the candidate

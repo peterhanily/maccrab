@@ -87,7 +87,14 @@ publish.
   the qualified second phase. Publisher credentials are deliberately not read
   and no GitHub/distribution mutation is attempted by the first-phase artifact
   build. It still performs the required Apple notarization submission, and the
-  existing read-only tag/ancestry check queries `origin`.
+  read-only remote preflight queries `origin`.
+- Before Step 0 (so a refusal costs seconds, not the clean CI), every run reads
+  `origin`'s release tags and release branch. It refuses when the source does not
+  descend from every published tag, when `v<version>` is already published
+  (pointing at `--resume-publish` when that tag is this candidate's own metadata
+  commit), and when `origin`'s release branch is not an ancestor of the source,
+  because the branch push after the tag push is a plain fast-forward. The tag
+  push re-reads `origin` immediately before it runs.
 - For a GA, `SITE_REPO_TOKEN` set before the qualified second phase. The optional
   `SKIP_APPCAST=1` skips only Sparkle; site `release.json` verification and the
   Homebrew tap remain mandatory because `release.sh` creates a public release.
@@ -129,7 +136,8 @@ publish.
   transcript. The installed-host recorder reuses that receipt and never runs a
   Swift build/test or the process-heavy rule linter inside the daemon process
   epoch being qualified.
-  `--skip-prerelease-check`, `--respin`, and `--publish-rc` do not bypass it.
+  `--skip-prerelease-check`, `--respin`, `--resume-publish`, and `--publish-rc`
+  do not bypass it.
 
 Release candidates are isolated by default. A standalone development-only RC
 can still be built with:
@@ -409,6 +417,34 @@ remote rollback. Partial create, missing/different digest, failed or ambiguous
 PATCH, and unexpected remote state all fail closed while retaining whatever
 draft or release exists. The error prints the immutable ID, nonce title, known
 state, and canonical releases page for manual inspection and recovery.
+
+#### Stranded publication: `--resume-publish`
+
+v1.22.2's tag push succeeded, its branch push failed, and another change then
+reached `main`, so `main` could not fast-forward to the tagged metadata commit and
+no GitHub release, appcast, `release.json` or cask was published. A failed branch
+push now prints this state and the recovery. Do not move or delete the tag, and
+do not rebuild:
+
+1. Fix the push failure, then make `origin`'s release branch contain the tagged
+   commit by a **merge** (never a squash, rebase or cherry-pick, which each
+   make a different commit):
+   `git fetch origin && git merge origin/main && git push origin main`
+   (local `main` is already at the metadata commit after the failed run).
+2. Run `scripts/release.sh <version> --resume-publish` (add `--publish-rc` for an
+   RC) with the preserved DMG and qualification evidence in place.
+
+Resume reads the candidate's source commit/tree from its manifest, not `HEAD`,
+and runs the same qualification gate. It requires the published tag to be an
+annotated `v<version>` on that source's single child changing exactly
+`release.json` and both casks (an RC's tag names the source itself), whose
+`release.json` and casks name the qualified DMG; `origin`'s branch to contain
+that commit (otherwise it prints the merge steps and stops); and no GitHub
+release for the tag. It then runs only the post-push steps above, reading
+`release.json`, the casks and the release notes from the tagged commit. It runs
+no CI, builds nothing, and never moves or pushes a tag or branch. It may run from
+a detached checkout of the tag when later commits on the branch changed files
+the qualification gate reads.
 
 ### Step 6 — downstream distribution and verification
 

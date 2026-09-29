@@ -5,6 +5,8 @@ set +x
 #
 # Usage:
 #   ./scripts/release.sh 1.1.0
+#   ./scripts/release.sh 1.1.0 --resume-publish   # finish a release whose tag is
+#                                                 # public but whose branch push failed
 #
 # Requires: DEVELOPER_ID and NOTARIZE_KEYCHAIN_PROFILE for a new candidate.
 # Set these in ~/.maccrab-release-env (parsed as data) or export them.
@@ -174,6 +176,14 @@ CONTAINMENT_REPORT="${CONTAINMENT_REPORT:-}"
 # no way forward but manual surgery. --respin is the explicit opt-in to re-point
 # an existing tag at the new HEAD.
 RESPIN=0
+# v1.22.2 pushed its verified tag, then the branch push failed and another
+# change landed on origin's main, so main could no longer fast-forward to the
+# tagged metadata commit. Every mode refused, and the operator merged by hand
+# and ran the post-push steps manually. --resume-publish is that recovery:
+# with origin's branch containing the tagged commit, it re-verifies the same
+# qualified candidate and runs only the post-push publication, never moving or
+# pushing the tag or the branch.
+RESUME_PUBLISH=0
 # The branch a release may be cut from. Nothing checked this: `git tag` tags HEAD
 # of whatever branch is checked out and the script then pushed the `main` REF, so
 # a release cut from `dev` (the day-to-day branch here) produced a tag pointing at
@@ -184,6 +194,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --skip-prerelease-check) SKIP_PRERELEASE=1; shift ;;
         --respin) RESPIN=1; shift ;;
+        --resume-publish) RESUME_PUBLISH=1; shift ;;
         --publish-rc) PUBLISH_RC=1; shift ;;
         --runtime-report)
             [ "$#" -ge 2 ] || { echo "ERROR: --runtime-report requires a JSON path" >&2; exit 2; }
@@ -206,6 +217,7 @@ done
 
 if [ -z "$VERSION" ]; then
     echo "Usage: $0 <version> [--publish-rc] [--skip-prerelease-check]"
+    echo "          [--respin | --resume-publish]"
     echo "          [--runtime-report PATH] [--containment-report PATH]"
     echo "Example: $0 1.1.0"
     exit 1
@@ -227,6 +239,10 @@ if [ "$VERSION_IS_RC" != "1" ] && [ "$PUBLISH_RC" = "1" ]; then
     echo "ERROR: --publish-rc requires a -rc.N version" >&2
     exit 2
 fi
+if [ "$RESUME_PUBLISH" = "1" ] && [ "$RESPIN" = "1" ]; then
+    echo "ERROR: --resume-publish publishes the existing tag; --respin replaces it. Choose one." >&2
+    exit 2
+fi
 
 # Candidate qualification is local, host-specific evidence and is never
 # committed. The public publisher accepts only the fixed candidate manifest
@@ -238,7 +254,6 @@ CANDIDATE_MANIFEST="$QUALIFICATION_DIR/MacCrab-v$VERSION.candidate.json"
 RUNTIME_REPORT="${RUNTIME_REPORT:-$QUALIFICATION_DIR/MacCrab-v$VERSION.runtime.json}"
 CONTAINMENT_REPORT="${CONTAINMENT_REPORT:-$QUALIFICATION_DIR/MacCrab-v$VERSION.containment.json}"
 DMG_PATH=".build/MacCrab-v$VERSION.dmg"
-BUILD_NUMBER="${VERSION%%-rc.*}.$($GIT_BIN rev-list --count "$SOURCE_COMMIT")"
 CI_TRANSCRIPT=""
 CI_STARTED_AT=""
 CI_COMPLETED_AT=""
@@ -347,7 +362,10 @@ require_versioned_pre_push_gate() {
 }
 require_versioned_pre_push_gate
 current_branch=$($GIT_BIN symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
-if [ "$current_branch" != "$RELEASE_BRANCH" ]; then
+# --resume-publish moves no local or remote ref and checks origin's branch
+# itself, so it may also run from a detached checkout of the published tag
+# (useful when the branch has since changed files the qualification gate reads).
+if [ "$current_branch" != "$RELEASE_BRANCH" ] && [ "$RESUME_PUBLISH" != "1" ]; then
     echo "ERROR: on branch '$current_branch' but releases must be cut from '$RELEASE_BRANCH'." >&2
     exit 1
 fi
@@ -366,6 +384,36 @@ is_nonempty_regular_release_artifact() {
 is_regular_evidence_file() {
     [ -f "$1" ] && [ ! -L "$1" ] && [ -s "$1" ]
 }
+
+# Under --resume-publish HEAD is the published metadata commit or a merge that
+# contains it, not the qualified source. Take the source commit/tree from the
+# candidate manifest instead; the qualification gate then verifies that
+# manifest, the DMG's signed source attestation and both host reports against
+# them exactly as it does for a normal second phase.
+if [ "$RESUME_PUBLISH" = "1" ]; then
+    if ! is_regular_evidence_file "$CANDIDATE_MANIFEST"; then
+        echo "ERROR: --resume-publish needs the qualified candidate manifest: $CANDIDATE_MANIFEST" >&2
+        exit 1
+    fi
+    manifest_source=$(/usr/bin/python3 -I -c '
+import json, re, sys
+candidate = json.load(open(sys.argv[1]))["candidate"]
+object_id = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+values = [candidate["source_commit"], candidate["source_tree"]]
+if not all(isinstance(value, str) and object_id.fullmatch(value) for value in values):
+    raise SystemExit(1)
+print(*values)
+' "$CANDIDATE_MANIFEST" 2>/dev/null || true)
+    read -r SOURCE_COMMIT SOURCE_TREE <<< "$manifest_source"
+    if [ -z "$SOURCE_COMMIT" ] || [ -z "$SOURCE_TREE" ] \
+            || [ "$($GIT_BIN rev-parse --verify --quiet "$SOURCE_COMMIT^{commit}" || true)" != "$SOURCE_COMMIT" ] \
+            || [ "$($GIT_BIN rev-parse --verify --quiet "$SOURCE_COMMIT^{tree}" || true)" != "$SOURCE_TREE" ]; then
+        echo "ERROR: the candidate manifest does not name a local source commit and its tree: $CANDIDATE_MANIFEST" >&2
+        exit 1
+    fi
+    echo "Resume: qualified candidate source $SOURCE_COMMIT (checkout HEAD $($GIT_BIN rev-parse HEAD))"
+fi
+BUILD_NUMBER="${VERSION%%-rc.*}.$($GIT_BIN rev-list --count "$SOURCE_COMMIT")"
 
 run_candidate_qualification_gate() {
     /usr/bin/python3 -I "$SCRIPT_DIR/candidate-qualification.py" verify-release \
@@ -552,67 +600,308 @@ echo "║  MacCrab v$VERSION Release                       "
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
 
-# Step 0a is deliberately deferred until after exact-candidate qualification.
-# A build-only first phase must not read publisher credentials or call a GitHub
-# publishing API; only the existing read-only origin ancestry query is allowed.
-# v1.10.0-rc audit fix:
-# Step 6 publishes both the Sparkle feed and the site's release metadata.
-# A missing token discovered after the tag/asset is public strands users on
-# stale distribution surfaces, so release.sh always requires it up front.
-# `SKIP_APPCAST=1` is deliberately narrow: it skips Sparkle only; it is not an
-# internal/dry-run escape hatch and cannot bypass release.json or the tap cask.
-# Step 0b: Pre-release check — enforce RELEASE_CHECKLIST.md items so the
-# pipeline refuses to ship out-of-sync versions, stale notes, or broken
-# localizations. Warnings still proceed; hard errors abort.
-echo "Step 0/6: Pre-release check..."
-if [ "$SKIP_PRERELEASE" = "1" ]; then
-    echo "  (skipped via --skip-prerelease-check)"
-else
-    "$SCRIPT_DIR/prerelease-check.sh" "$VERSION" || {
-        echo "Pre-release check failed — fix the errors above or run with --skip-prerelease-check to override (not recommended)"
-        exit 1
-    }
-fi
+# Remote release state is read here, before Step 0. Each check is seconds of
+# read-only Git against origin and decides whether this run can ever publish;
+# they used to run after the ~30-minute clean CI, so a refusal cost the whole
+# gate. The tag push re-reads origin immediately before it goes out.
 
-# Step 0b: Architectural-invariants audit (v1.6.19). Catches the
-# wire-the-orphans bug class and AlertSink-bypass regressions BEFORE
-# they ship. Sister script to prerelease-check.sh: that one verifies
-# manifest sync, this one verifies code structure.
-echo "Step 0b/6: Architectural audit..."
-"$SCRIPT_DIR/pre-release-audit.sh" || {
-    echo "Architectural audit failed — fix the structural issues above before shipping"
-    exit 1
+# A published same-version tag is an earlier attempt of THIS candidate only when
+# it names the source's single child changing exactly the GA metadata allowlist:
+# the commit a release run creates just before its tag push.
+is_release_metadata_child() {
+    [ "$($GIT_BIN rev-list --parents -n 1 "$1")" = "$1 $SOURCE_COMMIT" ] \
+        && [ "$($GIT_BIN diff-tree --no-commit-id --name-only -r "$SOURCE_COMMIT" "$1" \
+            | LC_ALL=C /usr/bin/sort)" = $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]
 }
 
-# Step 1: clean local CI before the artifact build. Running the clean gate only
-# from the later tag push cannot retroactively prove that the signed DMG came
-# from freshly resolved release outputs. Credentials remain unexported here.
-echo "Step 1/6: Running clean local CI before the release build..."
-require_clean_release_source
-# Retain the complete aggregate transcript on success and failure. Candidate
-# manifests store only its digest/tail; private build cleanup must not remove it.
-if [ -L "$QUALIFICATION_DIR" ] \
-        || { [ -e "$QUALIFICATION_DIR" ] && [ ! -d "$QUALIFICATION_DIR" ]; }; then
-    echo "ERROR: refusing redirected/non-directory qualification evidence: $QUALIFICATION_DIR" >&2
+# The branch push after the tag push is a plain, non-force push of the release
+# commit (the source's metadata child, or the source itself for an RC), so it
+# lands only when origin's branch is an ancestor of the source. v1.22.2's did
+# not: another change reached main first and left a public tag main could not
+# reach. Sets origin_branch_commit for the caller's diagnosis.
+origin_branch_commit=""
+origin_release_branch_fast_forwards() {
+    origin_branch_commit=$($GIT_BIN ls-remote origin "refs/heads/$RELEASE_BRANCH" \
+        | $AWK_BIN -v ref="refs/heads/$RELEASE_BRANCH" '$2 == ref && !found { print $1; found = 1 }')
+    [ -n "$origin_branch_commit" ] \
+        && $GIT_BIN rev-parse --verify --quiet "${origin_branch_commit}^{commit}" >/dev/null \
+        && $GIT_BIN merge-base --is-ancestor "$origin_branch_commit" "$SOURCE_COMMIT"
+}
+
+# --resume-publish instead needs origin's branch to CONTAIN the tagged release
+# commit, as it would after a successful branch push (or the operator's merge).
+# The branch's objects are fetched, writing no ref, when they are not local.
+origin_release_branch_contains() {
+    origin_branch_commit=$($GIT_BIN ls-remote origin "refs/heads/$RELEASE_BRANCH" \
+        | $AWK_BIN -v ref="refs/heads/$RELEASE_BRANCH" '$2 == ref && !found { print $1; found = 1 }')
+    [ -n "$origin_branch_commit" ] || return 1
+    if ! $GIT_BIN cat-file -e "${origin_branch_commit}^{commit}" 2>/dev/null \
+            && ! $GIT_BIN fetch --quiet --no-tags --no-prune --no-write-fetch-head \
+                origin "refs/heads/$RELEASE_BRANCH"; then
+        echo "ERROR: could not fetch origin's $RELEASE_BRANCH ($origin_branch_commit) to check it" >&2
+        exit 1
+    fi
+    $GIT_BIN merge-base --is-ancestor "$1" "$origin_branch_commit"
+}
+
+echo "Remote preflight: origin's release tags and $RELEASE_BRANCH..."
+require_canonical_origin
+published_tag_refs=$($GIT_BIN ls-remote --tags origin 'refs/tags/v*')
+published_tags=$(printf '%s\n' "$published_tag_refs" \
+    | $AWK_BIN '{ print $2 }' \
+    | /usr/bin/sed -e 's|^refs/tags/||' -e 's|\^{}$||' \
+    | LC_ALL=C /usr/bin/sort -u)
+release_tag_object=$(printf '%s\n' "$published_tag_refs" \
+    | $AWK_BIN -v ref="refs/tags/v$VERSION" '$2 == ref && !found { print $1; found = 1 }')
+release_tag_commit=""
+release_tag_is_metadata_child=0
+if [ -n "$release_tag_object" ]; then
+    # v1.22.2's operator had deleted the local tag, so --respin could not even
+    # resolve origin's. --respin and --resume-publish fetch only that tag when
+    # its objects are absent; a plain run refuses a published version anyway.
+    if ! $GIT_BIN cat-file -e "$release_tag_object" 2>/dev/null \
+            && { [ "$RESPIN" = "1" ] || [ "$RESUME_PUBLISH" = "1" ]; }; then
+        echo "  Fetching published tag v$VERSION to check what it names"
+        if ! $GIT_BIN fetch --quiet --no-tags --no-prune --no-write-fetch-head \
+                origin "refs/tags/v$VERSION"; then
+            echo "ERROR: could not fetch published tag v$VERSION to check its ancestry" >&2
+            exit 1
+        fi
+    fi
+    release_tag_commit=$($GIT_BIN rev-parse --verify --quiet "${release_tag_object}^{commit}" || true)
+    if [ -n "$release_tag_commit" ] && is_release_metadata_child "$release_tag_commit"; then
+        release_tag_is_metadata_child=1
+    fi
+fi
+
+# The tag push is leased to exactly this value: a replaceable earlier attempt
+# under --respin, otherwise empty, meaning v$VERSION must not exist on origin.
+tag_push_lease_object=""
+if [ "$RESUME_PUBLISH" = "1" ]; then
+    if [ -z "$release_tag_object" ]; then
+        echo "ERROR: origin has no v$VERSION tag, so there is no publication to resume." >&2
+        echo "       Run the release without --resume-publish." >&2
+        exit 1
+    fi
+    if [ "$($GIT_BIN cat-file -t "$release_tag_object" 2>/dev/null || true)" != "tag" ] \
+            || [ "$($GIT_BIN cat-file tag "$release_tag_object" | $SED_BIN -n 's/^tag //p' \
+                | /usr/bin/head -1)" != "v$VERSION" ]; then
+        echo "ERROR: published v$VERSION ($release_tag_object) is not an annotated tag named" >&2
+        echo "       v$VERSION. release.sh creates only annotated tags; this is not its publication." >&2
+        exit 1
+    fi
+    if [ "$VERSION_IS_RC" = "1" ]; then
+        # An RC is published from the exact source commit, with no metadata commit.
+        if [ "$release_tag_commit" != "$SOURCE_COMMIT" ]; then
+            echo "ERROR: published v$VERSION names ${release_tag_commit:-<unresolved>}, not the" >&2
+            echo "       qualified RC source $SOURCE_COMMIT; refusing to publish this candidate under it." >&2
+            exit 1
+        fi
+    else
+        if [ "$release_tag_is_metadata_child" != "1" ]; then
+            echo "ERROR: published v$VERSION names ${release_tag_commit:-<unresolved>}, which is not the" >&2
+            echo "       single child of the qualified source $SOURCE_COMMIT changing exactly" >&2
+            echo "       release.json and both casks. --resume-publish finishes only the" >&2
+            echo "       metadata commit a release run of this candidate pushed." >&2
+            exit 1
+        fi
+        for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
+            case "$metadata_path" in
+                release.json) metadata_sha_pattern='"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' ;;
+                *) metadata_sha_pattern='sha256[[:space:]]+"[a-f0-9]{64}"' ;;
+            esac
+            metadata_sha=$($GIT_BIN cat-file blob "$release_tag_commit:$metadata_path" 2>/dev/null \
+                | $GREP_BIN -oE "$metadata_sha_pattern" | /usr/bin/head -1 \
+                | $GREP_BIN -oE '[a-f0-9]{64}' || true)
+            if [ "$metadata_sha" != "$QUALIFIED_CANDIDATE_SHA" ]; then
+                echo "ERROR: $metadata_path in published v$VERSION names ${metadata_sha:-<no sha256>}," >&2
+                echo "       not the qualified DMG $QUALIFIED_CANDIDATE_SHA." >&2
+                exit 1
+            fi
+        done
+    fi
+    if ! origin_release_branch_contains "$release_tag_commit"; then
+        echo "ERROR: origin's $RELEASE_BRANCH (${origin_branch_commit:-<missing>}) does not contain" >&2
+        echo "       $release_tag_commit, the commit published v$VERSION names, so the" >&2
+        echo "       release would announce a commit $RELEASE_BRANCH cannot reach." >&2
+        echo "       Merge it into $RELEASE_BRANCH, never squash, rebase or cherry-pick it (each" >&2
+        echo "       makes a different commit and leaves the tag unreachable), push, and rerun:" >&2
+        echo "         git fetch origin" >&2
+        echo "         git switch $RELEASE_BRANCH" >&2
+        echo "         git merge origin/$RELEASE_BRANCH" >&2
+        echo "         git merge $release_tag_commit" >&2
+        echo "         git push origin $RELEASE_BRANCH" >&2
+        echo "         scripts/release.sh $VERSION --resume-publish" >&2
+        echo "       Nothing was published, and no tag or branch was moved." >&2
+        exit 1
+    fi
+    echo "  ✓ Resume: v$VERSION is annotated tag $release_tag_object on ${release_tag_commit:0:12}," \
+        "which origin's $RELEASE_BRANCH contains"
+elif [ -n "$release_tag_object" ] && [ "$RESPIN" = "1" ]; then
+    # Only a proven earlier attempt of this candidate may be replaced: its
+    # commit count is the one this run publishes, so replacing it cannot
+    # regress CFBundleVersion. A tag on the source itself or an ancestor used
+    # to pass the ancestry loop below and was then force-replaced.
+    if [ "$release_tag_is_metadata_child" != "1" ]; then
+        echo "ERROR: --respin will not replace published v$VERSION ($release_tag_object," >&2
+        echo "       commit ${release_tag_commit:-<unresolved>})." >&2
+        echo "       --respin replaces v$VERSION only when it names this source's single" >&2
+        echo "       child changing exactly release.json and both casks; this tag does not." >&2
+        echo "       A published tag on any other commit is a real release: bump the version." >&2
+        exit 1
+    fi
+    tag_push_lease_object=$release_tag_object
+    echo "  Re-spin: published v$VERSION is this source's earlier metadata commit" \
+        "(${release_tag_commit:0:12}); it will be replaced"
+elif [ -n "$release_tag_commit" ]; then
+    if [ "$release_tag_is_metadata_child" = "1" ]; then
+        # Advice to merge and re-cut would produce a new source and throw away
+        # the qualified candidate this tag already describes.
+        echo "ERROR: v$VERSION is already published on origin, on this source's metadata commit" >&2
+        echo "       $release_tag_commit: an earlier run of this candidate pushed its tag and" >&2
+        echo "       stopped before publishing, as v1.22.2 did when its branch push failed." >&2
+        echo "       Publish that tag without rebuilding:" >&2
+        echo "         scripts/release.sh $VERSION --resume-publish" >&2
+        echo "       It explains how to merge the tag's commit if origin's $RELEASE_BRANCH lacks it." >&2
+        if origin_release_branch_fast_forwards; then
+            echo "       Or, because origin's $RELEASE_BRANCH has not moved past this source," >&2
+            echo "       --respin can replace the tag with a new metadata commit." >&2
+        fi
+    else
+        echo "ERROR: v$VERSION is already published on origin (commit $release_tag_commit)." >&2
+        echo "       A release run creates its tag and cannot replace a published one; bump the version." >&2
+    fi
     exit 1
 fi
-(umask 077; /bin/mkdir -p "$QUALIFICATION_DIR")
-CI_TRANSCRIPT=$(/usr/bin/mktemp "$QUALIFICATION_DIR/MacCrab-v$VERSION.clean-ci.XXXXXX")
-/bin/chmod 600 "$CI_TRANSCRIPT"
-echo "Aggregate clean-CI transcript retained at: $CI_TRANSCRIPT"
-CI_STARTED_AT=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')
-if ! ./scripts/ci-local.sh --clean 2>&1 | /usr/bin/tee "$CI_TRANSCRIPT"; then
-    echo "ERROR: clean local CI failed; no candidate will be recorded" >&2
-    exit 1
+
+# `rev-list --count` is monotonic only along ONE ancestry, and nothing used to
+# check that this release shares it. A release cut from a branch that
+# squash-merged the qualified work carries a LOWER count than the candidate that
+# was actually tested, and Sparkle compares CFBundleVersion: every tester on the
+# higher candidate build would be told they are current and never offered the
+# shipped release. Enforce the property the derivation assumes — this commit
+# must descend from every release already published — rather than hoping for it.
+while IFS= read -r prior_tag; do
+    [ -n "$prior_tag" ] || continue
+    # This release's own tag was judged above: resumed or proven replaceable.
+    if [ "$prior_tag" = "v$VERSION" ] \
+            && { [ "$RESUME_PUBLISH" = "1" ] || [ -n "$tag_push_lease_object" ]; }; then
+        continue
+    fi
+    prior_commit=$($GIT_BIN rev-parse --verify --quiet "refs/tags/${prior_tag}^{commit}" || true)
+    if [ -z "$prior_commit" ]; then
+        echo "ERROR: published tag '$prior_tag' is not present locally, so its ancestry" >&2
+        echo "       cannot be checked. Run: git fetch --tags origin" >&2
+        exit 1
+    fi
+    if ! $GIT_BIN merge-base --is-ancestor "$prior_commit" "$SOURCE_COMMIT"; then
+        echo "ERROR: release source $SOURCE_COMMIT does not descend from published tag" >&2
+        echo "       $prior_tag ($prior_commit)." >&2
+        echo "       CFBundleVersion is derived from the commit count, so this build could" >&2
+        echo "       publish a version BELOW one already released — Sparkle would then never" >&2
+        echo "       offer it to anyone running the higher build. Merge (do NOT squash) the" >&2
+        echo "       published history into this branch and re-cut." >&2
+        exit 1
+    fi
+done <<PUBLISHED_TAGS
+$published_tags
+PUBLISHED_TAGS
+echo "  ✓ Descends from every published release tag (commit count cannot regress)"
+
+if [ "$RESUME_PUBLISH" != "1" ]; then
+    if ! origin_release_branch_fast_forwards; then
+        if [ -n "$tag_push_lease_object" ]; then
+            # By v1.22.2's recovery, origin/main had taken PR #8, which the
+            # source does not contain. Re-spinning then would force the public
+            # tag onto a new metadata commit and fail the branch push again.
+            echo "ERROR: --respin would replace published v$VERSION, but origin's $RELEASE_BRANCH" >&2
+            echo "       (${origin_branch_commit:-<missing>}) is not an ancestor of source $SOURCE_COMMIT." >&2
+            echo "       The branch push after the tag push could not fast-forward, leaving the" >&2
+            echo "       replaced public tag on a commit $RELEASE_BRANCH cannot reach." >&2
+            echo "       Do not re-spin. Publish the existing tag instead: make origin's" >&2
+            echo "       $RELEASE_BRANCH contain $release_tag_commit (merge it; never squash or" >&2
+            echo "       rebase), then run: scripts/release.sh $VERSION --resume-publish" >&2
+        else
+            echo "ERROR: origin's $RELEASE_BRANCH (${origin_branch_commit:-<missing>}) is not an ancestor" >&2
+            echo "       of source $SOURCE_COMMIT, so the branch push after the tag push could not" >&2
+            echo "       fast-forward and the public tag would name a commit $RELEASE_BRANCH cannot" >&2
+            echo "       reach, as v1.22.2's did. No CI ran and nothing was tagged or pushed." >&2
+            echo "       Merge (never squash or rebase) origin's $RELEASE_BRANCH into $RELEASE_BRANCH" >&2
+            echo "       and cut the release from the merge: a new source, so a new candidate." >&2
+        fi
+        exit 1
+    fi
+    echo "  ✓ origin's $RELEASE_BRANCH (${origin_branch_commit:0:12}) can fast-forward to this release"
 fi
-CI_COMPLETED_AT=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')
-require_clean_release_source
-if [ "$($GIT_BIN rev-parse HEAD)" != "$SOURCE_COMMIT" ] \
-        || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ]; then
-    echo "ERROR: clean CI changed the captured release source commit/tree" >&2
-    exit 1
+
+if [ "$RESUME_PUBLISH" = "1" ]; then
+    # The candidate's clean CI ran before it was built, and the tag push's hook
+    # ran clean CI again against the published commit. Resume changes no source
+    # and pushes nothing, so it goes straight to the verified post-push steps.
+    echo "Steps 0-1: skipped under --resume-publish (no source change, build or push)"
+else
+    # Step 0a is deliberately deferred until after exact-candidate qualification.
+    # A build-only first phase must not read publisher credentials or call a GitHub
+    # publishing API; only the read-only origin queries above are allowed.
+    # v1.10.0-rc audit fix:
+    # Step 6 publishes both the Sparkle feed and the site's release metadata.
+    # A missing token discovered after the tag/asset is public strands users on
+    # stale distribution surfaces, so release.sh always requires it up front.
+    # `SKIP_APPCAST=1` is deliberately narrow: it skips Sparkle only; it is not an
+    # internal/dry-run escape hatch and cannot bypass release.json or the tap cask.
+    # Step 0b: Pre-release check — enforce RELEASE_CHECKLIST.md items so the
+    # pipeline refuses to ship out-of-sync versions, stale notes, or broken
+    # localizations. Warnings still proceed; hard errors abort.
+    echo "Step 0/6: Pre-release check..."
+    if [ "$SKIP_PRERELEASE" = "1" ]; then
+        echo "  (skipped via --skip-prerelease-check)"
+    else
+        "$SCRIPT_DIR/prerelease-check.sh" "$VERSION" || {
+            echo "Pre-release check failed — fix the errors above or run with --skip-prerelease-check to override (not recommended)"
+            exit 1
+        }
+    fi
+
+    # Step 0b: Architectural-invariants audit (v1.6.19). Catches the
+    # wire-the-orphans bug class and AlertSink-bypass regressions BEFORE
+    # they ship. Sister script to prerelease-check.sh: that one verifies
+    # manifest sync, this one verifies code structure.
+    echo "Step 0b/6: Architectural audit..."
+    "$SCRIPT_DIR/pre-release-audit.sh" || {
+        echo "Architectural audit failed — fix the structural issues above before shipping"
+        exit 1
+    }
+
+    # Step 1: clean local CI before the artifact build. Running the clean gate only
+    # from the later tag push cannot retroactively prove that the signed DMG came
+    # from freshly resolved release outputs. Credentials remain unexported here.
+    echo "Step 1/6: Running clean local CI before the release build..."
+    require_clean_release_source
+    # Retain the complete aggregate transcript on success and failure. Candidate
+    # manifests store only its digest/tail; private build cleanup must not remove it.
+    if [ -L "$QUALIFICATION_DIR" ] \
+            || { [ -e "$QUALIFICATION_DIR" ] && [ ! -d "$QUALIFICATION_DIR" ]; }; then
+        echo "ERROR: refusing redirected/non-directory qualification evidence: $QUALIFICATION_DIR" >&2
+        exit 1
+    fi
+    (umask 077; /bin/mkdir -p "$QUALIFICATION_DIR")
+    CI_TRANSCRIPT=$(/usr/bin/mktemp "$QUALIFICATION_DIR/MacCrab-v$VERSION.clean-ci.XXXXXX")
+    /bin/chmod 600 "$CI_TRANSCRIPT"
+    echo "Aggregate clean-CI transcript retained at: $CI_TRANSCRIPT"
+    CI_STARTED_AT=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')
+    if ! ./scripts/ci-local.sh --clean 2>&1 | /usr/bin/tee "$CI_TRANSCRIPT"; then
+        echo "ERROR: clean local CI failed; no candidate will be recorded" >&2
+        exit 1
+    fi
+    CI_COMPLETED_AT=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')
+    require_clean_release_source
+    if [ "$($GIT_BIN rev-parse HEAD)" != "$SOURCE_COMMIT" ] \
+            || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ]; then
+        echo "ERROR: clean CI changed the captured release source commit/tree" >&2
+        exit 1
+    fi
+    verify_release_executor_blobs "$SOURCE_COMMIT"
 fi
-verify_release_executor_blobs "$SOURCE_COMMIT"
 
 # Clean CI intentionally builds in the live worktree, while the release below
 # builds again from an exact tracked-object export. Keeping both architecture
@@ -668,12 +957,14 @@ fi
 BUILD_WORKSPACE=""
 METADATA_INDEX=""
 UPLOAD_SNAPSHOT_DIR=""
+RESUME_METADATA_DIR=""
 cleanup_release_private_state() {
     local status=$?
     trap - EXIT
     [ -z "$METADATA_INDEX" ] || /bin/rm -f "$METADATA_INDEX"
     [ -z "$BUILD_WORKSPACE" ] || /bin/rm -rf "$BUILD_WORKSPACE"
     [ -z "$UPLOAD_SNAPSHOT_DIR" ] || /bin/rm -rf "$UPLOAD_SNAPSHOT_DIR"
+    [ -z "$RESUME_METADATA_DIR" ] || /bin/rm -rf "$RESUME_METADATA_DIR"
     exit "$status"
 }
 trap cleanup_release_private_state EXIT
@@ -706,110 +997,6 @@ echo "Step 2/6: Exact tracked-only source exported from $SOURCE_COMMIT / $SOURCE
 # after a dash. RC and GA builds share the same numeric source-commit sequence.
 echo "  Deterministic CFBundleVersion: $BUILD_NUMBER"
 
-# ...but `rev-list --count` is monotonic only along ONE ancestry, and nothing
-# used to check that this release shares it. A release cut from a branch that
-# squash-merged the qualified work carries a LOWER count than the candidate that
-# was actually tested, and Sparkle compares CFBundleVersion: every tester on the
-# higher candidate build would be told they are current and never offered the
-# shipped release. Enforce the property the derivation assumes — this commit
-# must descend from every release already published — rather than hoping for it.
-require_canonical_origin
-published_tag_refs=$($GIT_BIN ls-remote --tags origin 'refs/tags/v*')
-published_tags=$(printf '%s\n' "$published_tag_refs" \
-    | $AWK_BIN '{ print $2 }' \
-    | /usr/bin/sed -e 's|^refs/tags/||' -e 's|\^{}$||' \
-    | LC_ALL=C /usr/bin/sort -u)
-# v1.22.2 pushed its tag and then failed the branch push. The remote v$VERSION
-# then named that attempt's metadata commit, a CHILD of this source rather than
-# an ancestor, so this check refused the very --respin meant to recover, and
-# with the local tag deleted it could not even resolve the tag. Under --respin,
-# resolve the remote v$VERSION itself (fetching only that tag when its objects
-# are absent) and exempt it only when it is provably an earlier metadata commit
-# for this exact source: single parent SOURCE_COMMIT, changing exactly the GA
-# metadata allowlist committed below. Its commit count is the one this run
-# publishes, so replacing it cannot regress CFBundleVersion. Anything else is
-# checked, and refused, exactly like every other published tag.
-# Replacing the tag is only a recovery if the later non-force branch push can
-# still fast-forward. By the time v1.22.2 was recovered, origin/main had taken
-# PR #8, which the source does not contain. A re-spin from that state would
-# force the public tag onto a new metadata commit and then fail the branch
-# push, leaving the tag on a commit main cannot reach. Each retry would repeat
-# this, so the release branch is checked before anything is built or moved.
-respin_tag_commit=""
-respin_tag_replaceable=0
-if [ "$RESPIN" = "1" ]; then
-    respin_tag_object=$(printf '%s\n' "$published_tag_refs" \
-        | $AWK_BIN -v ref="refs/tags/v$VERSION" '$2 == ref && !found { print $1; found = 1 }')
-    if [ -n "$respin_tag_object" ]; then
-        if ! $GIT_BIN cat-file -e "$respin_tag_object" 2>/dev/null; then
-            echo "  Re-spin: fetching published tag v$VERSION to check whether it may be replaced"
-            if ! $GIT_BIN fetch --quiet --no-tags --no-prune --no-write-fetch-head \
-                    origin "refs/tags/v$VERSION"; then
-                echo "ERROR: could not fetch published tag v$VERSION to check its ancestry" >&2
-                exit 1
-            fi
-        fi
-        respin_tag_commit=$($GIT_BIN rev-parse --verify --quiet "${respin_tag_object}^{commit}" || true)
-        if [ -n "$respin_tag_commit" ] \
-                && [ "$($GIT_BIN rev-list --parents -n 1 "$respin_tag_commit")" \
-                    = "$respin_tag_commit $SOURCE_COMMIT" ] \
-                && [ "$($GIT_BIN diff-tree --no-commit-id --name-only -r \
-                    "$SOURCE_COMMIT" "$respin_tag_commit" | LC_ALL=C /usr/bin/sort)" \
-                    = $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]; then
-            respin_tag_replaceable=1
-        fi
-    fi
-    if [ "$respin_tag_replaceable" = "1" ]; then
-        respin_branch_commit=$($GIT_BIN ls-remote origin "refs/heads/$RELEASE_BRANCH" \
-            | $AWK_BIN -v ref="refs/heads/$RELEASE_BRANCH" '$2 == ref && !found { print $1; found = 1 }')
-        if [ -z "$respin_branch_commit" ] \
-                || ! $GIT_BIN rev-parse --verify --quiet "${respin_branch_commit}^{commit}" >/dev/null \
-                || ! $GIT_BIN merge-base --is-ancestor "$respin_branch_commit" "$SOURCE_COMMIT"; then
-            echo "ERROR: --respin would replace published v$VERSION, but origin's $RELEASE_BRANCH" >&2
-            echo "       (${respin_branch_commit:-<missing>}) is not an ancestor of source $SOURCE_COMMIT." >&2
-            echo "       The branch push after the tag push could not fast-forward, leaving the" >&2
-            echo "       replaced public tag on a commit $RELEASE_BRANCH cannot reach." >&2
-            echo "       Do not re-spin. Bring $RELEASE_BRANCH to the published tag commit" >&2
-            echo "       $respin_tag_commit (merge it if $RELEASE_BRANCH moved), push it," >&2
-            echo "       then resume the post-push publication steps." >&2
-            exit 1
-        fi
-    fi
-fi
-while IFS= read -r prior_tag; do
-    [ -n "$prior_tag" ] || continue
-    if [ -n "$respin_tag_commit" ] && [ "$prior_tag" = "v$VERSION" ]; then
-        if [ "$respin_tag_replaceable" = "1" ]; then
-            echo "  Re-spin: published v$VERSION is this source's earlier metadata commit" \
-                "(${respin_tag_commit:0:12}); it will be replaced"
-            continue
-        fi
-        prior_commit=$respin_tag_commit
-    else
-        prior_commit=$($GIT_BIN rev-parse --verify --quiet "refs/tags/${prior_tag}^{commit}" || true)
-    fi
-    if [ -z "$prior_commit" ]; then
-        echo "ERROR: published tag '$prior_tag' is not present locally, so its ancestry" >&2
-        echo "       cannot be checked. Run: git fetch --tags origin" >&2
-        exit 1
-    fi
-    if ! $GIT_BIN merge-base --is-ancestor "$prior_commit" "$SOURCE_COMMIT"; then
-        echo "ERROR: release source $SOURCE_COMMIT does not descend from published tag" >&2
-        echo "       $prior_tag ($prior_commit)." >&2
-        echo "       CFBundleVersion is derived from the commit count, so this build could" >&2
-        echo "       publish a version BELOW one already released — Sparkle would then never" >&2
-        echo "       offer it to anyone running the higher build. Merge (do NOT squash) the" >&2
-        echo "       published history into this branch and re-cut." >&2
-        if [ -n "$respin_tag_commit" ] && [ "$prior_tag" = "v$VERSION" ]; then
-            echo "       --respin replaces v$VERSION only when it names this source's single" >&2
-            echo "       child changing exactly release.json and both casks; this tag does not." >&2
-        fi
-        exit 1
-    fi
-done <<PUBLISHED_TAGS
-$published_tags
-PUBLISHED_TAGS
-echo "  ✓ Descends from every published release tag (commit count cannot regress)"
 BUILD_DMG_PATH="$BUILD_WORKSPACE/.build/MacCrab-v$VERSION.dmg"
 if [ "$CANDIDATE_READY" = "1" ]; then
     echo "Step 3/5: Reusing exact installed-host-qualified candidate..."
@@ -841,11 +1028,15 @@ if [ "$CANDIDATE_READY" = "1" ]; then
                 /bin/bash "$BUILD_WORKSPACE/scripts/check-release-dependencies.sh"
             echo "  ✓ Pinned Sparkle appcast tools verified in the publication export"
         fi
-        /usr/bin/python3 -I "$SCRIPT_DIR/candidate-qualification.py" emit-release-json \
-            --version "$VERSION" \
-            --source-root "$BUILD_WORKSPACE" \
-            --candidate-manifest "$CANDIDATE_MANIFEST" \
-            --output "$BUILD_WORKSPACE/release.json"
+        # A resumed release publishes the release.json its tag already names;
+        # regenerating it would stamp a new release_date the tag does not carry.
+        if [ "$RESUME_PUBLISH" != "1" ]; then
+            /usr/bin/python3 -I "$SCRIPT_DIR/candidate-qualification.py" emit-release-json \
+                --version "$VERSION" \
+                --source-root "$BUILD_WORKSPACE" \
+                --candidate-manifest "$CANDIDATE_MANIFEST" \
+                --output "$BUILD_WORKSPACE/release.json"
+        fi
     fi
 else
     echo "Step 3/5: Building an exact candidate (publication will stop after the build)..."
@@ -964,36 +1155,59 @@ fi
 # users saw old versions for nine releases before anyone noticed.
 # Both files are now updated in lockstep.
 SHA=$($SHASUM_BIN -a 256 "$DMG_PATH" | $AWK_BIN '{print $1}')
-if [ "$VERSION_IS_RC" != "1" ] && is_nonempty_regular_release_artifact "$DMG_PATH"; then
-    echo "Step 4/5: Updating Homebrew formulae..."
-    for formula in homebrew/maccrab.rb Casks/maccrab.rb; do
-        if [ -f "$BUILD_WORKSPACE/$formula" ]; then
-            $SED_BIN -i '' "s/version \".*\"/version \"$VERSION\"/" "$BUILD_WORKSPACE/$formula"
-            $SED_BIN -i '' "s/sha256 .*/sha256 \"$SHA\"/" "$BUILD_WORKSPACE/$formula"
-            echo "  Generated $formula (sha256: ${SHA:0:16}...)"
+# Where the steps below read release.json, the casks and the release notes. A
+# normal run copies its generated metadata into the worktree and commits
+# exactly those bytes, so the worktree holds the tagged commit's files. A
+# resumed release reads them from the published tag's commit instead: the
+# checkout may be a later merge, and the release must describe what the
+# public tag names.
+RELEASE_METADATA_ROOT="$PROJECT_DIR"
+if [ "$RESUME_PUBLISH" = "1" ]; then
+    echo "Step 4/5: Resuming published v$VERSION; metadata comes from its commit ${release_tag_commit:0:12}"
+    FINAL_COMMIT=$release_tag_commit
+    TAG_OBJECT=$release_tag_object
+    RESUME_METADATA_DIR=$(/usr/bin/mktemp -d /private/tmp/maccrab-release-metadata.XXXXXX)
+    /bin/chmod 700 "$RESUME_METADATA_DIR"
+    /bin/mkdir -p "$RESUME_METADATA_DIR/Casks" "$RESUME_METADATA_DIR/homebrew" \
+        "$RESUME_METADATA_DIR/RELEASE_NOTES"
+    for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb "RELEASE_NOTES/v$VERSION.md"; do
+        if $GIT_BIN cat-file -e "$FINAL_COMMIT:$metadata_path" 2>/dev/null; then
+            $GIT_BIN cat-file blob "$FINAL_COMMIT:$metadata_path" > "$RESUME_METADATA_DIR/$metadata_path"
         fi
     done
+    RELEASE_METADATA_ROOT=$RESUME_METADATA_DIR
 else
-    echo "Step 4/5: RC isolation — production Homebrew casks remain unchanged."
-fi
+    if [ "$VERSION_IS_RC" != "1" ] && is_nonempty_regular_release_artifact "$DMG_PATH"; then
+        echo "Step 4/5: Updating Homebrew formulae..."
+        for formula in homebrew/maccrab.rb Casks/maccrab.rb; do
+            if [ -f "$BUILD_WORKSPACE/$formula" ]; then
+                $SED_BIN -i '' "s/version \".*\"/version \"$VERSION\"/" "$BUILD_WORKSPACE/$formula"
+                $SED_BIN -i '' "s/sha256 .*/sha256 \"$SHA\"/" "$BUILD_WORKSPACE/$formula"
+                echo "  Generated $formula (sha256: ${SHA:0:16}...)"
+            fi
+        done
+    else
+        echo "Step 4/5: RC isolation — production Homebrew casks remain unchanged."
+    fi
 
-# Re-assert the captured source before copying generated metadata back. Only
-# these three files may differ, and they are committed below through a private
-# temporary index rather than an extensible commit hook.
-require_clean_release_source
-if [ "$($GIT_BIN rev-parse HEAD)" != "$SOURCE_COMMIT" ]; then
-    echo "ERROR: HEAD changed while the tracked-only artifact was built" >&2
-    exit 1
-fi
-verify_release_executor_blobs "$SOURCE_COMMIT"
-if [ "$VERSION_IS_RC" != "1" ]; then
-    for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
-        if [ ! -f "$BUILD_WORKSPACE/$metadata_path" ] || [ -L "$BUILD_WORKSPACE/$metadata_path" ]; then
-            echo "ERROR: tracked-only build did not produce required GA metadata: $metadata_path" >&2
-            exit 1
-        fi
-        /bin/cp -p "$BUILD_WORKSPACE/$metadata_path" "$PROJECT_DIR/$metadata_path"
-    done
+    # Re-assert the captured source before copying generated metadata back. Only
+    # these three files may differ, and they are committed below through a private
+    # temporary index rather than an extensible commit hook.
+    require_clean_release_source
+    if [ "$($GIT_BIN rev-parse HEAD)" != "$SOURCE_COMMIT" ]; then
+        echo "ERROR: HEAD changed while the tracked-only artifact was built" >&2
+        exit 1
+    fi
+    verify_release_executor_blobs "$SOURCE_COMMIT"
+    if [ "$VERSION_IS_RC" != "1" ]; then
+        for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
+            if [ ! -f "$BUILD_WORKSPACE/$metadata_path" ] || [ -L "$BUILD_WORKSPACE/$metadata_path" ]; then
+                echo "ERROR: tracked-only build did not produce required GA metadata: $metadata_path" >&2
+                exit 1
+            fi
+            /bin/cp -p "$BUILD_WORKSPACE/$metadata_path" "$PROJECT_DIR/$metadata_path"
+        done
+    fi
 fi
 
 # Step 5: Create GitHub release
@@ -1017,18 +1231,18 @@ if ! is_nonempty_regular_release_artifact "$DMG_PATH"; then
 fi
 gate_dmg_sha=$($SHASUM_BIN -a 256 "$DMG_PATH" | $AWK_BIN '{print $1}')
 if [ "$VERSION_IS_RC" != "1" ]; then
-    gate_json_sha=$($GREP_BIN -oE '"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' release.json 2>/dev/null | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
+    gate_json_sha=$($GREP_BIN -oE '"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' "$RELEASE_METADATA_ROOT/release.json" 2>/dev/null | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
     if [ "$gate_json_sha" != "$gate_dmg_sha" ]; then
         echo "  ✗ release.json sha256 ($gate_json_sha) != built DMG ($gate_dmg_sha)" >&2
         echo "    Re-run scripts/build-release.sh so release.json describes THIS DMG." >&2
         exit 1
     fi
     for gate_cask in Casks/maccrab.rb homebrew/maccrab.rb; do
-        [ -f "$gate_cask" ] || {
+        [ -f "$RELEASE_METADATA_ROOT/$gate_cask" ] || {
             echo "  ✗ required GA cask is missing: $gate_cask" >&2
             exit 1
         }
-        gate_cask_sha=$($GREP_BIN -oE 'sha256[[:space:]]+"[a-f0-9]{64}"' "$gate_cask" | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
+        gate_cask_sha=$($GREP_BIN -oE 'sha256[[:space:]]+"[a-f0-9]{64}"' "$RELEASE_METADATA_ROOT/$gate_cask" | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
         if [ "$gate_cask_sha" != "$gate_dmg_sha" ]; then
             echo "  ✗ $gate_cask sha256 ($gate_cask_sha) != built DMG ($gate_dmg_sha)" >&2
             echo "    brew install --cask would fail checksum verification for every user." >&2
@@ -1061,81 +1275,85 @@ validate_generated_release_paths() {
         return 1
     fi
 }
-validate_generated_release_paths
+# A resumed release already has its tagged metadata commit: nothing is
+# generated, committed or moved.
+if [ "$RESUME_PUBLISH" != "1" ]; then
+    validate_generated_release_paths
 
-if [ "$VERSION_IS_RC" = "1" ]; then
-    METADATA_TREE="$SOURCE_TREE"
-    FINAL_COMMIT="$SOURCE_COMMIT"
-else
-    METADATA_INDEX=$(/usr/bin/mktemp /private/tmp/maccrab-release-index.XXXXXX)
-    /bin/rm -f "$METADATA_INDEX"
-    GIT_INDEX_FILE="$METADATA_INDEX" $GIT_BIN -c core.hooksPath=/dev/null \
-        read-tree "$SOURCE_TREE"
-    for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
-        metadata_source_entry=$($GIT_BIN ls-tree "$SOURCE_TREE" -- "$metadata_path")
-        IFS=$' \t' read -r metadata_mode metadata_type metadata_source_blob \
-            metadata_source_name <<< "$metadata_source_entry"
-        if [ "$metadata_mode" != "100644" ] || [ "$metadata_type" != "blob" ] \
-                || [ "$metadata_source_name" != "$metadata_path" ]; then
-            echo "ERROR: GA metadata source is not an ordinary tracked file: $metadata_path" >&2
+    if [ "$VERSION_IS_RC" = "1" ]; then
+        METADATA_TREE="$SOURCE_TREE"
+        FINAL_COMMIT="$SOURCE_COMMIT"
+    else
+        METADATA_INDEX=$(/usr/bin/mktemp /private/tmp/maccrab-release-index.XXXXXX)
+        /bin/rm -f "$METADATA_INDEX"
+        GIT_INDEX_FILE="$METADATA_INDEX" $GIT_BIN -c core.hooksPath=/dev/null \
+            read-tree "$SOURCE_TREE"
+        for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
+            metadata_source_entry=$($GIT_BIN ls-tree "$SOURCE_TREE" -- "$metadata_path")
+            IFS=$' \t' read -r metadata_mode metadata_type metadata_source_blob \
+                metadata_source_name <<< "$metadata_source_entry"
+            if [ "$metadata_mode" != "100644" ] || [ "$metadata_type" != "blob" ] \
+                    || [ "$metadata_source_name" != "$metadata_path" ]; then
+                echo "ERROR: GA metadata source is not an ordinary tracked file: $metadata_path" >&2
+                exit 1
+            fi
+            metadata_working_blob=$($GIT_BIN hash-object -w --no-filters "$metadata_path")
+            GIT_INDEX_FILE="$METADATA_INDEX" $GIT_BIN -c core.hooksPath=/dev/null \
+                update-index --add --cacheinfo \
+                "$metadata_mode,$metadata_working_blob,$metadata_path"
+        done
+        METADATA_TREE=$(GIT_INDEX_FILE="$METADATA_INDEX" $GIT_BIN write-tree)
+        metadata_diff=$($GIT_BIN diff-tree --no-commit-id --name-only -r \
+            "$SOURCE_TREE" "$METADATA_TREE" | LC_ALL=C /usr/bin/sort)
+        if [ "$metadata_diff" != $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]; then
+            echo "ERROR: precomputed metadata tree differs outside the exact allowlist" >&2
+            printf '%s\n' "$metadata_diff" >&2
             exit 1
         fi
-        metadata_working_blob=$($GIT_BIN hash-object -w --no-filters "$metadata_path")
-        GIT_INDEX_FILE="$METADATA_INDEX" $GIT_BIN -c core.hooksPath=/dev/null \
-            update-index --add --cacheinfo \
-            "$metadata_mode,$metadata_working_blob,$metadata_path"
-    done
-    METADATA_TREE=$(GIT_INDEX_FILE="$METADATA_INDEX" $GIT_BIN write-tree)
-    metadata_diff=$($GIT_BIN diff-tree --no-commit-id --name-only -r \
-        "$SOURCE_TREE" "$METADATA_TREE" | LC_ALL=C /usr/bin/sort)
-    if [ "$metadata_diff" != $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]; then
-        echo "ERROR: precomputed metadata tree differs outside the exact allowlist" >&2
-        printf '%s\n' "$metadata_diff" >&2
+        for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
+            metadata_blob=$($GIT_BIN rev-parse "$METADATA_TREE:$metadata_path" 2>/dev/null || true)
+            working_blob=$($GIT_BIN hash-object --no-filters "$metadata_path" 2>/dev/null || true)
+            if [ -z "$metadata_blob" ] || [ "$working_blob" != "$metadata_blob" ]; then
+                echo "ERROR: precomputed metadata blob changed before commit: $metadata_path" >&2
+                exit 1
+            fi
+        done
+        FINAL_COMMIT=$($GIT_BIN -c core.hooksPath=/dev/null \
+            commit-tree "$METADATA_TREE" -p "$SOURCE_COMMIT" \
+            -m "chore: update release metadata to v$VERSION")
+        $GIT_BIN -c core.hooksPath=/dev/null update-ref \
+            "refs/heads/$RELEASE_BRANCH" "$FINAL_COMMIT" "$SOURCE_COMMIT"
+        $GIT_BIN -c core.hooksPath=/dev/null read-tree "$FINAL_COMMIT"
+    fi
+
+    # The final commit is either the exact source commit (RC) or one hookless,
+    # single-parent metadata commit with the precomputed tree. No pre-commit or
+    # commit-msg hook is part of this trust transition.
+    if [ "$($GIT_BIN rev-parse HEAD)" != "$FINAL_COMMIT" ] \
+            || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ] \
+            || [ "$($GIT_BIN rev-parse "$FINAL_COMMIT^{tree}")" != "$METADATA_TREE" ]; then
+        echo "ERROR: final release commit/source/metadata tree binding failed" >&2
         exit 1
     fi
-    for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
-        metadata_blob=$($GIT_BIN rev-parse "$METADATA_TREE:$metadata_path" 2>/dev/null || true)
-        working_blob=$($GIT_BIN hash-object --no-filters "$metadata_path" 2>/dev/null || true)
-        if [ -z "$metadata_blob" ] || [ "$working_blob" != "$metadata_blob" ]; then
-            echo "ERROR: precomputed metadata blob changed before commit: $metadata_path" >&2
-            exit 1
-        fi
-    done
-    FINAL_COMMIT=$($GIT_BIN -c core.hooksPath=/dev/null \
-        commit-tree "$METADATA_TREE" -p "$SOURCE_COMMIT" \
-        -m "chore: update release metadata to v$VERSION")
-    $GIT_BIN -c core.hooksPath=/dev/null update-ref \
-        "refs/heads/$RELEASE_BRANCH" "$FINAL_COMMIT" "$SOURCE_COMMIT"
-    $GIT_BIN -c core.hooksPath=/dev/null read-tree "$FINAL_COMMIT"
-fi
-
-# The final commit is either the exact source commit (RC) or one hookless,
-# single-parent metadata commit with the precomputed tree. No pre-commit or
-# commit-msg hook is part of this trust transition.
-if [ "$($GIT_BIN rev-parse HEAD)" != "$FINAL_COMMIT" ] \
-        || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ] \
-        || [ "$($GIT_BIN rev-parse "$FINAL_COMMIT^{tree}")" != "$METADATA_TREE" ]; then
-    echo "ERROR: final release commit/source/metadata tree binding failed" >&2
-    exit 1
-fi
-if [ "$FINAL_COMMIT" != "$SOURCE_COMMIT" ] \
-        && [ "$($GIT_BIN rev-list --parents -n 1 "$FINAL_COMMIT")" != "$FINAL_COMMIT $SOURCE_COMMIT" ]; then
-    echo "ERROR: final metadata commit is not the captured source's single child" >&2
-    exit 1
-fi
-reject_hidden_release_index_state
-final_dirty=$($GIT_BIN status --porcelain --untracked-files=all)
-if [ -n "$final_dirty" ]; then
-    echo "  ✗ Files remain outside the final release commit:" >&2
-    printf '%s\n' "$final_dirty" >&2
-    exit 1
-fi
-verify_release_executor_blobs "$FINAL_COMMIT"
-EXPECTED_HOOK_BLOB=$($GIT_BIN rev-parse "$FINAL_COMMIT:.githooks/pre-push")
-CURRENT_HOOK_BLOB=$($GIT_BIN hash-object --no-filters "$VERSIONED_PRE_PUSH")
-if [ "$EXPECTED_HOOK_BLOB" != "$CURRENT_HOOK_BLOB" ]; then
-    echo "ERROR: the executable pre-push hook bytes do not match the final release commit" >&2
-    exit 1
+    if [ "$FINAL_COMMIT" != "$SOURCE_COMMIT" ] \
+            && [ "$($GIT_BIN rev-list --parents -n 1 "$FINAL_COMMIT")" != "$FINAL_COMMIT $SOURCE_COMMIT" ]; then
+        echo "ERROR: final metadata commit is not the captured source's single child" >&2
+        exit 1
+    fi
+    reject_hidden_release_index_state
+    final_dirty=$($GIT_BIN status --porcelain --untracked-files=all)
+    if [ -n "$final_dirty" ]; then
+        echo "  ✗ Files remain outside the final release commit:" >&2
+        printf '%s\n' "$final_dirty" >&2
+        exit 1
+    fi
+    verify_release_executor_blobs "$FINAL_COMMIT"
+    EXPECTED_HOOK_BLOB=$($GIT_BIN rev-parse "$FINAL_COMMIT:.githooks/pre-push")
+    CURRENT_HOOK_BLOB=$($GIT_BIN hash-object --no-filters "$VERSIONED_PRE_PUSH")
+    if [ "$EXPECTED_HOOK_BLOB" != "$CURRENT_HOOK_BLOB" ]; then
+        echo "ERROR: the executable pre-push hook bytes do not match the final release commit" >&2
+        exit 1
+    fi
 fi
 
 # Never let an upload failure path delete a release that predated this run.
@@ -1159,128 +1377,218 @@ if ! printf '%s\n' "$github_release_probe" \
     exit 1
 fi
 
-# Existing-tag handling. Pre-fix `git tag` simply failed here under `set -e`,
-# aborting the release after the build + notarize had already completed.
-if $GIT_BIN rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-    if [ "$RESPIN" = "1" ]; then
-        echo "  Re-spin: moving tag v$VERSION from $($GIT_BIN rev-parse --short "v$VERSION") to $($GIT_BIN rev-parse --short HEAD)"
-        $GIT_BIN tag -d "v$VERSION"
+if [ "$RESUME_PUBLISH" != "1" ]; then
+    # Existing-tag handling. Pre-fix `git tag` simply failed here under `set -e`,
+    # aborting the release after the build + notarize had already completed.
+    if $GIT_BIN rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+        if [ "$RESPIN" = "1" ]; then
+            echo "  Re-spin: moving tag v$VERSION from $($GIT_BIN rev-parse --short "v$VERSION") to $($GIT_BIN rev-parse --short HEAD)"
+            $GIT_BIN tag -d "v$VERSION"
+        else
+            echo "  ✗ Tag v$VERSION already exists (at $($GIT_BIN rev-parse --short "v$VERSION"))." >&2
+            echo "    Bump the version, or pass --respin to re-point it at this build." >&2
+            exit 1
+        fi
+    fi
+
+    # Annotated — and signed when a signing key is configured — tags. Every release
+    # tag through v1.21.5 is a LIGHTWEIGHT ref: `git tag -v` reports "cannot verify a
+    # non-tag object of type commit", so no release carries a tagger identity, a
+    # message, or any cryptographic binding to the maintainer, and anyone with repo
+    # write can silently move one. Annotated is the floor; signing is applied when
+    # available rather than made mandatory, because an unconditional `git tag -s` on
+    # a machine with no user.signingkey would hard-fail every release.
+    if [ -n "$($GIT_BIN config --get user.signingkey || true)" ]; then
+        $GIT_BIN tag -s "v$VERSION" -m "MacCrab v$VERSION"
+        echo "  ✓ Signed annotated tag v$VERSION"
     else
-        echo "  ✗ Tag v$VERSION already exists (at $($GIT_BIN rev-parse --short "v$VERSION"))." >&2
-        echo "    Bump the version, or pass --respin to re-point it at this build." >&2
+        echo "  ! No git user.signingkey configured — creating an ANNOTATED (unsigned) tag." >&2
+        echo "    Enable signing so releases are verifiable by users and mirrors:" >&2
+        echo "      git config gpg.format ssh && git config user.signingkey ~/.ssh/id_ed25519.pub" >&2
+        $GIT_BIN tag -a "v$VERSION" -m "MacCrab v$VERSION"
+    fi
+    TAG_OBJECT=$($GIT_BIN rev-parse "refs/tags/v$VERSION")
+    TAG_TYPE=$($GIT_BIN cat-file -t "$TAG_OBJECT")
+    TAG_COMMIT=$($GIT_BIN rev-parse "$TAG_OBJECT^{commit}")
+    if [ "$TAG_TYPE" != "tag" ] || [ "$TAG_COMMIT" != "$FINAL_COMMIT" ]; then
+        echo "ERROR: release tag is not an annotated tag bound to final commit $FINAL_COMMIT" >&2
         exit 1
     fi
-fi
 
-# Annotated — and signed when a signing key is configured — tags. Every release
-# tag through v1.21.5 is a LIGHTWEIGHT ref: `git tag -v` reports "cannot verify a
-# non-tag object of type commit", so no release carries a tagger identity, a
-# message, or any cryptographic binding to the maintainer, and anyone with repo
-# write can silently move one. Annotated is the floor; signing is applied when
-# available rather than made mandatory, because an unconditional `git tag -s` on
-# a machine with no user.signingkey would hard-fail every release.
-if [ -n "$($GIT_BIN config --get user.signingkey || true)" ]; then
-    $GIT_BIN tag -s "v$VERSION" -m "MacCrab v$VERSION"
-    echo "  ✓ Signed annotated tag v$VERSION"
-else
-    echo "  ! No git user.signingkey configured — creating an ANNOTATED (unsigned) tag." >&2
-    echo "    Enable signing so releases are verifiable by users and mirrors:" >&2
-    echo "      git config gpg.format ssh && git config user.signingkey ~/.ssh/id_ed25519.pub" >&2
-    $GIT_BIN tag -a "v$VERSION" -m "MacCrab v$VERSION"
-fi
-TAG_OBJECT=$($GIT_BIN rev-parse "refs/tags/v$VERSION")
-TAG_TYPE=$($GIT_BIN cat-file -t "$TAG_OBJECT")
-TAG_COMMIT=$($GIT_BIN rev-parse "$TAG_OBJECT^{commit}")
-if [ "$TAG_TYPE" != "tag" ] || [ "$TAG_COMMIT" != "$FINAL_COMMIT" ]; then
-    echo "ERROR: release tag is not an annotated tag bound to final commit $FINAL_COMMIT" >&2
-    exit 1
-fi
+    # ORDER MATTERS — the tag goes to the remote BEFORE the release branch.
+    #
+    # Only the tag push's pre-push hook runs `ci-local.sh --clean`: the from-scratch
+    # build, the full suite, and the release manifest expectations. A branch push
+    # gets the warm run. Pushing the branch first therefore published the release
+    # metadata commit to a PUBLIC main before the authoritative gate had any chance
+    # to fail — and when it did fail, main advertised a `release.json` whose
+    # `dmg.url` 404s plus an in-tree cask naming a sha256 for a DMG nobody could
+    # download, with no release object to back either.
+    #
+    # Tag first inverts the failure mode. If the clean gate fails, nothing is public
+    # at all. If the gate passes but the later branch push fails, the remote holds a
+    # fully verified annotated tag and a main that is one commit behind: recoverable
+    # and never misleading, which the old order could not say.
+    #
+    # Both pushes run arbitrary project checks that could themselves alter local Git
+    # configuration, so the full release state is re-asserted immediately before each
+    # one. One implementation, called twice — the two copies used to drift.
+    assert_release_state_unchanged() {
+        local stage="$1"
+        require_canonical_origin
+        require_versioned_pre_push_gate
+        assert_qualification_evidence_unchanged "$stage"
+        reject_hidden_release_index_state
+        verify_release_executor_blobs "$FINAL_COMMIT"
+        if [ "$($GIT_BIN rev-parse HEAD)" != "$FINAL_COMMIT" ] \
+                || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ] \
+                || [ "$($GIT_BIN rev-parse "$FINAL_COMMIT^{tree}")" != "$METADATA_TREE" ] \
+                || [ -n "$($GIT_BIN status --porcelain --untracked-files=all)" ] \
+                || [ "$($GIT_BIN hash-object --no-filters "$VERSIONED_PRE_PUSH")" != "$EXPECTED_HOOK_BLOB" ] \
+                || [ "$($GIT_BIN rev-parse "refs/tags/v$VERSION")" != "$TAG_OBJECT" ] \
+                || [ "$($GIT_BIN rev-parse "$TAG_OBJECT^{commit}")" != "$FINAL_COMMIT" ]; then
+            echo "ERROR: HEAD, source, hook, or release tag drifted; refusing $stage" >&2
+            exit 1
+        fi
+    }
 
-# ORDER MATTERS — the tag goes to the remote BEFORE the release branch.
-#
-# Only the tag push's pre-push hook runs `ci-local.sh --clean`: the from-scratch
-# build, the full suite, and the release manifest expectations. A branch push
-# gets the warm run. Pushing the branch first therefore published the release
-# metadata commit to a PUBLIC main before the authoritative gate had any chance
-# to fail — and when it did fail, main advertised a `release.json` whose
-# `dmg.url` 404s plus an in-tree cask naming a sha256 for a DMG nobody could
-# download, with no release object to back either.
-#
-# Tag first inverts the failure mode. If the clean gate fails, nothing is public
-# at all. If the gate passes but the later branch push fails, the remote holds a
-# fully verified annotated tag and a main that is one commit behind: recoverable
-# and never misleading, which the old order could not say.
-#
-# Both pushes run arbitrary project checks that could themselves alter local Git
-# configuration, so the full release state is re-asserted immediately before each
-# one. One implementation, called twice — the two copies used to drift.
-assert_release_state_unchanged() {
-    local stage="$1"
+    # Nothing is public when the tag push is refused, but this run has already
+    # created the local tag and, for a GA, moved the local branch to its metadata
+    # commit. Say so, and how to return to the source checkout.
+    print_unpushed_release_restore() {
+        echo "       Nothing was pushed. This run created local tag v$VERSION; to restore:" >&2
+        echo "         git tag -d v$VERSION" >&2
+        if [ "$FINAL_COMMIT" != "$SOURCE_COMMIT" ]; then
+            echo "         git update-ref refs/heads/$RELEASE_BRANCH $SOURCE_COMMIT $FINAL_COMMIT" >&2
+            echo "         git restore --source=HEAD --staged --worktree -- release.json Casks/maccrab.rb homebrew/maccrab.rb" >&2
+        fi
+    }
+
+    # The preflight read origin before clean CI and the build, possibly an hour
+    # ago. Re-read it now, while nothing is public: a v$VERSION that no longer
+    # matches the lease would otherwise be refused only once the push is under
+    # way, and a branch that moved in the meantime would fail the branch push and
+    # strand the public tag, as v1.22.2's was.
+    require_origin_unchanged_for_tag_push() {
+        local remote_tag
+        remote_tag=$($GIT_BIN ls-remote origin "refs/tags/v$VERSION" \
+            | $AWK_BIN -v ref="refs/tags/v$VERSION" '$2 == ref && !found { print $1; found = 1 }')
+        if [ "$remote_tag" != "$tag_push_lease_object" ]; then
+            echo "ERROR: origin's v$VERSION changed after the preflight; refusing the tag push." >&2
+            echo "  expected: ${tag_push_lease_object:-<absent>}" >&2
+            echo "  remote:   ${remote_tag:-<absent>}" >&2
+            print_unpushed_release_restore
+            exit 1
+        fi
+        if ! origin_release_branch_fast_forwards; then
+            echo "ERROR: origin's $RELEASE_BRANCH moved during the release to ${origin_branch_commit:-<missing>}," >&2
+            echo "       which is not an ancestor of source $SOURCE_COMMIT, so the branch push after" >&2
+            echo "       the tag push could not fast-forward. Refusing the tag push." >&2
+            echo "       Merge (never squash or rebase) origin's $RELEASE_BRANCH into $RELEASE_BRANCH" >&2
+            echo "       and cut the release from the merge: a new source, so a new candidate." >&2
+            print_unpushed_release_restore
+            exit 1
+        fi
+    }
+
+    assert_release_state_unchanged "tag push"
+    require_origin_unchanged_for_tag_push
+    if [ "$RESPIN" = "1" ]; then
+        # The lease names the tag object proven replaceable in the preflight, or is
+        # empty ("must not exist") when origin had no v$VERSION. It covers the window
+        # between that ls-remote and this push's own ref advertisement, which spans
+        # clean CI and the build; the re-read just above makes a stale lease fail
+        # before the hook runs its clean CI. A tag moved while the push itself runs,
+        # hook included, is refused by receive-pack's compare-and-swap against the
+        # advertised value.
+        MACCRAB_RELEASE_EXPECTED_DMG="$DMG_PATH" \
+        MACCRAB_RELEASE_EXPECTED_SHA256="$gate_dmg_sha" \
+        MACCRAB_RELEASE_EXPECTED_COMMIT="$FINAL_COMMIT" \
+        MACCRAB_RELEASE_EXPECTED_TAG_OBJECT="$TAG_OBJECT" \
+        MACCRAB_RELEASE_EXPECTED_HOOK_BLOB="$EXPECTED_HOOK_BLOB" \
+        MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" \
+        MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" \
+        MACCRAB_RELEASE_METADATA_TREE="$METADATA_TREE" \
+            $GIT_BIN push --force-with-lease="refs/tags/v$VERSION:$tag_push_lease_object" \
+                origin "refs/tags/v$VERSION"
+    else
+        MACCRAB_RELEASE_EXPECTED_DMG="$DMG_PATH" \
+        MACCRAB_RELEASE_EXPECTED_SHA256="$gate_dmg_sha" \
+        MACCRAB_RELEASE_EXPECTED_COMMIT="$FINAL_COMMIT" \
+        MACCRAB_RELEASE_EXPECTED_TAG_OBJECT="$TAG_OBJECT" \
+        MACCRAB_RELEASE_EXPECTED_HOOK_BLOB="$EXPECTED_HOOK_BLOB" \
+        MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" \
+        MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" \
+        MACCRAB_RELEASE_METADATA_TREE="$METADATA_TREE" \
+            $GIT_BIN push origin "refs/tags/v$VERSION"
+    fi
+
     require_canonical_origin
-    require_versioned_pre_push_gate
-    assert_qualification_evidence_unchanged "$stage"
-    reject_hidden_release_index_state
-    verify_release_executor_blobs "$FINAL_COMMIT"
-    if [ "$($GIT_BIN rev-parse HEAD)" != "$FINAL_COMMIT" ] \
-            || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ] \
-            || [ "$($GIT_BIN rev-parse "$FINAL_COMMIT^{tree}")" != "$METADATA_TREE" ] \
-            || [ -n "$($GIT_BIN status --porcelain --untracked-files=all)" ] \
-            || [ "$($GIT_BIN hash-object --no-filters "$VERSIONED_PRE_PUSH")" != "$EXPECTED_HOOK_BLOB" ] \
-            || [ "$($GIT_BIN rev-parse "refs/tags/v$VERSION")" != "$TAG_OBJECT" ] \
-            || [ "$($GIT_BIN rev-parse "$TAG_OBJECT^{commit}")" != "$FINAL_COMMIT" ]; then
-        echo "ERROR: HEAD, source, hook, or release tag drifted; refusing $stage" >&2
+    remote_tag_object=$($GIT_BIN ls-remote origin "refs/tags/v$VERSION" | $AWK_BIN 'NR == 1 {print $1}')
+    if [ "$remote_tag_object" != "$TAG_OBJECT" ]; then
+        echo "ERROR: remote tag object does not match the locally verified annotated tag" >&2
+        echo "  expected: $TAG_OBJECT" >&2
+        echo "  remote:   ${remote_tag_object:-<missing>}" >&2
         exit 1
     fi
-}
 
-assert_release_state_unchanged "tag push"
-if [ "$RESPIN" = "1" ]; then
-    # Replace only the tag object proven replaceable before the build (or no
-    # tag at all): a tag moved during the long CI gate must not be overwritten.
-    MACCRAB_RELEASE_EXPECTED_DMG="$DMG_PATH" \
-    MACCRAB_RELEASE_EXPECTED_SHA256="$gate_dmg_sha" \
-    MACCRAB_RELEASE_EXPECTED_COMMIT="$FINAL_COMMIT" \
-    MACCRAB_RELEASE_EXPECTED_TAG_OBJECT="$TAG_OBJECT" \
-    MACCRAB_RELEASE_EXPECTED_HOOK_BLOB="$EXPECTED_HOOK_BLOB" \
-    MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" \
-    MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" \
-    MACCRAB_RELEASE_METADATA_TREE="$METADATA_TREE" \
-        $GIT_BIN push --force-with-lease="refs/tags/v$VERSION:${respin_tag_object:-}" \
-            origin "refs/tags/v$VERSION"
+    # The clean gate has now passed and the verified tag is on the remote. Only now
+    # does the release branch move. Push THIS commit explicitly: `git push origin
+    # main --tags` pushed the local `main` ref — which need not contain HEAD — plus
+    # every stray local tag in the repo.
+    #
+    # v1.22.2's branch push failed here (the hook's CI ran out of disk) and set -e
+    # ended the run without saying that the tag was already public or how to
+    # finish. Say both.
+    print_branch_push_recovery() {
+        echo "" >&2
+        echo "PUBLICATION STOPPED: the $RELEASE_BRANCH push failed after the release tag was pushed." >&2
+        echo "  v$VERSION is public and verified: annotated tag $TAG_OBJECT on $FINAL_COMMIT." >&2
+        echo "  origin's $RELEASE_BRANCH did not move, and no GitHub release, appcast, release.json" >&2
+        echo "  or cask was published. Do not move or delete the tag, and do not rebuild." >&2
+        echo "" >&2
+        echo "  Fix the push failure above, make origin's $RELEASE_BRANCH contain $FINAL_COMMIT" >&2
+        echo "  by a merge (never squash or rebase), then publish from the existing tag:" >&2
+        echo "    git fetch origin" >&2
+        echo "    git merge origin/$RELEASE_BRANCH" >&2
+        echo "    git push origin $RELEASE_BRANCH" >&2
+        echo "    scripts/release.sh $VERSION --resume-publish" >&2
+        if [ "$FINAL_COMMIT" != "$SOURCE_COMMIT" ]; then
+            echo "" >&2
+            echo "  This run already moved local refs/heads/$RELEASE_BRANCH from $SOURCE_COMMIT" >&2
+            echo "  to $FINAL_COMMIT (git update-ref); the steps above build on that. To return" >&2
+            echo "  it to the source instead, for example to rerun from the source:" >&2
+            echo "    git update-ref refs/heads/$RELEASE_BRANCH $SOURCE_COMMIT $FINAL_COMMIT" >&2
+            echo "    git restore --source=HEAD --staged --worktree -- release.json Casks/maccrab.rb homebrew/maccrab.rb" >&2
+        fi
+    }
+    assert_release_state_unchanged "branch push"
+    if ! $GIT_BIN push origin "HEAD:refs/heads/$RELEASE_BRANCH"; then
+        print_branch_push_recovery
+        exit 1
+    fi
+    require_canonical_origin
+    remote_branch_commit=$($GIT_BIN ls-remote origin "refs/heads/$RELEASE_BRANCH" | $AWK_BIN 'NR == 1 {print $1}')
+    if [ "$remote_branch_commit" != "$FINAL_COMMIT" ]; then
+        echo "ERROR: remote $RELEASE_BRANCH does not point at the verified release commit" >&2
+        echo "  expected: $FINAL_COMMIT" >&2
+        echo "  remote:   ${remote_branch_commit:-<missing>}" >&2
+        exit 1
+    fi
 else
-    MACCRAB_RELEASE_EXPECTED_DMG="$DMG_PATH" \
-    MACCRAB_RELEASE_EXPECTED_SHA256="$gate_dmg_sha" \
-    MACCRAB_RELEASE_EXPECTED_COMMIT="$FINAL_COMMIT" \
-    MACCRAB_RELEASE_EXPECTED_TAG_OBJECT="$TAG_OBJECT" \
-    MACCRAB_RELEASE_EXPECTED_HOOK_BLOB="$EXPECTED_HOOK_BLOB" \
-    MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" \
-    MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" \
-    MACCRAB_RELEASE_METADATA_TREE="$METADATA_TREE" \
-        $GIT_BIN push origin "refs/tags/v$VERSION"
-fi
-
-require_canonical_origin
-remote_tag_object=$($GIT_BIN ls-remote origin "refs/tags/v$VERSION" | $AWK_BIN 'NR == 1 {print $1}')
-if [ "$remote_tag_object" != "$TAG_OBJECT" ]; then
-    echo "ERROR: remote tag object does not match the locally verified annotated tag" >&2
-    echo "  expected: $TAG_OBJECT" >&2
-    echo "  remote:   ${remote_tag_object:-<missing>}" >&2
-    exit 1
-fi
-
-# The clean gate has now passed and the verified tag is on the remote. Only now
-# does the release branch move. Push THIS commit explicitly: `git push origin
-# main --tags` pushed the local `main` ref — which need not contain HEAD — plus
-# every stray local tag in the repo.
-assert_release_state_unchanged "branch push"
-$GIT_BIN push origin "HEAD:refs/heads/$RELEASE_BRANCH"
-require_canonical_origin
-remote_branch_commit=$($GIT_BIN ls-remote origin "refs/heads/$RELEASE_BRANCH" | $AWK_BIN 'NR == 1 {print $1}')
-if [ "$remote_branch_commit" != "$FINAL_COMMIT" ]; then
-    echo "ERROR: remote $RELEASE_BRANCH does not point at the verified release commit" >&2
-    echo "  expected: $FINAL_COMMIT" >&2
-    echo "  remote:   ${remote_branch_commit:-<missing>}" >&2
-    exit 1
+    # The gate and publisher checks above can take minutes. Re-read origin
+    # before creating anything: v$VERSION must still be the tag verified in
+    # the preflight, and the release branch must still contain its commit.
+    remote_tag_object=$($GIT_BIN ls-remote origin "refs/tags/v$VERSION" \
+        | $AWK_BIN -v ref="refs/tags/v$VERSION" '$2 == ref && !found { print $1; found = 1 }')
+    if [ "$remote_tag_object" != "$TAG_OBJECT" ] \
+            || ! origin_release_branch_contains "$FINAL_COMMIT"; then
+        echo "ERROR: origin changed during the resume: v$VERSION is ${remote_tag_object:-<absent>}" >&2
+        echo "       (expected $TAG_OBJECT) and $RELEASE_BRANCH is ${origin_branch_commit:-<missing>}," >&2
+        echo "       which must contain $FINAL_COMMIT. Nothing was published." >&2
+        exit 1
+    fi
+    echo "  ✓ Resume: origin still has v$VERSION (${TAG_OBJECT:0:12}); $RELEASE_BRANCH contains ${FINAL_COMMIT:0:12}"
 fi
 
 # The tag push runs the pre-push hook's clean CI gate. That gate historically
@@ -1352,7 +1660,7 @@ verify_immutable_upload_snapshot() {
 RELEASE_RUN_NONCE=$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')
 RELEASE_DRAFT_TITLE="MacCrab v$VERSION [release-run:$RELEASE_RUN_NONCE]"
 RELEASE_FINAL_TITLE="MacCrab v$VERSION"
-NOTES_FILE="RELEASE_NOTES/v$VERSION.md"
+NOTES_FILE="$RELEASE_METADATA_ROOT/RELEASE_NOTES/v$VERSION.md"
 GH_RELEASE_CREATE_ARGS=("v$VERSION" "$UPLOAD_SNAPSHOT" \
     --title "$RELEASE_DRAFT_TITLE" --draft --verify-tag)
 if [ "$VERSION_IS_RC" = "1" ]; then
@@ -1512,7 +1820,11 @@ fi
 SITE_REPO="${SITE_REPO:-peterhanily/maccrab-site}"
 APPCAST_ITEM=""
 keep_appcast_item=0
-SITE_PUBLISH_ARGS=(--release-json "$PROJECT_DIR/release.json" --site-repo "$SITE_REPO" --version "$VERSION")
+# A failed site publish is retried by hand with the same release.json. A resumed
+# release's copy comes from the tag's commit into a private directory removed on
+# exit, and the checkout may hold different bytes, so that copy is kept instead.
+site_recovery_release_json=release.json
+SITE_PUBLISH_ARGS=(--release-json "$RELEASE_METADATA_ROOT/release.json" --site-repo "$SITE_REPO" --version "$VERSION")
 if [ "${SKIP_APPCAST:-0}" = "1" ]; then
     echo ""
     echo "  Step 6/6: Skipping appcast publish (SKIP_APPCAST=1)"
@@ -1620,11 +1932,15 @@ os.execve(sys.argv[1], sys.argv[1:], environment)
             fi
         fi
     else
+        if [ "$RESUME_PUBLISH" = "1" ]; then
+            site_recovery_release_json="$RESUME_METADATA_DIR/release.json"
+            RESUME_METADATA_DIR=""
+        fi
         if [ -n "$APPCAST_ITEM" ]; then
             keep_appcast_item=1
-            release_fail "site publish failed — appcast.xml and release.json are published together or not at all; existing Sparkle users will not receive v$VERSION and maccrab.com advertises the PREVIOUS release until it lands. The generated item remains at $APPCAST_ITEM; after fixing the cause rerun, with the publisher profile loaded as in docs/ROLLBACK_RUNBOOK.md (never a token on the command line), 'scripts/publish-site-release.sh --item $APPCAST_ITEM --release-json release.json --site-repo $SITE_REPO --version $VERSION'"
+            release_fail "site publish failed — appcast.xml and release.json are published together or not at all; existing Sparkle users will not receive v$VERSION and maccrab.com advertises the PREVIOUS release until it lands. The generated item remains at $APPCAST_ITEM; after fixing the cause rerun, with the publisher profile loaded as in docs/ROLLBACK_RUNBOOK.md (never a token on the command line), 'scripts/publish-site-release.sh --item $APPCAST_ITEM --release-json $site_recovery_release_json --site-repo $SITE_REPO --version $VERSION'"
         else
-            release_fail "release.json publish failed — maccrab.com is still advertising the PREVIOUS release; after fixing the cause rerun, with the publisher profile loaded as in docs/ROLLBACK_RUNBOOK.md (never a token on the command line), 'scripts/publish-site-release.sh --skip-appcast --release-json release.json --site-repo $SITE_REPO --version $VERSION'"
+            release_fail "release.json publish failed — maccrab.com is still advertising the PREVIOUS release; after fixing the cause rerun, with the publisher profile loaded as in docs/ROLLBACK_RUNBOOK.md (never a token on the command line), 'scripts/publish-site-release.sh --skip-appcast --release-json $site_recovery_release_json --site-repo $SITE_REPO --version $VERSION'"
         fi
     fi
 if [ -n "$APPCAST_ITEM" ]; then
@@ -1652,8 +1968,8 @@ fi
     echo "Step 6c: Cross-source SHA sanity check..."
     # || true so set -e + pipefail don't abort the post-publish step
     # when grep finds nothing (we WANT to fall through and report).
-    local_release_sha=$($GREP_BIN -oE '"sha256":\s*"[a-f0-9]{64}"' release.json 2>/dev/null | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
-    cask_sha=$($GREP_BIN -oE 'sha256\s+"[a-f0-9]{64}"' Casks/maccrab.rb 2>/dev/null | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
+    local_release_sha=$($GREP_BIN -oE '"sha256":\s*"[a-f0-9]{64}"' "$RELEASE_METADATA_ROOT/release.json" 2>/dev/null | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
+    cask_sha=$($GREP_BIN -oE 'sha256\s+"[a-f0-9]{64}"' "$RELEASE_METADATA_ROOT/Casks/maccrab.rb" 2>/dev/null | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
     gh_release_sha=$(publisher_gh api \
         "repos/$CANONICAL_GH_REPO/releases/$OWNED_RELEASE_ID" \
         --jq ".assets[] | select(.name == \"$DMG_NAME\") | .digest" \
@@ -1689,6 +2005,7 @@ fi
     echo "Step 6d: Publishing cask to homebrew-maccrab tap..."
     verify_immutable_upload_snapshot
     if TAP_REPO_TOKEN="$MACCRAB_PUBLISH_TAP_REPO_TOKEN" \
+            CASK_PATH="$RELEASE_METADATA_ROOT/Casks/maccrab.rb" \
             "$BUILD_WORKSPACE/scripts/publish-cask.sh"; then
         echo "  ✓ Cask published; 'brew install --cask peterhanily/maccrab/maccrab' serves v$VERSION"
 else

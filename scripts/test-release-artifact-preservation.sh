@@ -1101,6 +1101,7 @@ make_release_fixture() {
         '    exit 86' \
         'fi' \
         'printf "%s\n" "$*" >> "${MACCRAB_TEST_CI_LOG:-ci.log}"' \
+        'if [ -n "${MACCRAB_TEST_CI_MOVES_REMOTE_BRANCH_TO:-}" ]; then printf "%s\n" "$MACCRAB_TEST_CI_MOVES_REMOTE_BRANCH_TO" > .fixture-remote-branch-commit; fi' \
         'if [ -f .fixture-ci-output ]; then cat .fixture-ci-output; else printf "fixture clean CI stdout\n"; fi' \
         'printf "fixture clean CI stderr\n" >&2' \
         'exit "${MACCRAB_TEST_CI_STATUS:-0}"'
@@ -1260,6 +1261,7 @@ make_release_fixture() {
         '                esac ;;' \
         '            *)' \
         '                head=$(/usr/bin/git rev-parse HEAD)' \
+        '                if [ -n "${MACCRAB_TEST_BRANCH_PUSH_STATUS:-}" ]; then echo "fixture: branch push rejected" >&2; exit "$MACCRAB_TEST_BRANCH_PUSH_STATUS"; fi' \
         '                printf "refs/heads/main %s refs/heads/main %040d\n" "$head" 0 | ./.githooks/pre-push origin fixture' \
         '                printf "%s\n" "$head" > .fixture-remote-branch-commit' \
         '                if [ "${MACCRAB_TEST_MUTATE_ORIGIN_AFTER_BRANCH:-0}" = "1" ]; then /usr/bin/git remote set-url origin https://github.com/attacker/maccrab.git; fi ;;' \
@@ -1314,6 +1316,8 @@ make_release_fixture() {
         'if env | grep -qE "^(DEVELOPER_ID|APPLE_ID|APPLE_TEAM_ID|NOTARIZE_PASSWORD|NOTARIZE_KEYCHAIN_PROFILE|GH_TOKEN|GITHUB_TOKEN|SITE_REPO_TOKEN)="; then exit 86; fi' \
         '[ -n "${TAP_REPO_TOKEN:-}" ] || exit 87' \
         'fixture_root=__FIXTURE_ROOT__; [ -s "$(cat "$fixture_root/snapshot.path" 2>/dev/null || true)" ] || [ "${SKIP_APPCAST:-0}" = "1" ] || exit 88' \
+        'printf "%s\n" "${CASK_PATH:-}" > "$fixture_root/.fixture-published-cask-path"' \
+        'cp "${CASK_PATH:-Casks/maccrab.rb}" "$fixture_root/.fixture-published-cask"' \
         'if [ -n "${MACCRAB_TEST_PUBLISH_LOG:-}" ]; then printf "cask\n" >> "$MACCRAB_TEST_PUBLISH_LOG"; fi' \
         'exit "${MACCRAB_TEST_CASK_PUBLISH_STATUS:-0}"'
     # Only cache-busted live URLs are served; fail-live-<file> simulates a
@@ -1517,6 +1521,9 @@ PYTHON
         /usr/bin/git commit -q -m 'release fixture'
         /usr/bin/git config core.hooksPath .githooks
         /usr/bin/git remote add origin https://github.com/peterhanily/maccrab.git
+        # origin's release branch starts at the fixture source, so the release
+        # branch can fast-forward unless a case moves it.
+        /usr/bin/git rev-parse HEAD > .fixture-remote-branch-commit
     )
     /bin/mkdir -p "$fixture/.swiftpm/configuration" \
         "$fixture/Sources/MacCrabCore/Resources/private-input"
@@ -1787,11 +1794,34 @@ set -e
 [ "$qualification_missing_status" -ne 0 ] || fail "release accepted missing installed-host evidence"
 /usr/bin/grep -q 'PUBLICATION STOPPED' "$qualification_missing/output.log" \
     || fail "missing runtime evidence did not explain the phase boundary"
-/usr/bin/grep -qE '/\.qualification-evidence/resource-baseline/([0-9a-f]{64}|<private_evidence\.sha256>)\.json \((present|MISSING)\)' \
+# The exact private receipt named by the committed public policy, and whether it
+# is present: an alternation that also accepted the placeholder or either state
+# could not tell a correct diagnosis from a broken one.
+qualification_missing_baseline_sha=$(/usr/bin/python3 -I -c \
+    'import json, sys; print(json.load(open(sys.argv[1]))["private_evidence"]["sha256"])' \
+    "$qualification_missing/docs/RELEASE_RESOURCE_BASELINE.json")
+[[ "$qualification_missing_baseline_sha" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "fixture public resource policy lacks a private evidence commitment"
+/usr/bin/grep -qF "/.qualification-evidence/resource-baseline/$qualification_missing_baseline_sha.json (MISSING)" \
         "$qualification_missing/output.log" \
-    || fail "next steps did not name the private resource baseline a fresh clone lacks"
+    || fail "next steps did not name the exact private resource baseline a fresh clone lacks"
 [ ! -s "$qualification_missing/build.log" ] || fail "missing evidence caused a qualified candidate rebuild"
 [ ! -s "$qualification_missing/gh.log" ] || fail "missing evidence reached GitHub"
+(umask 077; /bin/mkdir -p "$qualification_missing/.qualification-evidence/resource-baseline")
+printf '{}\n' > "$qualification_missing/.qualification-evidence/resource-baseline/$qualification_missing_baseline_sha.json"
+set +e
+(
+    cd "$qualification_missing"
+    PATH="$qualification_missing/fake-bin:/usr/bin:/bin" \
+        HOME="$qualification_missing/home" \
+        RELEASE_BRANCH=main \
+        MACCRAB_TEST_GH_LOG="$qualification_missing/gh.log" \
+        ./scripts/release.sh 9.9.11 --skip-prerelease-check
+) > "$qualification_missing/output.log" 2>&1
+set -e
+/usr/bin/grep -qF "/.qualification-evidence/resource-baseline/$qualification_missing_baseline_sha.json (present)" \
+        "$qualification_missing/output.log" \
+    || fail "next steps did not report the copied private resource baseline as present"
 
 qualification_mismatch="$TEST_ROOT/release-qualification-mismatch"
 make_release_fixture "$qualification_mismatch"
@@ -3000,13 +3030,30 @@ respin_foreign_tag=$(cat "$respin_foreign/.fixture-remote-tag-object")
 run_respin_release "$respin_foreign" --respin
 [ "$respin_status" -ne 0 ] \
     || fail "--respin replaced a same-version tag that is not a metadata-only child"
-grep -q 'does not descend from published tag' "$respin_foreign/output.log" \
+grep -q -- '--respin will not replace published v9.9.11' "$respin_foreign/output.log" \
     && grep -q -- '--respin replaces v9.9.11 only when' "$respin_foreign/output.log" \
     || fail "refused re-spin did not explain why the published tag cannot be replaced"
 [ "$(cat "$respin_foreign/.fixture-remote-tag-object")" = "$respin_foreign_tag" ] \
-    && [ ! -s "$respin_foreign/build.log" ] \
+    && [ ! -e "$respin_foreign/ci.log" ] && [ ! -s "$respin_foreign/build.log" ] \
     && ! grep -q 'release create' "$respin_foreign/gh.log" 2>/dev/null \
-    || fail "refused re-spin built, moved the published tag, or reached GitHub"
+    || fail "refused re-spin ran CI, built, moved the published tag, or reached GitHub"
+
+# A published tag on the source itself (or an ancestor) passes the ancestry
+# check, so --respin used to fall through and force-replace a real release.
+respin_on_source="$TEST_ROOT/release-respin-tag-on-source"
+make_release_fixture "$respin_on_source"
+/usr/bin/git -C "$respin_on_source" -c core.hooksPath=.no-hooks tag -a v9.9.11 -m 'MacCrab v9.9.11'
+respin_on_source_tag=$(/usr/bin/git -C "$respin_on_source" rev-parse refs/tags/v9.9.11)
+printf '%s\n' "$respin_on_source_tag" > "$respin_on_source/.fixture-remote-tag-object"
+printf 'refs/tags/v9.9.11\n' > "$respin_on_source/.fixture-remote-tag-name"
+run_respin_release "$respin_on_source" --respin
+[ "$respin_status" -ne 0 ] || fail "--respin replaced a published tag on the source itself"
+grep -q -- '--respin will not replace published v9.9.11' "$respin_on_source/output.log" \
+    || fail "--respin did not explain why a tag on the source cannot be replaced"
+[ "$(cat "$respin_on_source/.fixture-remote-tag-object")" = "$respin_on_source_tag" ] \
+    && [ ! -e "$respin_on_source/ci.log" ] && [ ! -s "$respin_on_source/build.log" ] \
+    && [ ! -e "$respin_on_source/gh.log" ] \
+    || fail "--respin of a tag on the source ran CI, built, moved it, or reached GitHub"
 
 # A replaceable tag is still refused when origin's main would not fast-forward to
 # the re-spun commit. By v1.22.2's recovery, main had taken PR #8, a commit the
@@ -3035,9 +3082,11 @@ for respin_branch_variant in moved pushed; do
         && grep -q "($respin_branch_main) is not an ancestor of source" "$respin_branch/output.log" \
         && grep -q 'Do not re-spin' "$respin_branch/output.log" \
         || fail "refused re-spin did not explain the unreachable release branch ($respin_branch_variant)"
+    grep -qF 'scripts/release.sh 9.9.11 --resume-publish' "$respin_branch/output.log" \
+        || fail "refused re-spin did not point at --resume-publish ($respin_branch_variant)"
     [ "$(cat "$respin_branch/.fixture-remote-tag-object")" = "$respin_branch_tag" ] \
         && [ "$(cat "$respin_branch/.fixture-remote-branch-commit")" = "$respin_branch_main" ] \
-        && [ ! -s "$respin_branch/build.log" ] \
+        && [ ! -e "$respin_branch/ci.log" ] && [ ! -s "$respin_branch/build.log" ] \
         && ! grep -q 'release create' "$respin_branch/gh.log" 2>/dev/null \
         || fail "refused re-spin built, pushed, or reached GitHub ($respin_branch_variant)"
 done
@@ -3052,6 +3101,255 @@ grep -q "published tag 'v9.9.11' is not present locally" "$respin_unflagged/outp
     || fail "published tag without --respin did not fail as before"
 [ ! -e "$respin_unflagged/.fixture-fetch.log" ] \
     || fail "release fetched a published tag without --respin"
+
+# Once that tag is local, a plain run must recognize its own earlier attempt.
+# "Merge the published history and re-cut" would make a new source and throw
+# away the qualified candidate the tag already describes.
+own_tag_plain="$TEST_ROOT/release-own-tag-plain-run"
+make_release_fixture "$own_tag_plain"
+make_respin_prior_attempt "$own_tag_plain"
+/usr/bin/git -C "$own_tag_plain" -c core.hooksPath=.no-hooks fetch -q \
+    "$own_tag_plain-origin" refs/tags/v9.9.11:refs/tags/v9.9.11
+run_respin_release "$own_tag_plain"
+[ "$respin_status" -ne 0 ] || fail "a plain run accepted its own published version"
+grep -q 'an earlier run of this candidate pushed its tag' "$own_tag_plain/output.log" \
+    && grep -qF 'scripts/release.sh 9.9.11 --resume-publish' "$own_tag_plain/output.log" \
+    && grep -q -- '--respin can replace the tag' "$own_tag_plain/output.log" \
+    || fail "a plain run did not point its own earlier attempt at --resume-publish/--respin"
+! grep -q 'published history into this branch and re-cut' "$own_tag_plain/output.log" \
+    || fail "a plain run advised re-cutting, which would discard the qualified candidate"
+[ ! -e "$own_tag_plain/ci.log" ] && [ ! -s "$own_tag_plain/build.log" ] \
+    || fail "own-tag refusal ran CI or built"
+
+# The branch push after the tag push is a plain fast-forward. If origin's main
+# has taken a change the source lacks, every release, not only --respin, must
+# stop before Step 0 spends the clean CI.
+ff_preflight="$TEST_ROOT/release-branch-cannot-fast-forward"
+make_release_fixture "$ff_preflight"
+ff_preflight_source=$(/usr/bin/git -C "$ff_preflight" rev-parse HEAD)
+ff_preflight_main=$(/usr/bin/git -C "$ff_preflight" commit-tree -p "$ff_preflight_source" \
+    -m 'concurrent change on main' "$ff_preflight_source^{tree}")
+printf '%s\n' "$ff_preflight_main" > "$ff_preflight/.fixture-remote-branch-commit"
+run_release_control "$ff_preflight" SITE_REPO_TOKEN='fixture token'
+[ "$release_control_status" -eq 1 ] || fail "release started although main cannot fast-forward"
+grep -q "origin's main ($ff_preflight_main) is not an ancestor" "$ff_preflight/output.log" \
+    && grep -q 'No CI ran and nothing was tagged or pushed' "$ff_preflight/output.log" \
+    || fail "fast-forward preflight did not explain the refusal"
+! grep -q 'Step 0/6' "$ff_preflight/output.log" \
+    && [ ! -e "$ff_preflight/ci.log" ] && [ ! -s "$ff_preflight/build.log" ] \
+    && [ ! -e "$ff_preflight/gh.log" ] && [ -z "$(/usr/bin/git -C "$ff_preflight" tag -l)" ] \
+    && [ "$(/usr/bin/git -C "$ff_preflight" rev-parse HEAD)" = "$ff_preflight_source" ] \
+    || fail "fast-forward refusal reached Step 0, CI, the build, GitHub, or a ref"
+
+# The same change can land during the clean CI. The re-read right before the
+# tag push must stop it while nothing is public, and its restore steps must
+# really return the checkout to the source.
+ff_during_ci="$TEST_ROOT/release-branch-moved-during-ci"
+make_release_fixture "$ff_during_ci"
+ff_during_source=$(/usr/bin/git -C "$ff_during_ci" rev-parse HEAD)
+ff_during_main=$(/usr/bin/git -C "$ff_during_ci" commit-tree -p "$ff_during_source" \
+    -m 'concurrent change on main' "$ff_during_source^{tree}")
+run_release_control "$ff_during_ci" SITE_REPO_TOKEN='fixture token' \
+    MACCRAB_TEST_CI_MOVES_REMOTE_BRANCH_TO="$ff_during_main"
+[ "$release_control_status" -eq 1 ] || fail "tag push proceeded after main moved during CI"
+grep -q "origin's main moved during the release to $ff_during_main" "$ff_during_ci/output.log" \
+    || fail "pre-tag-push re-read did not explain the moved branch"
+[ ! -e "$ff_during_ci/.fixture-remote-tag-object" ] \
+    && [ "$(/usr/bin/wc -l < "$ff_during_ci/ci.log" | /usr/bin/tr -d ' ')" = 1 ] \
+    && ! grep -q 'release create' "$ff_during_ci/gh.log" \
+    || fail "moved branch still reached the tag push, its hook CI, or a GitHub draft"
+ff_during_final=$(/usr/bin/git -C "$ff_during_ci" rev-parse HEAD)
+grep -qF 'git tag -d v9.9.11' "$ff_during_ci/output.log" \
+    && grep -qF "git update-ref refs/heads/main $ff_during_source $ff_during_final" "$ff_during_ci/output.log" \
+    || fail "refused tag push did not print the local restore steps"
+/usr/bin/git -C "$ff_during_ci" -c core.hooksPath=.no-hooks tag -d v9.9.11 >/dev/null
+/usr/bin/git -C "$ff_during_ci" -c core.hooksPath=.no-hooks \
+    update-ref refs/heads/main "$ff_during_source" "$ff_during_final"
+/usr/bin/git -C "$ff_during_ci" -c core.hooksPath=.no-hooks \
+    restore --source=HEAD --staged --worktree -- release.json Casks/maccrab.rb homebrew/maccrab.rb
+[ "$(/usr/bin/git -C "$ff_during_ci" rev-parse HEAD)" = "$ff_during_source" ] \
+    && [ -z "$(/usr/bin/git -C "$ff_during_ci" status --porcelain)" ] \
+    || fail "printed restore steps did not return the checkout to the clean source"
+
+# run_release_with FIXTURE VERSION [VAR=value ...] [-- release.sh flags ...]
+run_release_with() {
+    local fixture="$1" version="$2" assignments=()
+    shift 2
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do assignments+=("$1"); shift; done
+    [ "$#" -eq 0 ] || shift
+    set +e
+    (
+        cd "$fixture"
+        env PATH="$fixture/fake-bin:/usr/bin:/bin" HOME="$fixture/home" TMPDIR="$fixture/tmp" \
+            DEVELOPER_ID="fixture identity" SITE_REPO_TOKEN="fixture token" \
+            TAP_REPO_TOKEN="fixture token" RELEASE_BRANCH=main \
+            MACCRAB_TEST_GH_LOG="$fixture/gh.log" MACCRAB_TEST_GIT_LOG="$fixture/git.log" \
+            MACCRAB_TEST_PUBLISH_LOG="$fixture/publish.log" \
+            ${assignments[@]+"${assignments[@]}"} \
+            ./scripts/release.sh "$version" --skip-prerelease-check "$@"
+    ) > "$fixture/output.log" 2>&1
+    release_with_status=$?
+    set -e
+}
+
+# The resume path reads the candidate's source commit/tree from its manifest.
+write_resume_manifest() {
+    local fixture="$1" version="$2" candidate_commit
+    candidate_commit=$(/usr/bin/git -C "$fixture" rev-parse HEAD)
+    printf '{"candidate":{"source_commit":"%s","source_tree":"%s"}}\n' \
+        "$candidate_commit" "$(/usr/bin/git -C "$fixture" rev-parse "$candidate_commit^{tree}")" \
+        > "$fixture/.qualification-evidence/MacCrab-v$version.candidate.json"
+}
+
+# v1.22.2 end to end: the qualified candidate's tag push succeeds, its branch
+# push fails, and another change reaches origin's main before a retry.
+resume_flow="$TEST_ROOT/release-resume-publish"
+make_qualified_ga_sparkle_fixture "$resume_flow"
+resume_source=$(/usr/bin/git -C "$resume_flow" rev-parse HEAD)
+write_resume_manifest "$resume_flow" 9.9.11
+run_release_with "$resume_flow" 9.9.11 MACCRAB_TEST_BRANCH_PUSH_STATUS=1
+[ "$release_with_status" -ne 0 ] || fail "a failed branch push was reported as success"
+resume_final=$(/usr/bin/git -C "$resume_flow" rev-parse HEAD)
+resume_tag=$(/usr/bin/git -C "$resume_flow" rev-parse refs/tags/v9.9.11)
+[ "$resume_final" != "$resume_source" ] && [ "$(cat "$resume_flow/.fixture-remote-tag-object")" = "$resume_tag" ] \
+    && [ "$(cat "$resume_flow/.fixture-remote-branch-commit")" != "$resume_final" ] \
+    && ! grep -q 'release create' "$resume_flow/gh.log" \
+    || fail "branch-push failure fixture did not strand a public tag with no release"
+grep -q 'PUBLICATION STOPPED: the main push failed after the release tag was pushed' "$resume_flow/output.log" \
+    && grep -q "v9.9.11 is public and verified: annotated tag $resume_tag on $resume_final" "$resume_flow/output.log" \
+    && grep -qF 'scripts/release.sh 9.9.11 --resume-publish' "$resume_flow/output.log" \
+    && grep -qF "git update-ref refs/heads/main $resume_source $resume_final" "$resume_flow/output.log" \
+    || fail "branch-push failure did not explain the public tag, --resume-publish, and the moved local branch"
+
+# Another change lands on origin's main, a child of what origin had.
+resume_origin_before=$(cat "$resume_flow/.fixture-remote-branch-commit")
+resume_index="$resume_flow/tmp/concurrent.index"
+GIT_INDEX_FILE="$resume_index" /usr/bin/git -C "$resume_flow" read-tree "$resume_origin_before"
+resume_blob=$(printf 'concurrent change\n' | /usr/bin/git -C "$resume_flow" hash-object -w --stdin)
+GIT_INDEX_FILE="$resume_index" /usr/bin/git -C "$resume_flow" \
+    update-index --add --cacheinfo "100644,$resume_blob,docs/CONCURRENT.md"
+resume_concurrent=$(/usr/bin/git -C "$resume_flow" commit-tree \
+    -p "$resume_origin_before" -m 'concurrent change on main' \
+    "$(GIT_INDEX_FILE="$resume_index" /usr/bin/git -C "$resume_flow" write-tree)")
+rm -f "$resume_index"
+printf '%s\n' "$resume_concurrent" > "$resume_flow/.fixture-remote-branch-commit"
+
+rm -f "$resume_flow/gh.log" "$resume_flow/publish.log"
+run_release_with "$resume_flow" 9.9.11 -- --resume-publish
+[ "$release_with_status" -ne 0 ] || fail "--resume-publish published although main lacks the tagged commit"
+grep -q "origin's main ($resume_concurrent) does not contain" "$resume_flow/output.log" \
+    && grep -qF "git merge $resume_final" "$resume_flow/output.log" \
+    && grep -q 'never squash, rebase or cherry-pick' "$resume_flow/output.log" \
+    || fail "--resume-publish did not print the exact merge-and-push steps"
+[ ! -e "$resume_flow/gh.log" ] && [ ! -e "$resume_flow/publish.log" ] \
+    && [ "$(cat "$resume_flow/.fixture-remote-tag-object")" = "$resume_tag" ] \
+    && [ "$(cat "$resume_flow/.fixture-remote-branch-commit")" = "$resume_concurrent" ] \
+    || fail "refused --resume-publish reached GitHub, a publisher, or a remote ref"
+
+# The operator follows those steps (origin's main merged into local main,
+# already at the metadata commit), then main moves on and rewrites
+# release.json and the casks, so the checkout no longer holds the tagged bytes.
+/usr/bin/git -C "$resume_flow" -c core.hooksPath=.no-hooks merge -q --no-edit "$resume_concurrent"
+printf '{"version":"9.9.12-dev","sha256":"%064d"}\n' 2 > "$resume_flow/release.json"
+printf 'cask "maccrab" do\n  version "9.9.12-dev"\n  sha256 "%064d"\nend\n' 2 > "$resume_flow/Casks/maccrab.rb"
+cp "$resume_flow/Casks/maccrab.rb" "$resume_flow/homebrew/maccrab.rb"
+/usr/bin/git -C "$resume_flow" add release.json Casks/maccrab.rb homebrew/maccrab.rb
+/usr/bin/git -C "$resume_flow" -c core.hooksPath=.no-hooks commit -q -m 'start the next development cycle'
+resume_head=$(/usr/bin/git -C "$resume_flow" rev-parse HEAD)
+printf '%s\n' "$resume_head" > "$resume_flow/.fixture-remote-branch-commit"
+/usr/bin/git -C "$resume_flow" merge-base --is-ancestor "$resume_final" "$resume_head" \
+    || fail "resume fixture: main does not contain the tagged commit"
+
+rm -f "$resume_flow/gh.log" "$resume_flow/publish.log" "$resume_flow/git.log"
+resume_ci_runs=$(/usr/bin/wc -l < "$resume_flow/ci.log" | /usr/bin/tr -d ' ')
+run_release_with "$resume_flow" 9.9.11 -- --resume-publish
+if [ "$release_with_status" -ne 0 ]; then
+    tail -60 "$resume_flow/output.log" >&2
+    fail "--resume-publish did not publish the stranded release"
+fi
+grep -q 'MacCrab v9.9.11 Released!' "$resume_flow/output.log" \
+    && grep -q 'Steps 0-1: skipped under --resume-publish' "$resume_flow/output.log" \
+    || fail "--resume-publish did not complete through the post-push steps alone"
+[ "$(grep -c 'release create' "$resume_flow/gh.log")" = 1 ] \
+    && grep -qE 'release create --repo peterhanily/maccrab v9\.9\.11 /private/tmp/maccrab-release-upload\.[^/]*/MacCrab-v9\.9\.11\.dmg' "$resume_flow/gh.log" \
+    && grep -qE -- '--notes-file /private/tmp/maccrab-release-metadata\.[^/]*/RELEASE_NOTES/v9\.9\.11\.md' "$resume_flow/gh.log" \
+    || fail "--resume-publish did not create one owned draft from the snapshot and the tagged notes"
+for resume_publisher in appcast-generate appcast-publish release-json cask; do
+    grep -qx "$resume_publisher" "$resume_flow/publish.log" \
+        || fail "--resume-publish skipped $resume_publisher"
+done
+/usr/bin/git -C "$resume_flow" cat-file blob "$resume_final:release.json" > "$resume_flow/tmp/tagged-release.json"
+/usr/bin/git -C "$resume_flow" cat-file blob "$resume_final:Casks/maccrab.rb" > "$resume_flow/tmp/tagged-cask.rb"
+cmp -s "$resume_flow/.fixture-site/release.json" "$resume_flow/tmp/tagged-release.json" \
+    && cmp -s "$resume_flow/.fixture-published-cask" "$resume_flow/tmp/tagged-cask.rb" \
+    || fail "--resume-publish published the checkout's metadata instead of the tagged commit's"
+resume_metadata_dir=$(dirname "$(dirname "$(cat "$resume_flow/.fixture-published-cask-path")")")
+[[ "$resume_metadata_dir" == /private/tmp/maccrab-release-metadata.* ]] && [ ! -e "$resume_metadata_dir" ] \
+    || fail "--resume-publish did not read, then remove, its private metadata copy"
+[ "$(cat "$resume_flow/.fixture-remote-tag-object")" = "$resume_tag" ] \
+    && [ "$(cat "$resume_flow/.fixture-remote-branch-commit")" = "$resume_head" ] \
+    && [ "$(/usr/bin/git -C "$resume_flow" rev-parse HEAD)" = "$resume_head" ] \
+    && [ "$(/usr/bin/git -C "$resume_flow" rev-parse refs/tags/v9.9.11)" = "$resume_tag" ] \
+    && [ ! -e "$resume_flow/git.log" ] \
+    || fail "--resume-publish moved or pushed a tag or branch"
+[ "$(/usr/bin/wc -l < "$resume_flow/ci.log" | /usr/bin/tr -d ' ')" = "$resume_ci_runs" ] \
+    && [ ! -s "$resume_flow/build.log" ] \
+    || fail "--resume-publish ran CI or rebuilt the qualified candidate"
+
+# Once the release exists, a second resume must not touch it. (The fake appcast
+# generator's untracked snapshot.path would otherwise stop it as unclean source.)
+rm -f "$resume_flow/gh.log" "$resume_flow/publish.log" "$resume_flow/snapshot.path"
+run_release_with "$resume_flow" 9.9.11 -- --resume-publish
+[ "$release_with_status" -ne 0 ] || fail "--resume-publish ran against an existing GitHub release"
+grep -q 'GitHub release v9.9.11 already exists' "$resume_flow/output.log" \
+    && ! grep -q 'release create' "$resume_flow/gh.log" && [ ! -e "$resume_flow/publish.log" ] \
+    || fail "--resume-publish did not refuse an existing GitHub release before any publication"
+
+# Resume publishes only the metadata-only child a release run of this candidate
+# pushed; any other same-version tag is refused before anything runs.
+resume_foreign="$TEST_ROOT/release-resume-not-metadata-only"
+make_release_fixture "$resume_foreign"
+write_resume_manifest "$resume_foreign" 9.9.11
+/bin/mkdir -p "$resume_foreign/.build"
+printf 'preserved qualified GA candidate\n' > "$resume_foreign/.build/MacCrab-v9.9.11.dmg"
+printf '{}\n' > "$resume_foreign/.qualification-evidence/MacCrab-v9.9.11.runtime.json"
+make_respin_prior_attempt "$resume_foreign" README.md
+resume_foreign_tag=$(cat "$resume_foreign/.fixture-remote-tag-object")
+run_release_with "$resume_foreign" 9.9.11 -- --resume-publish
+[ "$release_with_status" -ne 0 ] || fail "--resume-publish accepted a tag that is not a metadata-only child"
+grep -q 'single child of the qualified source' "$resume_foreign/output.log" \
+    || fail "--resume-publish did not explain why the tag cannot be resumed"
+[ "$(cat "$resume_foreign/.fixture-remote-tag-object")" = "$resume_foreign_tag" ] \
+    && [ ! -e "$resume_foreign/gh.log" ] && [ ! -e "$resume_foreign/publish.log" ] \
+    && [ ! -e "$resume_foreign/ci.log" ] && [ ! -s "$resume_foreign/build.log" ] \
+    || fail "refused --resume-publish ran CI, built, moved the tag, or reached GitHub"
+
+# An RC publishes the exact source commit, so its tag names the source itself.
+resume_rc="$TEST_ROOT/release-resume-rc"
+make_release_fixture "$resume_rc"
+write_resume_manifest "$resume_rc" 9.9.11-rc.1
+/bin/mkdir -p "$resume_rc/.build"
+printf 'preserved qualified RC candidate\n' > "$resume_rc/.build/MacCrab-v9.9.11-rc.1.dmg"
+printf '{}\n' > "$resume_rc/.qualification-evidence/MacCrab-v9.9.11-rc.1.runtime.json"
+/usr/bin/git -C "$resume_rc" -c core.hooksPath=.no-hooks tag -a v9.9.11-rc.1 -m 'MacCrab v9.9.11-rc.1'
+resume_rc_tag=$(/usr/bin/git -C "$resume_rc" rev-parse refs/tags/v9.9.11-rc.1)
+printf '%s\n' "$resume_rc_tag" > "$resume_rc/.fixture-remote-tag-object"
+printf 'refs/tags/v9.9.11-rc.1\n' > "$resume_rc/.fixture-remote-tag-name"
+resume_rc_main=$(cat "$resume_rc/.fixture-remote-branch-commit")
+run_release_with "$resume_rc" 9.9.11-rc.1 -- --publish-rc --resume-publish
+if [ "$release_with_status" -ne 0 ]; then
+    tail -60 "$resume_rc/output.log" >&2
+    fail "--resume-publish did not publish a stranded RC"
+fi
+grep -q 'MacCrab v9.9.11-rc.1 Prerelease Published' "$resume_rc/output.log" \
+    && grep -q 'release create --repo peterhanily/maccrab v9.9.11-rc.1 .* --prerelease' "$resume_rc/gh.log" \
+    && [ ! -e "$resume_rc/publish.log" ] \
+    || fail "--resume-publish did not publish the RC as an isolated prerelease"
+[ "$(cat "$resume_rc/.fixture-remote-tag-object")" = "$resume_rc_tag" ] \
+    && [ "$(cat "$resume_rc/.fixture-remote-branch-commit")" = "$resume_rc_main" ] \
+    && [ ! -e "$resume_rc/ci.log" ] && [ ! -s "$resume_rc/build.log" ] \
+    || fail "RC --resume-publish moved a ref, ran CI, or rebuilt"
+echo "PASS: --resume-publish finishes a stranded release from its tag and refuses every other state"
 
 while IFS= read -r github_log; do
     assert_no_github_delete "$github_log"

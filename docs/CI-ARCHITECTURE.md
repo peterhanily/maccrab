@@ -162,7 +162,8 @@ An RC is build-only unless `--publish-rc` is explicit. Even with that flag, a
 first invocation cannot publish: it stops at the exact-candidate evidence
 boundary. Once both reports pass, the explicit path creates only a non-latest
 GitHub prerelease and leaves production appcast, `release.json`, and both casks
-unchanged. `--skip-prerelease-check` and `--respin` cannot bypass qualification.
+unchanged. `--skip-prerelease-check`, `--respin`, and `--resume-publish` cannot
+bypass qualification.
 
 ## Local same-UID threat boundary
 

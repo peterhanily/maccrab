@@ -5,6 +5,11 @@ published. Companion to `CI-ARCHITECTURE.md` (the build/release pipeline) and
 `RULE_CHANNEL.md` (the separate signed rule-update channel — this doc is about
 the **app** release, not rules).
 
+A publication that stopped after its tag push, with no GitHub release, appcast,
+`release.json` or cask published (v1.22.2's failed branch push), is not a
+rollback. Keep the tag and finish it with `scripts/release.sh <version>
+--resume-publish`; see "Stranded publication" in `RELEASE_PROCESS.md`.
+
 ## Reality check first
 
 Sparkle **cannot auto-downgrade** a client that already installed the bad
