@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP_ROOT=$(/usr/bin/mktemp -d /private/tmp/maccrab-site-publish-test.XXXXXX)
 trap '/bin/rm -rf "$TMP_ROOT"' EXIT
 
-TOKEN=github_pat_FAKE_OFFLINE_ONLY_site_publish
+TOKEN=github_pat_FAKE_OFFLINE_ONLY_site_publish  # secret-scan:allow — placeholder for the offline fake GitHub API; never a real token
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@invalid.example
 export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@invalid.example
