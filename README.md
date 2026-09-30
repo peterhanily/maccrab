@@ -6,7 +6,7 @@
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
 [![Tests](https://img.shields.io/badge/tests-4870%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
-[![Version](https://img.shields.io/badge/version-1.22.2-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.22.3-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -668,10 +668,14 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-This source tree targets **v1.22.2**. See [CHANGELOG.md](CHANGELOG.md) for the full
+This source tree targets **v1.22.3**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.22.3** — Rave forensic plugin result views, per-plugin source selection
+  and encrypted-case reviews (PR #8); DGA detection ignores reserved TLDs and
+  hyphenated service names; the release process publishes the site in one
+  commit, can resume a stranded publication, and skips a redundant CI run.
 - **v1.22.2** — removes the largest false-alarm sources (shared hosting such as
   GitHub flagged as malicious domains, one correlator alert per file in bulk
   operations, DGA and idle-daemon alerts); keeps the engine running when the

@@ -3,7 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.22.3] — 2026-09-30
 
 ### Added
 - **Rave forensic plugins show their results in dedicated views inside the
