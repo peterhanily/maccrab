@@ -193,6 +193,20 @@ collect() {   # collect <label>
                 4025d74bc418d5fb1b2922190a7e0887b1b71e06f0f08635a4d2e1b348a4e2f9) continue ;;
             esac
         fi
+        if [ "$MODE" = "diff" ] && [ "$file" = "scripts/test-site-release-publish.sh" ]; then
+            # The offline site-publisher fixture's placeholder token was added
+            # unannotated in the commit that introduced it; the current tree
+            # carries secret-scan:allow, but this historical added line stays
+            # in the unpublished range. Bind the exact content, as above.
+            historical_line_sha=$(printf '%s' "${line#+}" | /usr/bin/shasum -a 256 2>/dev/null) || {
+                echo "check-secrets: cannot verify historical fixture identity" >&2
+                exit 2
+            }
+            case "${historical_line_sha%% *}" in
+                # The fixture's FAKE_OFFLINE_ONLY placeholder token line — never a real token.
+                b7cb9bac8d55bb9774e5bc7e6d08049b29d7fa0a373dede0b88bd764af7f2648) continue ;;
+            esac
+        fi
         if [ "$MODE" = "diff" ]; then
             printf '  %s → %s\n' "$label" "${file:-<unknown file>}" >> "$FINDINGS"
         else
