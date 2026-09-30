@@ -36,6 +36,15 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   network egress", which matches what a plugin's manifest actually states.
 
 ### Fixed
+- **Terminal output no longer counts as an AI tool writing outside its
+  project.** A coding agent's children write to their pseudo-terminal on every
+  line of output, and each write was reported as a boundary violation: about
+  270 alert submissions a second on the reference host, every one deduplicated
+  away but each costing a settings-file check that the engine then observed as
+  another file event. Terminal devices (`/dev/tty*`, `/dev/ptmx`,
+  `/dev/console`) are exempt like `/dev/null`; every other device path still
+  counts. The built-in rule settings file is now probed at most once a second
+  instead of once per submitted alert.
 - **DGA detection no longer flags reserved or abbreviated service names.**
   Names under special-use TLDs (`.invalid`, `.test`, `.example`, `.localhost`,
   `.local`, `.arpa`) can never be registered, so a connectivity probe such as

@@ -83,7 +83,23 @@ public actor ProjectBoundary {
     public nonisolated static func isDefaultGloballyAllowed(filePath: String) -> Bool {
         let normalized = (filePath as NSString).standardizingPath
         if allowedDevicePaths.contains(normalized) { return true }
+        if isTerminalDevice(normalized) { return true }
         return globalExceptions.contains { normalized.contains($0) }
+    }
+
+    /// A pseudo-terminal is an output stream, not a filesystem artefact. An
+    /// agent's children write to their tty on every line of output, so each
+    /// write reported as a violation made one alert submission; on the
+    /// reference host that reached ~270 submissions a second, and the sink's
+    /// per-submission settings stat became file events the engine re-ingested.
+    /// Only terminal devices are exempt: /dev/disk* and other devices remain
+    /// out-of-project writes.
+    nonisolated static func isTerminalDevice(_ normalizedPath: String) -> Bool {
+        guard normalizedPath.hasPrefix("/dev/") else { return false }
+        let name = normalizedPath.dropFirst("/dev/".count)
+        guard !name.contains("/") else { return false }
+        return name == "tty" || name == "ptmx" || name == "console"
+            || name.hasPrefix("ttys") || name.hasPrefix("pty")
     }
 
     /// Custom exception paths (user-configurable).

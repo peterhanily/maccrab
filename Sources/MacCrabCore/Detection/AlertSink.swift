@@ -103,6 +103,12 @@ public actor AlertSink {
     private let builtinSettingsDir: String?
     private var cachedBuiltinSettings = BuiltinRuleSettings()
     private var builtinSettingsMtime: Date?
+    /// The mtime probe is one stat per submission, and it runs before dedup.
+    /// Under a flood of suppressed candidates it was ~1,000 stats a second on
+    /// the engine's own store, each a file event the engine then re-ingested.
+    /// Probe at most once a second; an operator edit still applies within it.
+    private var builtinSettingsCheckedAt: Date?
+    private static let builtinSettingsProbeInterval: TimeInterval = 1
 
     /// Counter of suppressed alerts since the sink was created. Useful for
     /// the metrics file and diagnostic surfaces.
@@ -185,10 +191,16 @@ public actor AlertSink {
     private func applyBuiltinSettings(_ alert: Alert) -> Alert? {
         guard alert.ruleId.hasPrefix("maccrab."), let dir = builtinSettingsDir else { return alert }
         let path = BuiltinRuleSettings.path(inDir: dir)
-        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
-        if mtime != builtinSettingsMtime {
-            cachedBuiltinSettings = mtime == nil ? BuiltinRuleSettings() : BuiltinRuleSettings.load(fromDir: dir)
-            builtinSettingsMtime = mtime
+        let now = Date()
+        if let checked = builtinSettingsCheckedAt, now.timeIntervalSince(checked) < Self.builtinSettingsProbeInterval {
+            // Within the probe interval: serve the cached settings.
+        } else {
+            builtinSettingsCheckedAt = now
+            let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+            if mtime != builtinSettingsMtime {
+                cachedBuiltinSettings = mtime == nil ? BuiltinRuleSettings() : BuiltinRuleSettings.load(fromDir: dir)
+                builtinSettingsMtime = mtime
+            }
         }
         guard let setting = cachedBuiltinSettings.setting(forRuleId: alert.ruleId) else { return alert }
         if !setting.enabled { return nil }

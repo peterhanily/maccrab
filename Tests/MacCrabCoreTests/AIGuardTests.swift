@@ -397,6 +397,22 @@ struct ProjectBoundaryTests {
         }
     }
 
+    @Test("Writes to a pseudo-terminal are output, not boundary violations (v1.22.3)")
+    func terminalDevicesAllowed() async {
+        let boundary = ProjectBoundary()
+        await boundary.registerBoundary(aiPid: 100, projectDir: "/Users/user/Projects/myapp")
+        // The reference host saw ~270 of these a second from agents' children.
+        for path in ["/dev/ttys002", "/dev/ptmx", "/dev/tty", "/dev/console", "/dev/pty0"] {
+            let violation = await boundary.checkWrite(filePath: path, aiSessionPid: 100, aiToolName: "Codex")
+            #expect(violation == nil, "\(path) is a terminal, not a project artefact")
+        }
+        // Other devices are still writes outside the project.
+        for path in ["/dev/disk3s5", "/dev/rdisk3", "/dev/ttys002/../disk3", "/dev/mem"] {
+            let violation = await boundary.checkWrite(filePath: path, aiSessionPid: 100, aiToolName: "Codex")
+            #expect(violation != nil, "\(path) is not a terminal and must stay a violation")
+        }
+    }
+
     @Test("Violation detection stays exact while duplicate log emission is bounded")
     func violationLogAmplificationIsBounded() async {
         final class Clock: @unchecked Sendable {
