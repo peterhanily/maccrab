@@ -621,3 +621,60 @@ struct AIContainmentRetirementTests {
         #expect(!paths.contains { $0.hasPrefix("/var/root/") })
     }
 }
+
+@Suite("Real-user-home resolution cache")
+struct RealUserHomeResolutionCacheTests {
+    private let lifetime: Duration = .seconds(5)
+    private let home = RealUserHome(path: "/Users/fixture", userID: 501, userName: "fixture")
+
+    @Test("validated home list is reused inside its lifetime and dropped at expiry")
+    func homeListExpiry() {
+        var cache = RealUserHomeResolver.ResolutionCache()
+        let start = ContinuousClock.now
+        #expect(cache.homes(at: start) == nil)
+
+        cache.store(homes: [home], at: start, lifetime: lifetime)
+        #expect(cache.homes(at: start) == [home])
+        #expect(cache.homes(at: start + .seconds(4)) == [home])
+        #expect(cache.homes(at: start + .seconds(5)) == nil)
+    }
+
+    @Test("per-uid answers cache negatives separately from misses")
+    func userIDEntries() {
+        var cache = RealUserHomeResolver.ResolutionCache()
+        let start = ContinuousClock.now
+        #expect(cache.home(forUserID: 501, at: start) == nil)
+
+        cache.store(home: home, forUserID: 501, at: start, lifetime: lifetime)
+        cache.store(home: nil, forUserID: 502, at: start, lifetime: lifetime)
+        #expect(cache.home(forUserID: 501, at: start) == .some(home))
+        #expect(cache.home(forUserID: 502, at: start) == .some(nil))
+        #expect(cache.home(forUserID: 503, at: start) == nil)
+        #expect(cache.home(forUserID: 501, at: start + .seconds(5)) == nil)
+        #expect(cache.home(forUserID: 502, at: start + .seconds(5)) == nil)
+    }
+
+    @Test("per-uid table is bounded and keeps serving after it is cleared")
+    func userIDTableBound() {
+        var cache = RealUserHomeResolver.ResolutionCache()
+        let start = ContinuousClock.now
+        let capacity = RealUserHomeResolver.ResolutionCache.maximumUserEntries
+        for uid in 0..<capacity {
+            cache.store(home: nil, forUserID: UInt32(1000 + uid), at: start, lifetime: lifetime)
+        }
+        #expect(cache.home(forUserID: 1000, at: start) == .some(nil))
+
+        cache.store(home: home, forUserID: 501, at: start, lifetime: lifetime)
+        #expect(cache.home(forUserID: 501, at: start) == .some(home))
+        #expect(cache.home(forUserID: 1000, at: start) == nil)
+    }
+
+    @Test("live resolver answers are stable across back-to-back calls")
+    func liveResolverIsStable() {
+        let first = RealUserHomeResolver.all()
+        let second = RealUserHomeResolver.all()
+        #expect(first == second)
+        let uid = UInt32(geteuid())
+        #expect(RealUserHomeResolver.home(forUserID: uid) == RealUserHomeResolver.home(forUserID: uid))
+    }
+}

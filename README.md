@@ -4,9 +4,9 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
-[![Tests](https://img.shields.io/badge/tests-4881%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-4885%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
-[![Version](https://img.shields.io/badge/version-1.22.3-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.22.4-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -672,6 +672,9 @@ This source tree targets **v1.22.3**. See [CHANGELOG.md](CHANGELOG.md) for the f
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.22.4** — the engine no longer re-validates the user's home directory
+  for every file event, removing ~68k file system calls per second and
+  priority-event loss during agent file storms.
 - **v1.22.3** — Rave forensic plugin result views, per-plugin source selection
   and encrypted-case reviews (PR #8); DGA detection ignores reserved TLDs and
   hyphenated service names; the release process publishes the site in one

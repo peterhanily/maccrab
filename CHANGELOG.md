@@ -3,6 +3,18 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.4] — 2026-10-01
+
+### Fixed
+- **The engine no longer re-validates the user's home directory for every
+  file event.** Quarantine and AI-tool enrichment resolve the owning home per
+  event; each answer re-listed `/Users`, re-walked the home descriptor by
+  descriptor and repeated the passwd lookups, about seven directory walks per
+  event. During an agent file storm the engine issued ~68,000 file system
+  calls per second, ran at 100–150% CPU, and shed priority-lane events. The
+  validated answer is now reused for five seconds; per-path owner checks stay
+  uncached so a symlink swap inside the window still fails closed.
+
 ## [1.22.3] — 2026-09-30
 
 ### Added

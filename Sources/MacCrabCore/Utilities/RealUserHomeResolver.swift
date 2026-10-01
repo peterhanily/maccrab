@@ -37,7 +37,75 @@ public enum RealUserHomeResolver {
     ///
     /// `/Users/Shared`, hidden entries, symlink homes, stale/deleted accounts,
     /// and a directory merely named like another user all fail closed.
+    ///
+    /// The validated result is reused for `cacheLifetime`. Quarantine and
+    /// AI-tool enrichment ask for a home on every file event, and each fresh
+    /// answer costs a `/Users` listing, two descriptor walks and two passwd
+    /// lookups per account; during an agent file storm that was ~7,000 walks
+    /// per second. Per-path owner checks (`noFollowOwner`) are never cached, so
+    /// a component swapped for a symlink inside the window still fails closed.
     public static func all() -> [RealUserHome] {
+        let now = ContinuousClock.now
+        cacheLock.lock()
+        let cached = cache.homes(at: now)
+        cacheLock.unlock()
+        if let cached { return cached }
+
+        let homes = enumerateHomes()
+        cacheLock.lock()
+        cache.store(homes: homes, at: now, lifetime: cacheLifetime)
+        cacheLock.unlock()
+        return homes
+    }
+
+    /// How long a validated answer is reused before the walks run again.
+    static let cacheLifetime: Duration = .seconds(5)
+
+    private static let cacheLock = NSLock()
+    nonisolated(unsafe) private static var cache = ResolutionCache()
+
+    /// Pure, time-parameterised cache so the expiry rules are testable without
+    /// real accounts. Negative uid answers are cached too: an unknown uid asked
+    /// on every event would otherwise still pay a passwd lookup each time.
+    struct ResolutionCache {
+        static let maximumUserEntries = 64
+
+        private var allHomes: (value: [RealUserHome], expiresAt: ContinuousClock.Instant)?
+        private var homesByUID: [UInt32: (value: RealUserHome?, expiresAt: ContinuousClock.Instant)] = [:]
+
+        func homes(at now: ContinuousClock.Instant) -> [RealUserHome]? {
+            guard let allHomes, now < allHomes.expiresAt else { return nil }
+            return allHomes.value
+        }
+
+        mutating func store(
+            homes: [RealUserHome],
+            at now: ContinuousClock.Instant,
+            lifetime: Duration
+        ) {
+            allHomes = (homes, now + lifetime)
+        }
+
+        /// `.some(nil)` is a cached negative answer; `nil` is a miss.
+        func home(forUserID userID: UInt32, at now: ContinuousClock.Instant) -> RealUserHome?? {
+            guard let entry = homesByUID[userID], now < entry.expiresAt else { return nil }
+            return .some(entry.value)
+        }
+
+        mutating func store(
+            home: RealUserHome?,
+            forUserID userID: UInt32,
+            at now: ContinuousClock.Instant,
+            lifetime: Duration
+        ) {
+            if homesByUID.count >= Self.maximumUserEntries, homesByUID[userID] == nil {
+                homesByUID.removeAll(keepingCapacity: true)
+            }
+            homesByUID[userID] = (home, now + lifetime)
+        }
+    }
+
+    private static func enumerateHomes() -> [RealUserHome] {
         guard let snapshot = BoundedDirectoryLister.list(
             at: "/Users",
             maximumEntries: 65_536,
@@ -79,8 +147,22 @@ public enum RealUserHomeResolver {
     /// enumeration for provenance: on a fast-user-switched Mac it prevents an
     /// event from Alice being joined to Bob's quarantine or browser database.
     public static func home(forUserID userID: UInt32) -> RealUserHome? {
-        guard userID != 0, userID != UInt32.max,
-              let account = passwdRecord(for: userID),
+        guard userID != 0, userID != UInt32.max else { return nil }
+        let now = ContinuousClock.now
+        cacheLock.lock()
+        let cached = cache.home(forUserID: userID, at: now)
+        cacheLock.unlock()
+        if let cached { return cached }
+
+        let home = resolveHome(forUserID: userID)
+        cacheLock.lock()
+        cache.store(home: home, forUserID: userID, at: now, lifetime: cacheLifetime)
+        cacheLock.unlock()
+        return home
+    }
+
+    private static func resolveHome(forUserID userID: UInt32) -> RealUserHome? {
+        guard let account = passwdRecord(for: userID),
               let normalizedHome = normalizedAbsolutePath(account.home),
               normalizedHome.hasPrefix("/Users/"),
               normalizedHome != "/Users/Shared",
