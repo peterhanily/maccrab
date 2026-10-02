@@ -60,6 +60,8 @@ actor StorageErrorTracker {
     /// error has been recorded since boot.
     private var lastEventInsertKind: String = ""
     private var lastErrorAt: Date?
+    /// Alert-side twin of `lastErrorAt`, which events also overwrite.
+    private var lastAlertErrorAt: Date?
 
     /// Per-kind running totals for event-insert errors. Keys are
     /// normalised error kinds (e.g. `disk_io`, `constraint`).
@@ -135,6 +137,7 @@ actor StorageErrorTracker {
         lastErrorMessage = error.localizedDescription
         lastErrorKind = "alert_insert"
         lastErrorAt = now
+        lastAlertErrorAt = now
         if now.timeIntervalSince(lastAlertErrorLog) > 60 {
             let count = self.alertInsertErrors
             logger.error("Alert insert failed (\(count, privacy: .public) total): \(error.localizedDescription, privacy: .public)")
@@ -213,11 +216,12 @@ actor StorageErrorTracker {
 
     /// Tier 3 surface — alert-side twin of `eventInsertErrorSnapshot()`.
     /// Read by `DaemonTimers` when assembling the rich heartbeat payload.
-    /// Total-count-only: the alert path has a much lower steady-state
-    /// volume than events (see the comment on `lastAlertErrorLog` above),
-    /// so it doesn't carry the event-side per-minute rate window.
-    public func alertInsertErrorSnapshot(now: Date = Date()) -> Int {
-        rollingSum(alertErrorPerHourWindow, now: now)
+    /// The alert path has a much lower steady-state volume than events (see
+    /// the comment on `lastAlertErrorLog` above), so it doesn't carry the
+    /// event-side per-minute rate window. The last failure time lets the
+    /// heartbeat say whether a failure is current rather than historical.
+    public func alertInsertErrorSnapshot(now: Date = Date()) -> (total: Int, lastErrorAt: Date?) {
+        (rollingSum(alertErrorPerHourWindow, now: now), lastAlertErrorAt)
     }
 
     /// Test-only: reset all internal state. Production never calls this
@@ -229,6 +233,7 @@ actor StorageErrorTracker {
         lastErrorKind = ""
         lastEventInsertKind = ""
         lastErrorAt = nil
+        lastAlertErrorAt = nil
         eventErrorCountByKind.removeAll()
         eventErrorLastSeenByKind.removeAll()
         eventErrorPerSecondWindow.removeAll()

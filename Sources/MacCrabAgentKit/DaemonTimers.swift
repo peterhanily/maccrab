@@ -3423,6 +3423,13 @@ enum DaemonTimers {
             // failure instead of leaving it silent. Total-count-only.
             let alertInsertErrorSnapshot = await StorageErrorTracker.shared
                 .alertInsertErrorSnapshot()
+            // Degraded means failing now. The trailing count stays for the
+            // System Health history; recency decides the protection state.
+            let alertInsertFailureRecent = alertInsertErrorSnapshot.lastErrorAt.map {
+                Date().timeIntervalSince($0) <= MacCrabCore.HeartbeatSnapshot.recentWriteFailureWindowSeconds
+            } ?? false
+            let alertInsertLastErrorAtUnix: Any =
+                alertInsertErrorSnapshot.lastErrorAt?.timeIntervalSince1970 ?? NSNull()
 
             // v1.12.6 Wave 9K: previously-orphaned operator counters
             // wired into the rich heartbeat:
@@ -3959,6 +3966,15 @@ enum DaemonTimers {
                     d["pending_entity_rows"] = w.pendingEntityRows
                     d["pending_edge_rows"] = w.pendingEdgeRows
                     d["oldest_outstanding_age_seconds"] = w.oldestOutstandingAgeSeconds
+                    // Recency is judged here, against the engine clock, so the
+                    // app never has to compare a stale file with its own clock.
+                    if let failedAt = w.lastWriteFailureAt {
+                        d["write_last_failure_at_unix"] = failedAt.timeIntervalSince1970
+                        d["write_failure_recent"] = Date().timeIntervalSince(failedAt)
+                            <= MacCrabCore.HeartbeatSnapshot.recentWriteFailureWindowSeconds
+                    } else {
+                        d["write_failure_recent"] = false
+                    }
                 }
                 traceGraphStorageDict = d
             } else if let startupAdmission = state.causalStoreStartupAdmission {
@@ -4591,7 +4607,9 @@ enum DaemonTimers {
                 "event_insert_errors_total": insertErrorSnapshot.total,
                 "event_insert_error_rate_per_min": insertErrorSnapshot.ratePerMin,
                 "last_event_insert_error_kind": insertErrorSnapshot.lastKind ?? "",
-                "alert_insert_errors_total": alertInsertErrorSnapshot,
+                "alert_insert_errors_total": alertInsertErrorSnapshot.total,
+                "alert_insert_failure_recent": alertInsertFailureRecent,
+                "alert_insert_last_error_at_unix": alertInsertLastErrorAtUnix,
                 "eslogger_dropped_total": esloggerDroppedTotal,
                 // v1.21.4 (F3): effective vs on-disk single-event rule coverage.
                 "rules_loaded": rulesLoaded,

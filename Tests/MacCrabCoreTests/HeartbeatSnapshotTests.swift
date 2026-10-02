@@ -787,6 +787,56 @@ struct HeartbeatSnapshotTests {
         #expect(partial.traceGraphStorageAdmission?.graphWriteDegraded == true)
     }
 
+    @Test("The producer's recency verdict decides whether a failed batch still degrades the graph")
+    func traceGraphRecencyDecidesDegraded() throws {
+        let historical = try decode("""
+        {"tracegraph_storage_admission": {
+            "enabled": true, "blocked": false, "store_available": true,
+            "startup_blocked": false, "reason": "",
+            "ingest_events_total": 2, "ingest_events_committed_total": 0, "ingest_events_failed_total": 2,
+            "ingest_events_in_flight": 0, "ingest_events_pending": 0,
+            "entity_observations_total": 2, "edge_observations_total": 0,
+            "relevance_suppressed_file_events_total": 0, "relevance_suppressed_rows_total": 0,
+            "write_attempts_total": 1, "write_batches_committed_total": 0, "write_batches_failed_total": 1,
+            "write_batches_in_flight": 0, "write_rows_attempted_total": 1, "write_rows_committed_total": 0,
+            "write_rows_failed_total": 1, "write_rows_in_flight": 0, "coalesced_noop_rows_total": 1,
+            "pending_entity_rows": 0, "pending_edge_rows": 0,
+            "write_failure_recent": false, "write_last_failure_at_unix": 1790000000
+        }}
+        """)
+        let old = try #require(historical.traceGraphStorageAdmission)
+        #expect(old.hasStickyWriteFailure == true, "the lifetime totals still record the failure")
+        #expect(old.writeFailureRecent == false)
+        #expect(old.writeLastFailureAtUnix == 1_790_000_000)
+        #expect(!old.hasCurrentWriteFailure)
+        #expect(!old.graphWriteDegraded, "a failure outside the recent window is history, not degraded protection")
+
+        let current = try decode("""
+        {"tracegraph_storage_admission": {
+            "enabled": true, "blocked": false, "store_available": true,
+            "startup_blocked": false, "reason": "",
+            "ingest_events_total": 2, "ingest_events_committed_total": 0, "ingest_events_failed_total": 2,
+            "ingest_events_in_flight": 0, "ingest_events_pending": 0,
+            "entity_observations_total": 2, "edge_observations_total": 0,
+            "relevance_suppressed_file_events_total": 0, "relevance_suppressed_rows_total": 0,
+            "write_attempts_total": 1, "write_batches_committed_total": 0, "write_batches_failed_total": 1,
+            "write_batches_in_flight": 0, "write_rows_attempted_total": 1, "write_rows_committed_total": 0,
+            "write_rows_failed_total": 1, "write_rows_in_flight": 0, "coalesced_noop_rows_total": 1,
+            "pending_entity_rows": 0, "pending_edge_rows": 0,
+            "write_failure_recent": true
+        }}
+        """)
+        #expect(current.traceGraphStorageAdmission?.hasCurrentWriteFailure == true)
+        #expect(current.traceGraphStorageAdmission?.graphWriteDegraded == true)
+
+        // Recency cannot excuse missing counters, backlog or accounting drift.
+        let incomplete = try decode("""
+        {"tracegraph_storage_admission":{"enabled":true,"blocked":false,
+        "store_available":true,"ingest_events_total":1,"write_failure_recent":false}}
+        """)
+        #expect(incomplete.traceGraphStorageAdmission?.graphWriteDegraded == true)
+    }
+
     @Test("transition-aware evidence and timer ledgers remain fail-visible")
     func evidenceAndTimerHealth() throws {
         let h = try decode("""
