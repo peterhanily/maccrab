@@ -112,4 +112,51 @@ struct AlertWriteFailurePresentationTests {
         #expect(ui.alertInsertErrorsTotal == 0)
         #expect(!ui.alertWritesRequireAttention)
     }
+
+    @Test("The engine's recency verdict decides degraded protection; the trailing count stays reported")
+    @MainActor
+    func recencyDecidesDegraded() throws {
+        let stale = V2HeartbeatSnapshot.decode(raw: ["alert_insert_errors_total": 2_530,
+                                                     "alert_insert_failure_recent": false,
+                                                     "alert_insert_last_error_at_unix": 1_790_000_000.0])
+        #expect(stale.alertInsertErrorsTotal == 2_530)
+        #expect(!stale.alertWritesRequireAttention, "an old failure is history, not degraded protection")
+        #expect(stale.alertWriteFailuresReported, "System Health still shows the trailing count")
+        #expect(stale.alertInsertLastErrorAt == Date(timeIntervalSince1970: 1_790_000_000))
+
+        let current = V2HeartbeatSnapshot.decode(raw: ["alert_insert_errors_total": 1,
+                                                       "alert_insert_failure_recent": true])
+        #expect(current.alertWritesRequireAttention)
+
+        let legacy = V2HeartbeatSnapshot.decode(raw: ["alert_insert_errors_total": 7])
+        #expect(legacy.alertWritesRequireAttention, "engines without a recency flag keep the sticky verdict")
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("maccrab-alert-recency-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let now = Date()
+        let minimal = ready(now)
+        try JSONSerialization.data(withJSONObject: minimal)
+            .write(to: directory.appendingPathComponent("heartbeat.json"))
+        for recent in [false, true] {
+            var rich = minimal
+            rich["alert_insert_errors_total"] = 2_530
+            rich["alert_insert_failure_recent"] = recent
+            rich["alert_evidence_budget"] = recoveredEvidence
+            try JSONSerialization.data(withJSONObject: rich)
+                .write(to: directory.appendingPathComponent("heartbeat_rich.json"), options: .atomic)
+            let app = AppState(engineSource: .init(directory: directory.path), startBackgroundWork: false)
+            app.refreshHeartbeat()
+            app.rulesLoaded = 1
+            app.isConnected = true
+            #expect(app.heartbeat?.alertInsertFailureRecent == recent)
+            #expect(app.heartbeat?.alertInsertErrorsTotal == 2_530)
+            #expect(app.isProtectionDegraded == recent)
+            let ui = try #require(V2HeartbeatSnapshot.read(directory: directory.path, now: now))
+            #expect(ui.alertWritesRequireAttention == recent)
+            #expect(V2ProtectionStatus.resolve(providerLive: true, heartbeatPresent: true,
+                heartbeatStale: false, readiness: .ready, degraded: app.isProtectionDegraded)
+                == (recent ? .degraded : .active))
+        }
+    }
 }

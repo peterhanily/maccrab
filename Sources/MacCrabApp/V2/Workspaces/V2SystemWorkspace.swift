@@ -226,7 +226,7 @@ public struct V2SystemWorkspace: View {
                     || budget.captureDegraded {
                     alertEvidenceTransitionBanner(budget)
                 }
-                if let heartbeat, heartbeat.alertWritesRequireAttention {
+                if let heartbeat, heartbeat.alertWriteFailuresReported {
                     alertWriteFailuresBanner(heartbeat.alertInsertErrorsTotal)
                 }
                 if let storage = heartbeat?.traceGraphStorageAdmission,

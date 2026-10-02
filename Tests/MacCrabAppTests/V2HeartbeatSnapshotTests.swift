@@ -881,6 +881,8 @@ struct V2HeartbeatSnapshotTests {
             traceStoreStorageAdmission: nil,
             alertEvidenceBudget: nil,
             alertInsertErrorsTotal: 0,
+            alertInsertFailureRecent: nil,
+            alertInsertLastErrorAt: nil,
             timerLifecycle: nil,
             livenessTimerLifecycle: nil,
             startupWorkLifecycle: nil,

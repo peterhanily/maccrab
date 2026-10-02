@@ -87,7 +87,20 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     /// Zero is the compatibility default for an absent older-engine field;
     /// nil means a present count could not be trusted.
     public let alertInsertErrorsTotal: Int?
-    public var alertWritesRequireAttention: Bool { alertInsertErrorsTotal != 0 }
+    /// The engine's own verdict on whether a failed alert write is recent.
+    /// Nil from engines that publish only the trailing count.
+    public let alertInsertFailureRecent: Bool?
+    public let alertInsertLastErrorAt: Date?
+    /// Degraded protection: a write is failing now. Engines that report
+    /// recency decide; older engines fall back to the trailing count, which
+    /// an invalid value cannot clear.
+    public var alertWritesRequireAttention: Bool {
+        if let alertInsertFailureRecent { return alertInsertFailureRecent }
+        return alertInsertErrorsTotal != 0
+    }
+    /// History for System Health: failures in the engine's trailing window,
+    /// shown whether or not they are still current.
+    public var alertWriteFailuresReported: Bool { alertInsertErrorsTotal != 0 }
     /// Joinable timer-handler lifecycle accounting. One in-flight heartbeat
     /// handler is normal; conservation/rejection while accepting is not.
     public let timerLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
@@ -1127,6 +1140,9 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             traceStoreStorageAdmission: traceStoreStorageAdmission,
             alertEvidenceBudget: alertEvidenceBudget,
             alertInsertErrorsTotal: alertWriteFailureCount(from: raw),
+            alertInsertFailureRecent: raw["alert_insert_failure_recent"] as? Bool,
+            alertInsertLastErrorAt: (raw["alert_insert_last_error_at_unix"] as? Double)
+                .map { Date(timeIntervalSince1970: $0) },
             timerLifecycle: timerLifecycle,
             livenessTimerLifecycle: livenessTimerLifecycle,
             startupWorkLifecycle: startupWorkLifecycle,
