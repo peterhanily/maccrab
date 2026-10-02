@@ -3,6 +3,21 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`brew install --cask` no longer fails on Homebrew 7.** Homebrew deprecated
+  the Ruby `postflight` block in favour of structured `postflight_steps`, and
+  the deprecation is a hard error on any Mac in developer mode, which `brew`
+  turns on by itself after a developer command; the install then stopped with
+  "Calling `postflight` is deprecated! Use `postflight_steps` instead."
+  The cask's post-install work (removing the 1.2.x LaunchDaemons and
+  standalone `maccrabd` symlinks, preparing the support directories and the
+  mode-1777 inbox) is now declared as install steps. The pre-1.3.0
+  provisioning-profile sweep needed Ruby and now lives only in `install.sh`;
+  a leftover system profile is inert because the extension embeds its own
+  copy. The published tap was updated directly, ahead of the next release. (#9)
+
 ## [1.22.4] — 2026-10-01
 
 ### Fixed
