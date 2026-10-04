@@ -13,68 +13,47 @@ cask "maccrab" do
   binary "#{appdir}/MacCrab.app/Contents/Resources/bin/maccrabctl"
   binary "#{appdir}/MacCrab.app/Contents/Resources/bin/maccrab-mcp"
 
-  postflight do
+  # Homebrew 7 deprecates the Ruby `postflight` block ("Calling `postflight`
+  # is deprecated! Use `postflight_steps` instead"), and the deprecation is a
+  # hard error whenever HOMEBREW_DEVELOPER is set — which brew switches on by
+  # itself after any developer command, so ordinary users hit it (issue #9).
+  # `postflight_steps` is the structured replacement: literal DSL calls only,
+  # no Ruby. The pre-1.3.0 provisioning-profile sweep needed Ruby and now
+  # lives in scripts/install.sh only; a leftover system profile is inert
+  # because the sysext embeds its own copy inside MacCrab.app.
+  postflight_steps do
     # ── Clean up pre-1.3.0 artefacts ────────────────────────────────
-    # 1.2.x shipped maccrabd as a LaunchDaemon with a system-wide
-    # provisioning profile. 1.3.0 moved the detection engine into a
-    # SystemExtension activated from inside MacCrab.app on first
-    # launch. Strip the old plumbing so the two models don't fight.
-    ["/Library/LaunchDaemons/com.maccrab.daemon.plist",
-     "/Library/LaunchDaemons/com.maccrab.agent.plist"].each do |plist|
-      if File.exist?(plist)
-        label = File.basename(plist, ".plist")
-        system_command "/bin/launchctl", args: ["unload", plist], sudo: true, must_succeed: false
-        system_command "/bin/rm", args: ["-f", plist], sudo: true
-        _ = label
-      end
+    # 1.2.x shipped maccrabd as a LaunchDaemon. 1.3.0 moved the detection
+    # engine into a SystemExtension activated from inside MacCrab.app on
+    # first launch. Strip the old plumbing so the two models don't fight.
+    if_path_exists "/Library/LaunchDaemons/com.maccrab.daemon.plist" do
+      run "/bin/launchctl",
+          args:         ["unload", "/Library/LaunchDaemons/com.maccrab.daemon.plist"],
+          sudo:         true,
+          must_succeed: false
+      remove "/Library/LaunchDaemons/com.maccrab.daemon.plist", sudo: true
+    end
+    if_path_exists "/Library/LaunchDaemons/com.maccrab.agent.plist" do
+      run "/bin/launchctl",
+          args:         ["unload", "/Library/LaunchDaemons/com.maccrab.agent.plist"],
+          sudo:         true,
+          must_succeed: false
+      remove "/Library/LaunchDaemons/com.maccrab.agent.plist", sudo: true
     end
 
-    # Legacy standalone maccrabd symlinks
-    ["#{HOMEBREW_PREFIX}/bin/maccrabd", "/usr/local/bin/maccrabd"].each do |path|
-      if File.symlink?(path) || File.exist?(path)
-        system_command "/bin/rm", args: ["-f", path], sudo: true
-      end
-    end
-
-    # Legacy system-wide provisioning profile — the sysext embeds its
-    # own copy inside MacCrab.app, so we don't need one at the system
-    # location any more.
-    profile_dir = "/Library/MobileDevice/Provisioning Profiles"
-    if Dir.exist?(profile_dir)
-      Dir.glob("#{profile_dir}/*.provisionprofile").each do |profile|
-        tmp = "/tmp/maccrab-cask-profile-#{Process.pid}.plist"
-        # Decode the profile to a plist via argv (no shell, no
-        # string interpolation into a command line).
-        system_command "/usr/bin/security",
-                       args:         ["cms", "-D", "-i", profile, "-o", tmp],
-                       must_succeed: false
-        next unless File.exist?(tmp)
-        plist_result = system_command "/usr/libexec/PlistBuddy",
-                                      args:         ["-c", "Print :Entitlements:application-identifier", tmp],
-                                      must_succeed: false
-        app_id = plist_result.stdout.strip
-        File.delete(tmp) rescue nil
-        if app_id.include?("com.maccrab.")
-          system_command "/bin/rm", args: ["-f", profile], sudo: true
-        end
-      end
-    end
+    # Legacy standalone maccrabd symlinks. Missing paths are skipped.
+    remove ["{{HOMEBREW_PREFIX}}/bin/maccrabd", "/usr/local/bin/maccrabd"], sudo: :if_needed
 
     # ── Prepare support directories ────────────────────────────────
-    system_command "/bin/mkdir",
-                   args: ["-p", "/Library/Application Support/MacCrab/compiled_rules/sequences"],
-                   sudo: true
-    system_command "/bin/mkdir",
-                   args: ["-p", "/Library/Application Support/MacCrab/compiled_rules/graph"],
-                   sudo: true
-    # v1.10.0 audit fix: cross-UID IPC drop point for the dashboard's
-    # "Reduce events.db now" button. 1777 = sticky+world-write.
-    system_command "/bin/mkdir",
-                   args: ["-p", "/Library/Application Support/MacCrab/inbox"],
-                   sudo: true
-    system_command "/bin/chmod",
-                   args: ["1777", "/Library/Application Support/MacCrab/inbox"],
-                   sudo: true
+    # v1.10.0 audit fix: inbox/ is the cross-UID IPC drop point for the
+    # dashboard's "Reduce events.db now" button. 1777 = sticky+world-write.
+    run "/bin/mkdir",
+        args: ["-p",
+               "/Library/Application Support/MacCrab/compiled_rules/sequences",
+               "/Library/Application Support/MacCrab/compiled_rules/graph",
+               "/Library/Application Support/MacCrab/inbox"],
+        sudo: true
+    run "/bin/chmod", args: ["1777", "/Library/Application Support/MacCrab/inbox"], sudo: true
     # Never update compiled_rules file-by-file in cask postflight. That can
     # destroy the previous verified corpus on ENOSPC/interruption and makes
     # upgrades needlessly double rule-storage use. The root System Extension
@@ -86,7 +65,6 @@ cask "maccrab" do
     # inside MacCrab.app/Contents/Library/SystemExtensions/ and is
     # registered with sysextd the first time the user opens the app
     # and clicks "Enable Protection" (see SystemExtensionPanel.swift).
-
   end
 
   # v1.7.11 cask-only patch: clean up the user-context LaunchAgent that

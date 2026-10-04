@@ -20,7 +20,12 @@ set -euo pipefail
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" && /bin/pwd -P)"
-cd "$(/usr/bin/dirname "$SCRIPT_DIR")"
+# Gate the tree whose refs are leaving. Git runs this hook at the top of the
+# pushing worktree, and `core.hooksPath` may be an absolute path into another
+# checkout, so deriving the root from the script's location would run CI
+# against that checkout instead of this one. SCRIPT_DIR still names the
+# executing hook for the release-manifest check below.
+cd "$(/usr/bin/git rev-parse --show-toplevel)"
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
     GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_CONFIG \
     GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT \

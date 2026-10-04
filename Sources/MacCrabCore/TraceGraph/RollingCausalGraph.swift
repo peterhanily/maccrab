@@ -194,6 +194,9 @@ public struct CausalGraphIngestionWriteTelemetry: Sendable, Equatable {
     /// Measured with ContinuousClock; zero only when no work remains or a batch
     /// was just admitted. Wall-clock and event timestamps do not affect it.
     public let oldestOutstandingAgeSeconds: TimeInterval
+    /// Wall-clock time of the most recent failed batch, for recency and
+    /// display. Nil until a write has failed in this process.
+    public let lastWriteFailureAt: Date?
 }
 
 public actor RollingCausalGraph {
@@ -572,6 +575,7 @@ public actor RollingCausalGraph {
     private var writeAttemptsTotal: UInt64 = 0
     private var writeBatchesCommittedTotal: UInt64 = 0
     private var writeBatchesFailedTotal: UInt64 = 0
+    private var lastWriteFailureAt: Date?
     private var writeBatchesInFlight = 0
     private var writeRowsAttemptedTotal: UInt64 = 0
     private var writeRowsCommittedTotal: UInt64 = 0
@@ -1031,6 +1035,7 @@ public actor RollingCausalGraph {
                 writeBatchesFailedTotal,
                 1
             )
+            lastWriteFailureAt = Date()
             eventsFailedTotal = Self.saturatingAdd(
                 eventsFailedTotal,
                 UInt64(batch.eventCount)
@@ -1076,7 +1081,8 @@ public actor RollingCausalGraph {
             coalescedNoopRowsTotal: coalescedNoopRowsTotal,
             pendingEntityRows: pendingWriteBatch.entities.count,
             pendingEdgeRows: pendingWriteBatch.edges.count,
-            oldestOutstandingAgeSeconds: age
+            oldestOutstandingAgeSeconds: age,
+            lastWriteFailureAt: lastWriteFailureAt
         )
     }
 

@@ -200,6 +200,16 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// Failed alert write attempts in this engine's hourly-bucketed recent
     /// 24-hour window. Not a count of distinct lost alerts or a live block.
     public let alertInsertErrorsTotal: Int?
+    /// A failed alert write inside the producer's recent window (see
+    /// `recentWriteFailureWindowSeconds`), judged against the engine's own
+    /// clock when the heartbeat was written. Nil from engines that only
+    /// publish the trailing count.
+    public let alertInsertFailureRecent: Bool?
+    public let alertInsertLastErrorAtUnix: Double?
+    /// Degraded protection means a write is failing now, not that one failed
+    /// earlier in the process. Producers compare their last failure time with
+    /// this window; consumers without a recency flag fall back to the totals.
+    public static let recentWriteFailureWindowSeconds: TimeInterval = 15 * 60
     /// Written by the daemon as an integer (`ratePerMin: Int`), not a rate float.
     public let eventInsertErrorRatePerMin: Int?
     /// The daemon writes `""` (not JSON null) when no insert error since boot.
@@ -298,6 +308,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case payloadTruncatedTotal = "payload_truncated_total"
         case eventInsertErrorsTotal = "event_insert_errors_total"
         case alertInsertErrorsTotal = "alert_insert_errors_total"
+        case alertInsertFailureRecent = "alert_insert_failure_recent"
+        case alertInsertLastErrorAtUnix = "alert_insert_last_error_at_unix"
         case eventInsertErrorRatePerMin = "event_insert_error_rate_per_min"
         case lastEventInsertErrorKind = "last_event_insert_error_kind"
         case esSensorDegraded = "es_sensor_degraded"
@@ -1549,8 +1561,9 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let ingestConservation: TraceStoreIngestConservation?
 
         // Exact rolling-graph persistence accounting. These counters are
-        // cumulative for one process epoch; failed totals therefore remain
-        // sticky even if the SQLite admission latch later returns to Active.
+        // cumulative for one process epoch. A producer that also reports
+        // `write_failure_recent` decides whether a failure is current; without
+        // it the failed totals stay sticky for the epoch.
         public let ingestEventsTotal: Int64?
         public let ingestEventsCommittedTotal: Int64?
         public let ingestEventsFailedTotal: Int64?
@@ -1574,6 +1587,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let pendingEntityRows: Int?
         public let pendingEdgeRows: Int?
         public let oldestOutstandingAgeSeconds: Double?
+        public let writeFailureRecent: Bool?
+        public let writeLastFailureAtUnix: Double?
 
         private enum CodingKeys: String, CodingKey {
             case enabled
@@ -1644,6 +1659,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case pendingEntityRows = "pending_entity_rows"
             case pendingEdgeRows = "pending_edge_rows"
             case oldestOutstandingAgeSeconds = "oldest_outstanding_age_seconds"
+            case writeFailureRecent = "write_failure_recent"
+            case writeLastFailureAtUnix = "write_last_failure_at_unix"
         }
 
         /// input = committed + failed + in-flight + pending.
@@ -1915,9 +1932,18 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             if recoveryMutationBarrierDegraded { return true }
             guard writeTelemetryPresent else { return false }
             return !writeTelemetryComplete
-                || hasStickyWriteFailure != false
+                || hasCurrentWriteFailure
                 || hasOutstandingBacklog != false
                 || writeConservationMaintained != true
+        }
+
+        /// The producer's recency verdict wins when it is present: a failure
+        /// outside the recent window is history, not degraded protection, and
+        /// the user can resolve it by letting writes recover. Lifetime totals
+        /// stay sticky only for producers that never report recency.
+        public var hasCurrentWriteFailure: Bool {
+            if let writeFailureRecent { return writeFailureRecent }
+            return hasStickyWriteFailure != false
         }
 
         private static func anyPositive(_ values: [Int64?]) -> Bool? {

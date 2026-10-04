@@ -3,6 +3,50 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **The diagnostics export explains the protection verdict.** A new
+  `protection` block (export schema 4) lists the verdict the sidebar derives
+  from the heartbeat, the reasons behind it, and every input the app checks:
+  readiness and staleness, rule count, unhealthy enabled collectors, the
+  sensor flag, the TraceGraph admission and write-health flags, the sequence
+  checkpoint, the maintenance and detection work ledgers, the alert-evidence
+  budget and the alert write failure state. Earlier exports carried five of
+  those inputs, so a "Protection degraded" report could not be diagnosed from
+  the file. Free-text engine details stay out of the export.
+
+### Fixed
+- **`brew install --cask` no longer fails on Homebrew 7.** Homebrew deprecated
+  the Ruby `postflight` block in favour of structured `postflight_steps`, and
+  the deprecation is a hard error on any Mac in developer mode, which `brew`
+  turns on by itself after a developer command; the install then stopped with
+  "Calling `postflight` is deprecated! Use `postflight_steps` instead."
+  The cask's post-install work (removing the 1.2.x LaunchDaemons and
+  standalone `maccrabd` symlinks, preparing the support directories and the
+  mode-1777 inbox) is now declared as install steps. The pre-1.3.0
+  provisioning-profile sweep needed Ruby and now lives only in `install.sh`;
+  a leftover system profile is inert because the extension embeds its own
+  copy. The published tap was updated directly, ahead of the next release. (#9)
+- **A write failure earlier in the engine's life no longer keeps protection
+  degraded.** The TraceGraph writer's failed-batch totals and the alert write
+  failure count are cumulative, and both held the Overview, sidebar and menu
+  bar at "Protection degraded" until the engine was restarted, however long
+  ago the failure happened and although writes had recovered. The engine now
+  reports whether a failure happened inside the last 15 minutes, judged
+  against its own clock, and only a current failure degrades protection.
+  System Health keeps showing the trailing 24-hour alert write failure count
+  as history. Heartbeats from engines that do not report recency keep the
+  previous behaviour.
+
+### Release tooling
+- **The pre-push gate tests the tree being pushed.** The hook resolved the
+  repository root from its own location, and `core.hooksPath` can be an
+  absolute path into the main checkout, so a push from a linked worktree ran
+  the full CI against the main checkout's tree instead of the branch leaving
+  the machine, and reported that tree's failures as the branch's. The hook now
+  resolves the root of the worktree it runs in.
+
 ## [1.22.4] — 2026-10-01
 
 ### Fixed

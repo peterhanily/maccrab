@@ -153,6 +153,27 @@ struct InsertFailureEscalationTests {
         #expect(snap.lastKind == "constraint", "last-kind tracks the most recent error's classification")
     }
 
+    @Test("Tier 3 alert twin: the snapshot carries the last failure time so the heartbeat can judge recency")
+    func tier3AlertSnapshotRecency() async {
+        await reset()
+        let tracker = StorageErrorTracker.shared
+        var snap = await tracker.alertInsertErrorSnapshot(now: Self.anchor)
+        #expect(snap.total == 0)
+        #expect(snap.lastErrorAt == nil)
+
+        let before = Date()
+        await tracker.recordAlertError(diskIOError())
+        snap = await tracker.alertInsertErrorSnapshot()
+        #expect(snap.total == 1)
+        let at = snap.lastErrorAt
+        #expect(at != nil && at! >= before && at! <= Date())
+
+        // An event-side error must not move the alert-side time.
+        await tracker.recordEventError(diskIOError(), now: Date().addingTimeInterval(60))
+        let after = await tracker.alertInsertErrorSnapshot()
+        #expect(after.lastErrorAt == at)
+    }
+
     @Test("Recovery: rate window decays to zero after 60s of quiet")
     func recoveryClearsRateCounter() async {
         await reset()

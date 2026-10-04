@@ -114,6 +114,14 @@ final class AppState: ObservableObject, EventQueryReading {
         /// Recent failures remain visible after the admission block recovers.
         /// Missing older-engine telemetry is zero; invalid present data is nil.
         var alertInsertErrorsTotal: Int? = 0
+        /// The engine's recency verdict for alert write failures; nil from
+        /// engines that publish only the trailing count.
+        var alertInsertFailureRecent: Bool?
+        /// Mirrors `V2HeartbeatSnapshot.alertWritesRequireAttention`.
+        var alertWritesRequireAttention: Bool {
+            if let alertInsertFailureRecent { return alertInsertFailureRecent }
+            return alertInsertErrorsTotal != 0
+        }
 
         /// True when the latest privileged browser-extension walk exhausted its
         /// bounded per-home dirent budget. Nil means an older heartbeat. This is
@@ -253,7 +261,7 @@ final class AppState: ObservableObject, EventQueryReading {
             legacyDerivedDegraded: hb.legacyDerivedWorkLifecycleDegraded
         ) { return true }
         if let hb = heartbeat, hb.alertEvidenceBudgetDegraded == true { return true }
-        if let hb = heartbeat, hb.alertInsertErrorsTotal != 0 { return true }
+        if let hb = heartbeat, hb.alertWritesRequireAttention { return true }
         if let hb = heartbeat, Self.sequenceCheckpointUnavailable(
             restoreStatus: hb.sequenceCheckpointRestoreStatus,
             rpoMaintained: hb.sequenceCheckpointRPOMaintained,
@@ -624,6 +632,7 @@ final class AppState: ObservableObject, EventQueryReading {
         }
         let inlineAlertEvidenceBudget = json["alert_evidence_budget"] as? [String: Any]
         var richAlertInsertErrorsTotal = V2HeartbeatSnapshot.alertWriteFailureCount(from: json)
+        var richAlertInsertFailureRecent = json["alert_insert_failure_recent"] as? Bool
         var richAlertEvidenceBudgetDegraded: Bool? = inlineAlertEvidenceBudget.flatMap {
             Self.alertEvidenceBudgetDegraded(from: $0)
         }
@@ -657,6 +666,7 @@ final class AppState: ObservableObject, EventQueryReading {
            V2HeartbeatPayload.currentRich(richJSON, minimal: json) {
             if richJSON["alert_insert_errors_total"] != nil {
                 richAlertInsertErrorsTotal = V2HeartbeatSnapshot.alertWriteFailureCount(from: richJSON)
+                richAlertInsertFailureRecent = richJSON["alert_insert_failure_recent"] as? Bool
             }
             if let counts = richJSON["event_type_counts_1h"] as? [String: Int] {
                 richEventTypeCounts = counts
@@ -805,6 +815,7 @@ final class AppState: ObservableObject, EventQueryReading {
         snapshot.otlpReceiverLifecycleFeatureDegraded = richOTLPReceiverLifecycleDegraded
         snapshot.alertEvidenceBudgetDegraded = richAlertEvidenceBudgetDegraded
         snapshot.alertInsertErrorsTotal = richAlertInsertErrorsTotal
+        snapshot.alertInsertFailureRecent = richAlertInsertFailureRecent
         snapshot.browserInventoryDegraded = richBrowserInventoryDegraded
         snapshot.sequenceCheckpointRestoreStatus = richSequenceCheckpointRestoreStatus
         snapshot.sequenceCheckpointRPOMaintained = richSequenceCheckpointRPOMaintained
