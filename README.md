@@ -6,7 +6,7 @@
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
 [![Tests](https://img.shields.io/badge/tests-4892%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
-[![Version](https://img.shields.io/badge/version-1.22.4-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.22.5-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -668,10 +668,14 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-This source tree targets **v1.22.3**. See [CHANGELOG.md](CHANGELOG.md) for the full
+This source tree targets **v1.22.5**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.22.5** — the Homebrew cask installs again on Homebrew 7 (`postflight_steps`);
+  a past write failure no longer keeps protection degraded until restart; the
+  diagnostics export explains the protection verdict; the pre-push gate tests
+  the worktree being pushed.
 - **v1.22.4** — the engine no longer re-validates the user's home directory
   for every file event, removing ~68k file system calls per second and
   priority-event loss during agent file storms.
