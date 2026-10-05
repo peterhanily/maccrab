@@ -2575,6 +2575,57 @@ func traceGraphPersistenceStatusLines(
     return lines
 }
 
+/// Preface for the TraceGraph read tools. When the engine's heartbeat shows the
+/// store blocked or not accepting mutations, a short or empty result is a
+/// recording gap, not evidence that nothing happened. Nil when persistence is
+/// accepting writes or no heartbeat block is readable. Must not touch
+/// main.swift globals (`isoFormatter`, `dataDir`) so tests can call it.
+func traceGraphPersistencePausedNote(_ heartbeat: HeartbeatSnapshot?) -> String? {
+    guard let storage = heartbeat?.traceGraphStorageAdmission,
+          storage.blocked == true
+            || storage.acceptingMutations == false
+            || storage.storeAvailable == false else { return nil }
+    let reason = storage.reason.flatMap { $0.isEmpty ? nil : $0 }
+    let why: String
+    if storage.storeAvailable == false {
+        why = "the TraceGraph store could not be opened when the engine started"
+    } else if storage.blocked == true {
+        switch reason {
+        case "footprint_limit": why = "the store reached its on-disk size limit"
+        case "low_free_space": why = "free disk space is below the TraceGraph safety floor"
+        case "probe_failure": why = "a storage measurement failed, so writes are refused until it succeeds"
+        case "mutation_too_large": why = "a write exceeded the per-transaction storage reserve"
+        case "recovery_in_progress": why = "storage recovery is in progress"
+        default: why = "storage admission is blocked"
+        }
+    } else if storage.recoveryMutationQueueSaturated == true {
+        why = "the bounded recovery write queue is saturated"
+    } else {
+        why = "the writer is not accepting new mutations"
+    }
+    var note = "TraceGraph persistence is PAUSED (\(reason ?? "reason not reported")): \(why). "
+        + "New causal evidence is not being recorded, so graph rules and trace queries "
+        + "cover only activity from before the pause; events, alerts, Sigma and sequence "
+        + "rules keep running. A missing trace here is not evidence that nothing happened."
+    if storage.storeAvailable != false, storage.blocked == true, reason == "footprint_limit" {
+        if let deficit = storage.recoveryDeficitBytes, deficit > 0 {
+            let megabytes = (Double(deficit) / 100_000).rounded(.up) / 10
+            note += " Recovery must free about \(String(format: "%.1f", megabytes)) MB before writes resume automatically."
+        } else {
+            note += " Writes resume automatically when recovery catches up."
+        }
+    }
+    if let written = heartbeat?.writtenAtUnix {
+        note += " (Engine heartbeat written \(Date(timeIntervalSince1970: written).ISO8601Format()).)"
+    }
+    return note
+}
+
+/// Current heartbeat's paused-persistence note for the trace tools.
+func currentTraceGraphPersistencePausedNote() -> String? {
+    traceGraphPersistencePausedNote(HeartbeatSnapshot.readFreshest(supportDirs: [dataDir]))
+}
+
 /// Fixed-cardinality/content-free AI accounting for MCP `get_status`.
 func llmRuntimeOperatorStatusLines(_ llm: HeartbeatSnapshot.LLMHealth) -> [String] {
     guard llm.configured == true else { return ["AI Runtime: Not configured"] }
@@ -3173,11 +3224,16 @@ func handleGetTraces(_ args: [String: Any]) async -> Any {
         // capping returned matches at whatever fraction of the first
         // 25 happened to match).
         let traces = try await store.listTraces(limit: limit, status: statusFilter)
+        let pausedNote = currentTraceGraphPersistencePausedNote()
         if traces.isEmpty {
+            if let pausedNote {
+                return ["content": [["type": "text", "text": "No traces found. \(pausedNote)"]]]
+            }
             return ["content": [["type": "text", "text":
                 "No traces found. Either the daemon hasn't materialized any yet (it anchors a trace once it correlates a multi-step chain of activity), or the tracegraph.db isn't on this machine."]]]
         }
-        var lines = ["\(traces.count) trace(s):"]
+        var lines = pausedNote.map { [$0, ""] } ?? []
+        lines.append("\(traces.count) trace(s):")
         for t in traces {
             // v1.11.1 (audit perf HIGH): one O(1) SQL query per row instead of
             // a full loadTrace round-trip. Now counts entities and edges
@@ -3260,10 +3316,14 @@ func handleHuntTrace(_ args: [String: Any]) async -> Any {
         // 500 candidates + Swift substring scan. Lets SQLite skip
         // deserializing non-matches.
         let matches = try await store.huntTraces(query: query, limit: limit)
+        let pausedNote = currentTraceGraphPersistencePausedNote()
         if matches.isEmpty {
-            return ["content": [["type": "text", "text": "No traces match `\(query)`."]]]
+            let text = pausedNote.map { "No traces match `\(query)`. \($0)" }
+                ?? "No traces match `\(query)`."
+            return ["content": [["type": "text", "text": text]]]
         }
-        var lines = ["\(matches.count) trace(s) match `\(query)`:"]
+        var lines = pausedNote.map { [$0, ""] } ?? []
+        lines.append("\(matches.count) trace(s) match `\(query)`:")
         for t in matches {
             lines.append("  · [\(t.severity.uppercased())] \(t.title)  (\(t.id))")
         }
@@ -3396,6 +3456,10 @@ func handleTraceFromEvent(_ args: [String: Any]) async -> Any {
         // Pre-fix worst case: 200 × 2 SQL queries + 200 × M
         // deserializations. Now: one query.
         guard let trace = try await store.traceContaining(entityId: eventId) else {
+            if let pausedNote = currentTraceGraphPersistencePausedNote() {
+                return ["content": [["type": "text", "text":
+                    "Event \(eventId) is not a member of any recorded trace. \(pausedNote)"]]]
+            }
             return ["content": [["type": "text", "text":
                 "Event \(eventId) is not a member of any trace. Either it pre-dates the trace materialiser's window, or it didn't qualify as a trace anchor / member."]]]
         }
