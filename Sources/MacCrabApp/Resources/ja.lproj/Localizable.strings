@@ -1038,6 +1038,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "カスタムフィードとIOCを追加";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "組み込みソース：abuse.ch（URLhaus、MalwareBazaar、Feodo Tracker）— %@。URLhausとMalwareBazaarにはabuse.chのAuth-Keyが必要です。下のプロバイダー状態を確認してください。外部の指標は上記のthreat_intelフォルダから追加できます。";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "組み込み · 有効 — 4時間ごとに取得";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "組み込み · 有効 — 取得には abuse.ch 認証キー（Auth-Key）が必要";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "組み込み · 同意すると取得を有効化";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "IOC検索を解除";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "設定済みの連携と検出されたツール（%lld件）";

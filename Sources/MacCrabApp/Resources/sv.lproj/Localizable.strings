@@ -1714,6 +1714,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "Lägg till egna flöden och IOC:er";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "Inbyggda källor: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus och MalwareBazaar kräver en abuse.ch Auth-Key. Se leverantörsstatus nedan. Lägg till externa indikatorer via mappen threat_intel ovan.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "Inbyggt · aktivt — hämtas var fjärde timme";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Inbyggt · aktiverat — hämtning kräver en abuse.ch Auth-Key";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "Inbyggt · samtyck för att aktivera hämtning";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "Rensa IOC-sökning";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "Konfigurerade integrationer och upptäckta verktyg (%lld)";

@@ -1038,6 +1038,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "新增自訂情報來源與 IOC";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "內建來源：abuse.ch（URLhaus、MalwareBazaar、Feodo Tracker）— %@。URLhaus 和 MalwareBazaar 需要 abuse.ch Auth-Key。供應商狀態如下。可透過上方 threat_intel 資料夾新增外部指標。";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "內建 · 已啟用 — 每 4 小時取得一次";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "內建 · 已啟用 — 取得需要 abuse.ch 驗證金鑰（Auth-Key）";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "內建 · 同意後啟用擷取";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "清除 IOC 搜尋";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "已設定的整合與偵測到的工具（%lld）";

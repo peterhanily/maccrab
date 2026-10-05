@@ -1036,6 +1036,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "사용자 지정 피드 및 IOC 추가";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "기본 제공 출처: abuse.ch(URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus와 MalwareBazaar에는 abuse.ch Auth-Key가 필요합니다. 아래에서 제공업체 상태를 확인하세요. 외부 지표는 위의 threat_intel 폴더를 통해 추가할 수 있습니다.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "기본 제공 · 활성 — 4시간마다 가져옴";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "기본 제공 · 활성 — 가져오려면 abuse.ch 인증 키(Auth-Key)가 필요";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "기본 제공 · 동의하면 가져오기 활성화";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "IOC 검색 해제";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "설정된 연동 및 감지된 도구 (%lld개)";
