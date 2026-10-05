@@ -5838,3 +5838,28 @@ private let SQLITE_TRANSIENT = unsafeBitCast(
     OpaquePointer(bitPattern: -1)!,
     to: sqlite3_destructor_type.self
 )
+
+// MARK: - Degraded startup latch
+
+extension SQLiteCausalGraphStore {
+    /// Boot fallback for a store that `recoverStorageBeforeProducers` could not
+    /// drain below its resume target, typically because every remaining row is
+    /// inside the one-hour evidence floor. Exiting instead only let sysextd
+    /// relaunch the engine into the same store, with no detection running.
+    ///
+    /// Trips the ordinary footprint latch when the measured footprint is at or
+    /// above `resumeBelowBytes`, so the store refuses graph growth and clears
+    /// through the same hysteresis as a runtime trip once the periodic bounded
+    /// recovery lane drains below that target. Deletes nothing, and never
+    /// relaxes a free-space, probe, SQLite, or deferred-schema block.
+    public func latchMutationsForDegradedStartup() -> CausalGraphStorageAdmissionStatus {
+        refreshAdmissionMeasurementsAndLatch()
+        if let footprint = lastFootprintBytes,
+           let resume = resumeBelowBytes,
+           footprint >= resume {
+            setFootprintAdmissionLatch(true)
+            refreshAdmissionMeasurementsAndLatch()
+        }
+        return makeStorageAdmissionStatus()
+    }
+}

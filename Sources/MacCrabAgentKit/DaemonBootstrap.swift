@@ -35,7 +35,8 @@ public struct DaemonHandles {
     let timerHandles: DaemonTimers.Handles
     let supervisor: MonitorSupervisor
     /// Proof retained across the first event epoch that TraceGraph ordinary
-    /// admission had durable headroom before any producer was started.
+    /// admission had durable headroom, or was latched, before any producer
+    /// was started.
     let traceGraphStartupRecovery: CausalGraphStartupRecoveryResult
 }
 
@@ -118,9 +119,13 @@ public enum DaemonBootstrap {
         // materialization for this run: no store and no bridge, so nothing can
         // write to an unproven graph. That run must start. This guard used to
         // abort it anyway, turning a problem in the optional graph into a
-        // relaunch loop with no detection at all.
+        // relaunch loop with no detection at all. The same holds for an open
+        // store that could not reach headroom: it starts with writes latched.
         let traceGraphAttached = state.causalStore != nil || state.causalGraphBridge != nil
-        guard traceGraphStartupRecovery.writableBeforeProducers || !traceGraphAttached else {
+        let traceGraphStartupAdmission = DaemonSetup.traceGraphStartupAdmission(
+            traceGraphStartupRecovery
+        )
+        guard traceGraphStartupAdmission != .notReady || !traceGraphAttached else {
             let admission = traceGraphStartupRecovery.finalAdmission
             let disposition: String
             switch traceGraphStartupRecovery.disposition {
@@ -150,6 +155,8 @@ public enum DaemonBootstrap {
         }
         if !traceGraphAttached {
             logger.warning("TraceGraph is detached this run (\(traceGraphStartupRecovery.failureDetail ?? "store unavailable", privacy: .public)); event detection, alerting and storage start without trace materialization")
+        } else if traceGraphStartupAdmission == .latched {
+            logger.warning("TraceGraph starts with graph writes latched (block=\(traceGraphStartupRecovery.finalAdmission?.reason?.rawValue ?? "unavailable", privacy: .public)); event detection, alerting and storage start while bounded recovery continues")
         } else if traceGraphStartupRecovery.normalWriteAdmissionRestored {
             logger.notice("TraceGraph startup recovery restored normal writable admission before producers after \(traceGraphStartupRecovery.passes) bounded pass(es); cutoffs=\(traceGraphStartupRecovery.attemptedCutoffHours)")
         } else if traceGraphStartupRecovery.passes > 0 {
