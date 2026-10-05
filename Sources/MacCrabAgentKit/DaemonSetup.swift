@@ -524,6 +524,40 @@ enum DaemonSetup {
         )
     }
 
+    /// Rewrites the "starting" boot phase every `interval` while one
+    /// synchronous boot step runs. EventStore's legacy structural check can
+    /// take up to ten minutes, past the app's 120 s heartbeat freshness
+    /// window; a stale boot heartbeat reads as a crashed engine and kicks the
+    /// app's system-extension watchdog. Returns only after any in-flight
+    /// rewrite, so a phase the caller writes next, including
+    /// storage_not_ready, is never overwritten.
+    static func keepingBootPhaseFresh<T>(
+        supportDir: String,
+        startedAt: Date,
+        interval: DispatchTimeInterval = .seconds(30),
+        _ body: () throws -> T
+    ) rethrows -> T {
+        let active = OSAllocatedUnfairLock(initialState: true)
+        let timer = DispatchSource.makeTimerSource(queue: .global())
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler {
+            active.withLock { running in
+                guard running else { return }
+                DaemonSetup.writeBootPhase(
+                    supportDir: supportDir,
+                    phase: "starting",
+                    startedAt: startedAt
+                )
+            }
+        }
+        timer.resume()
+        defer {
+            active.withLock { $0 = false }
+            timer.cancel()
+        }
+        return try body()
+    }
+
     /// Boot's own backpressure budget for the pre-producer journal expiry
     /// pass, distinct from `DaemonTimers.journalExpiryConsecutiveBackpressureBudgetSeconds`
     /// (30s). That value is tuned for a steady-state sweep with a five-minute
@@ -895,12 +929,17 @@ enum DaemonSetup {
                     )
                 },
                 operation: {
-                    try EventStore(
-                        directory: supportDir,
-                        storagePolicy: eventStoragePolicy,
-                        allowLegacyUpgradeHeadroom: true,
-                        liveMemoryBudget: .processShared
-                    )
+                    try Self.keepingBootPhaseFresh(
+                        supportDir: supportDir,
+                        startedAt: startedAt
+                    ) {
+                        try EventStore(
+                            directory: supportDir,
+                            storagePolicy: eventStoragePolicy,
+                            allowLegacyUpgradeHeadroom: true,
+                            liveMemoryBudget: .processShared
+                        )
+                    }
                 }
             )
         } catch let error as EventStoreError {
@@ -913,19 +952,29 @@ enum DaemonSetup {
                     failure: error
                 )
             }
-            eventStore = Self.recoverEventStore(
+            eventStore = Self.keepingBootPhaseFresh(
                 supportDir: supportDir,
-                storagePolicy: eventStoragePolicy,
-                logger: logger,
-                initialFailure: error
-            )
+                startedAt: startedAt
+            ) {
+                Self.recoverEventStore(
+                    supportDir: supportDir,
+                    storagePolicy: eventStoragePolicy,
+                    logger: logger,
+                    initialFailure: error
+                )
+            }
         } catch {
-            eventStore = Self.recoverEventStore(
+            eventStore = Self.keepingBootPhaseFresh(
                 supportDir: supportDir,
-                storagePolicy: eventStoragePolicy,
-                logger: logger,
-                initialFailure: error
-            )
+                startedAt: startedAt
+            ) {
+                Self.recoverEventStore(
+                    supportDir: supportDir,
+                    storagePolicy: eventStoragePolicy,
+                    logger: logger,
+                    initialFailure: error
+                )
+            }
         }
         if transition.pendingReserveFitsHardBoundary == true,
            let pending = transition.pendingReserveMiB {
