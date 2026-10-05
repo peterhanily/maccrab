@@ -482,6 +482,50 @@ struct CausalGraphStorageAdmissionTests {
         await store.close()
     }
 
+    @Test("A latched store that is also low on free space refuses writers for low free space")
+    func latchedLowFreeSpaceKeepsAdmissionPrecedence() async throws {
+        let path = Self.tempPath("latched-low-free")
+        defer { Self.cleanup(path) }
+        let bootstrap = try await SQLiteCausalGraphStore(databasePath: path)
+        await bootstrap.close()
+        let footprint = ProbeBox(0)
+        let free = ProbeBox(Int64.max)
+        let floor = 10 * Self.mib
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path,
+            maxFootprintBytes: 250 * Self.mib,
+            freeSpaceFloorBytes: floor,
+            footprintProbe: { _ in footprint.get() },
+            freeSpaceProbe: { _ in free.get() }
+        )
+        let threshold = try #require(
+            await store.storageAdmissionStatus().admissionThresholdBytes)
+        footprint.set(threshold + 1)
+        free.set(floor)
+        let blocked = await store.storageAdmissionStatus()
+        #expect(blocked.footprintLatchTripsTotal == 1)
+        #expect(blocked.reason == .lowFreeSpace)
+
+        // Low free space outranks the footprint in full admission. The early
+        // latched rejection must not report the footprint instead, which also
+        // flipped the block reason (and its fault log) on every writer.
+        for index in 0..<3 {
+            do {
+                try await store.upsertEntity(Self.entity("denied-\(index)"))
+                Issue.record("a latched store with low free space admitted a writer")
+            } catch let error as CausalGraphStorageAdmissionError {
+                guard case .lowFreeSpace = error else {
+                    Issue.record("expected lowFreeSpace, got \(error)")
+                    continue
+                }
+            }
+        }
+        let after = await store.storageAdmissionStatus()
+        #expect(after.reason == .lowFreeSpace)
+        #expect(after.shedMutationsTotal == 3)
+        await store.close()
+    }
+
     @Test("Direct and rolling-graph bypass writers all share the SQLite gate")
     func mutationBypassesAreGated() async throws {
         let path = Self.tempPath("bypasses")

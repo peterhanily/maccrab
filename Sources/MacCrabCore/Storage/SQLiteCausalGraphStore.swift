@@ -1230,16 +1230,24 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         } else {
             footprintLatchClearsTotal &+= 1
             footprintLatchLastClearedAt = Date()
-            // The latch usually clears inside a status refresh or a recovery
-            // pass, which also resets the block reason, so admitGrowth's own
-            // "recovered" notice never saw the transition. Log it here.
+            // Free space, a SQLite failure or pending migrations can still
+            // block writes, so this does not claim that mutations resumed.
+            // The "admission recovered" notice reports that transition.
             let footprint = lastFootprintBytes ?? -1
             let resume = resumeBelowBytes ?? -1
-            logger.notice("TraceGraph footprint admission latch cleared at \(footprint) bytes (resume below \(resume) bytes); graph mutations resumed")
+            logger.notice("TraceGraph footprint admission latch cleared at \(footprint) bytes (resume below \(resume) bytes)")
         }
     }
 
     private func refreshAdmissionMeasurementsAndLatch() {
+        // A block usually clears here, in a status refresh or a recovery pass,
+        // so admitGrowth's own "recovered" notice never saw the transition.
+        let wasBlocked = storageBlockReason != nil || footprintAdmissionLatched
+        defer {
+            if wasBlocked, storageBlockReason == nil, !footprintAdmissionLatched {
+                logger.notice("TraceGraph storage admission recovered; mutations resumed")
+            }
+        }
         var measuredReason: CausalGraphStorageBlockReason?
         if maxFootprintBytes != nil {
             lastFootprintBytes = footprintProbe(databasePath)
@@ -1478,9 +1486,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// its current quantum, so a stream of refused writers kept a latched
     /// store's recovery permanently short. Re-measure first, so a footprint
     /// that has already crossed the resume watermark still goes through the
-    /// barrier to the full admission check.
+    /// barrier to the full admission check. A SQLite storage failure, low free
+    /// space or a failed probe outranks the footprint in that check, so those
+    /// writers also take the full path and keep their more severe reason.
     private func rejectLatchedGrowthBeforeRecoveryBarrier() throws {
         guard footprintAdmissionLatched, !closeRequested, db != nil,
+              sqliteStorageFailure == nil,
+              storageBlockReason == nil || storageBlockReason == .footprintLimit,
               let cap = maxFootprintBytes,
               let threshold = admissionThresholdBytes,
               let footprint = footprintProbe(databasePath) else { return }
