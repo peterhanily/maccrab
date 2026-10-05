@@ -1449,11 +1449,32 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         payloadBytes: @autoclosure () -> Int,
         rows: Int
     ) async throws {
+        try rejectLatchedGrowthBeforeRecoveryBarrier()
         try await awaitRecoveryMutationBarrier()
         guard maxFootprintBytes != nil || freeSpaceFloorBytes != nil
                 || deferredMigrationsPending else { return }
         try admitGrowth(upperBoundBytes: mutationUpperBound(
             payloadBytes: payloadBytes(), rows: rows))
+    }
+
+    /// A writer the footprint latch will refuse anyway must not queue behind
+    /// an active recovery pass: any queued writer makes that pass stop after
+    /// its current quantum, so a stream of refused writers kept a latched
+    /// store's recovery permanently short. Re-measure first, so a footprint
+    /// that has already crossed the resume watermark still goes through the
+    /// barrier to the full admission check.
+    private func rejectLatchedGrowthBeforeRecoveryBarrier() throws {
+        guard footprintAdmissionLatched, !closeRequested, db != nil,
+              let cap = maxFootprintBytes,
+              let threshold = admissionThresholdBytes,
+              let footprint = footprintProbe(databasePath) else { return }
+        lastFootprintBytes = footprint
+        guard footprint >= (resumeBelowBytes ?? threshold) else { return }
+        try rejectGrowth(.footprintLimit(
+            footprintBytes: footprint,
+            admissionThresholdBytes: threshold,
+            capBytes: cap
+        ))
     }
 
     private func admitGrowth(upperBoundBytes: Int64) throws {
@@ -4306,13 +4327,14 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         var entitiesDeleted = 0
         var pagesReclaimed = 0
         refreshAdmissionMeasurementsAndLatch()
+        let byteDeficitAtStart = (Self.recoveryDeficitBytes(
+            footprintBytes: lastFootprintBytes,
+            recoveryTargetBytes: resumeBelowBytes
+        ) ?? 0) > 0
         let recoveryRequiredAtStart = storageBlockReason != nil
             || footprintAdmissionLatched
             || deferredMigrationsPending
-            || (Self.recoveryDeficitBytes(
-                footprintBytes: lastFootprintBytes,
-                recoveryTargetBytes: resumeBelowBytes
-            ) ?? 0) > 0
+            || byteDeficitAtStart
         let mode = Int(StoragePragmas.readAutoVacuumMode(db))
         let footprintBefore = footprintProbe(databasePath)
         let retentionCutoffSeconds = retentionCutoff.timeIntervalSince1970
@@ -4347,6 +4369,19 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 orphanBacklogRemaining: backlog.orphan,
                 eligibleBacklogRemaining: backlog.eligible
             )
+        }
+
+        /// True unless the freelist is proven empty. A failed read keeps the
+        /// conservative vacuum-first return.
+        func freelistPagesRemain() -> Bool {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db, "PRAGMA freelist_count", -1, &stmt, nil) == SQLITE_OK else {
+                return true
+            }
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return true }
+            return sqlite3_column_int64(stmt, 0) > 0
         }
 
         func internalAdmissionReachedRecoveryTarget() -> Bool {
@@ -4495,10 +4530,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             if internalAdmissionReachedRecoveryTarget() {
                 return result()
             }
-            if pagesReclaimed > 0 {
-                // One quantum of pre-existing freelist pages made physical
-                // progress. Give the next bounded pass first claim on the
-                // remaining freelist before deleting any logical evidence.
+            if pagesReclaimed > 0, freelistPagesRemain() {
+                // This bounded quantum left pre-existing freelist pages. Give
+                // the next pass first claim on them before deleting any logical
+                // evidence. Once the freelist is drained, delete in this pass:
+                // ordinary page churn refills a few pages between passes, and
+                // returning whenever any page was reclaimed starved every
+                // delete for as long as the store stayed pressured.
                 return result()
             }
         }
@@ -4586,11 +4624,18 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             if internalAdmissionReachedRecoveryTarget() {
                 return result()
             }
-            // Never cross from trace evidence into graph substrate in the same
-            // pressured quantum. Mode 2 may need the next pass's vacuum budget
-            // to expose this phase's physical gain; mode 1 has already shrunk
-            // on commit and still benefits from a fresh admission decision.
-            return result()
+            // A trace phase that spent its whole budget may have more eligible
+            // traces at this cutoff; give the next pass a fresh admission
+            // decision first. A short phase found nothing more to select, so a
+            // pass that began in byte deficit continues to orphan substrate
+            // now. Returning here unconditionally left continuously aging
+            // orphans waiting behind every trace delete while the store stayed
+            // latched.
+            let tracePhaseSpentBudget = tracesDeleted >= traceBudget
+                || traceChildRowsDeleted >= traceChildBudget
+            guard byteDeficitAtStart, !tracePhaseSpentBudget else {
+                return result()
+            }
         }
 
         if graphBudget > 0 {

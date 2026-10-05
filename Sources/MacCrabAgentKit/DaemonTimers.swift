@@ -1259,18 +1259,30 @@ final class TraceStoreRecoveryCadenceGate: @unchecked Sendable {
 }
 
 /// TraceGraph recovery is one bounded store pass per admitted timer tick. The
-/// gate keeps pressure/proactive drains at a short cadence, holds the current
-/// evidence cutoff while eligible backlog remains, and advances only after the
-/// store proves that rung is exhausted. Row progress alone is never convergence.
+/// gate keeps pressure/proactive drains at a short cadence and holds the
+/// current trace cutoff while that cutoff still has eligible traces. It
+/// tightens once the store proves the cutoff holds no more eligible traces, or
+/// once repeated pressured passes stop reducing the deficit. Row progress alone
+/// is never convergence.
+///
+/// Orphan backlog does not hold the cutoff. It is measured at the fixed
+/// one-hour floor, and under continuous ingest some orphan is always crossing
+/// that line, so gating on it pinned traces to the configured retention for
+/// hours while the store stayed latched.
 final class TraceGraphRecoveryCadenceGate: @unchecked Sendable {
     static let initialDelaySeconds: TimeInterval = 30
     static let pressureIntervalSeconds: TimeInterval = 30
     static let healthyIntervalSeconds: TimeInterval = 300
+    /// Pressured passes at one cutoff that may fail to set a new deficit low
+    /// before the cutoff tightens even though eligible traces remain (ingest
+    /// is outpacing deletion at this rung). Two minutes at the pressure cadence.
+    static let maximumPassesWithoutDeficitProgress = 4
 
     enum Outcome: Equatable {
         case converged
         case draining
         case advanced(toHours: Int)
+        case advancedAfterStall(toHours: Int)
         case evidenceFloorExhausted
         case waitingAtEvidenceFloor
     }
@@ -1280,6 +1292,8 @@ final class TraceGraphRecoveryCadenceGate: @unchecked Sendable {
     private var activeCutoffHours: Int?
     private var drainPending = false
     private var evidenceFloorExhausted = false
+    private var lowestDeficitAtCutoff: Int64?
+    private var passesWithoutDeficitProgress = 0
 
     func cutoffHoursIfShouldRun(
         blocked: Bool,
@@ -1315,45 +1329,78 @@ final class TraceGraphRecoveryCadenceGate: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        if result.recoveryDeficitBytes == 0 {
-            activeCutoffHours = nil
-            drainPending = result.eligibleBacklogRemaining == true
-            evidenceFloorExhausted = false
-            return drainPending ? .draining : .converged
-        }
-
-        // Without a configured cap there is no byte target, but bounded
-        // retention still drains every pressure tick while old rows remain.
-        if result.recoveryDeficitBytes == nil {
+        guard let deficit = result.recoveryDeficitBytes else {
+            // Without a configured cap there is no byte target, but bounded
+            // retention still drains every pressure tick while old rows remain.
             drainPending = result.eligibleBacklogRemaining != false
             if !drainPending {
-                activeCutoffHours = nil
+                resetCutoff()
                 evidenceFloorExhausted = false
                 return .converged
             }
             return .draining
         }
 
-        // Unknown or present backlog is proof that this exact cutoff must run
-        // again. This deliberately ignores how many rows/pages the pass moved.
-        if result.pinnedReader || result.eligibleBacklogRemaining != false {
+        if deficit == 0 {
+            resetCutoff()
+            drainPending = result.eligibleBacklogRemaining == true
+            evidenceFloorExhausted = false
+            return drainPending ? .draining : .converged
+        }
+
+        // A reader-pinned pass issued no delete, so it says nothing about
+        // this cutoff's backlog or progress.
+        if result.pinnedReader {
             drainPending = true
             evidenceFloorExhausted = false
             return .draining
         }
 
+        // Progress means a new low for this cutoff, so a deficit that only
+        // oscillates under continuous ingest still counts as stalled.
+        if let lowest = lowestDeficitAtCutoff, deficit >= lowest {
+            passesWithoutDeficitProgress += 1
+        } else {
+            lowestDeficitAtCutoff = deficit
+            passesWithoutDeficitProgress = 0
+        }
+
         let current = activeCutoffHours ?? max(1, configuredRetentionHours)
         if let next = cutoffRungs.first(where: { $0 < current }) {
-            activeCutoffHours = next
+            // Unknown or present trace backlog keeps this exact cutoff, however
+            // many rows/pages the pass moved, until passes stop gaining.
+            let cutoffExhausted = result.traceBacklogRemaining == false
+            let stalled = passesWithoutDeficitProgress
+                >= Self.maximumPassesWithoutDeficitProgress
             drainPending = true
             evidenceFloorExhausted = false
-            return .advanced(toHours: next)
+            guard cutoffExhausted || stalled else { return .draining }
+            resetCutoff()
+            activeCutoffHours = next
+            return cutoffExhausted
+                ? .advanced(toHours: next)
+                : .advancedAfterStall(toHours: next)
+        }
+
+        // At the one-hour floor, keep draining while anything at or above it
+        // is still eligible, traces or orphans alike.
+        if result.eligibleBacklogRemaining != false {
+            drainPending = true
+            evidenceFloorExhausted = false
+            return .draining
         }
 
         let newlyExhausted = !evidenceFloorExhausted
         drainPending = false
         evidenceFloorExhausted = true
         return newlyExhausted ? .evidenceFloorExhausted : .waitingAtEvidenceFloor
+    }
+
+    /// Caller holds `lock`.
+    private func resetCutoff() {
+        activeCutoffHours = nil
+        lowestDeficitAtCutoff = nil
+        passesWithoutDeficitProgress = 0
     }
 }
 
@@ -1403,8 +1450,8 @@ enum DaemonTimers {
     static let journalExpiryBackpressureRetryMilliseconds = 250
 
     /// Progressively tighter retention windows for TraceGraph recovery, used
-    /// only after the store proves the current cutoff has no eligible backlog
-    /// while a byte deficit remains. Ordered coarse→fine and floored at one hour, which is well clear of
+    /// only while a byte deficit remains and the current cutoff is exhausted
+    /// (or, in the periodic lane, has stopped reducing the deficit). Ordered coarse→fine and floored at one hour, which is well clear of
     /// the 5-minute trace materialization window, so a tightened sweep can never
     /// delete the causal context of a trace still being assembled.
     ///
@@ -2176,6 +2223,8 @@ enum DaemonTimers {
                         switch outcome {
                         case .advanced(let nextHours):
                             logger.notice("TraceGraph recovery still has a \(result.recoveryDeficitBytes ?? -1)-byte deficit after exhausting the \(cutoffHours)h cutoff; the next bounded pass will tighten traces to \(nextHours)h")
+                        case .advancedAfterStall(let nextHours):
+                            logger.notice("TraceGraph recovery made no deficit progress in \(TraceGraphRecoveryCadenceGate.maximumPassesWithoutDeficitProgress) pressured passes at the \(cutoffHours)h cutoff (deficit \(result.recoveryDeficitBytes ?? -1) bytes); the next bounded pass will tighten traces to \(nextHours)h")
                         case .evidenceFloorExhausted:
                             logger.fault("TraceGraph remains \(result.recoveryDeficitBytes ?? -1) bytes above its recovery target after exhausting the one-hour evidence floor. Recent causal evidence was NOT deleted. Recovery can resume only as physical-write suppression slows growth and protected rows age past the floor, or when capacity is raised; graph rules and trace queries remain degraded meanwhile.")
                         case .converged, .draining, .waitingAtEvidenceFloor:
