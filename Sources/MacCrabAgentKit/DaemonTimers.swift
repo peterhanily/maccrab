@@ -1262,8 +1262,8 @@ final class TraceStoreRecoveryCadenceGate: @unchecked Sendable {
 /// gate keeps pressure/proactive drains at a short cadence and holds the
 /// current trace cutoff while that cutoff still has eligible traces. It
 /// tightens once the store proves the cutoff holds no more eligible traces, or
-/// once repeated pressured passes stop reducing the deficit. Row progress alone
-/// is never convergence.
+/// once repeated pressured passes that delete rows stop reducing the deficit.
+/// Row progress alone is never convergence.
 ///
 /// Orphan backlog does not hold the cutoff. It is measured at the fixed
 /// one-hour floor, and under continuous ingest some orphan is always crossing
@@ -1273,9 +1273,10 @@ final class TraceGraphRecoveryCadenceGate: @unchecked Sendable {
     static let initialDelaySeconds: TimeInterval = 30
     static let pressureIntervalSeconds: TimeInterval = 30
     static let healthyIntervalSeconds: TimeInterval = 300
-    /// Pressured passes at one cutoff that may fail to set a new deficit low
-    /// before the cutoff tightens even though eligible traces remain (ingest
-    /// is outpacing deletion at this rung). Two minutes at the pressure cadence.
+    /// Pressured passes at one cutoff that may delete rows yet fail to set a
+    /// new deficit low before the cutoff tightens even though eligible traces
+    /// remain (ingest is outpacing deletion at this rung). Two minutes at the
+    /// pressure cadence.
     static let maximumPassesWithoutDeficitProgress = 4
 
     enum Outcome: Equatable {
@@ -1357,9 +1358,14 @@ final class TraceGraphRecoveryCadenceGate: @unchecked Sendable {
         }
 
         // Progress means a new low for this cutoff, so a deficit that only
-        // oscillates under continuous ingest still counts as stalled.
+        // oscillates under continuous ingest still counts as stalled. A pass
+        // that deleted nothing was blocked (free-space headroom, a legacy
+        // store, an overlapping pass), not stalled: it is no evidence that
+        // this cutoff failed, so it never counts toward tightening.
+        let rowsDeleted = result.tracesDeleted + result.traceChildRowsDeleted
+            + result.edgesDeleted + result.entitiesDeleted
         if let lowest = lowestDeficitAtCutoff, deficit >= lowest {
-            passesWithoutDeficitProgress += 1
+            if rowsDeleted > 0 { passesWithoutDeficitProgress += 1 }
         } else {
             lowestDeficitAtCutoff = deficit
             passesWithoutDeficitProgress = 0
@@ -2224,7 +2230,7 @@ enum DaemonTimers {
                         case .advanced(let nextHours):
                             logger.notice("TraceGraph recovery still has a \(result.recoveryDeficitBytes ?? -1)-byte deficit after exhausting the \(cutoffHours)h cutoff; the next bounded pass will tighten traces to \(nextHours)h")
                         case .advancedAfterStall(let nextHours):
-                            logger.notice("TraceGraph recovery made no deficit progress in \(TraceGraphRecoveryCadenceGate.maximumPassesWithoutDeficitProgress) pressured passes at the \(cutoffHours)h cutoff (deficit \(result.recoveryDeficitBytes ?? -1) bytes); the next bounded pass will tighten traces to \(nextHours)h")
+                            logger.notice("TraceGraph recovery made no deficit progress in \(TraceGraphRecoveryCadenceGate.maximumPassesWithoutDeficitProgress) pressured passes that deleted rows at the \(cutoffHours)h cutoff (deficit \(result.recoveryDeficitBytes ?? -1) bytes); the next bounded pass will tighten traces to \(nextHours)h")
                         case .evidenceFloorExhausted:
                             logger.fault("TraceGraph remains \(result.recoveryDeficitBytes ?? -1) bytes above its recovery target after exhausting the one-hour evidence floor. Recent causal evidence was NOT deleted. Recovery can resume only as physical-write suppression slows growth and protected rows age past the floor, or when capacity is raised; graph rules and trace queries remain degraded meanwhile.")
                         case .converged, .draining, .waitingAtEvidenceFloor:

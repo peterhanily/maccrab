@@ -2010,10 +2010,16 @@ struct CausalGraphSubstrateRetentionTests {
         func record(
             deficit: Int64,
             traces: Bool,
-            orphans: Bool = false
+            orphans: Bool = false,
+            rowsDeleted: Int = 1
         ) -> TraceGraphRecoveryCadenceGate.Outcome {
             gate.recordRecoveryOutcome(
-                recoveryResult(deficit: deficit, backlog: traces, orphanBacklog: orphans),
+                recoveryResult(
+                    deficit: deficit,
+                    backlog: traces,
+                    orphanBacklog: orphans,
+                    rowsDeleted: rowsDeleted
+                ),
                 configuredRetentionHours: configured,
                 cutoffRungs: rungs
             )
@@ -2023,8 +2029,15 @@ struct CausalGraphSubstrateRetentionTests {
         // crossing the fixed one-hour floor on every pass.
         #expect(record(deficit: 90, traces: false, orphans: true) == .advanced(toHours: 72))
 
-        // Traces remain at 72h, yet passes stop setting a new deficit low.
+        // Traces remain at 72h. A pass that deleted nothing was blocked (low
+        // free-space headroom, a legacy store, an overlapping pass), not
+        // stalled, so any number of them keeps this cutoff.
         #expect(record(deficit: 90, traces: true) == .draining)
+        for _ in 0..<(limit * 3) {
+            #expect(record(deficit: 95, traces: true, rowsDeleted: 0) == .draining)
+        }
+
+        // Passes that delete rows yet stop setting a new deficit low do count.
         for _ in 0..<(limit - 1) {
             #expect(record(deficit: 95, traces: true) == .draining)
         }
