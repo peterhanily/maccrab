@@ -3990,6 +3990,8 @@ enum DaemonTimers {
                 if let value = s.proactiveRecoveryThresholdBytes { d["proactive_recovery_threshold_bytes"] = value }
                 if let value = s.recoveryDeficitBytes { d["recovery_deficit_bytes"] = value }
                 if let value = s.lastRecoveryEligibleBacklogRemaining { d["last_recovery_eligible_backlog_remaining"] = value }
+                if let at = s.footprintLatchLastTrippedAt { d["footprint_latch_last_tripped_at_unix"] = at.timeIntervalSince1970 }
+                if let at = s.footprintLatchLastClearedAt { d["footprint_latch_last_cleared_at_unix"] = at.timeIntervalSince1970 }
                 if let bridge = state.causalGraphBridge {
                     let w = await bridge.writeTelemetry()
                     d["ingest_events_total"] = Int64(clamping: w.inputEventsTotal)

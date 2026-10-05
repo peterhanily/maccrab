@@ -167,6 +167,10 @@ public struct CausalGraphStorageAdmissionStatus: Sendable, Equatable {
     public let autoVacuumMode: Int
     public let footprintLatchTripsTotal: UInt64
     public let footprintLatchClearsTotal: UInt64
+    /// Wall-clock time of the most recent footprint-latch trip / clear in this
+    /// process epoch. nil means that transition has not happened.
+    public let footprintLatchLastTrippedAt: Date?
+    public let footprintLatchLastClearedAt: Date?
     public let recoveryRunsTotal: UInt64
     public let recoveryTracesDeletedTotal: UInt64
     public let recoveryTraceChildRowsDeletedTotal: UInt64
@@ -460,6 +464,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private var recoveryTraceScanAfterRowID: Int64 = 0
     private var footprintLatchTripsTotal: UInt64 = 0
     private var footprintLatchClearsTotal: UInt64 = 0
+    private var footprintLatchLastTrippedAt: Date?
+    private var footprintLatchLastClearedAt: Date?
     private var recoveryRunsTotal: UInt64 = 0
     private var recoveryTracesDeletedTotal: UInt64 = 0
     private var recoveryTraceChildRowsDeletedTotal: UInt64 = 0
@@ -1173,6 +1179,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             autoVacuumMode: db.map { Int(StoragePragmas.readAutoVacuumMode($0)) } ?? 0,
             footprintLatchTripsTotal: footprintLatchTripsTotal,
             footprintLatchClearsTotal: footprintLatchClearsTotal,
+            footprintLatchLastTrippedAt: footprintLatchLastTrippedAt,
+            footprintLatchLastClearedAt: footprintLatchLastClearedAt,
             recoveryRunsTotal: recoveryRunsTotal,
             recoveryTracesDeletedTotal: recoveryTracesDeletedTotal,
             recoveryTraceChildRowsDeletedTotal: recoveryTraceChildRowsDeletedTotal,
@@ -1218,8 +1226,16 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         footprintAdmissionLatched = latched
         if latched {
             footprintLatchTripsTotal &+= 1
+            footprintLatchLastTrippedAt = Date()
         } else {
             footprintLatchClearsTotal &+= 1
+            footprintLatchLastClearedAt = Date()
+            // The latch usually clears inside a status refresh or a recovery
+            // pass, which also resets the block reason, so admitGrowth's own
+            // "recovered" notice never saw the transition. Log it here.
+            let footprint = lastFootprintBytes ?? -1
+            let resume = resumeBelowBytes ?? -1
+            logger.notice("TraceGraph footprint admission latch cleared at \(footprint) bytes (resume below \(resume) bytes); graph mutations resumed")
         }
     }
 

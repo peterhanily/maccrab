@@ -450,6 +450,38 @@ struct CausalGraphStorageAdmissionTests {
         await store.close()
     }
 
+    @Test("Footprint latch transitions record when they last tripped and cleared")
+    func footprintLatchTransitionTimes() async throws {
+        let path = Self.tempPath("latch-transition-times")
+        defer { Self.cleanup(path) }
+        let footprint = ProbeBox(0)
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path,
+            maxFootprintBytes: 250 * Self.mib,
+            footprintProbe: { _ in footprint.get() }
+        )
+        let initial = await store.storageAdmissionStatus()
+        #expect(initial.footprintLatchLastTrippedAt == nil)
+        #expect(initial.footprintLatchLastClearedAt == nil)
+        let threshold = try #require(initial.admissionThresholdBytes)
+        let resume = try #require(initial.resumeBelowBytes)
+
+        let beforeTrip = Date()
+        footprint.set(threshold + 1)
+        let latched = await store.storageAdmissionStatus()
+        let trippedAt = try #require(latched.footprintLatchLastTrippedAt)
+        #expect(trippedAt >= beforeTrip)
+        #expect(latched.footprintLatchLastClearedAt == nil)
+
+        footprint.set(resume - 1)
+        let cleared = await store.storageAdmissionStatus()
+        let clearedAt = try #require(cleared.footprintLatchLastClearedAt)
+        #expect(clearedAt >= trippedAt)
+        #expect(cleared.footprintLatchLastTrippedAt == trippedAt,
+                "a clear must not rewrite when the latch last tripped")
+        await store.close()
+    }
+
     @Test("Direct and rolling-graph bypass writers all share the SQLite gate")
     func mutationBypassesAreGated() async throws {
         let path = Self.tempPath("bypasses")
