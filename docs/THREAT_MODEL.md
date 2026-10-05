@@ -41,8 +41,10 @@ residual risk remains.
   trees, AMOS/Atomic Stealer wallet paths, XCSSET clipboard injection,
   etc.). This count describes the full corpus. Since v1.21.4 the daemon
   defaults to the stable rule profile — only rules marked `status: stable`
-  (109 single-event rules) ship **enabled** by default; the majority are
-  disabled unless the operator opts into a broader profile. See
+  load by default: 116 of the 486 (98 single-event, 11 sequence, 7 graph).
+  Seven of those cannot fire until Agent Traces or the deception tier is
+  enabled (see the README's "What runs on a default install"). The majority
+  are disabled unless the operator opts into a broader profile. See
   [`COVERAGE.md`](COVERAGE.md).
 - Sequence rules correlate multi-step kill chains within bounded
   windows (longest is `ransomware_kill_chain.yml` at 10 minutes;
@@ -103,10 +105,11 @@ escalate to root via the System Extension.
 - `daemon_config.json` and `actions.json` in `/Library/Application
   Support/MacCrab/` are root-owned. A non-root user can't write them.
 - The user-writable overlay (`~/Library/.../user_overrides.json`)
-  is restricted to a small list of storage-tuning keys
-  (`storage.*`). Security-sensitive settings (thresholds, output
-  destinations, LLM provider) are NOT overlaid from user-writable
-  files.
+  is restricted to storage-tuning keys (`storage.*`) and the four
+  network-enrichment toggles, and the engine honours it only from an
+  admin-group account's home. Other security-sensitive settings
+  (thresholds, output destinations, LLM provider) are NOT overlaid from
+  user-writable files.
 - Storage values are clamped to safe floors (15 min hot tier, 50 MB
   caps, 1 day retention) so a hostile config can't immediately wipe
   history.
@@ -177,9 +180,10 @@ events to suppress evidence post-compromise.
 **MacCrab defenses (current):**
 - Files are root-owned 0o640. A non-root user can't open them
   read-write.
-- Database key is encrypted at rest in Keychain with
+- The column-encryption key is stored in the Keychain with
   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (no iCloud
-  Keychain roaming).
+  Keychain roaming). It protects only the trace / causal-graph stores,
+  not the three databases this row is about (see below).
 - AlertStore is a separate file (`alerts.db`) from the high-churn
   events table, so size-cap pruning of one can't evict the other.
 
@@ -228,7 +232,9 @@ an FDA/TCC host.
   only after a byte-match to a compiled-in publisher anchor; an untrusted
   third-party plugin runs **only** sandboxed. The lanes never cross and both
   fail-closed — a plugin that isn't provably first-party can never reach the
-  unsandboxed lane.
+  unsandboxed lane. All 19 plugins in the Rave catalog today are first-party,
+  so they take the unsandboxed lane; the defenses below apply to other
+  publishers' plugins.
 - **Deny-default sandbox.** The third-party plugin runs under `(deny default)`
   SBPL applied post-startup by the signed `maccrab-tierb-sandbox-host` trampoline
   (`sandbox_init` then `execv`). There is **no** global `mach-lookup` — the
@@ -264,17 +270,21 @@ an FDA/TCC host.
   and a Swift fixture; the debug test bundle is not accepted as release proof.
 
 **Residual risk:**
-- The runnable third-party lane **ships fail-closed and is disabled by default**:
-  no third-party plugin executes until an operator sets the publisher trust
-  anchor (offline). Operators should independently review the lane against the
-  exact signed build (the corpus must pass) before enabling untrusted third-party
+- The third-party lane is **on by default**. A third-party plugin runs once it
+  is installed with publisher trust: an official-catalog install trusts the
+  signer key the signed catalog names, and a sideload needs an explicit
+  `--trust-on-install` or `maccrabctl plugin trust`. Creating
+  `~/Library/Application Support/MacCrab/tierb_third_party_disabled` turns the
+  lane off. Operators should independently review the lane against the exact
+  signed build (the corpus must pass) before installing untrusted third-party
   code.
 - A check→spawn TOCTOU on the trampoline binary remains (same-uid only — no
   privilege crossing); an fd-pinned (`fexecve`-style) spawn is a tracked
   hardening.
-- Runtime revocation is staleness-driven; a runtime fetch of a fresh signed
-  revocation list (so a post-install revocation is enforced within minutes, not
-  by the staleness ceiling) is a tracked hardening.
+- While a store or sideloaded plugin is installed, MacCrab.app fetches the
+  signed revocation list about hourly and quarantines revoked plugins. A host
+  where the app is not running, or cannot reach `rave.maccrab.com`, learns of a
+  revocation only through the staleness ceiling.
 - A sandboxed plugin can still consume CPU/memory within its rlimits and emit
   misleading artifacts; the operator reviews plugin output.
 - The brokered-snapshot scheme rests on the snapshot dir being plugin-unwritable;
