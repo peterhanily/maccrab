@@ -2579,19 +2579,46 @@ func traceGraphPersistenceStatusLines(
 /// store blocked or not accepting mutations, a short or empty result is a
 /// recording gap, not evidence that nothing happened. Nil when persistence is
 /// accepting writes or no heartbeat block is readable. Must not touch
-/// main.swift globals (`isoFormatter`, `dataDir`) so tests can call it.
-func traceGraphPersistencePausedNote(_ heartbeat: HeartbeatSnapshot?) -> String? {
-    guard let storage = heartbeat?.traceGraphStorageAdmission,
+/// main.swift globals (`isoFormatter`, `dataDir`) so tests can call it; `now`
+/// is injected for the same reason.
+func traceGraphPersistencePausedNote(
+    _ heartbeat: HeartbeatSnapshot?,
+    now: Double = Date().timeIntervalSince1970
+) -> String? {
+    guard let heartbeat,
+          let storage = heartbeat.traceGraphStorageAdmission,
           storage.blocked == true
             || storage.acceptingMutations == false
             || storage.storeAvailable == false else { return nil }
     let reason = storage.reason.flatMap { $0.isEmpty ? nil : $0 }
+    let footprintLatch = storage.storeAvailable != false
+        && storage.blocked == true && reason == "footprint_limit"
+    func mebibytes(_ bytes: Int64, roundingUp: Bool = false) -> String {
+        let tenths = (Double(max(0, bytes)) * 10 / 1_048_576)
+            .rounded(roundingUp ? .up : .toNearestOrAwayFromZero)
+        return String(format: "%.1f MiB", tenths / 10)
+    }
     let why: String
     if storage.storeAvailable == false {
         why = "the TraceGraph store could not be opened when the engine started"
     } else if storage.blocked == true {
         switch reason {
-        case "footprint_limit": why = "the store reached its on-disk size limit"
+        case "footprint_limit":
+            // The latch trips above the admission threshold and clears only
+            // below the lower resume target, not at the cap itself.
+            var text = "the store passed its write threshold and stays paused until it falls below the resume target"
+            if let threshold = storage.admissionThresholdBytes,
+               let resume = storage.resumeBelowBytes {
+                text += " (threshold \(mebibytes(threshold)), resume below \(mebibytes(resume))"
+                if let footprint = storage.footprintBytes {
+                    text += ", now \(mebibytes(footprint))"
+                }
+                if let cap = storage.maxFootprintBytes {
+                    text += ", cap \(mebibytes(cap))"
+                }
+                text += ")"
+            }
+            why = text
         case "low_free_space": why = "free disk space is below the TraceGraph safety floor"
         case "probe_failure": why = "a storage measurement failed, so writes are refused until it succeeds"
         case "mutation_too_large": why = "a write exceeded the per-transaction storage reserve"
@@ -2603,20 +2630,51 @@ func traceGraphPersistencePausedNote(_ heartbeat: HeartbeatSnapshot?) -> String?
     } else {
         why = "the writer is not accepting new mutations"
     }
+    let written = heartbeat.writtenAtUnix.map {
+        Date(timeIntervalSince1970: $0).ISO8601Format()
+    }
+    // Same 120 s bound get_status applies (RuntimeStatusDocument): an older
+    // heartbeat cannot say what a possibly stopped engine is doing now.
+    if heartbeat.isStale(now: now, maxAge: 120) {
+        var age = written.map { "written \($0)" } ?? "with no recorded write time"
+        if let seconds = heartbeat.ageSeconds(now: now), seconds.isFinite, seconds >= 0 {
+            age += ", \(Int(seconds / 60)) min ago"
+        }
+        return "The last engine heartbeat (\(age)) reported TraceGraph persistence PAUSED "
+            + "(\(reason ?? "reason not reported")): \(why). That heartbeat is too old to "
+            + "describe the engine now: it may not be running, so nothing at all may currently "
+            + "be recorded. A missing trace here is not evidence that nothing happened."
+    }
     var note = "TraceGraph persistence is PAUSED (\(reason ?? "reason not reported")): \(why). "
-        + "New causal evidence is not being recorded, so graph rules and trace queries "
-        + "cover only activity from before the pause; events, alerts, Sigma and sequence "
-        + "rules keep running. A missing trace here is not evidence that nothing happened."
-    if storage.storeAvailable != false, storage.blocked == true, reason == "footprint_limit" {
-        if let deficit = storage.recoveryDeficitBytes, deficit > 0 {
-            let megabytes = (Double(deficit) / 100_000).rounded(.up) / 10
-            note += " Recovery must free about \(String(format: "%.1f", megabytes)) MB before writes resume automatically."
+        + "Graph rules are paused and no new traces are recorded; trace queries still run "
+        + "but return only evidence recorded before the pause. Events, alerts, Sigma and "
+        + "sequence rules keep running. A missing trace here is not evidence that nothing happened."
+    if footprintLatch {
+        let deficit = storage.recoveryDeficitBytes
+        if deficit == 0 {
+            note += " Recovery has reached its resume target; writes resume at the next storage check."
+        } else if storage.autoVacuumMode == 0 {
+            // Core preserves a pressured mode-0 store's rows and never clears
+            // the latch online (recoverStorageBudget).
+            note += " This store uses legacy auto_vacuum mode 0, so recovery cannot shrink it while "
+                + "the engine runs; writes stay paused until the TraceGraph size limit "
+                + "(storage.tracegraph_max_size_mb) is raised or the store is converted offline "
+                + "with a full VACUUM while the engine is stopped."
         } else {
-            note += " Writes resume automatically when recovery catches up."
+            note += " Recovery is deleting the oldest pre-pause trace evidence (never anything "
+                + "under an hour old) to make room"
+            if storage.pinnedReader == true {
+                note += "; it is currently waiting for a reader to release the database"
+            }
+            if let deficit, deficit > 0 {
+                note += ", and must free about \(mebibytes(deficit, roundingUp: true)) more before writes resume automatically."
+            } else {
+                note += ". Writes resume automatically when recovery catches up."
+            }
         }
     }
-    if let written = heartbeat?.writtenAtUnix {
-        note += " (Engine heartbeat written \(Date(timeIntervalSince1970: written).ISO8601Format()).)"
+    if let written {
+        note += " (Engine heartbeat written \(written).)"
     }
     return note
 }
