@@ -11,9 +11,9 @@ ATT&CK technique tags from each rule's `tags:` block.
 | Metric | Count |
 |---|---|
 | Rules total | **479** |
-| Status: stable | 98 |
-| Status: experimental | 368 |
-| Status: deprecated | 10 |
+| Status: stable | 109 |
+| Status: experimental | 356 |
+| Status: deprecated | 11 |
 | Severity: critical | 19 |
 | Severity: high | 111 |
 | Severity: medium | 228 |
@@ -80,17 +80,17 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `ai_tool_unapproved_network.yml`<br/>AI Tool Connects to Unapproved Network Destination | experimental | medium | T1041 T1071.001 |
 | `ai_tool_writes_outside_project.yml`<br/>AI Tool Process Writes File Outside Project Directory | experimental | medium | T1036 |
 | `ai_tool_writes_persistence.yml`<br/>AI Tool Installs Persistence Mechanism | stable | high | T1543.001 |
-| `binary_dropped_into_claude_dir.yml`<br/>Executable Dropped Into .claude/ Subdirectory (SessionStart Hijack) | experimental | high | T1195.001 T1546 T1564.001 |
-| `canary_skill_or_rules_read.yml`<br/>AI-Agent Honey-Prompt File Read | experimental | critical | T1083 |
-| `claude_code_project_config_rce.yml`<br/>Claude Code Project Config Hook RCE Pattern | experimental | high | T1059 T1546 |
+| `binary_dropped_into_claude_dir.yml`<br/>Executable Dropped Into .claude/ Subdirectory (SessionStart Hijack) | stable | high | T1195.001 T1546 T1564.001 |
+| `canary_skill_or_rules_read.yml`<br/>AI-Agent Honey-Prompt File Read | stable | critical | T1083 |
+| `claude_code_project_config_rce.yml`<br/>Claude Code Project Config Hook RCE Pattern | stable | high | T1059 T1546 |
 | `claude_settings_hook_injection_by_non_claude.yml`<br/>~/.claude/settings.json Modified by Non-Claude Process (Hook Injection) | experimental | high | T1195.001 T1546 |
-| `honeyprompt_canary_package_install.yml`<br/>Honey-Prompt Canary Package Install Attempted | experimental | critical | T1195.001 |
-| `llm_classifier_high_risk_intent.yml`<br/>MacCrab IntentClassifier Returned High-Risk Verdict | experimental | medium | T1195 |
+| `honeyprompt_canary_package_install.yml`<br/>Honey-Prompt Canary Package Install Attempted | stable | critical | T1195.001 |
+| `llm_classifier_high_risk_intent.yml`<br/>MacCrab Deterministic Intent Heuristic Found High-Risk Shape | experimental | medium | T1195 |
 | `mcp_server_added.yml`<br/>MCP Server Configuration Added | stable | low | T1195.002 |
 | `mcp_server_config_injection_by_non_ai_tool.yml`<br/>MCP Server Config Modified by Package-Manager Lineage (SANDWORM_MODE / Shai-Hulud) | experimental | high | T1195.001 T1546 T1546.016 |
 | `mcp_server_suspicious_command.yml`<br/>MCP Server with Suspicious Command Path | stable | medium | T1036 T1059 |
-| `mcp_server_tool_poisoning.yml`<br/>MCP Server with Potential Tool Description Injection | stable | high | T1059 T1195.002 |
-| `skill_md_poisoning_install.yml`<br/>SKILL.md Poisoning — Install of Untrusted Agent Skill | experimental | high | T1059 T1546 |
+| `mcp_server_tool_poisoning.yml`<br/>MCP Server Process Launched With Prompt-Injection Text In Its Command Line | stable | high | T1059 T1195.002 |
+| `skill_md_poisoning_install.yml`<br/>SKILL.md Poisoning — Install of Untrusted Agent Skill | stable | high | T1059 T1546 |
 | `vscode_tasks_json_modified_by_non_vscode.yml`<br/>.vscode/tasks.json Modified by Non-Editor Process (Folder-Open Hook Injection) | experimental | medium | T1195.001 T1546 |
 
 ### Collection (TA0009) (13 rules)
@@ -115,9 +115,9 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
-| `c2_azurestaticprovider_net.yml`<br/>C2 Connection to sh.azurestaticprovider.net / 37.16.75.69 (Mini Shai-Hulud) | experimental | critical | T1071.001 T1102 T1195.001 |
+| `c2_azurestaticprovider_net.yml`<br/>C2 Connection to sh.azurestaticprovider.net / 37.16.75.69 (Mini Shai-Hulud) | stable | critical | T1071.001 T1102 T1195.001 |
 | `c2_beacon_pattern.yml`<br/>Regular C2 Beacon Pattern Detected | experimental | low | T1071.001 |
-| `c2_trackpipe_dev.yml`<br/>C2 Connection to trackpipe.dev (OpenClaw / GhostLoader) | experimental | critical | T1071.001 T1102 T1195.001 |
+| `c2_trackpipe_dev.yml`<br/>C2 Connection to trackpipe.dev (OpenClaw / GhostLoader) | stable | critical | T1071.001 T1102 T1195.001 |
 | `curl_to_raw_ip.yml`<br/>curl or wget Connection to Raw IP Address | experimental | medium | T1071.001 |
 | `dns_high_entropy_query.yml`<br/>High-Entropy DNS Query (Possible DGA or Tunneling) | experimental | low | T1568.002 |
 | `dns_over_https_manual.yml`<br/>Manual DNS-over-HTTPS Query to Bypass Local DNS | experimental | medium | T1071.004 |
@@ -150,7 +150,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `docker_remote_api_access.yml`<br/>Docker Remote API Accessed via Plaintext TCP | experimental | medium | T1021 T1609 |
 | `docker_sensitive_volume_mount.yml`<br/>Docker Container Mounts Sensitive Host Path | experimental | medium | T1552.001 T1611 |
 | `docker_socket_access.yml`<br/>Non-Docker Process Accesses Docker Socket | experimental | medium | T1611 |
-| `docker_socket_mount.yml`<br/>Docker Socket Mounted Into Container | experimental | medium | T1611 |
+| `docker_socket_mount.yml`<br/>Docker Socket Mounted Into Container | stable | medium | T1611 |
 | `kubernetes_service_account_token.yml`<br/>Kubernetes Service Account Token Read from Unexpected Process | experimental | medium | T1552 T1552.007 |
 
 ### Credential Access (TA0006) (37 rules)
@@ -261,7 +261,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `sip_protected_process_interference.yml`<br/>Attempt to Kill or Signal SIP-Protected Security Process | stable | high | T1562.001 |
 | `sudoers_modification.yml`<br/>Sudoers File Modified | experimental | high | T1548.003 |
 | `suspicious_xpc_connection.yml`<br/>Unsigned Process Connects to Privileged XPC Service | deprecated | medium | T1559 |
-| `task_for_pid_injection.yml`<br/>Mach Port task_for_pid Process Injection | stable | medium | T1055 |
+| `task_for_pid_injection.yml`<br/>Mach Port task_for_pid Process Injection | deprecated | medium | T1055 |
 | `tcc_db_direct_write.yml`<br/>Direct TCC Database Modification | experimental | high | T1548 T1562.001 |
 | `tcc_reset_attempt.yml`<br/>TCC Database Reset via tccutil | stable | low | T1562.001 |
 | `timestomp_touch.yml`<br/>Timestamp Modification via touch Command | experimental | low | T1070.006 |
@@ -373,8 +373,8 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `firmware_tamper.yml`<br/>EFI or Firmware Update Tool Executed by Non-System Process | experimental | high | T1542.001 T1542.003 |
 | `forced_system_shutdown.yml`<br/>Forced System Shutdown or Reboot from Shell | experimental | low | T1529 |
 | `hosts_file_modification.yml`<br/>System Hosts File Modified | experimental | medium | T1565.001 |
-| `inhibit_system_recovery.yml`<br/>System Recovery Inhibited | experimental | high | T1490 |
-| `known_macos_ransomware.yml`<br/>Known macOS Ransomware Process Detected | experimental | critical | T1486 |
+| `inhibit_system_recovery.yml`<br/>System Recovery Inhibited | stable | high | T1490 |
+| `known_macos_ransomware.yml`<br/>Known macOS Ransomware Process Detected | stable | critical | T1486 |
 | `mass_file_deletion.yml`<br/>Mass File Deletion from Critical Directories | experimental | medium | T1485 |
 | `mass_file_encryption.yml`<br/>Mass File Encryption Pattern Detected | experimental | medium | T1486 |
 | `mass_unlink_from_package_lineage.yml`<br/>Recursive Unlink Targeting $HOME From Package-Manager Lineage | experimental | high | T1070.004 T1195.001 T1485 |
@@ -512,7 +512,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `homebrew_formula_no_check_sha.yml`<br/>Homebrew Formula Installed Without SHA Verification (:no_check) | experimental | medium | T1195.002 |
 | `homebrew_tap_mitm_cleartext_http.yml`<br/>Homebrew Process Fetches Over Cleartext HTTP (Tap MITM) | experimental | medium | T1195.002 T1557 |
 | `lockfile_unexpected_modification.yml`<br/>Package Lockfile Modified Outside Package Manager | experimental | medium | T1195.002 |
-| `node_ipc_compromised_versions.yml`<br/>Compromised node-ipc Version Observed in node_modules (peacenotwar 9.1.6/9.2.3/12.0.1) | experimental | high | T1059.007 T1195.001 T1485 |
+| `node_ipc_compromised_versions.yml`<br/>Compromised node-ipc Version Observed in node_modules (peacenotwar 9.1.6/9.2.3/12.0.1) | stable | high | T1059.007 T1195.001 T1485 |
 | `node_modules_contains_leaked_dotfile.yml`<br/>Leaked Dotfile / Secret Material Under node_modules After Install | experimental | medium | T1195.001 T1552.001 |
 | `node_modules_spawns_binary.yml`<br/>Binary Executed Directly from node_modules Directory | experimental | low | T1059.007 T1195.001 |
 | `node_process_writes_to_system_dirs.yml`<br/>Node.js Process Writes to System Directories | experimental | medium | T1036.005 T1059.007 T1195.001 |
@@ -572,7 +572,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 |---|---|---|---|
 | `ble_covert_channel.yml`<br/>Bluetooth Low Energy Covert Channel or Exfiltration Tool | experimental | medium | T1011 |
 | `bluetooth_attack_tool.yml`<br/>Bluetooth Attack or Scanning Tool Executed | experimental | medium | T1557 |
-| `pmkid_wpa_handshake_capture.yml`<br/>WPA Handshake or PMKID Capture Attempt | experimental | medium | T1040 |
+| `pmkid_wpa_handshake_capture.yml`<br/>WPA Handshake or PMKID Capture Attempt | stable | medium | T1040 |
 | `rogue_hotspot_creation.yml`<br/>Rogue Software Hotspot or Internet Sharing Enabled Programmatically | experimental | medium | T1557 |
 | `wifi_config_file_written.yml`<br/>Wi-Fi Preference File Modified by Non-System Process | experimental | medium | T1565.001 |
 | `wifi_deauth_injection.yml`<br/>Wi-Fi Deauthentication Frame Injection Detected | experimental | medium | T1498 |
