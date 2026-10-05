@@ -1759,7 +1759,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "Add custom feeds & IOCs";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "Built-in sources: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus and MalwareBazaar require an abuse.ch Auth-Key. See provider status below. Add external indicators through the threat_intel folder above.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "Built-in · active — fetched every 4h";
-"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Built-in · enabled — needs an abuse.ch Auth-Key to fetch";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Built-in · enabled — fetching requires an abuse.ch Auth-Key";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "Built-in · opt in to enable fetching";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "Clear IOC search";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "Configured integrations & detected tools (%lld)";

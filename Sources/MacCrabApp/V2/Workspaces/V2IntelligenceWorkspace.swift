@@ -1533,6 +1533,18 @@ public enum V2FeedConfig: String, Identifiable, CaseIterable {
     /// fetched without an abuse.ch Auth-Key; Feodo's public list needs none.
     public var requiresAuthKey: Bool { self != .feodoTracker }
 
+    /// What the sheet's status chip may claim.
+    public enum FetchStatus: Equatable { case optIn, active, needsAuthKey }
+
+    /// `hasStoredAuthKey` is the shared-Keychain presence check (nil when it
+    /// could not be read). A keyed feed is shown as fetching only when a key
+    /// is confirmed stored; otherwise the chip states the requirement.
+    public func fetchStatus(enrichmentEnabled: Bool, hasStoredAuthKey: Bool?) -> FetchStatus {
+        guard enrichmentEnabled else { return .optIn }
+        guard requiresAuthKey, hasStoredAuthKey != true else { return .active }
+        return .needsAuthKey
+    }
+
     public var description: String {
         switch self {
         case .urlhaus:
@@ -1556,6 +1568,9 @@ public struct V2FeedConfigSheet: View {
     // (the daemon gates egress on this key), so the status chip reflects that
     // rather than claiming "always-on" — which contradicted the opt-in card.
     @AppStorage("enrich.threatIntel") private var enrichThreatIntel: Bool = false
+    // Same Keychain item Settings → Network enrichment edits; read without UI
+    // so viewing a feed never raises a Keychain prompt.
+    @State private var credential = ThreatIntelCredentialState()
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1583,11 +1598,12 @@ public struct V2FeedConfigSheet: View {
                 .accessibilityLabel(String(localized: "ax.close", defaultValue: "Close"))
             }
 
-            if enrichThreatIntel, feed.requiresAuthKey {
-                V2StatusChip(String(localized: "ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key", defaultValue: "Built-in · enabled — needs an abuse.ch Auth-Key to fetch"), kind: .info, icon: "key")
-            } else if enrichThreatIntel {
+            switch feed.fetchStatus(enrichmentEnabled: enrichThreatIntel, hasStoredAuthKey: credential.hasStoredKey) {
+            case .needsAuthKey:
+                V2StatusChip(String(localized: "ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key", defaultValue: "Built-in · enabled — fetching requires an abuse.ch Auth-Key"), kind: .info, icon: "key")
+            case .active:
                 V2StatusChip(String(localized: "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h", defaultValue: "Built-in · active — fetched every 4h"), kind: .healthy, icon: "checkmark.seal")
-            } else {
+            case .optIn:
                 V2StatusChip(String(localized: "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching", defaultValue: "Built-in · opt in to enable fetching"), kind: .info, icon: "checkmark.seal")
             }
 
@@ -1598,5 +1614,9 @@ public struct V2FeedConfigSheet: View {
         }
         .padding(20)
         .frame(width: 460)
+        .onAppear {
+            guard feed.requiresAuthKey else { return }
+            credential.refresh { try SecretsStore().getNonInteractive(.abuseCHAuthKey) }
+        }
     }
 }
