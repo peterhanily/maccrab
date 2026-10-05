@@ -5,7 +5,7 @@
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
 [![Tests](https://img.shields.io/badge/tests-4892%20passing-brightgreen)]()
-[![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
+[![Rules](https://img.shields.io/badge/rules-486%20shipped%2C%20116%20loaded%20by%20default-blueviolet)](#what-runs-on-a-default-install)
 [![Version](https://img.shields.io/badge/version-1.22.5-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -26,7 +26,7 @@
 
 MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, a library of Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Detection runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console or vendor lock-in. Optional outbound features and the release build's signed update check are documented below. It draws on the same lineage as Sysmon + Sigma on Windows -- rich endpoint telemetry plus transparent, readable detection rules -- adapted to macOS's Endpoint Security framework.
 
-A distinguishing focus is **AI-coding-agent observability**: MacCrab's AI Guard and tamper-evident **Agent Traces** attribute file reads, config writes, MCP calls, and network egress to the specific agent session that caused them -- so when an AI coding tool (Claude Code, Codex, and the like), or a compromised one, touches something sensitive, you have a signed, replayable record. The Endpoint Security detection engine underneath gives that attribution teeth.
+A distinguishing focus is **AI-coding-agent observability**. On a default install, AI Guard recognises nine AI coding tools (Claude Code, Codex, Cursor, and others) and attributes the file reads, config writes, MCP-server activity, and network connections of their child processes to the tool session by process lineage. **Agent Traces** is off by default; turning it on adds higher-confidence attribution from the W3C `TRACEPARENT` an agent passes to its subprocesses and from the agent's own OpenTelemetry spans. The causal record can be exported as a signed `.maccrabtrace` bundle that `maccrabctl trace verify` checks offline and `maccrabctl trace replay` runs back through the rules. It is tamper-evident against non-root users, not proof against root -- see [docs/AGENT_TRACES.md](docs/AGENT_TRACES.md).
 
 It's a tool for reading and operating your own detection logic, not a managed EDR: there's no global adversary telemetry, no managed response, the experimental tier of the rule corpus is opt-in (the daemon defaults to the curated **stable** tier -- see [coverage](docs/COVERAGE.md)), and it ships from a **single-maintainer supply chain** (see [docs/SUPPLY_CHAIN_SECURITY.md](docs/SUPPLY_CHAIN_SECURITY.md)).
 
@@ -45,9 +45,10 @@ brew install --cask peterhanily/maccrab/maccrab
 # 2. Open the dashboard
 open /Applications/MacCrab.app
 
-# 3. Click "Enable Protection" on the Overview screen, then approve the
-#    extension in System Settings → General → Login Items & Extensions →
-#    Endpoint Security Extensions.
+# 3. On first launch the app asks macOS to load its extension (the setup
+#    sheet ends with "Enable Protection"). Approve it in System Settings →
+#    General → Login Items & Extensions → Endpoint Security Extensions
+#    (macOS 15 and later) or System Settings → Privacy & Security (macOS 13-14).
 ```
 
 > **Homebrew 6.0+:** the fully-qualified cask name (`peterhanily/maccrab/maccrab`) auto-taps the official [`homebrew-maccrab`](https://github.com/peterhanily/homebrew-maccrab) tap and trusts this cask in one step. The bare `--cask maccrab` fails with `Refusing to load cask … from untrusted tap`.
@@ -89,7 +90,7 @@ Once running, MacCrab gives you:
 - **Behavioral scoring** -- even if no single rule fires at critical severity, accumulated suspicious indicators across a process tree will still trigger an alert
 - **Campaign detection** -- multi-step attack chains (download, execute, persist, call home) are correlated across process lineage and time windows
 - **AI coding tool guardrails** -- monitors Claude Code, Codex, Cursor, and 6 other AI tools for credential access, project boundary escapes, and prompt injection
-- **Forensic plugins + the Rave store** -- run built-in forensic scanners on this Mac, or install signed community plugins from the [Rave store](https://rave.maccrab.com). Every plugin runs sandboxed and declares its read-set + network access for your consent before install
+- **Forensic plugins + the Rave store** -- run built-in forensic scanners on this Mac, or install signed plugins from the [Rave store](https://rave.maccrab.com). Every plugin in the store today is first-party (MacCrab-signed) and runs **without a sandbox**, with MacCrab's own access, including Full Disk Access when granted. Plugins signed by any other publisher run only inside a deny-default sandbox. The install sheet shows each plugin's declared read-set and network access before you consent
 - **Out-of-band rule updates** *(built, not yet provisioned)* -- the signed, anti-rollback channel is implemented end-to-end (`maccrabctl rules update`; pushed rules are detection-only and can never override a built-in rule), but **no rule-channel signing key ships yet**, so the command fails closed on every current build. Detection rules ship with the app until the channel is provisioned — see [`docs/RULE_CHANNEL.md`](docs/RULE_CHANNEL.md)
 - **No product analytics by default** -- detection data stays in local SQLite stores; release builds check the signed Sparkle update feed, and opt-in outbound features are documented below
 
@@ -107,7 +108,7 @@ Read the full [Privacy Policy](PRIVACY.md).
 
 ## Security
 
-MacCrab's detection engine runs as a System Extension (a sandboxed userspace process managed by `sysextd`, as required for Endpoint Security). The CLI and dashboard run as your user with read-only database access. The engine protects its own integrity with 8 layers of tamper detection including binary integrity checks, anti-debug, and process injection detection.
+MacCrab's detection engine runs as a System Extension: a root userspace process that `sysextd` launches and manages, as Endpoint Security requires. It is not App Sandboxed. The CLI and dashboard run as your user with read-only database access. The engine re-checks its own binary and rule hashes, watches its config files, and flags a debugger, a changed parent process, or loader-injection variables in its own environment; [Self-Defense](#detection-stack) below lists what those checks do and do not cover.
 
 To report a vulnerability, **do not open a public issue** -- email maccrab@peterhanily.com instead.
 
@@ -146,7 +147,7 @@ See [KNOWN_LIMITS.md](KNOWN_LIMITS.md) for transition and admission behavior and
 
 > **History:** Before v1.18, `tracegraph.db` had no retention sweep and could grow without bound — it was **field-observed at 17 GB**. v1.18 added time-based retention, a size cap, and an orphan sweep; v1.19 made all caps configurable. If you ran a pre-v1.18 build, a one-time prune reclaims the space on first launch.
 
-**Power and CPU:** the engine is event-driven and idles cheaply, but on a busy host the Unified Log collector, periodic SQLite WAL checkpoints, and FTS5 re-indexing do real work. MacCrab gates background-intensive work under battery/thermal pressure (`PowerGate`). On a battery-critical or low-disk Mac you can disable optional monitors (clipboard, USB, ultrasonic, EDR scan, etc.) in `daemon_config.json`.
+**Power and CPU:** the engine is event-driven and idles cheaply, but on a busy host the Unified Log collector, periodic SQLite WAL checkpoints, and FTS5 re-indexing do real work. MacCrab gates background-intensive work under battery/thermal pressure (`PowerGate`). On a battery-critical Mac you can lengthen the polled monitors' intervals (`usb_poll_interval`, `browser_extension_poll_interval`, `rootkit_poll_interval`, and the other `*_poll_interval` keys) in `daemon_config.json`. The ultrasonic and deception monitors are off unless you enable them; there is no setting that turns the USB or EDR-scan monitors off.
 
 ---
 
@@ -156,7 +157,7 @@ See [KNOWN_LIMITS.md](KNOWN_LIMITS.md) for transition and admission behavior and
 |---|---|
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Sysext approval failures, FDA silent drops, `make compile-rules` errors, "Protection active but no alerts", webhook validation rejections, Homebrew upgrade cleanup |
 | [UPGRADE.md](UPGRADE.md) | v1.2 LaunchDaemon → v1.3 SystemExtension migration, within-family upgrade notes, rollback guidance |
-| [FAQ.md](FAQ.md) | Top 14 questions: custom rules, data that leaves the machine, air-gapped use, SIEM export, license, macOS versions, Apple Silicon |
+| [FAQ.md](FAQ.md) | 18 questions: custom rules, data that leaves the machine, air-gapped use, SIEM export, license, macOS versions, Apple Silicon |
 | [Rules/README.md](Rules/README.md) | Sigma YAML rule authoring, field mappings, sequence rule syntax |
 | [docs/daemon_config.example.json](docs/daemon_config.example.json) | Annotated reference config with every tunable knob and every output-sink type |
 | [docs/suppressions.example.json](docs/suppressions.example.json) | Per-rule process allowlist format |
@@ -195,7 +196,7 @@ See [KNOWN_LIMITS.md](KNOWN_LIMITS.md) for transition and admission behavior and
                                                         +----------+-----------+
                                                         |  Incident Grouper    |
                                                         |  Dedup & Suppression |
-                                                        |  Self-Defense (8 ly) |
+                                                        |  Self-defense checks |
                                                         +----------+-----------+
                                                                    |
                             +------------+------------+------------+-----+--------+
@@ -351,11 +352,11 @@ MacCrab evaluates events through a 5-tier detection hierarchy:
 <details>
 <summary><strong>Event Sources (click to expand)</strong></summary>
 
-MacCrab ingests from 16 real-time collectors (the full list, with poll intervals, is in the [Monitors and Collectors](#monitors--collectors) table below), covering kernel-level process activity through application-layer permissions. The primary sources:
+MacCrab ingests from the collectors and monitors in the [Monitors and Collectors](#monitors--collectors) table below (with poll intervals), covering kernel-level process activity through application-layer permissions. The primary sources:
 
 | Source | What it captures |
 |--------|------------------|
-| **Endpoint Security framework** | 90+ kernel event types: process exec/fork/exit, file create/write/rename/unlink, signal delivery, kext loading, mmap, iokit operations |
+| **Endpoint Security framework** | Up to 20 notification types: process exec/fork/exit; file create/write/close/rename/unlink, ownership and mode changes; file opens on a credential-path allowlist; signals; kext loads; login-item (BTM) adds. Task-port reads, ptrace, remote-thread creation, code-signature invalidation, and W+X mmap/mprotect are subscribed only when an enabled rule needs them, which the default stable profile does not |
 | **Unified Log** | Real-time streaming from 18 subsystems (`com.apple.securityd`, `com.apple.authd`, `com.apple.xpc`, `com.apple.install`, Bluetooth, Wi-Fi, AirDrop, and more) |
 | **TCC permission monitor** | Watches system and user TCC databases for grants/revocations to accessibility, full disk access, screen recording, camera, microphone, and more |
 | **Network connection collector** | Outbound TCP/UDP connections with destination IP, port, hostname resolution, and owning process attribution |
@@ -376,13 +377,13 @@ See the Monitors and Collectors table below for the full list including USB, cli
 |---------|---------|--------------|
 | ESCollector | Endpoint Security framework events | Real-time |
 | UnifiedLogCollector | System log (18 subsystems incl. Bluetooth, Wi-Fi, AirDrop) | Real-time |
-| NetworkCollector | TCP/UDP connections | 5s |
+| NetworkCollector | TCP/UDP connections | 10s |
 | DNSCollector | DNS queries (BPF) | Real-time |
 | TCCMonitor | Privacy permission changes | Real-time |
 | FSEventsCollector | File system events (non-root fallback) | Real-time |
 | EDRMonitor | EDR/RMM/insider threat/remote access tool scanning | 120s |
 | USBMonitor | USB device connect/disconnect | 10s |
-| ClipboardMonitor | Clipboard content + injection detection | 3s |
+| ClipboardMonitor | Disabled in the System Extension, which has no user pasteboard. MacCrab.app checks the clipboard instead and forwards copied download-and-run shell commands for ClickFix detection (see [PRIVACY.md](PRIVACY.md)) | 3s (app) |
 | UltrasonicMonitor | DolphinAttack/NUIT audio injection | Configurable |
 | RootkitDetector | Dual-API process cross-reference | 120s |
 | EventTapMonitor | Keylogger detection | 30s |
@@ -392,7 +393,7 @@ See the Monitors and Collectors table below for the full list including USB, cli
 | GitSecurityMonitor | Git credential-helper abuse, SSH-agent hijack, malicious git hooks | Real-time |
 | SDRDeviceMonitor | SDR USB devices + rapid display hotplug (no electromagnetic analysis) | 60s |
 
-Poll intervals are the defaults from `DaemonConfig.swift`; most are tunable in
+Poll intervals are the code defaults; most are tunable in
 `daemon_config.json`. All of them are stretched under battery or thermal
 pressure by `PowerGate.adjustedInterval`, so observed latency can exceed the
 figure above on an unplugged or hot machine.
@@ -423,12 +424,12 @@ Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, C
 | Component | Description |
 |-----------|-------------|
 | **AI process tracker** | Identifies and tracks AI tool processes and their child process trees |
-| **Credential fence** | Alerts when AI tool children access any of 29 sensitive path patterns (SSH keys, `.env` files, AWS credentials, keychains, browser credential stores, kubeconfig, and more) |
+| **Credential fence** | Alerts when AI tool children access any of 27 sensitive path patterns (SSH keys, `.env` files, AWS credentials, keychains, browser credential stores, kubeconfig, and more) |
 | **Project boundary enforcement** | Detects when AI tools read or write files outside the current project directory |
 | **Prompt injection scanner** | Native structural scan of files AI tools read — invisible/zero-width unicode, bidi overrides (Trojan Source), and Unicode tag-character smuggling. No external dependency. |
 | **Activity by tool** | Dashboard AI Guard tab shows a live per-tool alert breakdown (credential / injection / boundary / other) sorted by severity |
 
-32 dedicated AI safety detection rules in `Rules/ai_safety/`. Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
+32 AI-safety rules ship in `Rules/ai_safety/`; 17 are in the default stable profile, and 5 of those cannot fire until you turn on Agent Traces or deploy deception bait (see [What runs on a default install](#what-runs-on-a-default-install)). Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
 
 </details>
 
@@ -441,10 +442,12 @@ This brings AgentSight-style correlation ([arXiv:2508.02736](https://arxiv.org/a
 
 **How it works:**
 
-1. **TRACEPARENT in process env** — when an AI coding tool spawns a child, MacCrab's ES collector reads the `TRACEPARENT` W3C trace-context value from the exec env block. The trace ID binds every descendant process to the originating LLM turn.
-2. **Loopback OTLP receiver** — MacCrab listens on `127.0.0.1:4318` (the OTel-canonical OTLP/HTTP port) for spans emitted by the AI tool's instrumentation. Loopback only — never routable from off-host. Off by default; enable from **Settings → Agent Traces** in the dashboard, or set `receiverEnabled: true` in `<supportDir>/agent_traces_config.json`.
+Agent Traces is **off by default**. Turn it on with **Receive agent traces** under **Investigation → Agent Traces** in the dashboard. The receiver starts immediately; `TRACEPARENT` binding starts the next time the engine starts. On a release install, turning the toggle off stops the receiver but leaves `TRACEPARENT` binding on, because the engine keeps `agent_traces_enabled: true` in the root-owned `/Library/Application Support/MacCrab/agent_traces_config.json`; set it to `false` there and restart the Mac to turn binding off.
+
+1. **TRACEPARENT in process env** — when Agent Traces is on and an AI coding tool spawns a child, MacCrab's ES collector reads the `TRACEPARENT` W3C trace-context value from the exec env block. The trace ID binds every descendant process to the originating LLM turn. With it off, AI Guard still attributes AI-tool child processes by process lineage, at lower confidence.
+2. **Loopback OTLP receiver** — MacCrab listens on `127.0.0.1:4318` (the OTel-canonical OTLP/HTTP port) for spans emitted by the AI tool's instrumentation. Loopback only — never routable from off-host. Off by default (see above).
 3. **Span sanitisation** — incoming OTLP spans pass through `OTLPAttributeSanitizer` before storage: prompt text, file paths, command output, and any value matching a credential / API-key shape gets redacted. Span IDs + structural attributes survive so correlation still works.
-4. **Causal graph storage** — spans + bound kernel events land in `tracegraph.db` (SQLite, AES-GCM column-level encryption, `0o660`). Each materialized trace appends one entry to an **append-only continuity hash chain** in the DB (`verifyHashChain()` flags a mutated, deleted, reordered, or inserted ledger row), and each exported bundle gets a **daemon-signed Merkle root** over its members. This is tamper-**evident**: it is forgery-resistant against a non-root attacker and verifiable by a party holding an out-of-band pinned key — local root can rewrite and re-sign and is out of scope (see [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) and [`docs/maccrabtrace.v1.spec.md` §6.4](docs/maccrabtrace.v1.spec.md)). An optional macOS unified-log record of each signed chain head acts as an independent witness (wired; its cross-run read-back is pending on-device verification).
+4. **Causal graph storage** — spans + bound kernel events land in `tracegraph.db` (SQLite, AES-GCM column-level encryption, `0o640`). Each materialized trace appends one entry to an **append-only continuity hash chain** in the DB (`verifyHashChain()` flags a mutated, deleted, reordered, or inserted ledger row), and each exported bundle gets a **daemon-signed Merkle root** over its members. This is tamper-**evident**: it is forgery-resistant against a non-root attacker and verifiable by a party holding an out-of-band pinned key — local root can rewrite and re-sign and is out of scope (see [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) and [`docs/maccrabtrace.v1.spec.md` §6.4](docs/maccrabtrace.v1.spec.md)). An optional macOS unified-log record of each signed chain head acts as an independent witness (wired; its cross-run read-back is pending on-device verification).
 5. **Investigation surface** — the dashboard's Investigation → TraceGraph workspace renders the trace as a hub-and-spoke graph (anchor in centre, members on a ring); each member shows what kernel side-effect ran under that span. The `maccrabctl trace export` CLI emits a signed `.maccrabtrace` bundle that `verify_bundle` (MCP) or `maccrabctl trace verify` can re-check offline. Signing reads key material from `<supportDir>/keys/`, which is root-owned (`drwx------`) on a release install: run the export under `sudo`, or export from MacCrab.app, for a **daemon-signed** bundle. Without root the CLI falls back to a user-domain signing key under `~/Library/Application Support/MacCrab/keys/` — the bundle still exports and self-verifies, but it is not signed by the daemon identity a relying party would have pinned; if that key is unusable too the export carries the honest `UNSIGNED` placeholder, which `maccrabctl trace verify` rejects.
 
 **Five MCP tools** (`get_traces`, `get_trace_detail`, `hunt_trace`, `verify_bundle`, `trace_from_event`) let an AI assistant pivot from any single event back to its containing trace and the agent turn that produced it.
@@ -523,18 +526,19 @@ Every event passes through enrichment before rule evaluation:
 </details>
 
 <details>
-<summary><strong>Self-Defense (8 layers) (click to expand)</strong></summary>
+<summary><strong>Self-Defense (click to expand)</strong></summary>
 
-The daemon protects its own integrity with continuous tamper detection:
+`SelfDefense` runs inside the engine and repeats its checks every 15 seconds:
 
-1. **Binary integrity** -- SHA-256 hash at startup, periodic recheck
-2. **Rules integrity** -- directory hash of compiled rules
-3. **Config file monitoring** -- dispatch source watches for modification
-4. **Database tamper detection** -- integrity checks on event/alert stores
-5. **Anti-debug** -- detects debugger attachment via `sysctl` checks
-6. **Signal interception** -- monitors SIGKILL/SIGTERM from non-system sources
-7. **LaunchDaemon plist watch** -- alerts on plist removal or modification
-8. **Process injection detection** -- detects attempts to inject into the daemon
+1. **Binary integrity** -- SHA-256 of the engine binary at startup, rechecked each cycle. A change that still carries MacCrab's Developer ID signature is treated as an update.
+2. **Rules integrity** -- hash of the compiled rules directory. A change outside a rule update raises a high alert; deleting the directory raises a critical one.
+3. **Config file watch** -- `actions.json` and `suppressions.json`, when they exist.
+4. **Anti-debug** -- a debugger attached to the engine (`P_TRACED` via `sysctl`).
+5. **Parent-process change** -- the engine being re-parented.
+6. **Loader-injection variables** -- `DYLD_INSERT_LIBRARIES` and similar variables in the engine's own environment.
+7. **Duplicate engine** -- another process running under the engine's name is logged, not alerted on.
+
+What it does not cover: it does not detect edits to database contents (the engine writes them constantly; the AES-GCM trace columns and the TraceGraph hash chain are the integrity checks there). It cannot intercept `SIGKILL`. Its LaunchDaemon-plist watch only applies to legacy pre-1.3 installs that still have the plist. Detecting another process reading the engine's task port or injecting a thread needs experimental-tier rules (`rule_profile: all`); the default stable profile does not subscribe to those events. Separately, the engine records a **MacCrab Self-Protection** alert when a control-plane change weakens detection, such as disabling an Endpoint Security subscription or clamping a detection threshold.
 
 </details>
 
@@ -607,6 +611,29 @@ Counts are derived from the YAML tree at release time — see
 breakdown. To regenerate this section after editing rules: `make readme-coverage`.
 <!-- COVERAGE-END -->
 
+### What runs on a default install
+
+Shipping a rule does not mean it runs. Unless `rule_profile` is `all`, the
+engine loads only rules marked `status: stable`: **116 of the 486** (98
+single-event, 11 sequence, 7 graph). `maccrabctl status` reports the
+single-event and sequence figures for the running engine.
+
+Seven of those 116 cannot fire until you turn on a feature that is off by
+default:
+
+- **Agent Traces** (`agent_traces_enabled`): `agent_traceparent_credential_access`,
+  `agent_filesystem_violation_high_conf`, and `agent_filesystem_violation_probable`
+  match `MachineAgentConfidence`, which is only set when Agent Traces is on; the
+  graph rule `maccrab_ai_agent_lethal_trifecta` needs a direct (TRACEPARENT)
+  agent link.
+- **Deception** (`deception_enabled`, with bait planted by
+  `maccrabctl deception deploy`): `honeyfile_accessed`,
+  `canary_skill_or_rules_read`, and `honeyprompt_canary_package_install`.
+
+Graph rules also evaluate only traces that TraceGraph has stored, so they pause
+while TraceGraph storage is refusing writes. `maccrabctl status` shows that
+state on its `TraceGraph:` line.
+
 ---
 
 ## Output Targets
@@ -651,18 +678,24 @@ A native status bar application whose dashboard is a workspace shell — a sideb
 Beyond live detection, MacCrab's **Forensics** workspace runs forensic scanners on
 this Mac — built-in collectors and analyzers plus optional community plugins.
 
-- **[Rave store](https://rave.maccrab.com)** — browse and install signed community
-  forensic plugins. Every plugin is Ed25519-signed, runs **fully sandboxed**
-  (a least-privilege `sandbox_init` profile + a brokered file-descriptor model),
-  and declares its read-set + network access so you consent **before** install.
+- **[Rave store](https://rave.maccrab.com)** — browse and install signed forensic
+  plugins. Every plugin is Ed25519-signed and declares its read-set + network
+  access so you consent **before** install. All 19 plugins in the store today
+  are first-party: they match the publisher key compiled into MacCrab and run
+  **without a sandbox**, with MacCrab's own access (including Full Disk Access
+  when granted). A plugin signed by any other publisher runs only under a
+  deny-default `sandbox_init` profile with brokered file reads. That
+  third-party lane is on by default for plugins you install; create
+  `~/Library/Application Support/MacCrab/tierb_third_party_disabled` to turn it
+  off.
 - **[maccrab-plugin-reference](https://github.com/peterhanily/maccrab-plugin-reference)**
   — what a good plugin looks like: reproducible, least-privilege, author-signed.
   Copy it to start your own.
 - **[maccrab-rave-submissions](https://github.com/peterhanily/maccrab-rave-submissions)**
   — the community submission + vetting path. Submit a plugin there for review.
 
-The trust model is the same one MacCrab applies to itself: signed, anti-rollback,
-revocable, and sandboxed. See [docs/PLUGIN_AUTHORING.md](docs/PLUGIN_AUTHORING.md)
+Every plugin is signed, anti-rollback, and revocable; only third-party plugins
+are sandboxed. See [docs/PLUGIN_AUTHORING.md](docs/PLUGIN_AUTHORING.md)
 and [docs/TRUST.md](docs/TRUST.md).
 
 ---
@@ -1024,7 +1057,7 @@ The baseline anomaly engine builds a profile of normal activity over a configura
 |-------------|---------|
 | **macOS** | 13.0+ (Ventura or later) |
 | **Swift** | 5.9+ |
-| **SystemExtension approval** | One-time user approval in System Settings → General → Login Items & Extensions → Endpoint Security Extensions (release builds). Dev builds skip this via the fallback chain. |
+| **SystemExtension approval** | One-time user approval in System Settings → General → Login Items & Extensions → Endpoint Security Extensions on macOS 15 and later, or System Settings → Privacy & Security on macOS 13-14 (release builds). Dev builds skip this via the fallback chain. |
 | **ES entitlement** | `com.apple.developer.endpoint-security.client` -- ships in release DMGs via an approved provisioning profile; dev builds use the `eslogger` / `kdebug` / FSEvents fallback chain |
 | **Full Disk Access** | Grant to MacCrab.app (release) or your terminal emulator (dev) for TCC database monitoring |
 | **Python** | 3.9+ with PyYAML (`pip install pyyaml`) for the rule compiler |
@@ -1123,7 +1156,7 @@ maccrab/
 │   │   │   ├── AlertDeduplicator.swift  #   Dedup and rate limiting
 │   │   │   ├── SuppressionManager.swift #   Per-rule process allowlists
 │   │   │   ├── ResponseAction.swift     #   Kill, quarantine, script, etc.
-│   │   │   ├── SelfDefense.swift        #   8-layer tamper protection
+│   │   │   ├── SelfDefense.swift        #   Engine tamper self-checks
 │   │   │   ├── RootkitDetector.swift    #   Hidden process detection
 │   │   │   ├── CrashReportMiner.swift   #   Exploitation indicator mining
 │   │   │   ├── PowerAnomalyDetector.swift # Power/thermal anomaly detection
