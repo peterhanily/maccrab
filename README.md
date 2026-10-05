@@ -642,7 +642,7 @@ state on its `TraceGraph:` line.
 |--------|--------|
 | **CLI stdout** | Human-readable colored output with severity indicators |
 | **JSONL file** | One JSON object per line, suitable for log ingestion pipelines |
-| **macOS notifications** | Native `UserNotifications` alerts for high and critical severity |
+| **macOS notifications** | Native `UserNotifications` banners for alerts at or above a configurable severity (critical by default; every alert still appears in the dashboard) |
 | **Webhook** | JSON POST to a configurable URL for integration with Slack, Teams, PagerDuty |
 | **Syslog** | RFC 5424 structured data over UDP/TCP for forwarding to any syslog receiver |
 | **Fleet telemetry** | Optional enrollment with a fleet server for centralized multi-host visibility (self-hosted prototype; outbound-only) |
