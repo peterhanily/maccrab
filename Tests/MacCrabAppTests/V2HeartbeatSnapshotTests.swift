@@ -399,6 +399,95 @@ struct V2HeartbeatSnapshotTests {
         #expect(status.maxFootprintBytes == 100_000_000)
     }
 
+    @Test("TraceGraph footprint latch explains cause, deficit, history, scope and auto-resume")
+    func traceGraphFootprintLatchDetail() throws {
+        let tripped = 1_759_600_000.5
+        let cleared = 1_759_500_000.0
+        let raw: [String: Any] = [
+            "enabled": true,
+            "accepting_mutations": false,
+            "blocked": true,
+            "store_available": true,
+            "startup_blocked": false,
+            "reason": "footprint_limit",
+            "footprint_bytes": NSNumber(value: 262_000_000),
+            "max_footprint_bytes": NSNumber(value: 262_144_000),
+            "recovery_deficit_bytes": NSNumber(value: 12_340_001),
+            "footprint_latch_last_tripped_at_unix": NSNumber(value: tripped),
+            "footprint_latch_last_cleared_at_unix": NSNumber(value: cleared),
+        ]
+        let status = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        typealias Admission = V2HeartbeatSnapshot.TraceGraphStorageAdmission
+
+        #expect(status.recoveryDeficitBytes == 12_340_001)
+        #expect(status.footprintLatchLastTrippedAtUnix == tripped)
+        #expect(status.footprintLatchLastClearedAtUnix == cleared)
+        #expect(status.diagnosticDictionary["footprint_latch_last_tripped_at_unix"] as? Double == tripped)
+        #expect(status.diagnosticDictionary["footprint_latch_last_cleared_at_unix"] as? Double == cleared)
+
+        let detail = status.operatorDetail
+        #expect(detail.contains("reached its on-disk size limit (262.0 MB used of a 262.2 MB cap)"))
+        #expect(detail.contains("free about 12.4 MB before writes resume"))
+        #expect(detail.contains("last tripped \(Admission.timestamp(tripped))"))
+        #expect(detail.contains("last cleared \(Admission.timestamp(cleared))"))
+        #expect(detail.contains("Graph rules and trace queries are paused"))
+        #expect(detail.contains("Events, alerts, Sigma rules and sequence rules keep running"))
+        #expect(detail.contains("resume automatically"))
+
+        // A deliberate pause is still an evidence gap: protection stays degraded.
+        #expect(status.evidenceUnavailable)
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        var heartbeatRaw: [String: Any] = [
+            "written_at_unix": now.timeIntervalSince1970,
+            "engine_pid": 101,
+            "engine_started_at_unix": now.addingTimeInterval(-300).timeIntervalSince1970,
+            "engine_version": "1.22.6", "engine_build": "test",
+            "boot_phase": "ready", "liveness": true, "rules_loaded": 10,
+            "collector_health": [["name": "ESCollector", "healthy": true,
+                                  "state": "healthy", "enabled": true]],
+        ]
+        #expect(V2MenuBarProtectionStatus.resolve(
+            heartbeat: V2HeartbeatSnapshot.decode(raw: heartbeatRaw), now: now) == .active)
+        heartbeatRaw["tracegraph_storage_admission"] = raw
+        #expect(V2MenuBarProtectionStatus.resolve(
+            heartbeat: V2HeartbeatSnapshot.decode(raw: heartbeatRaw), now: now) == .degraded)
+    }
+
+    @Test("TraceGraph footprint latch tolerates absent or invalid latch history")
+    func traceGraphFootprintLatchWithoutHistory() throws {
+        var raw: [String: Any] = [
+            "enabled": true, "blocked": true, "store_available": true,
+            "startup_blocked": false, "reason": "footprint_limit",
+        ]
+        let bare = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        #expect(bare.recoveryDeficitBytes == nil)
+        #expect(bare.footprintLatchLastTrippedAtUnix == nil)
+        #expect(bare.footprintLatchLastClearedAtUnix == nil)
+        #expect(bare.evidenceUnavailable)
+        #expect(bare.operatorDetail.contains("reached its on-disk size limit."))
+        #expect(!bare.operatorDetail.contains("last tripped"))
+        #expect(!bare.operatorDetail.contains("last cleared"))
+        #expect(!bare.operatorDetail.contains("Recovery"))
+        #expect(bare.operatorDetail.contains("resume automatically"))
+
+        let invalidTimes: [Any] = ["yesterday", -5.0, 0, Double.nan, Double.infinity]
+        for invalid in invalidTimes {
+            raw["footprint_latch_last_tripped_at_unix"] = invalid
+            raw["footprint_latch_last_cleared_at_unix"] = invalid
+            let status = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+            #expect(status.footprintLatchLastTrippedAtUnix == nil)
+            #expect(status.footprintLatchLastClearedAtUnix == nil)
+        }
+
+        raw["recovery_deficit_bytes"] = 0
+        let caughtUp = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        #expect(caughtUp.operatorDetail.contains("Recovery has reached its target"))
+
+        raw["reason"] = "low_free_space"
+        let other = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        #expect(other.operatorDetail.contains("hard storage admission is blocked (low free space)"))
+    }
+
     @Test("TraceGraph evidence gaps degrade every shared dashboard surface")
     func traceGraphGlobalDegradedSignal() {
         #expect(AppState.traceGraphEvidenceUnavailable(
