@@ -279,7 +279,7 @@ struct RaveInstallConsentSheet: View {
                     if !pf.needs.isEmpty { consentChipRow("TCC", pf.needs) }
                     consentChipRow("Emits", pf.emits)
                     HStack(spacing: 6) {
-                        Image(systemName: "network.slash").font(.caption2).foregroundStyle(.secondary)
+                        Image(systemName: "network").font(.caption2).foregroundStyle(.secondary)
                         Text("\(pf.networkChip) · \(pf.sandboxChip)")
                             .font(.caption2).foregroundStyle(.secondary)
                     }

@@ -18,11 +18,13 @@ public struct PluginFacts: Sendable {
     public let privacyLabel: String       // PrivacyClassDisplay.label
     public let isMetadataOnly: Bool       // drives green-shield vs lock affordance
 
-    /// Truthful with NO new data: Tier B plugins default to deny-all network and
-    /// there is no plugin sandbox yet (mirrors the consent sheet's C-D
-    /// disclosure). Co-located here so the "network: none · not sandboxed"
-    /// honesty stays consistent across both surfaces.
-    public var networkChip: String { "Network: none (default-deny)" }
+    /// Facts exist only for reserved `com.maccrab.*` ids, which
+    /// RaveNamespaceGuard keeps first-party. First-party scanners run without a
+    /// sandbox profile — built-ins in MacCrab's own process, installed ones via
+    /// FirstPartyTierBRunner — so nothing denies them the network. Only the
+    /// third-party lane (SandboxedTierBRunner) is deny-default; the consent
+    /// sheet's C-D disclosure says the same. Co-located so both surfaces agree.
+    public var networkChip: String { "Network: not restricted (runs with MacCrab's own access)" }
     public var sandboxChip: String { "Not sandboxed" }
 }
 

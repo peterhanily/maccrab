@@ -897,7 +897,7 @@ struct V2RaveCatalogBrowserView: View {
                 Text(f.privacyLabel).scaledSystem(10).foregroundStyle(.secondary)
             }
             HStack(spacing: 4) {
-                Image(systemName: "network.slash").scaledSystem(9).foregroundStyle(.secondary)
+                Image(systemName: "network").scaledSystem(9).foregroundStyle(.secondary)
                 Text(f.networkChip).scaledSystem(10).foregroundStyle(.secondary)
             }
         }
