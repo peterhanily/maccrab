@@ -30,9 +30,9 @@ where you choose to save them.
 ## What Leaves Your Machine
 
 **With default settings, MacCrab makes no enrichment network calls.** There is
-zero telemetry and no phone-home behavior. The four network-enrichment feeds are
-**off by default** (opt-in, as of v1.19.1); the only outbound connection a stock
-install makes is the signed software-update check.
+zero telemetry and no detection data leaves the Mac. The four network-enrichment
+feeds are **off by default** (opt-in, as of v1.19.1); the only outbound
+connection a stock install makes is the daily signed software-update check.
 
 ### What MacCrab connects to
 
