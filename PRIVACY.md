@@ -18,6 +18,7 @@ All data is collected and stored **locally** in `~/Library/Application Support/M
 | Causal traces and agent spans | Process/session attribution | SQLite `tracegraph.db` and `traces.db` |
 | Forensic cases, when created | Operator-requested investigations | User support directory under `Cases/<case-id>/` |
 | Behavioral baselines | Anomaly detection | JSON files in the support dir — `baseline.json`, `process_tree_model.json`, `mcp_baselines.json` |
+| Clipboard text (read by MacCrab.app) | ClickFix detection: a copied command that downloads and runs code, then is pasted into a shell | While the menubar app runs it checks the clipboard every 3 seconds and reads its text when it changes. Text that does not look like a shell delivery command (for example `curl … \| bash`, or `osascript` running a shell script) is discarded without being stored. A matching command (up to 8,192 characters) is written to a `0600` file in `/Library/Application Support/MacCrab/inbox/`; the engine reads and deletes that file and keeps the 32 most recent commands in memory until it restarts; a copy in `~/Library/Application Support/MacCrab/inbox/` is deleted at the app's next launch. If a shell runs that command within 60 seconds, the alert in `alerts.db` quotes its first 200 characters. There is currently no setting to turn this off; quitting MacCrab.app stops it. |
 
 In v1.22.0, `events.db` contains the checksummed event journal and a sparse
 search projection. Journal checksums detect damage; they do not encrypt its
@@ -44,7 +45,8 @@ turn it off:
 | **osv.dev** | CVE lookup, hourly when enabled | **Off** | Your installed-software inventory (anonymous) | Your installed software list | `vulnScanEnabled` |
 | **npm / PyPI / Homebrew / crates** registries | Package-freshness check, on install — **and on demand** via the MCP tools `analyze_package_metadata` / `verify_package_attestation` | **Off** | The package name (and, for attestation, the version) being looked up | The package **name** you install or ask about | `packageFreshnessEnabled` for the automatic check. The two MCP tools are a separate path and require the `config` agent capability, which a human must turn on in Settings → Agent Control (off by default) |
 | **crt.sh** | Certificate-Transparency lookup, on an observed destination domain | **Off** | The domain being looked up | The **domain** you connect to | `certTransparencyEnabled` |
-| **maccrab.com** (Sparkle appcast) | Update check (standard auto-update) | **On** | Feed request; the default user agent includes the app and Sparkle versions | Your source IP, app/version information, and ordinary request metadata; no detection data | Disable automatic update checks in Settings; manual checks still make a request |
+| **maccrab.com** (Sparkle appcast) | Update check (standard auto-update), daily | **On** | Feed request; the default user agent includes the app and Sparkle versions | Your source IP, app/version information, and ordinary request metadata; no detection data | No in-app setting today; the check runs from MacCrab.app, so it stops while the app is not running. Manual checks also make a request |
+| **rave.maccrab.com** (forensic plugin store) | Opening **Forensics → Catalog**; installing a plugin; with at least one store plugin installed, about hourly (signed revocation list) and when you open **Forensics** (update check) | **Off** until you open the Catalog or install a plugin | Requests for the signed catalog, revocation list, and plugin download | Your source IP, which plugins you browse or install, and ordinary request metadata; no detection data | Uninstall store plugins and leave the Catalog closed |
 
 Toggle the four enrichment feeds in **Settings → Network enrichment**. That
 writes `~/Library/Application Support/MacCrab/user_overrides.json` — a file in
@@ -211,13 +213,19 @@ When enrolled in fleet management, each push carries exactly the fields of the
   see some path fragments. The IOC value itself is deliberately **not**
   redacted: sharing it is the entire point of the feature.
 
-### Third-Party Forensic Plugins (opt-in)
+### Forensic Plugins (opt-in)
 
-If you install a forensic plugin from the rave marketplace (or sideload one), it
-is **third-party code** and runs **only under a deny-default sandbox**. It can
-read **only** the files its signed manifest declares, and the install consent
-sheet shows you the exact read-set, derived from those declared capabilities (a
-plugin cannot under-declare). Specifics:
+Every plugin in the Rave store today is **first-party**: it matches the
+publisher key compiled into MacCrab and runs **without a sandbox**, with
+MacCrab's own access, including Full Disk Access when granted. Its consent
+sheet shows its declared read-set and network access, but nothing outside its
+own code enforces that declaration.
+
+A plugin signed by any other publisher (sideloaded, or a future community
+store entry) is **third-party code** and runs **only under a deny-default
+sandbox**. It can read **only** the files its signed manifest declares, and the
+install consent sheet shows you the exact read-set, derived from those declared
+capabilities (a plugin cannot under-declare). Specifics:
 
 - **Personal-comms stores** (Messages `chat.db`, Mail, Safari history, …) are
   never read live — MacCrab snapshots them into a plugin-unwritable copy and the
@@ -228,8 +236,9 @@ plugin cannot under-declare). Specifics:
 - You can revoke a publisher's trust, freeze the catalog, or locally disable all
   third-party plugin execution at any time.
 
-By default no third-party plugins are installed and the marketplace ships
-fail-closed.
+By default no plugins from the store are installed. Third-party execution is
+on by default for plugins you install with publisher trust; creating
+`~/Library/Application Support/MacCrab/tierb_third_party_disabled` turns it off.
 
 ## Data Retention
 
