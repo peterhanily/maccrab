@@ -628,11 +628,19 @@ public actor RollingCausalGraph {
     }
 
     private func anchorDedupKey(_ anchor: AnchorTrigger) -> String? {
-        // Only the agent-activity anchors dedup. The rest are rare by nature and
-        // a repeat genuinely is a separate incident worth its own trace.
+        // Repeating anchors dedup by behavioural identity. Persistence and
+        // external anchors are rare by nature, and a repeat genuinely is a
+        // separate incident worth its own trace.
         switch anchor {
         case .credentialAccess(_, let stableProcessIdentity, let fileEntityId, let operation):
             return "credentialAccess:\(stableProcessIdentity):\(fileEntityId):\(operation)"
+        case .unsignedDownloadExecution(_, let stableProcessIdentity):
+            // Not rare on a developer Mac: tools re-run unsigned binaries from
+            // /tmp and caches, and every event from such a process re-fires.
+            // A field store held 34k traces in 9 h, 98.6% of them this anchor
+            // from 361 roots. The first run still anchors; repeats of the same
+            // binary inside the window do not.
+            return "unsignedDownloadExecution:\(stableProcessIdentity)"
         case .aiAgentSpawnsShell(let agentEntityId, _):
             return "aiAgentSpawnsShell:\(agentEntityId)"
         case .externalNetworkFromAgent(let agentEntityId, let networkEntityId):

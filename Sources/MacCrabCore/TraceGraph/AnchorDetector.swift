@@ -30,7 +30,10 @@ public enum AnchorTrigger: Sendable, Equatable {
     )
     case persistenceCreated(processEntityId: String, persistenceEntityId: String)
     case aiAgentSpawnsShell(agentEntityId: String, processEntityId: String)
-    case unsignedDownloadExecution(processEntityId: String)
+    case unsignedDownloadExecution(
+        processEntityId: String,
+        stableProcessIdentity: String
+    )
     case externalNetworkFromAgent(agentEntityId: String, networkEntityId: String)
     case external(reason: String, anchorEntityId: String)
 
@@ -39,7 +42,7 @@ public enum AnchorTrigger: Sendable, Equatable {
         case .credentialAccess(_, _, let fileId, _):     return fileId
         case .persistenceCreated(_, let persistenceId):  return persistenceId
         case .aiAgentSpawnsShell(_, let processId):      return processId
-        case .unsignedDownloadExecution(let processId):  return processId
+        case .unsignedDownloadExecution(let processId, _): return processId
         case .externalNetworkFromAgent(_, let netId):    return netId
         case .external(_, let anchorId):                 return anchorId
         }
@@ -115,7 +118,7 @@ public enum AnchorDetector {
             let fileEntityId = FileNode.entityType + ":" + file.pathHash
             anchors.append(.credentialAccess(
                 processEntityId: processEntityId,
-                stableProcessIdentity: stableCredentialProcessIdentity(context.processNode),
+                stableProcessIdentity: stableProcessIdentity(context.processNode),
                 fileEntityId: fileEntityId,
                 operation: context.credentialOperation
             ))
@@ -163,15 +166,18 @@ public enum AnchorDetector {
               policy.trustedConduitPolicy.isPathInDenylist(
                 processNode.executablePath) else { return nil }
         return .unsignedDownloadExecution(
-            processEntityId: ProcessNode.entityType + ":" + processNode.processKey)
+            processEntityId: ProcessNode.entityType + ":" + processNode.processKey,
+            stableProcessIdentity: stableProcessIdentity(processNode))
     }
 
-    /// Identity used only to aggregate repeated credential observations. A
-    /// process key includes pid/pidversion, so short-lived polling CLIs mint a
-    /// new key on every invocation and can otherwise materialize hundreds of
-    /// copies of the same trace. Prefer the signed binary identity, then its
-    /// content hash, and finally its normalized executable path.
-    private static func stableCredentialProcessIdentity(_ process: ProcessNode) -> String {
+    /// Identity used only to aggregate repeated anchor observations (credential
+    /// access, unsigned execution from a download/temp path). A process key
+    /// includes pid/pidversion, so short-lived polling CLIs and build tools
+    /// re-run from /tmp mint a new key on every invocation and can otherwise
+    /// materialize thousands of copies of the same trace. Prefer the signed
+    /// binary identity, then its content hash, and finally its normalized
+    /// executable path.
+    private static func stableProcessIdentity(_ process: ProcessNode) -> String {
         if let teamId = process.signingTeamId, !teamId.isEmpty,
            let signingId = process.signingIdentifier, !signingId.isEmpty {
             return "signer:\(teamId):\(signingId)"

@@ -700,6 +700,64 @@ struct EventToRollingCausalGraphBridgeTests {
         await store.close()
     }
 
+    @Test("Unsigned download-path anchors aggregate repeated runs of the same binary")
+    func unsignedDownloadAnchorDedupUsesStableExecutableIdentity() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let rollingGraph = RollingCausalGraph(
+            store: store,
+            materializer: TraceMaterializer(store: store)
+        )
+        let bridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+
+        func unsignedExec(
+            pid: Int32,
+            at timestamp: Date,
+            executable: String = "/private/tmp/build-tool/bin/helper"
+        ) -> Event {
+            Event(
+                timestamp: timestamp,
+                eventCategory: .process,
+                eventType: .start,
+                eventAction: "exec",
+                process: processInfo(
+                    pid: pid,
+                    executable: executable,
+                    appleSigned: false,
+                    startTime: timestamp,
+                    auditIdentity: audit(pidversion: UInt32(pid), pid: pid)
+                )
+            )
+        }
+
+        // Field shape: the same unsigned helper re-run from /private/tmp by a
+        // build or agent loop, every run a distinct kernel process identity.
+        var traces: [Trace] = []
+        for run in 0..<20 {
+            traces += await bridge.process(unsignedExec(
+                pid: 600 + Int32(run),
+                at: now.addingTimeInterval(Double(run) * 10)
+            ))
+        }
+        #expect(traces.count == 1, "the first run anchors; in-window repeats do not")
+        #expect(traces.first?.title == "Unsigned binary executed from download path")
+
+        // A different binary remains a distinct behavioural fact.
+        #expect(await bridge.process(unsignedExec(
+            pid: 700,
+            at: now.addingTimeInterval(200),
+            executable: "/Users/me/Downloads/other-tool"
+        )).count == 1)
+
+        // The same binary may materialize again after the five-minute window.
+        #expect(await bridge.process(unsignedExec(
+            pid: 701,
+            at: now.addingTimeInterval(301)
+        )).count == 1)
+        #expect(try await store.traceCount() == 3)
+        await store.close()
+    }
+
     @Test("Credential anchor identity prefers signer, then executable hash")
     func credentialAnchorIdentityPrecedence() {
         let file = FileNode(
