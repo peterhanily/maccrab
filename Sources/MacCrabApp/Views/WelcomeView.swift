@@ -213,7 +213,7 @@ struct WelcomeView: View {
             VStack(alignment: .leading, spacing: 12) {
                 FeatureRow(icon: "shield.checkered",
                     title: String(localized: "welcome.feature.detection", defaultValue: "Real-Time Detection"),
-                    description: String(localized: "welcome.feature.detectionDesc", defaultValue: "Hundreds of detection rules monitor your Mac for threats in real time"))
+                    description: String(localized: "welcome.feature.detectionDesc", defaultValue: "More than a hundred detection rules monitor your Mac for threats in real time"))
                 FeatureRow(icon: "brain",
                     title: String(localized: "welcome.feature.ai", defaultValue: "AI Safety"),
                     description: String(localized: "welcome.feature.aiDesc", defaultValue: "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access"))
@@ -223,10 +223,10 @@ struct WelcomeView: View {
                 // "do not describe this as an active prevention" rule).
                 FeatureRow(icon: "hand.raised",
                     title: String(localized: "welcome.feature.prevention", defaultValue: "Automated Response"),
-                    description: String(localized: "welcome.feature.preventionDesc", defaultValue: "Optional modules sinkhole malicious domains, block bad IPs, lock persistence locations, and can kill or quarantine on high-severity alerts \u{2014} response follows detection"))
+                    description: String(localized: "welcome.feature.preventionDesc", defaultValue: "Optional modules sinkhole malicious domains, lock persistence locations, and can kill or quarantine on high-severity alerts \u{2014} response follows detection"))
                 FeatureRow(icon: "lock.shield",
                     title: String(localized: "welcome.feature.privacy", defaultValue: "Private by default"),
-                    description: String(localized: "welcome.feature.privacyDesc", defaultValue: "Runs on-device by default \u{2014} nothing leaves your Mac unless you turn on optional enrichment"))
+                    description: String(localized: "welcome.feature.privacyDesc", defaultValue: "Runs on-device by default \u{2014} your events and alerts stay on your Mac unless you turn on optional enrichment"))
             }
             .padding(.horizontal, 20)
 

@@ -405,13 +405,13 @@
 "welcome.allSet" = "Checklista för installation";
 "welcome.ready" = "MacCrab är redo att skydda din Mac.";
 "welcome.feature.detection" = "Detektering i realtid";
-"welcome.feature.detectionDesc" = "Hundratals detekteringsregler övervakar din Mac efter hot i realtid";
+"welcome.feature.detectionDesc" = "Över hundra detekteringsregler övervakar din Mac efter hot i realtid";
 "welcome.feature.ai" = "AI-säkerhet";
 "welcome.feature.aiDesc" = "Övervakar AI-kodverktyg som Claude, Cursor och Copilot för åtkomst till autentiseringsuppgifter";
 "welcome.feature.prevention" = "Automatiserad respons";
-"welcome.feature.preventionDesc" = "Valfria moduler avleder skadliga domäner, blockerar skadliga IP-adresser, låser persistensplatser och kan avsluta processer eller sätta filer i karantän vid larm med hög allvarlighetsgrad — responsen följer på detekteringen";
+"welcome.feature.preventionDesc" = "Valfria moduler avleder skadliga domäner, låser persistensplatser och kan avsluta processer eller sätta filer i karantän vid larm med hög allvarlighetsgrad — responsen följer på detekteringen";
 "welcome.feature.privacy" = "Privat som standard";
-"welcome.feature.privacyDesc" = "Körs på enheten som standard — inget lämnar din Mac om du inte aktiverar valfri berikning";
+"welcome.feature.privacyDesc" = "Körs på enheten som standard — dina händelser och larm stannar på din Mac om du inte aktiverar valfri berikning";
 "welcome.setup.engineActive" = "Detekteringsmotorn är aktiv";
 "welcome.setup.prevention" = "Aktivera förebyggande under fliken Förebyggande";
 

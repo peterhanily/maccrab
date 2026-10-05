@@ -405,13 +405,13 @@
 "welcome.allSet" = "セットアップチェックリスト";
 "welcome.ready" = "MacCrabがあなたのMacを保護する準備ができました。";
 "welcome.feature.detection" = "リアルタイム検出";
-"welcome.feature.detectionDesc" = "数百件の検出ルールがリアルタイムでMacの脅威を監視します";
+"welcome.feature.detectionDesc" = "100件を超える検出ルールがリアルタイムでMacの脅威を監視します";
 "welcome.feature.ai" = "AI安全性";
 "welcome.feature.aiDesc" = "Claude、Cursor、CopilotなどのAIコーディングツールの認証情報アクセスを監視します";
 "welcome.feature.prevention" = "自動対応";
-"welcome.feature.preventionDesc" = "オプションのモジュールが悪意のあるドメインをシンクホール化し、不正なIPをブロックし、永続化場所をロックし、重大度の高いアラート時にはプロセスの終了やファイルの隔離を実行できます — 対応は検出の後に行われます";
+"welcome.feature.preventionDesc" = "オプションのモジュールが悪意のあるドメインをシンクホール化し、永続化場所をロックし、重大度の高いアラート時にはプロセスの終了やファイルの隔離を実行できます — 対応は検出の後に行われます";
 "welcome.feature.privacy" = "デフォルトでプライベート";
-"welcome.feature.privacyDesc" = "デフォルトではデバイス上で動作 — 任意のエンリッチメントを有効にしない限り、Mac の外にデータが出ることはありません";
+"welcome.feature.privacyDesc" = "デフォルトではデバイス上で動作 — 任意のエンリッチメントを有効にしない限り、イベントとアラートは Mac の外に出ません";
 "welcome.setup.engineActive" = "検出エンジンは稼働中";
 "welcome.setup.prevention" = "予防タブで予防を有効にしてください";
 

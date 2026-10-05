@@ -405,13 +405,13 @@
 "welcome.allSet" = "設定檢查清單";
 "welcome.ready" = "MacCrab 已準備好保護您的 Mac。";
 "welcome.feature.detection" = "即時偵測";
-"welcome.feature.detectionDesc" = "數百條偵測規則即時監控您 Mac 上的威脅";
+"welcome.feature.detectionDesc" = "一百多條偵測規則即時監控您 Mac 上的威脅";
 "welcome.feature.ai" = "AI 安全";
 "welcome.feature.aiDesc" = "監控 Claude、Cursor 和 Copilot 等 AI 程式設計工具的憑證存取行為";
 "welcome.feature.prevention" = "自動回應";
-"welcome.feature.preventionDesc" = "可選模組可將惡意網域導入陷阱、封鎖有害 IP、鎖定持續性位置，並可在高嚴重性警示時終止程序或隔離檔案 — 回應在偵測之後進行";
+"welcome.feature.preventionDesc" = "可選模組可將惡意網域導入陷阱、鎖定持續性位置，並可在高嚴重性警示時終止程序或隔離檔案 — 回應在偵測之後進行";
 "welcome.feature.privacy" = "預設隱私保護";
-"welcome.feature.privacyDesc" = "預設在裝置上執行 — 除非您開啟選用的增強功能，否則資料不會離開您的 Mac";
+"welcome.feature.privacyDesc" = "預設在裝置上執行 — 除非您開啟選用的增強功能，否則您的事件與警示不會離開您的 Mac";
 "welcome.setup.engineActive" = "偵測引擎作用中";
 "welcome.setup.prevention" = "在「預防」分頁中啟用預防機制";
 

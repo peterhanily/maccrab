@@ -405,13 +405,13 @@
 "welcome.allSet" = "Lista kontrolna konfiguracji";
 "welcome.ready" = "MacCrab jest gotowy chronić Twojego Maca.";
 "welcome.feature.detection" = "Wykrywanie w czasie rzeczywistym";
-"welcome.feature.detectionDesc" = "Setki reguł wykrywania monitorują Twojego Maca pod kątem zagrożeń w czasie rzeczywistym";
+"welcome.feature.detectionDesc" = "Ponad sto reguł wykrywania monitoruje Twojego Maca pod kątem zagrożeń w czasie rzeczywistym";
 "welcome.feature.ai" = "Bezpieczeństwo AI";
 "welcome.feature.aiDesc" = "Monitoruje narzędzia AI do kodowania, takie jak Claude, Cursor i Copilot, pod kątem dostępu do poświadczeń";
 "welcome.feature.prevention" = "Zautomatyzowana reakcja";
-"welcome.feature.preventionDesc" = "Opcjonalne moduły przekierowują złośliwe domeny, blokują szkodliwe adresy IP, blokują lokalizacje persystencji i mogą zakończyć proces lub poddać plik kwarantannie przy alertach o wysokiej ważności — reakcja następuje po wykryciu";
+"welcome.feature.preventionDesc" = "Opcjonalne moduły przekierowują złośliwe domeny, blokują lokalizacje persystencji i mogą zakończyć proces lub poddać plik kwarantannie przy alertach o wysokiej ważności — reakcja następuje po wykryciu";
 "welcome.feature.privacy" = "Prywatność domyślnie";
-"welcome.feature.privacyDesc" = "Domyślnie działa na urządzeniu — nic nie opuszcza Twojego Maca, dopóki nie włączysz opcjonalnego wzbogacania";
+"welcome.feature.privacyDesc" = "Domyślnie działa na urządzeniu — Twoje zdarzenia i alerty nie opuszczają Twojego Maca, dopóki nie włączysz opcjonalnego wzbogacania";
 "welcome.setup.engineActive" = "Silnik wykrywania aktywny";
 "welcome.setup.prevention" = "Włącz zapobieganie na karcie Zapobieganie";
 

@@ -405,13 +405,13 @@
 "welcome.allSet" = "设置清单";
 "welcome.ready" = "MacCrab已准备好保护您的Mac。";
 "welcome.feature.detection" = "实时检测";
-"welcome.feature.detectionDesc" = "数百条检测规则实时监控您的Mac以发现威胁";
+"welcome.feature.detectionDesc" = "一百多条检测规则实时监控您的Mac以发现威胁";
 "welcome.feature.ai" = "AI安全";
 "welcome.feature.aiDesc" = "监控Claude、Cursor、Copilot等AI编程工具的凭据访问行为";
 "welcome.feature.prevention" = "自动响应";
-"welcome.feature.preventionDesc" = "可选模块可将恶意域名引入陷阱、拦截有害 IP、锁定持久化位置，并可在高危警报时终止进程或隔离文件 — 响应在检测之后进行";
+"welcome.feature.preventionDesc" = "可选模块可将恶意域名引入陷阱、锁定持久化位置，并可在高危警报时终止进程或隔离文件 — 响应在检测之后进行";
 "welcome.feature.privacy" = "默认隐私保护";
-"welcome.feature.privacyDesc" = "默认在设备上运行 — 除非您开启可选的增强功能，否则数据不会离开您的 Mac";
+"welcome.feature.privacyDesc" = "默认在设备上运行 — 除非您开启可选的增强功能，否则您的事件和警报不会离开您的 Mac";
 "welcome.setup.engineActive" = "检测引擎已激活";
 "welcome.setup.prevention" = "在“预防”标签页中启用预防";
 

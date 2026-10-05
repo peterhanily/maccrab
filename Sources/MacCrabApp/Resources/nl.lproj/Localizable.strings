@@ -405,13 +405,13 @@
 "welcome.allSet" = "Configuratiechecklist";
 "welcome.ready" = "MacCrab is klaar om je Mac te beschermen.";
 "welcome.feature.detection" = "Realtime detectie";
-"welcome.feature.detectionDesc" = "Honderden detectieregels bewaken je Mac in realtime op bedreigingen";
+"welcome.feature.detectionDesc" = "Meer dan honderd detectieregels bewaken je Mac in realtime op bedreigingen";
 "welcome.feature.ai" = "AI-veiligheid";
 "welcome.feature.aiDesc" = "Bewaakt AI-codeertools zoals Claude, Cursor en Copilot op toegang tot referenties";
 "welcome.feature.prevention" = "Geautomatiseerde reactie";
-"welcome.feature.preventionDesc" = "Optionele modules leiden kwaadaardige domeinen om, blokkeren schadelijke IP-adressen, vergrendelen persistentielocaties en kunnen bij meldingen met hoge ernst processen beëindigen of bestanden in quarantaine plaatsen — de reactie volgt op de detectie";
+"welcome.feature.preventionDesc" = "Optionele modules leiden kwaadaardige domeinen om, vergrendelen persistentielocaties en kunnen bij meldingen met hoge ernst processen beëindigen of bestanden in quarantaine plaatsen — de reactie volgt op de detectie";
 "welcome.feature.privacy" = "Privé door ontwerp";
-"welcome.feature.privacyDesc" = "Draait standaard op het apparaat — niets verlaat je Mac tenzij je de optionele verrijking inschakelt";
+"welcome.feature.privacyDesc" = "Draait standaard op het apparaat — je gebeurtenissen en meldingen blijven op je Mac tenzij je de optionele verrijking inschakelt";
 "welcome.setup.engineActive" = "Detectie-engine actief";
 "welcome.setup.prevention" = "Schakel preventie in op het tabblad Preventie";
 

@@ -405,13 +405,13 @@
 "welcome.allSet" = "Elenco di configurazione";
 "welcome.ready" = "MacCrab è pronto a proteggere il tuo Mac.";
 "welcome.feature.detection" = "Rilevamento in Tempo Reale";
-"welcome.feature.detectionDesc" = "Centinaia di regole di rilevamento monitorano il tuo Mac alla ricerca di minacce in tempo reale";
+"welcome.feature.detectionDesc" = "Oltre cento regole di rilevamento monitorano il tuo Mac alla ricerca di minacce in tempo reale";
 "welcome.feature.ai" = "Sicurezza IA";
 "welcome.feature.aiDesc" = "Monitora l'accesso alle credenziali da parte di strumenti di coding IA come Claude, Cursor e Copilot";
 "welcome.feature.prevention" = "Risposta automatizzata";
-"welcome.feature.preventionDesc" = "Moduli opzionali deviano i domini dannosi, bloccano gli IP dannosi, proteggono le posizioni di persistenza e possono terminare processi o mettere file in quarantena su avvisi di gravità alta — la risposta segue il rilevamento";
+"welcome.feature.preventionDesc" = "Moduli opzionali deviano i domini dannosi, proteggono le posizioni di persistenza e possono terminare processi o mettere file in quarantena su avvisi di gravità alta — la risposta segue il rilevamento";
 "welcome.feature.privacy" = "Privato per impostazione predefinita";
-"welcome.feature.privacyDesc" = "Funziona sul dispositivo per impostazione predefinita — nulla lascia il tuo Mac a meno che tu non attivi l'arricchimento opzionale";
+"welcome.feature.privacyDesc" = "Funziona sul dispositivo per impostazione predefinita — i tuoi eventi e avvisi restano sul tuo Mac a meno che tu non attivi l'arricchimento opzionale";
 "welcome.setup.engineActive" = "Motore di rilevamento attivo";
 "welcome.setup.prevention" = "Attiva la prevenzione nel pannello Prevenzione";
 
