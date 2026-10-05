@@ -8,17 +8,35 @@
 // DaemonSetup.initialize needs a real support directory, Endpoint Security and
 // root-owned paths, so a full boot cannot run here. These tests drive the same
 // store calls and the same decision functions DaemonSetup and DaemonBootstrap
-// use; the source-order tests in CausalGraphSubstrateRetentionTests pin that
-// failPreIngestionStorage is reached only for `.notReady`.
+// use; the source-order tests in CausalGraphSubstrateRetentionTests pin that a
+// `.notReady` store is closed and detached after its drain.
 
 import Testing
 import Foundation
+import CSQLCipher
 @testable import MacCrabCore
 @testable import MacCrabAgentKit
 
 @Suite("TraceGraph latched startup")
 struct TraceGraphLatchedStartupTests {
     private let mib: Int64 = 1_048_576
+
+    private final class FaultSwitch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var on = false
+
+        var isOn: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return on
+        }
+
+        func turnOn() {
+            lock.lock()
+            on = true
+            lock.unlock()
+        }
+    }
 
     private func makeStore() async throws -> (SQLiteCausalGraphStore, URL) {
         let url = FileManager.default.temporaryDirectory
@@ -158,7 +176,7 @@ struct TraceGraphLatchedStartupTests {
         await store.close()
     }
 
-    @Test("A store with no writable handle still fails closed instead of starting latched")
+    @Test("A store with no writable handle is not ready, so it is detached instead of starting latched")
     func closedHandleIsNotReady() async throws {
         let (store, url) = try await makeStore()
         defer { removeFamily(url) }
@@ -178,5 +196,63 @@ struct TraceGraphLatchedStartupTests {
         // only through its separate `!traceGraphAttached` clause.
         #expect(DaemonSetup.traceGraphStartupAdmission(
             .unavailable(reason: .lowFreeSpace)) == .notReady)
+    }
+
+    @Test("A drain that fails on an SQLite fault is not ready, never latched as footprint_limit")
+    func sqliteFaultDuringDrainIsNotLatched() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracegraph-drain-fault-\(UUID().uuidString).db")
+        defer { removeFamily(url) }
+        let faulting = FaultSwitch()
+        let corrupt = CausalGraphInjectedSQLiteFailure(resultCode: SQLITE_CORRUPT)
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: url.path,
+            transactionFailureProbe: { operation in
+                operation == .begin && faulting.isOn ? corrupt : nil
+            }
+        )
+        let now = Date(timeIntervalSince1970: 2_000_300_000)
+        // Past the 90-day retention, so the first bounded pass must delete.
+        let expired = now.addingTimeInterval(-100 * 24 * 3_600)
+        for index in 0..<200 {
+            try await store.saveTrace(
+                trace("expired-\(index)", updatedAt: expired, payloadBytes: 40 * 1_024),
+                members: []
+            )
+        }
+        #expect(await store.walCheckpointTruncate())
+        let footprint = try #require(await store.storageFootprintBytes())
+        let reserve = 8 * mib
+        let initial = await store.updateStorageAdmission(
+            maxFootprintBytes: footprint + 2 * mib + reserve,
+            freeSpaceFloorBytes: nil,
+            transactionReserveBytes: reserve
+        )
+        #expect(!initial.blocked)
+        // At or above proactive, hence above resume: the latch helper would
+        // trip the footprint latch on this store.
+        #expect((initial.footprintBytes ?? -1)
+                >= (initial.proactiveRecoveryThresholdBytes ?? Int64.max))
+
+        faulting.turnOn()
+        let recovery = await store.recoverStorageBeforeProducers(
+            configuredRetentionHours: 90 * 24,
+            cutoffRungs: DaemonTimers.tracegraphRecoveryCutoffHours,
+            now: now,
+            maximumPasses: DaemonTimers.tracegraphStartupRecoveryMaximumPasses
+        )
+        #expect(recovery.disposition == .nonconverged(.recoveryFailed))
+        #expect(DaemonSetup.traceGraphStartupAdmission(recovery) == .notReady)
+
+        let startup = await DaemonSetup.admitTraceGraphStartup(
+            store: store,
+            recovery: recovery
+        )
+        #expect(startup.admission == .notReady)
+        #expect(startup.proof == recovery)
+        let status = await store.storageAdmissionStatus()
+        #expect(!status.blocked, "the startup step must not trip the footprint latch")
+        #expect(status.reason != .footprintLimit)
+        await store.close()
     }
 }

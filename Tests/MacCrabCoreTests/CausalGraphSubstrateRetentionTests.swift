@@ -1688,7 +1688,7 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(branch.contains("causalStoreOuter = nil"))
     }
 
-    @Test("Bootstrap decides graph startup before every producer marker and fails closed only when not ready")
+    @Test("Bootstrap decides graph startup before every producer marker; after the drain it latches or detaches, never exits")
     func bootstrapRequiresTraceGraphStartupProofBeforeIngestion() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1713,26 +1713,28 @@ struct CausalGraphSubstrateRetentionTests {
             "let startup = await Self.admitTraceGraphStartup("
         ))
         // The drain result no longer gates boot directly: a store that cannot
-        // reach headroom starts latched, and only `.notReady` reaches the
-        // pre-ingestion failure.
+        // reach headroom starts latched, and one that cannot be latched is
+        // closed and detached. Only the activation-boundary reprobe below can
+        // still fail pre-ingestion storage for TraceGraph.
         #expect(!setup.contains("guard recovery.writableBeforeProducers"))
-        let setupFailClosed = try #require(setup.range(of:
+        let setupDecision = try #require(setup.range(of:
             "guard startup.admission == .latched else",
             range: setupGuard.upperBound..<setup.endIndex
         ))
-        let setupFailure = try #require(setup.range(of:
-            "try DaemonBootstrap.failPreIngestionStorage(",
-            range: setupFailClosed.upperBound..<setup.endIndex
-        ))
         let setupLatchedLog = try #require(setup.range(of:
             "TraceGraph starts with graph writes latched",
-            range: setupFailure.upperBound..<setup.endIndex
+            range: setupDecision.upperBound..<setup.endIndex
         ))
-        #expect(setupFailClosed.lowerBound < setupFailure.lowerBound)
-        #expect(setupFailure.lowerBound < setupLatchedLog.lowerBound)
+        let detachBranch = setup[setupDecision.upperBound..<setupLatchedLog.lowerBound]
+        #expect(detachBranch.contains("await causalStore.close()"))
+        #expect(detachBranch.contains("causalGraphBridge = nil"))
+        #expect(detachBranch.contains("causalStoreOuter = nil"))
+        #expect(detachBranch.contains("break traceGraphStartup"))
         let activationBoundary = try #require(setup.range(of:
             "FINAL_PRE_INGESTION_STORAGE_ACTIVATION_BOUNDARY"
         ))
+        #expect(!setup[setupGuard.upperBound..<activationBoundary.lowerBound]
+            .contains("try DaemonBootstrap.failPreIngestionStorage("))
         let activationGraphProbe = try #require(setup.range(of:
             "activationCausalStore.storageAdmissionStatus()"
         ))

@@ -149,8 +149,10 @@ enum DaemonSetup {
         /// periodic bounded recovery lane keeps draining it and the latch
         /// clears below its resume target; events, alerts, and rules run.
         case latched
-        /// No writable handle, or the store would admit writes without a
-        /// headroom proof. Fails closed before any producer starts.
+        /// No writable handle, a drain that failed outright, or a store that
+        /// would admit writes without a headroom proof. After the startup
+        /// drain the store is closed and TraceGraph is detached for the run;
+        /// at the activation boundary it fails closed.
         case notReady
     }
 
@@ -158,7 +160,12 @@ enum DaemonSetup {
         _ recovery: CausalGraphStartupRecoveryResult
     ) -> TraceGraphStartupAdmission {
         if recovery.writableBeforeProducers { return .writable }
-        guard let admission = recovery.finalAdmission,
+        // A drain that threw (an SQLite fault such as SQLITE_CORRUPT or EIO,
+        // or a failed max_page_count verification) is not a footprint
+        // condition. Latched, it would report footprint_limit while runtime
+        // recovery failed on every tick and never cleared it.
+        guard recovery.disposition != .nonconverged(.recoveryFailed),
+              let admission = recovery.finalAdmission,
               admission.writableHandle,
               admission.blocked,
               !admission.acceptingMutations else {
@@ -175,7 +182,10 @@ enum DaemonSetup {
         store: SQLiteCausalGraphStore,
         recovery: CausalGraphStartupRecoveryResult
     ) async -> (proof: CausalGraphStartupRecoveryResult, admission: TraceGraphStartupAdmission) {
-        guard !recovery.writableBeforeProducers else { return (recovery, .writable) }
+        guard !recovery.writableBeforeProducers,
+              recovery.disposition != .nonconverged(.recoveryFailed) else {
+            return (recovery, traceGraphStartupAdmission(recovery))
+        }
         let proof = recovery.refreshed(
             finalAdmission: await store.latchMutationsForDegradedStartup()
         )
@@ -1516,14 +1526,15 @@ enum DaemonSetup {
         }
         let causalStoreOpen = await openCausalStore()
         let causalStoreStartupAdmission = causalStoreOpen.startupAdmission
-        if let causalStore = causalStoreOpen.store {
+        traceGraphStartup: if let causalStore = causalStoreOpen.store {
             // rc.11 can restart with no in-memory latch while the inherited
             // family is already at the proactive boundary. Recover here—not in
             // DaemonBootstrap—because every collector-local producer below
             // this point owns a bounded buffer that can fill/drop before the
             // merged EventLoop drivers attach. Success requires strict durable
             // headroom; the one-hour evidence floor is never crossed. A store
-            // that cannot reach headroom starts with its writes latched.
+            // that cannot reach headroom starts with its writes latched, and
+            // one that cannot be latched is closed and detached.
             let days = max(1, min(bootStorage.tracegraphRetentionDays, 3_650))
             let recovery = await causalStore.recoverStorageBeforeProducers(
                 configuredRetentionHours: days * 24,
@@ -1565,13 +1576,22 @@ enum DaemonSetup {
                     "one-hour evidence floor preserved",
                 ].joined(separator: ", ")
                 guard startup.admission == .latched else {
-                    try DaemonBootstrap.failPreIngestionStorage(
-                        supportDir: supportDir,
-                        startedAt: startedAt,
-                        component: "TraceGraph",
-                        reason: detail,
-                        failure: TraceGraphStartupStorageError(recovery: recovery)
+                    // An open store that cannot be latched (no writable
+                    // handle, or a drain that failed outright) used to stop
+                    // the engine here, and sysextd relaunched it into the same
+                    // store with no detection. Close it and detach TraceGraph
+                    // for this run, as for a store that could not open: with
+                    // no writer nothing reaches an unproven graph, and the
+                    // heartbeat reports the store unavailable.
+                    await causalStore.close()
+                    logger.fault("TraceGraph detached this run: \(detail, privacy: .public). Event detection, alerting and rules run without trace materialization.")
+                    causalGraphBridge = nil
+                    causalStoreOuter = nil
+                    causalStoreStartupRecovery = .unavailable(
+                        reason: nil,
+                        detail: "TraceGraph startup could not admit the open store: \(detail)"
                     )
+                    break traceGraphStartup
                 }
                 logger.fault("TraceGraph starts with graph writes latched: \(detail, privacy: .public). Event detection, alerting and rules run; bounded recovery continues at runtime and clears the latch below its resume target.")
             }
@@ -1618,8 +1638,9 @@ enum DaemonSetup {
             // an engine whose events.db and alerts.db are entirely healthy —
             // trading all endpoint detection for one optional feature.
             //
-            // The genuinely fail-closed case (an open store with no writable
-            // handle, above) still aborts. This one does not.
+            // An open store that cannot be admitted after its drain is
+            // detached above in the same way. Only the activation-boundary
+            // reprobe below still aborts.
             let unavailable = CausalGraphStartupRecoveryResult.unavailable(
                 reason: causalStoreStartupAdmission?.reason,
                 detail: "TraceGraph store actor could not open before collector construction"
