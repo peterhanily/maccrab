@@ -17,7 +17,7 @@ interaction.
 
 | Subject | Before (v1.2) | After (v1.3+) |
 |---|---|---|
-| Startup | `sudo maccrabd` (LaunchDaemon on `/Library/LaunchDaemons/com.maccrab.daemon.plist`) | Click *Enable Protection* in `MacCrab.app` → approve in System Settings |
+| Startup | `sudo maccrabd` (LaunchDaemon on `/Library/LaunchDaemons/com.maccrab.daemon.plist`) | Open `MacCrab.app` (it requests activation on launch) → approve in System Settings |
 | Running process | `maccrabd` (root) | `com.maccrab.agent` (sysext, managed by `sysextd`) |
 | ES entitlement | Loaded from a standalone provisioning profile | Embedded in the `.systemextension` bundle |
 | Shipped binary | `/usr/local/bin/maccrabd` | Inside `MacCrab.app/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension/` |
@@ -30,16 +30,18 @@ interaction.
 ```bash
 brew upgrade --cask maccrab
 open /Applications/MacCrab.app
-# Click "Enable Protection" and approve in System Settings when prompted.
+# The app requests activation on launch; approve in System Settings when prompted.
 ```
 
-The cask's `postflight` automatically:
-1. Stops any legacy `com.maccrab.daemon` LaunchDaemon.
-2. Removes `/Library/LaunchDaemons/com.maccrab.*.plist`.
-3. Clears any old provisioning profiles from
-   `/Library/MobileDevice/Provisioning Profiles/`.
-4. Leaves your data (events, alerts, rules, suppressions) intact at
+The cask's `postflight_steps` automatically:
+1. Stops any legacy `com.maccrab.daemon` / `com.maccrab.agent` LaunchDaemon.
+2. Removes those two `/Library/LaunchDaemons/` plists.
+3. Leaves your data (events, alerts, rules, suppressions) intact at
    `/Library/Application Support/MacCrab/`.
+
+It no longer clears old provisioning profiles from
+`/Library/MobileDevice/Provisioning Profiles/` (a leftover profile is inert);
+the bundled `install.sh` still does.
 
 **DMG users (manual install):**
 
@@ -52,7 +54,7 @@ sudo rm -f /Library/LaunchDaemons/com.maccrab.*.plist
 sudo rm -f /Library/MobileDevice/Provisioning\ Profiles/com.maccrab.*
 ```
 
-Then launch `MacCrab.app`, click *Enable Protection*, and approve the
+Then launch `MacCrab.app`, which requests activation, and approve the
 extension.
 
 ### First-launch approval is unavoidable
