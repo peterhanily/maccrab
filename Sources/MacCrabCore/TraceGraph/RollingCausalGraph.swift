@@ -638,8 +638,9 @@ public actor RollingCausalGraph {
             // Not rare on a developer Mac: tools re-run unsigned binaries from
             // /tmp and caches, and every event from such a process re-fires.
             // A field store held 34k traces in 9 h, 98.6% of them this anchor
-            // from 361 roots. The first run still anchors; repeats of the same
-            // binary inside the window do not.
+            // from 361 roots. The first run still anchors; repeats with the
+            // same identity inside the window do not. Without a Team ID that
+            // identity is the executable path (see stableProcessIdentity).
             return "unsignedDownloadExecution:\(stableProcessIdentity)"
         case .aiAgentSpawnsShell(let agentEntityId, _):
             return "aiAgentSpawnsShell:\(agentEntityId)"

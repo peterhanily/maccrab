@@ -177,6 +177,13 @@ public enum AnchorDetector {
     /// materialize thousands of copies of the same trace. Prefer the signed
     /// binary identity, then its content hash, and finally its normalized
     /// executable path.
+    ///
+    /// The live graph sees each event as enriched at ingest, before the heavy
+    /// plane has hashed the executable, so the hash is normally absent there.
+    /// A binary without a Team ID is therefore keyed by its path in practice:
+    /// a different binary written to the same path inside the dedup window
+    /// shares that key and does not anchor its own trace until the window
+    /// ends. Its events still reach the graph and every non-graph rule.
     private static func stableProcessIdentity(_ process: ProcessNode) -> String {
         if let teamId = process.signingTeamId, !teamId.isEmpty,
            let signingId = process.signingIdentifier, !signingId.isEmpty {
