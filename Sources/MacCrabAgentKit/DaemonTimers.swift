@@ -1279,6 +1279,30 @@ final class TraceGraphRecoveryCadenceGate: @unchecked Sendable {
     /// pressure cadence.
     static let maximumPassesWithoutDeficitProgress = 4
 
+    /// Bounds for one recovery pass, passed to `recoverStorageBudget`.
+    struct PassBudget: Equatable {
+        let maxTraceDeletes: Int
+        let maxVacuumPages: Int
+    }
+
+    /// The store's own per-pass defaults. They keep a pass short while the
+    /// store still admits writers, which queue behind an active pass.
+    static let defaultPassBudget = PassBudget(
+        maxTraceDeletes: 256, maxVacuumPages: 2_048)
+    /// The store's clamps. A footprint-latched store refuses its writers
+    /// before the recovery barrier, so a larger pass delays no one. At the
+    /// default 256 traces per 30-second tick, a drain from the admission
+    /// threshold to resume_below can take most of an hour.
+    static let footprintLatchedPassBudget = PassBudget(
+        maxTraceDeletes: 2_000, maxVacuumPages: 8_192)
+
+    static func passBudget(
+        blockReason: CausalGraphStorageBlockReason?
+    ) -> PassBudget {
+        blockReason == .footprintLimit
+            ? footprintLatchedPassBudget : defaultPassBudget
+    }
+
     enum Outcome: Equatable {
         case converged
         case draining
@@ -2205,10 +2229,14 @@ enum DaemonTimers {
                     // Never delete graph substrate or traces newer than this
                     // one-hour floor; it is well clear of materialization's 5m window.
                     let orphanCutoff = now.addingTimeInterval(-3600)
+                    let budget = TraceGraphRecoveryCadenceGate.passBudget(
+                        blockReason: before.reason)
                     do {
                         let result = try await causalStore.recoverStorageBudget(
                             retentionCutoff: cutoff,
-                            orphanCutoff: orphanCutoff
+                            orphanCutoff: orphanCutoff,
+                            maxTraceDeletes: budget.maxTraceDeletes,
+                            maxVacuumPages: budget.maxVacuumPages
                         )
                         let admission = await causalStore.storageAdmissionStatus()
                         let outcome = recoveryCadence.recordRecoveryOutcome(

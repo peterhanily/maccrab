@@ -2147,9 +2147,13 @@ struct CausalGraphSubstrateRetentionTests {
                 now: now
             ) else { continue }
             attemptedCutoffHours.append(hours)
+            let budget = TraceGraphRecoveryCadenceGate.passBudget(
+                blockReason: before.reason)
             let result = try await store.recoverStorageBudget(
                 retentionCutoff: now.addingTimeInterval(-Double(hours) * 3_600),
-                orphanCutoff: now.addingTimeInterval(-3_600)
+                orphanCutoff: now.addingTimeInterval(-3_600),
+                maxTraceDeletes: budget.maxTraceDeletes,
+                maxVacuumPages: budget.maxVacuumPages
             )
             _ = gate.recordRecoveryOutcome(
                 result,
@@ -2174,6 +2178,95 @@ struct CausalGraphSubstrateRetentionTests {
         for index in 0..<20 {
             #expect(try await store.loadTrace(id: "protected-\(index)") != nil,
                     "evidence younger than the one-hour floor survives convergence")
+        }
+        await store.close()
+    }
+
+    @Test(
+        "A footprint-latched store drains an excess of many default trace budgets in a few passes",
+        .timeLimit(.minutes(2))
+    )
+    func footprintLatchedRecoveryUsesLargerPassBudget() async throws {
+        let standard = TraceGraphRecoveryCadenceGate.defaultPassBudget
+        let latchedBudget = TraceGraphRecoveryCadenceGate.footprintLatchedPassBudget
+        #expect(TraceGraphRecoveryCadenceGate.passBudget(blockReason: .footprintLimit)
+                == latchedBudget)
+        for reason: CausalGraphStorageBlockReason? in [nil, .lowFreeSpace, .probeFailure] {
+            #expect(TraceGraphRecoveryCadenceGate.passBudget(blockReason: reason)
+                    == standard, "writers still queue behind passes in this state")
+        }
+        #expect(latchedBudget.maxTraceDeletes > standard.maxTraceDeletes)
+
+        let (store, url) = try await makeStore()
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: url.path + suffix)
+            }
+        }
+        let now = Date(timeIntervalSince1970: 2_200_000_000)
+        for index in 0..<3_200 {
+            try await store.saveTrace(
+                startupTrace(
+                    "excess-\(index)",
+                    updatedAt: now.addingTimeInterval(-7_200 + Double(index) / 10),
+                    policyPayloadBytes: 512
+                ),
+                members: []
+            )
+        }
+        for index in 0..<10 {
+            try await store.saveTrace(
+                startupTrace(
+                    "protected-\(index)",
+                    updatedAt: now.addingTimeInterval(-600),
+                    policyPayloadBytes: 512
+                ),
+                members: []
+            )
+        }
+        #expect(await store.walCheckpointTruncate())
+        let footprint = try #require(await store.storageFootprintBytes())
+        // A reserve above half the footprint makes the recovery target half
+        // the store, and lets one vacuum call return everything a pass frees,
+        // so trace deletes, not vacuum, bound each pass (as on the field host).
+        let reserve: Int64 = 32 * 1_048_576
+        let initial = await store.updateStorageAdmission(
+            maxFootprintBytes: footprint + reserve - 1,
+            freeSpaceFloorBytes: nil,
+            transactionReserveBytes: reserve
+        )
+        #expect(initial.blocked)
+        #expect(initial.reason == .footprintLimit)
+
+        var passes = 0
+        var tracesDeleted = 0
+        var converged = false
+        while passes < 20 {
+            let before = await store.storageAdmissionStatus()
+            let budget = TraceGraphRecoveryCadenceGate.passBudget(
+                blockReason: before.reason)
+            let result = try await store.recoverStorageBudget(
+                retentionCutoff: now.addingTimeInterval(-3_600),
+                orphanCutoff: now.addingTimeInterval(-3_600),
+                maxTraceDeletes: budget.maxTraceDeletes,
+                maxVacuumPages: budget.maxVacuumPages
+            )
+            passes += 1
+            tracesDeleted += result.tracesDeleted
+            if result.recoveryDeficitBytes == 0 {
+                converged = true
+                break
+            }
+        }
+
+        #expect(converged)
+        #expect(tracesDeleted >= 5 * standard.maxTraceDeletes,
+                "the excess must span at least five default pass budgets")
+        #expect(passes <= 2, "a latched store drains with the larger budget")
+        let after = await store.storageAdmissionStatus()
+        #expect(!after.blocked)
+        for index in 0..<10 {
+            #expect(try await store.loadTrace(id: "protected-\(index)") != nil)
         }
         await store.close()
     }
