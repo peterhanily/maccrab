@@ -210,7 +210,7 @@ enum V2DocEntry: String, CaseIterable, Hashable {
                            body: "Each trace has a single anchor — the entity considered most load-bearing for the verdict. Investigations and defense recommendations always target the anchor's identity, not just its PID.",
                            codeBlock: ""),
                 DocSection(title: "Storage",
-                           body: "Materialized traces live in a separate SQLite store (tracegraph.db) so the events.db hot path never blocks on graph queries. The store is size-capped: at its limit, new trace writes pause until recovery frees space, then resume on their own. While paused, graph rules and new traces stop, but events, alerts, Sigma and sequence rules keep running, and System Health reports the pause.",
+                           body: "Materialized traces live in a separate SQLite store (tracegraph.db) so the events.db hot path never blocks on graph queries. The store is size-capped: past its write limit, new trace writes pause while recovery deletes the oldest traces (never anything under an hour old) to free space. Writes normally resume on their own; System Health says when they cannot, for example on a legacy store that needs an offline conversion. While paused, graph rules stop and no new traces are recorded, trace queries return only older evidence, and events, alerts, Sigma and sequence rules keep running.",
                            codeBlock: ""),
             ]
         case .traceBundle:
@@ -261,7 +261,7 @@ enum V2DocEntry: String, CaseIterable, Hashable {
         case .troubleshooting:
             return [
                 DocSection(title: "Empty TraceGraph",
-                           body: "If System Health shows TraceGraph evidence persistence paused, the store hit its size limit or low disk space: no new traces are recorded until recovery frees space, and writes then resume on their own. Otherwise, zero traces with the engine running means the materializer hasn't yet observed an anchor candidate. Traces appear once the engine correlates a multi-step chain of activity — give it time on an active machine.",
+                           body: "If System Health shows TraceGraph evidence persistence paused, the store passed its size limit or disk space is low: no new traces are recorded until space is freed. Writes normally resume on their own; System Health says when they cannot. Otherwise, zero traces with the engine running means the materializer hasn't yet observed an anchor candidate. Traces appear once the engine correlates a multi-step chain of activity — give it time on an active machine.",
                            codeBlock: ""),
                 DocSection(title: "ES entitlement missing",
                            body: "If System › Health shows EndpointSecurity as down, the system extension wasn't activated. Open MacCrab.app, click \"Enable Protection\", then allow the extension in System Settings → General → Login Items & Extensions.",

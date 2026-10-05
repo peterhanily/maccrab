@@ -386,18 +386,33 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             return "TraceGraph evidence persistence is active."
         }
 
-        /// The footprint latch is deliberate and clears itself, but it is still
-        /// an evidence gap: this text explains it without changing
-        /// `evidenceUnavailable`, so protection stays visibly degraded.
+        /// The footprint latch is deliberate, but it is still an evidence gap:
+        /// this text explains it without changing `evidenceUnavailable`, so
+        /// protection stays visibly degraded. The latch trips above the
+        /// admission threshold (cap minus reserve) and clears only below the
+        /// lower resume target, so those are the figures the text reports.
         private var footprintLatchDetail: String {
-            var text = "TraceGraph writes are paused because the store reached its on-disk size limit"
-            if let footprintBytes, let maxFootprintBytes {
-                text += " (\(Self.megabytes(footprintBytes)) used of a \(Self.megabytes(maxFootprintBytes)) cap)"
+            var text: String
+            if let threshold = writeTelemetry?.admissionThresholdBytes,
+               let resume = writeTelemetry?.resumeBelowBytes {
+                text = "TraceGraph writes are paused: the store passed its write limit of \(Self.mebibytes(threshold))"
+                if let maxFootprintBytes {
+                    text += " (cap \(Self.mebibytes(maxFootprintBytes)))"
+                }
+                text += " and stays paused until it falls below \(Self.mebibytes(resume))."
+                if let footprintBytes {
+                    text += " It is now \(Self.mebibytes(footprintBytes))."
+                }
+            } else {
+                text = "TraceGraph writes are paused because the store reached its on-disk size limit"
+                if let footprintBytes, let maxFootprintBytes {
+                    text += " (\(Self.mebibytes(footprintBytes)) used of a \(Self.mebibytes(maxFootprintBytes)) cap)"
+                }
+                text += "."
             }
-            text += "."
             if let deficit = recoveryDeficitBytes {
                 text += deficit > 0
-                    ? " Recovery still has to free about \(Self.megabytes(deficit)) before writes resume."
+                    ? " About \(Self.mebibytes(deficit, roundingUp: true)) more must be freed before writes resume."
                     : " Recovery has reached its target; writes resume at the next storage check."
             }
             if let tripped = footprintLatchLastTrippedAtUnix {
@@ -406,16 +421,38 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             if let cleared = footprintLatchLastClearedAtUnix {
                 text += " It last cleared \(Self.timestamp(cleared))."
             }
-            text += " Graph rules and trace queries are paused: no new traces are recorded, so Investigation shows only evidence from before the pause. Events, alerts, Sigma rules and sequence rules keep running."
-            text += " Writes resume automatically when recovery catches up; no restart is needed."
+            // A legacy auto_vacuum=0 store cannot return pages to the
+            // filesystem online, so Core's recovery preserves its rows and the
+            // latch never clears on its own (SQLiteCausalGraphStore
+            // recoverStorageBudget, legacyStoreNeedsOfflineConversion).
+            let legacyStore = autoVacuumMode == 0
+            text += " Graph rules are paused and no new traces are recorded. Trace queries still work, but they return only evidence recorded before the pause"
+            text += legacyStore
+                ? "."
+                : ", and recovery is deleting the oldest of it (never anything under an hour old) to make room."
+            text += " Events, alerts, Sigma rules and sequence rules keep running."
+            // Below the resume target the latch clears at the next measurement
+            // whatever the vacuum mode, so only an outstanding deficit is stuck.
+            if legacyStore, recoveryDeficitBytes != 0 {
+                text += " This store uses a legacy auto_vacuum mode, so recovery cannot shrink it while MacCrab runs. Writes stay paused until you raise the TraceGraph storage limit or convert the store offline (stop the engine and run a full VACUUM)."
+            } else {
+                if writeTelemetry?.pinnedReader == true {
+                    text += " Recovery is currently waiting for a reader to release the database."
+                }
+                text += " Writes resume automatically when recovery catches up; no restart is needed."
+            }
             return text
         }
 
-        /// Decimal megabytes, rounded up to 0.1 MB so a small remaining
-        /// deficit never reads as zero.
-        static func megabytes(_ bytes: Int64) -> String {
-            let tenths = (Double(max(0, bytes)) / 100_000).rounded(.up)
-            return String(format: "%.1f MB", tenths / 10)
+        /// Binary mebibytes, the unit `tracegraph_max_size_mb` is configured
+        /// in, to 0.1 MiB (whole values drop the decimal). A remaining deficit
+        /// rounds up so it never reads as zero.
+        static func mebibytes(_ bytes: Int64, roundingUp: Bool = false) -> String {
+            let tenths = (Double(max(0, bytes)) * 10 / 1_048_576)
+                .rounded(roundingUp ? .up : .toNearestOrAwayFromZero)
+            return tenths.truncatingRemainder(dividingBy: 10) == 0
+                ? String(format: "%.0f MiB", tenths / 10)
+                : String(format: "%.1f MiB", tenths / 10)
         }
 
         static func timestamp(_ unixSeconds: Double) -> String {

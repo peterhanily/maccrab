@@ -399,39 +399,56 @@ struct V2HeartbeatSnapshotTests {
         #expect(status.maxFootprintBytes == 100_000_000)
     }
 
-    @Test("TraceGraph footprint latch explains cause, deficit, history, scope and auto-resume")
-    func traceGraphFootprintLatchDetail() throws {
-        let tripped = 1_759_600_000.5
-        let cleared = 1_759_500_000.0
-        let raw: [String: Any] = [
+    /// Proportions from a real latched 1.22.5 heartbeat: a 250 MiB cap, a
+    /// write threshold at 75% of it, a resume target at 50%, and a footprint
+    /// in between, which is where a latched store spends nearly all its time.
+    private func latchedTraceGraphRaw(autoVacuumMode: Int) -> [String: Any] {
+        [
             "enabled": true,
             "accepting_mutations": false,
             "blocked": true,
             "store_available": true,
             "startup_blocked": false,
             "reason": "footprint_limit",
-            "footprint_bytes": NSNumber(value: 262_000_000),
+            "footprint_bytes": NSNumber(value: 164_274_176),
             "max_footprint_bytes": NSNumber(value: 262_144_000),
-            "recovery_deficit_bytes": NSNumber(value: 12_340_001),
-            "footprint_latch_last_tripped_at_unix": NSNumber(value: tripped),
-            "footprint_latch_last_cleared_at_unix": NSNumber(value: cleared),
+            "admission_threshold_bytes": NSNumber(value: 196_608_000),
+            "resume_below_bytes": NSNumber(value: 131_072_000),
+            "recovery_deficit_bytes": NSNumber(value: 33_202_177),
+            "auto_vacuum_mode": NSNumber(value: autoVacuumMode),
         ]
+    }
+
+    @Test("TraceGraph footprint latch explains cause, deficit, history, scope and auto-resume")
+    func traceGraphFootprintLatchDetail() throws {
+        let tripped = 1_759_600_000.5
+        let cleared = 1_759_500_000.0
+        var raw = latchedTraceGraphRaw(autoVacuumMode: 2)
+        raw["footprint_latch_last_tripped_at_unix"] = NSNumber(value: tripped)
+        raw["footprint_latch_last_cleared_at_unix"] = NSNumber(value: cleared)
         let status = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
         typealias Admission = V2HeartbeatSnapshot.TraceGraphStorageAdmission
 
-        #expect(status.recoveryDeficitBytes == 12_340_001)
+        #expect(status.recoveryDeficitBytes == 33_202_177)
         #expect(status.footprintLatchLastTrippedAtUnix == tripped)
         #expect(status.footprintLatchLastClearedAtUnix == cleared)
         #expect(status.diagnosticDictionary["footprint_latch_last_tripped_at_unix"] as? Double == tripped)
         #expect(status.diagnosticDictionary["footprint_latch_last_cleared_at_unix"] as? Double == cleared)
 
         let detail = status.operatorDetail
-        #expect(detail.contains("reached its on-disk size limit (262.0 MB used of a 262.2 MB cap)"))
-        #expect(detail.contains("free about 12.4 MB before writes resume"))
+        // The latch trips at the write threshold and clears at the resume
+        // target; a footprint at 63% of the cap has not "reached" the cap.
+        #expect(detail.contains("passed its write limit of 187.5 MiB (cap 250 MiB) and stays paused until it falls below 125 MiB. It is now 156.7 MiB."))
+        #expect(!detail.contains("reached its on-disk size limit"))
+        #expect(detail.contains("About 31.7 MiB more must be freed before writes resume."))
         #expect(detail.contains("last tripped \(Admission.timestamp(tripped))"))
         #expect(detail.contains("last cleared \(Admission.timestamp(cleared))"))
-        #expect(detail.contains("Graph rules and trace queries are paused"))
+        #expect(detail.contains("Graph rules are paused and no new traces are recorded"))
+        #expect(detail.contains("Trace queries still work"))
+        #expect(!detail.contains("trace queries are paused"))
+        #expect(detail.contains("recovery is deleting the oldest of it (never anything under an hour old)"))
         #expect(detail.contains("Events, alerts, Sigma rules and sequence rules keep running"))
+        #expect(!detail.contains("waiting for a reader"))
         #expect(detail.contains("resume automatically"))
 
         // A deliberate pause is still an evidence gap: protection stays degraded.
@@ -451,6 +468,41 @@ struct V2HeartbeatSnapshotTests {
         heartbeatRaw["tracegraph_storage_admission"] = raw
         #expect(V2MenuBarProtectionStatus.resolve(
             heartbeat: V2HeartbeatSnapshot.decode(raw: heartbeatRaw), now: now) == .degraded)
+
+        raw["pinned_reader"] = true
+        let pinned = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        #expect(pinned.operatorDetail.contains("Recovery is currently waiting for a reader to release the database."))
+    }
+
+    @Test("A latched legacy auto_vacuum=0 store is not promised an automatic resume")
+    func traceGraphFootprintLatchLegacyStore() throws {
+        var raw = latchedTraceGraphRaw(autoVacuumMode: 0)
+        let legacy = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        let detail = legacy.operatorDetail
+        #expect(legacy.evidenceUnavailable)
+        #expect(!detail.contains("resume automatically"))
+        #expect(!detail.contains("no restart is needed"))
+        #expect(!detail.contains("recovery is deleting"))
+        #expect(detail.contains("legacy auto_vacuum mode, so recovery cannot shrink it while MacCrab runs"))
+        #expect(detail.contains("raise the TraceGraph storage limit or convert the store offline"))
+
+        // Below the resume target the latch clears at the next measurement
+        // whatever the vacuum mode, so the stuck wording no longer applies.
+        raw["recovery_deficit_bytes"] = NSNumber(value: 0)
+        let caughtUp = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: raw))
+        #expect(caughtUp.operatorDetail.contains("Recovery has reached its target"))
+        #expect(!caughtUp.operatorDetail.contains("legacy auto_vacuum"))
+    }
+
+    @Test("TraceGraph sizes are reported in MiB, rounding only the deficit up")
+    func traceGraphMebibyteFormatting() {
+        typealias Admission = V2HeartbeatSnapshot.TraceGraphStorageAdmission
+        #expect(Admission.mebibytes(262_144_000) == "250 MiB")
+        #expect(Admission.mebibytes(196_608_000) == "187.5 MiB")
+        #expect(Admission.mebibytes(164_274_176) == "156.7 MiB")
+        #expect(Admission.mebibytes(1, roundingUp: true) == "0.1 MiB")
+        #expect(Admission.mebibytes(262_144_000, roundingUp: true) == "250 MiB")
+        #expect(Admission.mebibytes(-5) == "0 MiB")
     }
 
     @Test("TraceGraph footprint latch tolerates absent or invalid latch history")
