@@ -125,8 +125,8 @@ The *Suppress All Like This* button on an alert's detail panel adds a
 ### Does it work offline / in air-gapped environments?
 
 **Yes.** MacCrab's core detection pipeline needs zero network access. The
-486 rules ship precompiled in the app; the default stable profile loads 116 of
-them. Behavioral scoring, sequence correlation, campaign detection, and the
+486 rules ship precompiled in the app; the default stable profile enables 116
+of them. Behavioral scoring, sequence correlation, campaign detection, and the
 SQLite store are fully local.
 
 Features that need network:

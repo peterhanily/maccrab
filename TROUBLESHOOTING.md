@@ -71,8 +71,9 @@ ls -la ~/Library/Application\ Support/com.apple.TCC/TCC.db
 ### Other causes for silent detection
 
 - **No rules loaded.** Check `maccrabctl status` — the `Rules:` line reports
-  `<active> active / <loaded> loaded standard`, 109 active of 438
-  compiled under the default stable rule profile (set `rule_profile: all` in
+  `<active> active / <loaded> loaded standard` plus the sequence rules: 98
+  active of 438 single-event rules, plus 11 active of 41 sequence rules,
+  under the default stable rule profile (set `rule_profile: all` in
   `daemon_config.json` to activate the rest). `rules list | wc -l` is *not*
   this number: it counts every compiled rule plus four header lines,
   irrespective of profile. If the active count is zero, run
