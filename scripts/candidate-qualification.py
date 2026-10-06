@@ -8806,14 +8806,18 @@ def trace_graph_epoch_headroom_failure(heartbeat: Mapping[str, Any]) -> str | No
     return None
 
 
+def require_root_runtime_recorder() -> None:
+    if platform.system() != "Darwin" or os.geteuid() != 0:
+        fail("record-runtime must run with sudo on the installed reference Mac")
+
+
 def live_runtime_recording(
     *, root: pathlib.Path, candidate_manifest: Mapping[str, Any],
     candidate_manifest_sha256: str, dmg: pathlib.Path,
     heartbeat_path: pathlib.Path, data_dirs: Sequence[pathlib.Path],
     sqlite_overrides: Mapping[str, int], capture_path: pathlib.Path,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-    if platform.system() != "Darwin" or os.geteuid() != 0:
-        fail("record-runtime must run with sudo on the installed reference Mac")
+    require_root_runtime_recorder()
     candidate = object_value(candidate_manifest.get("candidate"), "candidate")
     verification = object_value(candidate_manifest.get("artifact_verification"), "artifact_verification")
     observations: List[Dict[str, Any]] = []
@@ -10667,7 +10671,7 @@ def retain_previous_runtime_attempt(
     the files keep their names and digests beside it.
     """
     readiness = capture_path.with_name(capture_path.name + ".readiness")
-    previous: List[pathlib.Path] = []
+    previous: List[Tuple[pathlib.Path, os.stat_result]] = []
     for path, is_kind, kind in (
         (capture_path, stat.S_ISREG, "regular file"),
         (readiness, stat.S_ISDIR, "directory"),
@@ -10680,10 +10684,19 @@ def retain_previous_runtime_attempt(
             fail(f"previous runtime attempt evidence is redirected: {path}")
         if not is_kind(status.st_mode):
             fail(f"previous runtime attempt evidence is not a {kind}: {path}")
-        previous.append(path)
+        previous.append((path, status))
     if not previous:
         return None
     attempts = output.with_name(output.name + ".attempts")
+    # A rename cannot cross volumes. Check every item before creating anything,
+    # so evidence on another volume is refused whole instead of split in two.
+    try:
+        volume = os.stat(output.parent).st_dev
+    except OSError as exc:
+        fail(f"cannot create the runtime attempt directory {attempts}: {exc}")
+    for path, status in previous:
+        if status.st_dev != volume:
+            fail(f"previous runtime attempt evidence is not on the volume holding {attempts}: {path}")
     try:
         attempts.mkdir(mode=0o700)
     except FileExistsError:
@@ -10699,7 +10712,7 @@ def retain_previous_runtime_attempt(
     destination = attempts / str(max(numbers, default=0) + 1)
     try:
         destination.mkdir(mode=0o700)
-        for path in previous:
+        for path, _ in previous:
             os.rename(path, destination / path.name)
     except OSError as exc:
         fail(f"cannot retain previous runtime attempt evidence in {destination}: {exc}")
@@ -10707,6 +10720,9 @@ def retain_previous_runtime_attempt(
 
 
 def command_record_runtime(args: argparse.Namespace) -> None:
+    # Before anything touches the filesystem: without sudo, retention below
+    # would move root-owned evidence only partly and leave it owned by the user.
+    require_root_runtime_recorder()
     root = pathlib.Path(args.source_root).resolve()
     manifest_path = absolute_path(args.candidate_manifest)
     dmg = absolute_path(args.dmg)

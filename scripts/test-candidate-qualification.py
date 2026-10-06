@@ -1898,7 +1898,8 @@ class CandidateQualificationTests(unittest.TestCase):
         guidance = (re.escape(str(private)) + r" before any capture.*copy it from the reference "
                     r"checkout with its permissions \(directory 0700, file 0600")
         capture_started = RuntimeError("capture started")
-        with mock.patch.object(qualification, "validate_candidate_document", return_value=self.manifest["candidate"]), \
+        with mock.patch.object(qualification, "require_root_runtime_recorder"), \
+                mock.patch.object(qualification, "validate_candidate_document", return_value=self.manifest["candidate"]), \
                 mock.patch.object(qualification, "assert_exact_clean_source"), \
                 mock.patch.object(qualification, "run_checked",
                                   return_value=subprocess.CompletedProcess([], 0, raw, "")), \
@@ -2931,7 +2932,8 @@ class CandidateQualificationTests(unittest.TestCase):
             capture.write_text(json.dumps({"result": "failed", "failure": label}) + "\n")
             readiness.mkdir(mode=0o700)
             (readiness / "0000.json").write_text(json.dumps({"phase": label}) + "\n")
-        with mock.patch.object(qualification, "validate_candidate_document", return_value=self.manifest["candidate"]), \
+        with mock.patch.object(qualification, "require_root_runtime_recorder") as root_gate, \
+                mock.patch.object(qualification, "validate_candidate_document", return_value=self.manifest["candidate"]), \
                 mock.patch.object(qualification, "assert_exact_clean_source"), \
                 mock.patch.object(qualification, "release_resource_limits"), \
                 mock.patch.object(qualification, "require_private_resource_baseline"), \
@@ -2945,6 +2947,7 @@ class CandidateQualificationTests(unittest.TestCase):
             # An attempt that left nothing behind retains nothing.
             with self.assertRaisesRegex(RuntimeError, "capture started"):
                 qualification.command_record_runtime(args)
+        self.assertEqual(root_gate.call_count, 3)
         self.assertEqual(seen, [(False, False)] * 3)
         self.assertEqual(sorted(entry.name for entry in attempts.iterdir()), ["1", "2"])
         self.assertEqual(attempts.stat().st_mode & 0o777, 0o700)
@@ -2955,6 +2958,56 @@ class CandidateQualificationTests(unittest.TestCase):
             self.assertEqual(json.loads((retained / readiness.name / "0000.json").read_text())["phase"],
                              f"attempt {attempt}")
         self.assertEqual(json.loads(output.read_text())["result"], "INCOMPLETE")
+
+    def test_record_runtime_without_sudo_refuses_before_moving_any_evidence(self) -> None:
+        # Retention used to run first: a forgotten sudo moved the root-owned
+        # capture into a user-owned attempts directory, could not move the
+        # root-owned readiness directory, and blocked every later sudo retry.
+        output = self.root / "runtime.json"
+        capture = pathlib.Path(str(output) + ".capture.json")
+        readiness = pathlib.Path(str(capture) + ".readiness")
+        capture.write_text('{"result": "failed"}\n')
+        readiness.mkdir(mode=0o700)
+        (readiness / "0000.json").write_text("{}\n")
+        args = qualification.parser().parse_args([
+            "record-runtime", "--candidate-manifest", str(self.manifest_path),
+            "--dmg", str(self.dmg), "--source-root", str(ROOT), "--output", str(output),
+        ])
+        for system, euid in (("Darwin", 501), ("Linux", 0)):
+            with self.subTest(system=system, euid=euid), \
+                    mock.patch.object(qualification.platform, "system", return_value=system), \
+                    mock.patch.object(qualification.os, "geteuid", return_value=euid), \
+                    mock.patch.object(qualification, "validate_candidate_document") as validate, \
+                    mock.patch.object(qualification, "live_runtime_recording") as live:
+                with self.assertRaisesRegex(qualification.QualificationError, "must run with sudo"):
+                    qualification.command_record_runtime(args)
+                validate.assert_not_called()
+                live.assert_not_called()
+        self.assertFalse(pathlib.Path(str(output) + ".attempts").exists())
+        self.assertEqual(capture.read_text(), '{"result": "failed"}\n')
+        self.assertEqual([entry.name for entry in readiness.iterdir()], ["0000.json"])
+        with mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
+                mock.patch.object(qualification.os, "geteuid", return_value=0):
+            qualification.require_root_runtime_recorder()
+
+    def test_attempt_retention_refuses_evidence_on_another_volume_and_moves_nothing(self) -> None:
+        output = self.root / "runtime.json"
+        capture = pathlib.Path(str(output) + ".capture.json")
+        readiness = pathlib.Path(str(capture) + ".readiness")
+        capture.write_text("{}\n")
+        readiness.mkdir(mode=0o700)
+        real_stat = os.stat
+        def other_volume(path, *args, **kwargs):
+            status = real_stat(path, *args, **kwargs)
+            if pathlib.Path(path) == output.parent:
+                return mock.Mock(st_dev=status.st_dev + 1)
+            return status
+        with mock.patch.object(qualification.os, "stat", side_effect=other_volume):
+            with self.assertRaisesRegex(qualification.QualificationError, "not on the volume holding"):
+                qualification.retain_previous_runtime_attempt(output, capture)
+        self.assertFalse(pathlib.Path(str(output) + ".attempts").exists())
+        self.assertEqual(capture.read_text(), "{}\n")
+        self.assertTrue(readiness.is_dir())
 
     def test_attempt_retention_refuses_redirected_or_shared_state_and_moves_nothing(self) -> None:
         output = self.root / "runtime.json"

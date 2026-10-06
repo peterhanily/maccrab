@@ -226,9 +226,11 @@ into the next free `<runtime report>.attempts/<n>/` (root-owned, mode 0700) as
 retained failure evidence; paths recorded inside a retained capture still name
 the original location, and the files keep their names and digests beside it.
 It never deletes them, and it never overwrites a
-file it did not create in the current run. Symlinked or wrong-type evidence
-paths, and an attempts directory that is redirected, shared or owned by another
-user, are refused.
+file it did not create in the current run. A run without sudo is refused before
+it touches anything. Symlinked or wrong-type evidence paths, evidence on a
+different volume from the report (a rename cannot cross volumes), and an
+attempts directory that is redirected, shared or owned by another user, are
+refused, and nothing is moved.
 
 If preflight reports historical cumulative loss from an earlier candidate or
 an out-of-contract workload, first preserve the current heartbeat/status and
