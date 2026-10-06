@@ -40,10 +40,11 @@ struct PluginFactsLookupTests {
         #expect(!comms.isMetadataOnly) // message bodies are personal-comms
     }
 
-    @Test("Network/sandbox honesty invariants are present and unchanged")
+    @Test("First-party chips never claim a network deny the unsandboxed lane lacks")
     func honestyChipsPresent() {
         let f = try! #require(PluginFactsLookup.facts(forPluginID: "com.maccrab.forensics.mail"))
-        #expect(f.networkChip == "Network: none (default-deny)")
+        #expect(f.networkChip == "Network: not restricted (runs with MacCrab's own access)")
+        #expect(!f.networkChip.contains("default-deny"))
         #expect(f.sandboxChip == "Not sandboxed")
     }
 

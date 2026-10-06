@@ -250,6 +250,13 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         public let recoveryNoPhysicalProgressTotal: Int64?
         public let lastRecoveryFootprintBeforeBytes: Int64?
         public let lastRecoveryFootprintAfterBytes: Int64?
+        /// Bytes recovery must still free before the footprint latch clears.
+        public let recoveryDeficitBytes: Int64?
+        /// Engine wall-clock unix seconds of the latest footprint-latch trip
+        /// and clear. Nil when absent (older engines) or not a positive
+        /// finite number; the operator text then omits that timestamp.
+        public let footprintLatchLastTrippedAtUnix: Double?
+        public let footprintLatchLastClearedAtUnix: Double?
         /// Shared typed decoder for the exact ingest/write ledgers carried in
         /// this same block. Keeping the equations in Core prevents the app, CLI,
         /// and MCP surfaces from drifting on what "Active" means.
@@ -293,6 +300,13 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             recoveryNoPhysicalProgressTotal = Self.int64(raw["recovery_no_physical_progress_total"])
             lastRecoveryFootprintBeforeBytes = Self.int64(raw["last_recovery_footprint_before_bytes"])
             lastRecoveryFootprintAfterBytes = Self.int64(raw["last_recovery_footprint_after_bytes"])
+            recoveryDeficitBytes = Self.int64(raw["recovery_deficit_bytes"])
+            footprintLatchLastTrippedAtUnix = Self.unixSeconds(
+                raw["footprint_latch_last_tripped_at_unix"]
+            )
+            footprintLatchLastClearedAtUnix = Self.unixSeconds(
+                raw["footprint_latch_last_cleared_at_unix"]
+            )
             writeTelemetry = Self.decodeWriteTelemetry(raw)
         }
 
@@ -319,6 +333,9 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             }
             if !enabled {
                 return "TraceGraph persistence is disabled (\(readableReason)). Detection continues, but new causal evidence is not being recorded."
+            }
+            if blocked, reason == "footprint_limit" {
+                return footprintLatchDetail
             }
             if blocked {
                 return "TraceGraph hard storage admission is blocked (\(readableReason)). Detection continues, but new causal evidence is being shed until bounded maintenance restores write headroom."
@@ -369,6 +386,80 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             return "TraceGraph evidence persistence is active."
         }
 
+        /// The footprint latch is deliberate, but it is still an evidence gap:
+        /// this text explains it without changing `evidenceUnavailable`, so
+        /// protection stays visibly degraded. The latch trips above the
+        /// admission threshold (cap minus reserve) and clears only below the
+        /// lower resume target, so those are the figures the text reports.
+        private var footprintLatchDetail: String {
+            var text: String
+            if let threshold = writeTelemetry?.admissionThresholdBytes,
+               let resume = writeTelemetry?.resumeBelowBytes {
+                text = "TraceGraph writes are paused: the store passed its write limit of \(Self.mebibytes(threshold))"
+                if let maxFootprintBytes {
+                    text += " (cap \(Self.mebibytes(maxFootprintBytes)))"
+                }
+                text += " and stays paused until it falls below \(Self.mebibytes(resume))."
+                if let footprintBytes {
+                    text += " It is now \(Self.mebibytes(footprintBytes))."
+                }
+            } else {
+                text = "TraceGraph writes are paused because the store reached its on-disk size limit"
+                if let footprintBytes, let maxFootprintBytes {
+                    text += " (\(Self.mebibytes(footprintBytes)) used of a \(Self.mebibytes(maxFootprintBytes)) cap)"
+                }
+                text += "."
+            }
+            if let deficit = recoveryDeficitBytes {
+                text += deficit > 0
+                    ? " About \(Self.mebibytes(deficit, roundingUp: true)) more must be freed before writes resume."
+                    : " Recovery has reached its target; writes resume at the next storage check."
+            }
+            if let tripped = footprintLatchLastTrippedAtUnix {
+                text += " The limit last tripped \(Self.timestamp(tripped))."
+            }
+            if let cleared = footprintLatchLastClearedAtUnix {
+                text += " It last cleared \(Self.timestamp(cleared))."
+            }
+            // A legacy auto_vacuum=0 store cannot return pages to the
+            // filesystem online, so Core's recovery preserves its rows and the
+            // latch never clears on its own (SQLiteCausalGraphStore
+            // recoverStorageBudget, legacyStoreNeedsOfflineConversion).
+            let legacyStore = autoVacuumMode == 0
+            text += " Graph rules are paused and no new traces are recorded. Trace queries still work, but they return only evidence recorded before the pause"
+            text += legacyStore
+                ? "."
+                : ", and recovery is deleting the oldest of it (never anything under an hour old) to make room."
+            text += " Events, alerts, Sigma rules and sequence rules keep running."
+            // Below the resume target the latch clears at the next measurement
+            // whatever the vacuum mode, so only an outstanding deficit is stuck.
+            if legacyStore, recoveryDeficitBytes != 0 {
+                text += " This store uses a legacy auto_vacuum mode, so recovery cannot shrink it while MacCrab runs. Writes stay paused until you raise the TraceGraph storage limit or convert the store offline (stop the engine and run a full VACUUM)."
+            } else {
+                if writeTelemetry?.pinnedReader == true {
+                    text += " Recovery is currently waiting for a reader to release the database."
+                }
+                text += " Writes resume automatically when recovery catches up; no restart is needed."
+            }
+            return text
+        }
+
+        /// Binary mebibytes, the unit `tracegraph_max_size_mb` is configured
+        /// in, to 0.1 MiB (whole values drop the decimal). A remaining deficit
+        /// rounds up so it never reads as zero.
+        static func mebibytes(_ bytes: Int64, roundingUp: Bool = false) -> String {
+            let tenths = (Double(max(0, bytes)) * 10 / 1_048_576)
+                .rounded(roundingUp ? .up : .toNearestOrAwayFromZero)
+            return tenths.truncatingRemainder(dividingBy: 10) == 0
+                ? String(format: "%.0f MiB", tenths / 10)
+                : String(format: "%.1f MiB", tenths / 10)
+        }
+
+        static func timestamp(_ unixSeconds: Double) -> String {
+            Date(timeIntervalSince1970: unixSeconds)
+                .formatted(date: .abbreviated, time: .standard)
+        }
+
         public var diagnosticDictionary: [String: Any] {
             var value: [String: Any] = [
                 "enabled": enabled,
@@ -381,6 +472,12 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             }
             if let storeAvailable { value["store_available"] = storeAvailable }
             if let reason { value["reason"] = reason }
+            if let footprintLatchLastTrippedAtUnix {
+                value["footprint_latch_last_tripped_at_unix"] = footprintLatchLastTrippedAtUnix
+            }
+            if let footprintLatchLastClearedAtUnix {
+                value["footprint_latch_last_cleared_at_unix"] = footprintLatchLastClearedAtUnix
+            }
             if let telemetry = writeTelemetry,
                let data = try? JSONEncoder().encode(telemetry),
                let decoded = try? JSONSerialization.jsonObject(with: data),
@@ -419,6 +516,12 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             if let value = value as? Int { return value }
             if let value = value as? NSNumber { return value.intValue }
             return nil
+        }
+
+        private static func unixSeconds(_ value: Any?) -> Double? {
+            guard let seconds = (value as? NSNumber)?.doubleValue,
+                  seconds.isFinite, seconds > 0 else { return nil }
+            return seconds
         }
 
         private static func decodeWriteTelemetry(

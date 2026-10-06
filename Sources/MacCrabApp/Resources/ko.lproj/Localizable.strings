@@ -405,13 +405,13 @@
 "welcome.allSet" = "설정 체크리스트";
 "welcome.ready" = "MacCrab이 Mac을 보호할 준비가 되었습니다.";
 "welcome.feature.detection" = "실시간 탐지";
-"welcome.feature.detectionDesc" = "수백 개의 탐지 규칙이 Mac의 위협을 실시간으로 모니터링합니다";
+"welcome.feature.detectionDesc" = "100개가 넘는 탐지 규칙이 Mac의 위협을 실시간으로 모니터링합니다";
 "welcome.feature.ai" = "AI 안전";
 "welcome.feature.aiDesc" = "Claude, Cursor, Copilot 등 AI 코딩 도구의 자격 증명 접근을 모니터링합니다";
 "welcome.feature.prevention" = "자동 대응";
-"welcome.feature.preventionDesc" = "선택적 모듈이 악성 도메인을 싱크홀 처리하고, 유해한 IP를 차단하고, 지속성 위치를 잠그며, 높은 심각도의 경고 시 프로세스 종료나 파일 격리를 수행할 수 있습니다 — 대응은 탐지 이후에 이루어집니다";
+"welcome.feature.preventionDesc" = "선택적 모듈이 악성 도메인을 싱크홀 처리하고, 지속성 위치를 잠그며, 높은 심각도의 경고 시 프로세스 종료나 파일 격리를 수행할 수 있습니다 — 대응은 탐지 이후에 이루어집니다";
 "welcome.feature.privacy" = "기본적으로 비공개";
-"welcome.feature.privacyDesc" = "기본적으로 기기에서 실행됩니다 — 선택적 보강 기능을 켜지 않는 한 어떤 데이터도 Mac을 벗어나지 않습니다";
+"welcome.feature.privacyDesc" = "기본적으로 기기에서 실행됩니다 — 선택적 보강 기능을 켜지 않는 한 이벤트와 경고는 Mac을 벗어나지 않습니다";
 "welcome.setup.engineActive" = "탐지 엔진 활성";
 "welcome.setup.prevention" = "예방 탭에서 예방 기능을 활성화하세요";
 
@@ -1036,6 +1036,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "사용자 지정 피드 및 IOC 추가";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "기본 제공 출처: abuse.ch(URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus와 MalwareBazaar에는 abuse.ch Auth-Key가 필요합니다. 아래에서 제공업체 상태를 확인하세요. 외부 지표는 위의 threat_intel 폴더를 통해 추가할 수 있습니다.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "기본 제공 · 활성 — 4시간마다 가져옴";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "기본 제공 · 활성 — 가져오려면 abuse.ch 인증 키(Auth-Key)가 필요";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "기본 제공 · 동의하면 가져오기 활성화";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "IOC 검색 해제";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "설정된 연동 및 감지된 도구 (%lld개)";

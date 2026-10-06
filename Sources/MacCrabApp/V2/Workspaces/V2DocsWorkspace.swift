@@ -160,11 +160,11 @@ enum V2DocEntry: String, CaseIterable, Hashable {
         switch self {
         case .gettingStarted:    return "What MacCrab does, how it stays local, and how to verify it's running."
         case .traceGraph:        return "The causal investigation engine that powers Investigation › TraceGraph."
-        case .traceBundle:       return "Forensic flight recorder format — signed, replayable, exportable."
+        case .traceBundle:       return "Forensic flight recorder format — signed, verifiable, exportable."
         case .aiGuard:           return "How MacCrab observes AI coding tools and MCP servers."
         case .mcp:               return "MacCrab's own MCP server lets agents query its data."
-        case .rules:             return "Sigma-compatible YAML rules across 19 tactic directories."
-        case .intel:             return "Pluggable threat-intel feeds with health monitoring."
+        case .rules:             return "Sigma-compatible YAML rules across 17 tactic directories, plus sequence and graph rules."
+        case .intel:             return "Opt-in abuse.ch feeds plus your own indicator lists."
         case .settings:          return "Daemon config keys + dashboard preferences."
         case .troubleshooting:   return "Common issues and what to check."
         }
@@ -195,10 +195,10 @@ enum V2DocEntry: String, CaseIterable, Hashable {
         case .gettingStarted:
             return [
                 DocSection(title: "Local-first design",
-                           body: "MacCrab runs entirely on this Mac. Detection rules execute locally, alerts are stored in a local SQLite DB, and the AI features default to a local Ollama backend. Cloud LLMs are opt-in and pre-redact identifiers.",
+                           body: "MacCrab runs entirely on this Mac. Detection rules execute locally and alerts are stored in local SQLite databases. AI features are off until you enable them; once enabled, the default backend is a local Ollama model. Cloud LLMs are opt-in, and identifiers are redacted on a best-effort basis before a prompt leaves the Mac.",
                            codeBlock: ""),
                 DocSection(title: "Verify it's running",
-                           body: "From the menubar: the sidebar footer reads \"Protection active\" when the daemon is healthy, \"Protection degraded\" if heartbeats are stale or score is low, \"Protection inactive\" if no daemon is detected. From CLI:",
+                           body: "From the menubar: the sidebar footer reads \"Protection active\" when the engine is healthy, \"Protection degraded\" when it reports a problem (a stale heartbeat, a failing sensor, paused evidence storage — System Health says which), and \"Protection inactive\" if no engine is detected. From CLI:",
                            codeBlock: "$ maccrabctl status   # daemon, rules, DB size, mode"),
             ]
         case .traceGraph:
@@ -210,17 +210,17 @@ enum V2DocEntry: String, CaseIterable, Hashable {
                            body: "Each trace has a single anchor — the entity considered most load-bearing for the verdict. Investigations and defense recommendations always target the anchor's identity, not just its PID.",
                            codeBlock: ""),
                 DocSection(title: "Storage",
-                           body: "Materialized traces live in a separate SQLite store (tracegraph.db) so the events.db hot path never blocks on graph queries.",
+                           body: "Materialized traces live in a separate SQLite store (tracegraph.db) so the events.db hot path never blocks on graph queries. The store is size-capped: past its write limit, new trace writes pause while recovery deletes the oldest traces (never anything under an hour old) to free space. Writes normally resume on their own; System Health says when they cannot, for example on a legacy store that needs an offline conversion. While paused, graph rules stop and no new traces are recorded, trace queries return only older evidence, and events, alerts, Sigma and sequence rules keep running.",
                            codeBlock: ""),
             ]
         case .traceBundle:
             return [
                 DocSection(title: "What's in it",
-                           body: "A .maccrabtrace bundle is a signed zip containing the trace's nodes, edges, raw events, anchor verdict, and a Merkle root over the canonical artifact ordering. The bundle is replayable — feeding it back into a fresh MacCrab reproduces the same verdict.",
+                           body: "A .maccrabtrace bundle is a directory, exported as a .tar.gz archive, holding the trace's graph, its events, matched rules and alerts, a hash chain, and a signature over the Merkle root of the canonical artifact ordering. It is signed with this install's P-256 trace key, kept in the Secure Enclave when one is available and otherwise in a protected key file. Replay is deliberately narrow: trace replay re-runs single-event rules over the bundle's events, and refuses verdicts that depend on sequence, behavioral or baseline state instead of reproducing them.",
                            codeBlock: ""),
                 DocSection(title: "Verify a bundle",
-                           body: "Use maccrabctl:",
-                           codeBlock: "$ maccrabctl trace verify trace.maccrabtrace\n✓ Schema valid\n✓ Merkle root matches\n✓ Signature verified (SE key)\n✓ Replay reproduces verdict"),
+                           body: "Use maccrabctl. verify checks the schema, the Merkle root and the signature, and pins the signing key the first time it sees a trace. A first, unpinned verify proves the bundle is self-consistent, not who signed it.",
+                           codeBlock: "$ maccrabctl trace verify <trace-id>.maccrabtrace.tar.gz\n$ maccrabctl trace replay <trace-id>.maccrabtrace.tar.gz"),
             ]
         case .aiGuard:
             return [
@@ -228,26 +228,29 @@ enum V2DocEntry: String, CaseIterable, Hashable {
                            body: "AI coding tools (Claude Code, Codex, Cursor, Continue.dev, Aider, …) and the MCP servers they reach. MacCrab attributes each file write / network connect / process spawn to the originating agent session.",
                            codeBlock: ""),
                 DocSection(title: "Common alerts",
-                           body: "Most AI Guard alerts fire on: writing credentials-shaped files outside known scope, sudden MCP tool inflation, agents spawning unsigned binaries, or agents hitting honeyfile paths.",
+                           body: "With the default rule profile, AI Guard alerts fire when an AI tool reads credentials (SSH keys, cloud credentials, .env files), writes persistence items, runs sudo, or touches files outside its project boundary, and when an MCP server is added, looks suspicious or carries poisoned tool descriptions. Honeyfile alerts need the optional deception tier, which is off by default.",
                            codeBlock: ""),
             ]
         case .mcp:
             return [
                 DocSection(title: "MacCrab as an MCP server",
-                           body: "The bundled maccrab-mcp binary exposes ~80 tools so AI agents can query MacCrab data with structured tool calls (the exact count varies with installed store plugins). They fall into groups: triage (get_alerts, get_alert_detail, cluster_alerts, get_events, get_campaigns, suppress_alert, suppress_campaign, get_ai_alerts); investigation / traces (hunt, get_traces, get_trace_detail, hunt_trace, trace_from_event, verify_bundle); status (get_status, get_security_score, scan_text); forensics plugins (forensics_run_collector / forensics_run_analyzer / forensics_enrich / forensics_search_artifacts / forensics_timeline …); response actions (list_response_actions / set_response_action); and supply-chain / intent (analyze_package_metadata, classify_package_intent, get_intent_posterior …). Tools are underscore-named for strict-MCP-client compatibility; the legacy forensics.* dotted names still work as aliases. Ordinary responses and every error are best-effort sanitized before reaching the agent. Successful forensic evidence reads intentionally remain raw after the case privacy ceiling authorizes them, because rewriting paths or hashes would break chain of custody. Defense-affecting tools require human-enabled capability tiers; MCP-created kill, quarantine, script, and network-block actions remain exact-rule, confirmation-pending proposals and cannot be made global or automatic through MCP.",
-                           codeBlock: "{\n  \"mcpServers\": {\n    \"maccrab\": {\n      \"command\": \"/usr/local/bin/maccrab-mcp\"\n    }\n  }\n}"),
+                           body: "The bundled maccrab-mcp binary exposes its built-in tools plus tools contributed by installed forensic plugins, so AI agents can query MacCrab data with structured tool calls (an MCP tools/list call returns the exact set). They fall into groups: triage (get_alerts, get_alert_detail, cluster_alerts, get_events, get_campaigns, suppress_alert, suppress_campaign, get_ai_alerts); investigation / traces (hunt, get_traces, get_trace_detail, hunt_trace, trace_from_event, verify_bundle); status (get_status, get_security_score, scan_text); forensics plugins (forensics_run_collector / forensics_run_analyzer / forensics_enrich / forensics_search_artifacts / forensics_timeline …); response actions (list_response_actions / set_response_action); and supply-chain / intent (analyze_package_metadata, classify_package_intent, get_intent_posterior …). Tools are underscore-named for strict-MCP-client compatibility; the legacy forensics.* dotted names still work as aliases. Ordinary responses and every error are best-effort sanitized before reaching the agent. Successful forensic evidence reads intentionally remain raw after the case privacy ceiling authorizes them, because rewriting paths or hashes would break chain of custody. Defense-affecting tools require human-enabled capability tiers; MCP-created kill, quarantine, script, and network-block actions remain exact-rule, confirmation-pending proposals and cannot be made global or automatic through MCP.",
+                           codeBlock: "{\n  \"mcpServers\": {\n    \"maccrab\": {\n      \"command\": \"/Applications/MacCrab.app/Contents/Resources/bin/maccrab-mcp\"\n    }\n  }\n}"),
             ]
         case .rules:
             return [
                 DocSection(title: "Authoring rules",
-                           body: "Drop YAML files in Rules/<tactic>/, run make compile-rules, then send SIGHUP to the daemon to hot-reload.",
-                           codeBlock: "# Rules/persistence/launchd_shell_spawn.yml\ntitle: LaunchAgent invokes shell directly\nlevel: high\ndetection:\n  selection:\n    ProcessName|contains: launchd\n    CommandLine|contains: ['/bin/sh -c', '/bin/bash -c']\n  condition: selection"),
+                           body: "Drop YAML files in Rules/<tactic>/, run make compile-rules, then send SIGHUP to the daemon to hot-reload. The default rule profile loads only rules marked status: stable.",
+                           codeBlock: "# Rules/persistence/launchd_shell_spawn.yml\ntitle: LaunchAgent invokes shell directly\nid: 00000000-0000-4000-8000-000000000000  # use a fresh UUID\nstatus: stable\nlevel: high\nlogsource:\n  category: process_creation\n  product: macos\ndetection:\n  selection:\n    ParentImage|endswith: /launchd\n    CommandLine|contains: ['/bin/sh -c', '/bin/bash -c']\n  condition: selection"),
             ]
         case .intel:
             return [
-                DocSection(title: "Adding a feed",
-                           body: "Each feed is a JSON file under intel/feeds/ describing source URL, parser, and refresh cadence. The collector then tracks fetch health.",
+                DocSection(title: "Built-in feeds",
+                           body: "MacCrab ships three abuse.ch feeds, all off until you opt in to threat-intel enrichment: Feodo Tracker is public and keyless; URLhaus and MalwareBazaar need an abuse.ch Auth-Key saved in Settings → Network enrichment. Enabled feeds refresh every 4 hours, bundled indicators work offline, and the Intelligence workspace shows each feed's status. Feeds are fixed in the engine; there is no feed-definition file.",
                            codeBlock: ""),
+                DocSection(title: "Adding your own indicators",
+                           body: "The engine loads plain-text files, one indicator per line, from its threat_intel folder when it starts. The file name picks the type; on an installed system extension the files must be owned by root.",
+                           codeBlock: "threat_intel/custom.hashes.txt\nthreat_intel/custom.ips.txt\nthreat_intel/custom.domains.txt\nthreat_intel/custom.urls.txt"),
             ]
         case .settings:
             return [
@@ -258,10 +261,10 @@ enum V2DocEntry: String, CaseIterable, Hashable {
         case .troubleshooting:
             return [
                 DocSection(title: "Empty TraceGraph",
-                           body: "If the dashboard reports zero traces but the daemon is running, the materializer hasn't yet observed an anchor candidate. Traces appear once the daemon correlates a multi-step chain of activity — give it time on an active machine.",
+                           body: "If System Health shows TraceGraph evidence persistence paused, the store passed its size limit or disk space is low: no new traces are recorded until space is freed. Writes normally resume on their own; System Health says when they cannot. Otherwise, zero traces with the engine running means the materializer hasn't yet observed an anchor candidate. Traces appear once the engine correlates a multi-step chain of activity — give it time on an active machine.",
                            codeBlock: ""),
                 DocSection(title: "ES entitlement missing",
-                           body: "If System › Health shows EndpointSecurity as down, the system extension wasn't activated. Open MacCrab.app and click \"Activate protection\" in the onboarding banner.",
+                           body: "If System › Health shows EndpointSecurity as down, the system extension wasn't activated. Open MacCrab.app, click \"Enable Protection\", then allow the extension in System Settings → General → Login Items & Extensions.",
                            codeBlock: ""),
             ]
         }

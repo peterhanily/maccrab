@@ -405,13 +405,13 @@
 "welcome.allSet" = "设置清单";
 "welcome.ready" = "MacCrab已准备好保护您的Mac。";
 "welcome.feature.detection" = "实时检测";
-"welcome.feature.detectionDesc" = "数百条检测规则实时监控您的Mac以发现威胁";
+"welcome.feature.detectionDesc" = "一百多条检测规则实时监控您的Mac以发现威胁";
 "welcome.feature.ai" = "AI安全";
 "welcome.feature.aiDesc" = "监控Claude、Cursor、Copilot等AI编程工具的凭据访问行为";
 "welcome.feature.prevention" = "自动响应";
-"welcome.feature.preventionDesc" = "可选模块可将恶意域名引入陷阱、拦截有害 IP、锁定持久化位置，并可在高危警报时终止进程或隔离文件 — 响应在检测之后进行";
+"welcome.feature.preventionDesc" = "可选模块可将恶意域名引入陷阱、锁定持久化位置，并可在高危警报时终止进程或隔离文件 — 响应在检测之后进行";
 "welcome.feature.privacy" = "默认隐私保护";
-"welcome.feature.privacyDesc" = "默认在设备上运行 — 除非您开启可选的增强功能，否则数据不会离开您的 Mac";
+"welcome.feature.privacyDesc" = "默认在设备上运行 — 除非您开启可选的增强功能，否则您的事件和警报不会离开您的 Mac";
 "welcome.setup.engineActive" = "检测引擎已激活";
 "welcome.setup.prevention" = "在“预防”标签页中启用预防";
 
@@ -1038,6 +1038,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "添加自定义情报源和 IOC";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "内置来源：abuse.ch（URLhaus、MalwareBazaar、Feodo Tracker）— %@。URLhaus 和 MalwareBazaar 需要 abuse.ch Auth-Key。提供商状态见下方。可通过上方 threat_intel 文件夹添加外部指标。";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "内置 · 已启用 — 每 4 小时获取一次";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "内置 · 已启用 — 获取需要 abuse.ch 认证密钥（Auth-Key）";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "内置 · 同意后启用获取";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "清除 IOC 搜索";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "已配置的集成与检测到的工具（%lld）";

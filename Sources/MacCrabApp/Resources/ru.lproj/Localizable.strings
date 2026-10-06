@@ -405,13 +405,13 @@
 "welcome.allSet" = "Контрольный список настройки";
 "welcome.ready" = "MacCrab готов защищать ваш Mac.";
 "welcome.feature.detection" = "Обнаружение в реальном времени";
-"welcome.feature.detectionDesc" = "Сотни правил обнаружения отслеживают угрозы на вашем Mac в реальном времени";
+"welcome.feature.detectionDesc" = "Более ста правил обнаружения отслеживают угрозы на вашем Mac в реальном времени";
 "welcome.feature.ai" = "Безопасность ИИ";
 "welcome.feature.aiDesc" = "Отслеживает доступ к учётным данным у ИИ-инструментов разработки, таких как Claude, Cursor и Copilot";
 "welcome.feature.prevention" = "Автоматизированное реагирование";
-"welcome.feature.preventionDesc" = "Дополнительные модули перенаправляют вредоносные домены, блокируют опасные IP-адреса, защищают места закрепления и могут завершать процессы или изолировать файлы при серьёзных оповещениях — реагирование следует за обнаружением";
+"welcome.feature.preventionDesc" = "Дополнительные модули перенаправляют вредоносные домены, защищают места закрепления и могут завершать процессы или изолировать файлы при серьёзных оповещениях — реагирование следует за обнаружением";
 "welcome.feature.privacy" = "Конфиденциально по умолчанию";
-"welcome.feature.privacyDesc" = "По умолчанию работает на устройстве — ничего не покидает ваш Mac, пока вы не включите дополнительное обогащение";
+"welcome.feature.privacyDesc" = "По умолчанию работает на устройстве — ваши события и оповещения не покидают Mac, пока вы не включите дополнительное обогащение";
 "welcome.setup.engineActive" = "Движок обнаружения активен";
 "welcome.setup.prevention" = "Включите предотвращение на вкладке «Предотвращение»";
 
@@ -1714,6 +1714,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "Добавить собственные источники и IOC";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "Встроенные источники: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus и MalwareBazaar требуют Auth-Key abuse.ch. Состояние сервисов показано ниже. Внешние индикаторы добавляются через указанный выше каталог threat_intel.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "Встроенный · активен — загрузка каждые 4 ч";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Встроенный · включён — для загрузки нужен Auth-Key abuse.ch";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "Встроенный · разрешите загрузку для включения";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "Очистить поиск IOC";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "Настроенные интеграции и обнаруженные средства (%lld)";

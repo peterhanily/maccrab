@@ -405,13 +405,13 @@
 "welcome.allSet" = "Einrichtungs-Checkliste";
 "welcome.ready" = "MacCrab ist bereit, Ihren Mac zu schützen.";
 "welcome.feature.detection" = "Echtzeit-Erkennung";
-"welcome.feature.detectionDesc" = "Hunderte Erkennungsregeln überwachen Ihren Mac in Echtzeit auf Bedrohungen";
+"welcome.feature.detectionDesc" = "Über hundert Erkennungsregeln überwachen Ihren Mac in Echtzeit auf Bedrohungen";
 "welcome.feature.ai" = "KI-Sicherheit";
 "welcome.feature.aiDesc" = "Überwacht KI-Coding-Tools wie Claude, Cursor und Copilot auf Zugriffe auf Anmeldedaten";
 "welcome.feature.prevention" = "Automatische Reaktion";
-"welcome.feature.preventionDesc" = "Optionale Module leiten bösartige Domains ins Leere, blockieren schädliche IPs, sperren Persistenzpfade und können bei Alarmen hoher Schwere Prozesse beenden oder Dateien in Quarantäne verschieben — die Reaktion folgt der Erkennung";
+"welcome.feature.preventionDesc" = "Optionale Module leiten bösartige Domains ins Leere, sperren Persistenzpfade und können bei Alarmen hoher Schwere Prozesse beenden oder Dateien in Quarantäne verschieben — die Reaktion folgt der Erkennung";
 "welcome.feature.privacy" = "Privat von Haus aus";
-"welcome.feature.privacyDesc" = "Läuft standardmäßig auf dem Gerät — nichts verlässt Ihren Mac, sofern Sie nicht die optionale Anreicherung aktivieren";
+"welcome.feature.privacyDesc" = "Läuft standardmäßig auf dem Gerät — Ihre Ereignisse und Alarme bleiben auf Ihrem Mac, sofern Sie nicht die optionale Anreicherung aktivieren";
 "welcome.setup.engineActive" = "Erkennungs-Engine aktiv";
 "welcome.setup.prevention" = "Aktivieren Sie die Prävention im Tab „Prävention“";
 
@@ -1714,6 +1714,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "Eigene Feeds & IOCs hinzufügen";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "Integrierte Quellen: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus und MalwareBazaar benötigen einen abuse.ch Auth-Key. Siehe Anbieterstatus unten. Externe Indikatoren über den obigen Ordner threat_intel hinzufügen.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "Integriert · aktiv — Abruf alle 4 Std.";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Integriert · aktiviert — Abruf erfordert einen abuse.ch Auth-Key";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "Integriert · zustimmen, um Abrufe zu aktivieren";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "IOC-Suche löschen";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "Konfigurierte Integrationen & erkannte Werkzeuge (%lld)";

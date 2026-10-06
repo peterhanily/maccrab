@@ -554,7 +554,7 @@ public struct V2IntelligenceWorkspace: View {
     }
 
     /// Clickable feed chip that opens a read-only detail sheet describing the
-    /// built-in (keyless) abuse.ch feed and whether it's currently fetching.
+    /// built-in abuse.ch feed and whether it's currently fetching.
     private func feedChipButton(_ feed: V2FeedConfig) -> some View {
         Button {
             feedSheet = feed
@@ -1502,7 +1502,8 @@ public struct V2IntelligenceWorkspace: View {
 // MARK: - V2FeedConfig + V2FeedConfigSheet
 
 /// Identity / metadata for the threat-intel feed chips. All shipped feeds are
-/// the built-in, keyless abuse.ch sources.
+/// built-in abuse.ch sources; only Feodo Tracker is keyless (see
+/// ThreatIntelDownloadContract).
 // NOTE: the commercial API-key feeds (VirusTotal / GreyNoise / AlienVault OTX)
 // were removed here — they were orphaned: no chip ever rendered them, and any
 // key saved to the Keychain was never read by a live consumer (the
@@ -1524,24 +1525,41 @@ public enum V2FeedConfig: String, Identifiable, CaseIterable {
         }
     }
 
-    /// All shipped feeds are built-in (keyless). Retained as a property so the
-    /// chip / sheet styling reads intent, and so a future keyed feed can flip it.
+    /// All shipped feeds are built-in. Retained as a property so the chip /
+    /// sheet styling reads intent.
     public var isBuiltIn: Bool { true }
+
+    /// URLhaus and MalwareBazaar download authenticated v2 exports and are not
+    /// fetched without an abuse.ch Auth-Key; Feodo's public list needs none.
+    public var requiresAuthKey: Bool { self != .feodoTracker }
+
+    /// What the sheet's status chip may claim.
+    public enum FetchStatus: Equatable { case optIn, active, needsAuthKey }
+
+    /// `hasStoredAuthKey` is the shared-Keychain presence check (nil when it
+    /// could not be read). A keyed feed is shown as fetching only when a key
+    /// is confirmed stored; otherwise the chip states the requirement.
+    public func fetchStatus(enrichmentEnabled: Bool, hasStoredAuthKey: Bool?) -> FetchStatus {
+        guard enrichmentEnabled else { return .optIn }
+        guard requiresAuthKey, hasStoredAuthKey != true else { return .active }
+        return .needsAuthKey
+    }
 
     public var description: String {
         switch self {
         case .urlhaus:
-            return "abuse.ch URLhaus — community-curated malicious URL feed. Keyless and download-only (nothing about your machine is uploaded). OFF by default — opt in to threat-intel enrichment to fetch every 4 hours; bundled IOCs work offline until then."
+            return "abuse.ch URLhaus — community-curated malicious URL feed. Requires an abuse.ch Auth-Key (Settings → Network enrichment); without one it is not fetched. Download-only: no observed events or software inventory are uploaded. OFF by default — opt in to threat-intel enrichment to fetch every 4 hours; bundled IOCs work offline until then."
         case .malwareBazaar:
-            return "abuse.ch MalwareBazaar — SHA-256 hashes for known-bad samples. Keyless, download-only. OFF by default — opt in to threat-intel enrichment to fetch every 4 hours."
+            return "abuse.ch MalwareBazaar — SHA-256 hashes for known-bad samples. Requires an abuse.ch Auth-Key (Settings → Network enrichment); without one it is not fetched. Download-only. OFF by default — opt in to threat-intel enrichment to fetch every 4 hours."
         case .feodoTracker:
             return "abuse.ch Feodo Tracker — IP addresses of active C2 infrastructure for Emotet, Dridex, TrickBot and similar bankers. Keyless, download-only. OFF by default — opt in to threat-intel enrichment to fetch every 4 hours."
         }
     }
 }
 
-/// Modal sheet describing a built-in threat-intel feed. Read-only: every
-/// shipped feed is a keyless abuse.ch source, so there is no API-key form.
+/// Modal sheet describing a built-in threat-intel feed. Read-only: the
+/// abuse.ch Auth-Key that URLhaus and MalwareBazaar need is entered in
+/// Settings → Network enrichment, not here.
 public struct V2FeedConfigSheet: View {
     let feed: V2FeedConfig
     let onClose: () -> Void
@@ -1550,6 +1568,9 @@ public struct V2FeedConfigSheet: View {
     // (the daemon gates egress on this key), so the status chip reflects that
     // rather than claiming "always-on" — which contradicted the opt-in card.
     @AppStorage("enrich.threatIntel") private var enrichThreatIntel: Bool = false
+    // Same Keychain item Settings → Network enrichment edits; read without UI
+    // so viewing a feed never raises a Keychain prompt.
+    @State private var credential = ThreatIntelCredentialState()
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1577,9 +1598,12 @@ public struct V2FeedConfigSheet: View {
                 .accessibilityLabel(String(localized: "ax.close", defaultValue: "Close"))
             }
 
-            if enrichThreatIntel {
+            switch feed.fetchStatus(enrichmentEnabled: enrichThreatIntel, hasStoredAuthKey: credential.hasStoredKey) {
+            case .needsAuthKey:
+                V2StatusChip(String(localized: "ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key", defaultValue: "Built-in · enabled — fetching requires an abuse.ch Auth-Key"), kind: .info, icon: "key")
+            case .active:
                 V2StatusChip(String(localized: "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h", defaultValue: "Built-in · active — fetched every 4h"), kind: .healthy, icon: "checkmark.seal")
-            } else {
+            case .optIn:
                 V2StatusChip(String(localized: "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching", defaultValue: "Built-in · opt in to enable fetching"), kind: .info, icon: "checkmark.seal")
             }
 
@@ -1590,5 +1614,9 @@ public struct V2FeedConfigSheet: View {
         }
         .padding(20)
         .frame(width: 460)
+        .onAppear {
+            guard feed.requiresAuthKey else { return }
+            credential.refresh { try SecretsStore().getNonInteractive(.abuseCHAuthKey) }
+        }
     }
 }
