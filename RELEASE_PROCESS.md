@@ -88,6 +88,16 @@ publish.
   and no GitHub/distribution mutation is attempted by the first-phase artifact
   build. It still performs the required Apple notarization submission, and the
   read-only remote preflight queries `origin`.
+- Free space is the first precondition checked, before the remote preflight,
+  the audits or any build, in every phase that runs clean CI (phase 1 and
+  phase 2; `--resume-publish` runs none).
+  `scripts/ci-local.sh --free-space-preflight` applies CI's own budget and
+  changes nothing: 14,336 MiB free on both the `$TMPDIR` and checkout volumes,
+  less the part of a warm build already in `.build` (at most 3 GiB), which the
+  clean run deletes before it measures. After phase 1 builds the candidate and
+  removes its private export, it runs the same check again and warns if the
+  space left is not enough for phase 2's clean CI; the warning does not change
+  phase 1's result.
 - Before Step 0 (so a refusal costs seconds, not the clean CI), every run reads
   `origin`'s release tags and release branch. It refuses when the source does not
   descend from every published tag, when `v<version>` is already published
@@ -254,7 +264,9 @@ capture mode and are rejected by `verify-release`.
 ### Step 1 — tests
 
 Each `release.sh` phase runs `scripts/ci-local.sh --clean`, including a fresh
-dependency resolution, builds, the full test suite, and all 20 local gates. The
+dependency resolution, builds, the full test suite, and all 20 local gates. Its
+free-space budget is checked when `release.sh` starts (Step 0) and again by
+`ci-local.sh` itself after the clean wipe. The
 first run does this before artifact construction. The qualified second run does
 it before publication, and the later tag hook repeats clean CI against the exact
 source commit/tree and exact final metadata tree. Release-mode clean CI also
@@ -458,7 +470,8 @@ release for the tag. It then runs only the post-push steps above, reading
 `release.json`, the casks and the release notes from the tagged commit. It runs
 no CI, builds nothing, and never moves or pushes a tag or branch. It may run from
 a detached checkout of the tag when later commits on the branch changed files
-the qualification gate reads.
+the qualification gate reads. Because it runs no CI, it also skips the
+free-space preflight.
 
 ### Step 6 — downstream distribution and verification
 

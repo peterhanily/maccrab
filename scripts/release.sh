@@ -245,6 +245,19 @@ if [ "$RESUME_PUBLISH" = "1" ] && [ "$RESPIN" = "1" ]; then
     exit 2
 fi
 
+# Free space comes first in every phase that runs clean CI. ci-local.sh checks
+# it too, but only after the remote preflight, the pre-release check, the audit
+# (and in phase 2 the qualification gate), the clean wipe and dependency
+# resolution. Its budget is reused here, crediting a warm build the clean run
+# will replace. --resume-publish runs no CI and builds nothing.
+if [ "$RESUME_PUBLISH" != "1" ]; then
+    if ! ./scripts/ci-local.sh --free-space-preflight; then
+        echo "ERROR: not enough free disk for this release's clean local CI." >&2
+        echo "       Nothing was built, tagged or pushed. Free space and rerun." >&2
+        exit 1
+    fi
+fi
+
 # Candidate qualification is local, host-specific evidence and is never
 # committed. The public publisher accepts only the fixed candidate manifest
 # emitted by this script's tracked-object build phase; callers may point at a
@@ -510,6 +523,24 @@ print_qualification_next_steps() {
     echo "2. Run 'VERSION=$VERSION make test-corpus' for the on-device containment JSON." >&2
     echo "3. Re-run this same release command. It will reuse, rehash, and re-verify" >&2
     echo "   these exact candidate bytes; it will not rebuild them." >&2
+}
+
+# Phase 1 ends here, always with status 3. Phase 2 repeats clean CI, so once the
+# spent private export is removed, say now, while installed-host qualification
+# still gives the operator time to free space, if what this build left is not
+# enough for it.
+end_candidate_phase() {
+    local phase_two_free_space
+    /bin/rm -rf "$BUILD_WORKSPACE"
+    BUILD_WORKSPACE=""
+    if ! phase_two_free_space=$(./scripts/ci-local.sh --free-space-preflight 2>&1); then
+        echo "" >&2
+        echo "WARNING: the space left after building this candidate is not enough for" >&2
+        echo "         phase 2, which repeats clean local CI before publishing:" >&2
+        printf '%s\n' "$phase_two_free_space" | $SED_BIN -e 's/^ERROR: //' -e 's/^/         /' >&2
+        echo "         Free space before re-running this release command." >&2
+    fi
+    exit 3
 }
 
 CANDIDATE_READY=0
@@ -1158,7 +1189,7 @@ else
             --output "$RUNTIME_REPORT"
     fi
     print_qualification_next_steps
-    exit 3 # exact-candidate-phase-boundary: fixture tests patch only their disposable copy
+    end_candidate_phase # exact-candidate-phase-boundary: fixture tests patch only their disposable copy
 fi
 
 # This is the irreversible phase boundary. Everything above may build or inspect
