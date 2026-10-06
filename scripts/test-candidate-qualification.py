@@ -2843,14 +2843,14 @@ class CandidateQualificationTests(unittest.TestCase):
             kwargs["readiness_observer"](initial, "post-prewarm")
             kwargs["readiness_observer"](final, "post-prewarm")
             raise qualification.QualificationError("synthetic post-prewarm refusal")
-        original_write = qualification.write_json_exclusive
+        original_write = qualification.write_run_owned_json
         for fail_terminal in (False, True):
             capture_path = self.root / f"failed-poll-diagnostics-{fail_terminal}.json"
-            def write_record(path, value):
+            def write_record(path, value, identity):
                 if fail_terminal and value.get("terminal_latest") is True:
                     raise OSError("synthetic diagnostic write failure")
-                original_write(path, value)
-            with mock.patch.object(qualification, "write_json_exclusive", side_effect=write_record), \
+                return original_write(path, value, identity)
+            with mock.patch.object(qualification, "write_run_owned_json", side_effect=write_record), \
                     mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
                     mock.patch.object(qualification.os, "geteuid", return_value=0), \
                     mock.patch.object(qualification, "read_live_heartbeat", return_value=(initial["heartbeat"], {})), \
@@ -2883,6 +2883,130 @@ class CandidateQualificationTests(unittest.TestCase):
                 last = qualification.read_json_file(pathlib.Path(records[-1]["path"]), "latest poll")
                 self.assertTrue(last["terminal_latest"])
                 self.assertEqual(last["observation"], final)
+
+    def test_run_owned_json_never_replaces_a_file_this_run_did_not_create(self) -> None:
+        path = self.root / "owned.capture.json"
+        foreign = self.root / "foreign.capture.json"
+        foreign.write_bytes(b"earlier attempt\n")
+        with self.assertRaisesRegex(qualification.QualificationError, "this run did not create it"):
+            qualification.write_run_owned_json(foreign, {"result": "failed"}, None)
+        self.assertEqual(foreign.read_bytes(), b"earlier attempt\n")
+        path.symlink_to(foreign)
+        with self.assertRaisesRegex(qualification.QualificationError, "this run did not create it"):
+            qualification.write_run_owned_json(path, {"result": "failed"}, None)
+        self.assertEqual(foreign.read_bytes(), b"earlier attempt\n")
+        path.unlink()
+        identity = qualification.write_run_owned_json(path, {"result": "checking-readiness"}, None)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.stat().st_nlink, 1)
+        identity = qualification.write_run_owned_json(path, {"result": "capturing"}, identity)
+        self.assertEqual(qualification.read_json_file(path, "owned capture")["result"], "capturing")
+        # Another writer replaces the file between two of this run's writes.
+        replacement = self.root / "replacement"
+        replacement.write_bytes(b"another writer\n")
+        os.replace(replacement, path)
+        with self.assertRaisesRegex(qualification.QualificationError, "no longer the file this run created"):
+            qualification.write_run_owned_json(path, {"result": "failed"}, identity)
+        self.assertEqual(path.read_bytes(), b"another writer\n")
+        self.assertEqual(sorted(entry.name for entry in self.root.glob("owned.capture.json*")),
+                         ["owned.capture.json"])
+
+    def test_record_runtime_retains_failed_attempt_evidence_before_a_retry(self) -> None:
+        # A retry used to die with FileExistsError on the earlier attempt's
+        # readiness directory, and would have replaced its capture sidecar.
+        output = self.root / "runtime.json"
+        output.write_text('{"result": "INCOMPLETE"}\n')
+        capture = pathlib.Path(str(output) + ".capture.json")
+        readiness = pathlib.Path(str(capture) + ".readiness")
+        attempts = pathlib.Path(str(output) + ".attempts")
+        args = qualification.parser().parse_args([
+            "record-runtime", "--candidate-manifest", str(self.manifest_path),
+            "--dmg", str(self.dmg), "--source-root", str(ROOT), "--output", str(output),
+        ])
+        seen = []
+        def capture_started(**kwargs):
+            seen.append((kwargs["capture_path"].exists(), readiness.exists()))
+            raise RuntimeError("capture started")
+        def leave_failed_attempt(label: str) -> None:
+            capture.write_text(json.dumps({"result": "failed", "failure": label}) + "\n")
+            readiness.mkdir(mode=0o700)
+            (readiness / "0000.json").write_text(json.dumps({"phase": label}) + "\n")
+        with mock.patch.object(qualification, "validate_candidate_document", return_value=self.manifest["candidate"]), \
+                mock.patch.object(qualification, "assert_exact_clean_source"), \
+                mock.patch.object(qualification, "release_resource_limits"), \
+                mock.patch.object(qualification, "require_private_resource_baseline"), \
+                mock.patch.object(qualification, "live_runtime_recording", side_effect=capture_started):
+            for attempt in (1, 2):
+                leave_failed_attempt(f"attempt {attempt}")
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed), self.assertRaisesRegex(RuntimeError, "capture started"):
+                    qualification.command_record_runtime(args)
+                self.assertIn(str(attempts / str(attempt)), printed.getvalue())
+            # An attempt that left nothing behind retains nothing.
+            with self.assertRaisesRegex(RuntimeError, "capture started"):
+                qualification.command_record_runtime(args)
+        self.assertEqual(seen, [(False, False)] * 3)
+        self.assertEqual(sorted(entry.name for entry in attempts.iterdir()), ["1", "2"])
+        self.assertEqual(attempts.stat().st_mode & 0o777, 0o700)
+        for attempt in (1, 2):
+            retained = attempts / str(attempt)
+            self.assertEqual(retained.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(json.loads((retained / capture.name).read_text())["failure"], f"attempt {attempt}")
+            self.assertEqual(json.loads((retained / readiness.name / "0000.json").read_text())["phase"],
+                             f"attempt {attempt}")
+        self.assertEqual(json.loads(output.read_text())["result"], "INCOMPLETE")
+
+    def test_attempt_retention_refuses_redirected_or_shared_state_and_moves_nothing(self) -> None:
+        output = self.root / "runtime.json"
+        capture = pathlib.Path(str(output) + ".capture.json")
+        readiness = pathlib.Path(str(capture) + ".readiness")
+        attempts = pathlib.Path(str(output) + ".attempts")
+        self.assertIsNone(qualification.retain_previous_runtime_attempt(output, capture))
+        self.assertFalse(attempts.exists())
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        capture.write_text("{}\n")
+        readiness.symlink_to(elsewhere)
+        with self.assertRaisesRegex(qualification.QualificationError, "evidence is redirected"):
+            qualification.retain_previous_runtime_attempt(output, capture)
+        readiness.unlink()
+        readiness.write_text("not a directory\n")
+        with self.assertRaisesRegex(qualification.QualificationError, "is not a directory"):
+            qualification.retain_previous_runtime_attempt(output, capture)
+        readiness.unlink()
+        attempts.symlink_to(elsewhere)
+        with self.assertRaisesRegex(qualification.QualificationError, "private directory owned by this user"):
+            qualification.retain_previous_runtime_attempt(output, capture)
+        attempts.unlink()
+        attempts.mkdir()
+        attempts.chmod(0o755)
+        with self.assertRaisesRegex(qualification.QualificationError, "private directory owned by this user"):
+            qualification.retain_previous_runtime_attempt(output, capture)
+        self.assertEqual(capture.read_text(), "{}\n")
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual(list(attempts.iterdir()), [])
+
+    def test_live_recorder_refuses_to_reuse_an_earlier_readiness_directory(self) -> None:
+        initial = copy.deepcopy(self.runtime["recorder_observations"][0])
+        capture_path = self.root / "reused.capture.json"
+        earlier = pathlib.Path(str(capture_path) + ".readiness")
+        earlier.mkdir(mode=0o700)
+        (earlier / "0000.json").write_text("earlier attempt\n")
+        with mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
+                mock.patch.object(qualification.os, "geteuid", return_value=0), \
+                mock.patch.object(qualification, "read_live_heartbeat", return_value=(initial["heartbeat"], {})), \
+                mock.patch.object(qualification, "installed_runtime_host", return_value=self.runtime["host"]), \
+                mock.patch.object(qualification, "capture_runtime_observation", return_value=initial):
+            with self.assertRaisesRegex(qualification.QualificationError, "moves an earlier attempt's evidence aside"):
+                qualification.live_runtime_recording(
+                    root=ROOT, candidate_manifest=self.manifest,
+                    candidate_manifest_sha256=self.manifest_sha, dmg=self.dmg,
+                    heartbeat_path=self.root / "heartbeat_rich.json",
+                    data_dirs=[self.root], sqlite_overrides={}, capture_path=capture_path,
+                )
+        self.assertEqual([entry.name for entry in earlier.iterdir()], ["0000.json"])
+        self.assertEqual((earlier / "0000.json").read_text(), "earlier attempt\n")
+        self.assertEqual(qualification.read_json_file(capture_path, "refused reuse")["result"], "failed")
 
     def test_increasing_completions_cannot_hide_an_older_unsettled_prefix(self) -> None:
         observations = self.fresh_boundary_work_observations(file_in_flight=17)

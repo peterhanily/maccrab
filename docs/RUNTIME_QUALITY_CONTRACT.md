@@ -328,7 +328,10 @@ process in its dedicated process group is terminated and reaped on failure.
 Both transitive workload executors and their SHA-256 values are part of the
 workload binding. The recorder leaves a restart-safe
 `.runtime.json.capture.json` while sampling, including the failing phase and
-reason when it aborts. A passing report embeds each raw
+reason when it aborts. A rerun first moves an earlier attempt's capture and
+readiness directory, unmodified, into the next free
+`.runtime.json.attempts/<n>/`, and never overwrites a file it did not create.
+A passing report embeds each raw
 rich heartbeat, heartbeat-file digest/ownership, Darwin process counters, and
 complete SQLite-family observation; it then canonically hashes and normalizes
 those observations. The verifier repeats that normalization, reconciles sample

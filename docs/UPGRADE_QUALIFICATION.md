@@ -92,7 +92,9 @@ the shipped system-extension process. Before publishing a successor:
    menu bar stay unready until monitoring starts.
 4. Run the existing installed runtime qualification against that same
    candidate. Retain failed attempts as failures; source changes require a
-   new candidate and qualification.
+   new candidate and qualification. Rerunning the recorder moves the failed
+   attempt's capture sidecar and readiness diagnostics into
+   `<runtime report>.attempts/<n>/`; it never deletes or overwrites them.
 
 ### Qualification lanes
 

@@ -207,11 +207,22 @@ log transcript to show a successful non-empty rule reload with no rejection or
 error; this is not represented as a live restart test. The recorder rechecks
 the exact source commit/tree and clean checkout after the 900-second capture.
 
+Rerunning the recorder after a failed attempt is safe. Before it writes
+anything, it renames that attempt's `.capture.json` and `.capture.json.readiness/`
+into the next free `<runtime report>.attempts/<n>/` (root-owned, mode 0700) as
+retained failure evidence; paths recorded inside a retained capture still name
+the original location, and the files keep their names and digests beside it.
+It never deletes them, and it never overwrites a
+file it did not create in the current run. Symlinked or wrong-type evidence
+paths, and an attempts directory that is redirected, shared or owned by another
+user, are refused.
+
 If preflight reports historical cumulative loss from an earlier candidate or
-an out-of-contract workload, first preserve the failed `.capture.json`, current
-heartbeat/status, and relevant logs. Then gracefully deactivate/reactivate
-Protection (or install and activate the exact candidate), verify a new engine
-PID, wait for retained-store recovery, and retry once with shipping defaults.
+an out-of-contract workload, first preserve the current heartbeat/status and
+relevant logs; the recorder retains the failed capture itself. Then gracefully
+deactivate/reactivate Protection (or install and activate the exact candidate),
+verify a new engine PID, wait for retained-store recovery, and retry once with
+shipping defaults.
 That is a clean process epoch, not a clean database. Do not delete stores, run
 `make clear-data`, raise caps, disable required features, or apply
 `--sqlite-cap` to a shipping family; those actions mask the condition under
