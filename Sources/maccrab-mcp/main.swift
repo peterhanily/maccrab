@@ -2672,6 +2672,15 @@ func traceGraphPersistencePausedNote(
                 note += ". Writes resume automatically when recovery catches up."
             }
         }
+        // Engines from v1.22.6 report when the size pause last tripped and
+        // cleared; older heartbeats omit both keys and the note stays as is.
+        if let tripped = storage.footprintLatchLastTrippedAtUnix {
+            note += " The pause began at \(Date(timeIntervalSince1970: tripped).ISO8601Format())"
+            if let cleared = storage.footprintLatchLastClearedAtUnix {
+                note += "; the previous pause cleared at \(Date(timeIntervalSince1970: cleared).ISO8601Format())"
+            }
+            note += "."
+        }
     }
     if let written {
         note += " (Engine heartbeat written \(written).)"

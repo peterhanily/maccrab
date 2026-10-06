@@ -357,7 +357,7 @@ struct SystemExtensionManagerTests {
         #expect(manager.needsExplicitReactivation)
         #expect(manager.state == .notActivated)
         #expect(manager.statusMessage.contains("Protection is OFF"))
-        #expect(manager.statusMessage.contains("Enable Protection"))
+        #expect(manager.statusMessage.contains("Reactivate System Extension"))
 
         // Repeated ticks keep reporting the same actionable state.
         manager.activateAutomatically()

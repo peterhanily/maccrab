@@ -264,7 +264,7 @@ enum V2DocEntry: String, CaseIterable, Hashable {
                            body: "If System Health shows TraceGraph evidence persistence paused, the store passed its size limit or disk space is low: no new traces are recorded until space is freed. Writes normally resume on their own; System Health says when they cannot. Otherwise, zero traces with the engine running means the materializer hasn't yet observed an anchor candidate. Traces appear once the engine correlates a multi-step chain of activity — give it time on an active machine.",
                            codeBlock: ""),
                 DocSection(title: "ES entitlement missing",
-                           body: "If System › Health shows EndpointSecurity as down, the system extension wasn't activated. Open MacCrab.app, click \"Enable Protection\", then allow the extension in System Settings → General → Login Items & Extensions.",
+                           body: "If System › Health shows EndpointSecurity as down, the system extension wasn't activated. Open MacCrab.app and use System › Health › Reactivate System Extension, then allow the extension in System Settings → General → Login Items & Extensions (macOS 15 and later) or Privacy & Security (macOS 13–14).",
                            codeBlock: ""),
             ]
         }

@@ -21,7 +21,7 @@ extension MacCrabCtl {
         let daemonRunning = isDaemonRunning()
         print("Daemon:          \(daemonRunning ? "Running ✓" : "Not running ✗")")
         if !daemonRunning {
-            print("                 Release: open MacCrab.app → Enable Protection")
+            print("                 Release: open MacCrab.app (it requests activation; approve in System Settings)")
             print("                 Dev:     sudo maccrabd  (or: make run-root)")
         }
 

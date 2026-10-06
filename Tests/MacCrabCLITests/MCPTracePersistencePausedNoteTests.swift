@@ -63,6 +63,27 @@ struct MCPTracePersistencePausedNoteTests {
         #expect(caughtUp.contains("Recovery has reached its resume target"))
     }
 
+    @Test("footprint latch names when the pause began and when the previous one cleared, when reported")
+    func latchTimes() throws {
+        let base = latched(autoVacuumMode: 2)
+        let withTimes = base.replacingOccurrences(
+            of: "\"pinned_reader\":false",
+            with: "\"pinned_reader\":false,\"footprint_latch_last_tripped_at_unix\":1779999400,"
+                + "\"footprint_latch_last_cleared_at_unix\":1779990000")
+        let note = try #require(traceGraphPersistencePausedNote(heartbeat(withTimes), now: Self.freshNow))
+        #expect(note.contains("The pause began at 2026-05-28T20:16:40Z; the previous pause cleared at 2026-05-28T17:40:00Z."))
+
+        let trippedOnly = base.replacingOccurrences(
+            of: "\"pinned_reader\":false",
+            with: "\"pinned_reader\":false,\"footprint_latch_last_tripped_at_unix\":1779999400")
+        let first = try #require(traceGraphPersistencePausedNote(heartbeat(trippedOnly), now: Self.freshNow))
+        #expect(first.contains("The pause began at 2026-05-28T20:16:40Z."))
+        #expect(!first.contains("previous pause"))
+
+        let older = try #require(traceGraphPersistencePausedNote(heartbeat(base), now: Self.freshNow))
+        #expect(!older.contains("The pause began"))
+    }
+
     @Test("a latched legacy auto_vacuum=0 store is not promised an automatic resume")
     func legacyStore() throws {
         let note = try #require(traceGraphPersistencePausedNote(

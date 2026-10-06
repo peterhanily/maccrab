@@ -129,7 +129,7 @@ public actor SecurityScorer {
         // ES/eslogger active? (7 points)
         let esActive = isProcessRunning("eslogger") || isProcessRunning("maccrabd") || isProcessRunning("com.maccrab.agent")
         factors.append(Factor(name: "MacCrab Daemon", category: "runtime", score: esActive ? 7 : 0, maxScore: 7, status: esActive ? "pass" : "fail", detail: esActive ? "Detection engine active" : "MacCrab detection engine not running"))
-        if !esActive { recommendations.append("Enable Protection in MacCrab.app (release) or start the dev daemon") }
+        if !esActive { recommendations.append("Approve MacCrab's System Extension (System → Health → Reactivate System Extension in MacCrab.app) or start the dev daemon") }
 
         // === Hygiene (25 points max) ===
 

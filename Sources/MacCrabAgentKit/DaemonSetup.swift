@@ -578,7 +578,7 @@ enum DaemonSetup {
         if !isRoot {
             print("Note: Running without root. Endpoint Security events unavailable.")
             print("      Other sources (Unified Log, TCC, Network) will still work.")
-            print("      For full coverage: run as root (dev) or install MacCrab.app and click Enable Protection (release).")
+            print("      For full coverage: run as root (dev) or install MacCrab.app and approve its System Extension (release).")
         }
 
         // Check Full Disk Access by probing a TCC-protected path.

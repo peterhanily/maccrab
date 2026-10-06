@@ -146,7 +146,7 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
                 needsExplicitReactivation = true
                 state = .notActivated
                 statusMessage = "Protection is OFF — automatic restart is paused because "
-                    + "extension removal was accepted earlier. Click Enable Protection to restore it."
+                    + "extension removal was accepted earlier. Use Reactivate System Extension in System → Health to restore it."
                 if !hasReportedLatchedActivation {
                     hasReportedLatchedActivation = true
                     logger.fault("""
