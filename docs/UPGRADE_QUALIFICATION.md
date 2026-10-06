@@ -94,7 +94,9 @@ the shipped system-extension process. Before publishing a successor:
    candidate. Retain failed attempts as failures; source changes require a
    new candidate and qualification. Rerunning the recorder moves the failed
    attempt's capture sidecar and readiness diagnostics into
-   `<runtime report>.attempts/<n>/`; it never deletes or overwrites them.
+   `<runtime report>.attempts/<n>/`; it never deletes or overwrites them. It
+   refuses in seconds, before any prewarm, when TraceGraph is blocked, is not
+   accepting mutations, or is at or above its proactive recovery threshold.
 
 ### Qualification lanes
 

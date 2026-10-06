@@ -2986,6 +2986,76 @@ class CandidateQualificationTests(unittest.TestCase):
         self.assertEqual(list(elsewhere.iterdir()), [])
         self.assertEqual(list(attempts.iterdir()), [])
 
+    def test_trace_graph_headroom_preflight_names_the_blocking_condition(self) -> None:
+        heartbeat = copy.deepcopy(self.runtime["recorder_observations"][0]["heartbeat"])
+        graph = heartbeat["tracegraph_storage_admission"]
+        self.assertIsNone(qualification.trace_graph_epoch_headroom_failure(heartbeat))
+        graph.update(footprint_bytes=100, proactive_recovery_threshold_bytes=101)
+        self.assertIsNone(qualification.trace_graph_epoch_headroom_failure(heartbeat))
+        graph["footprint_bytes"] = 101
+        self.assertEqual(
+            qualification.trace_graph_epoch_headroom_failure(heartbeat),
+            "the TraceGraph footprint (101 bytes) is at or above its proactive "
+            "recovery threshold (101 bytes)",
+        )
+        graph["footprint_bytes"] = True
+        with self.assertRaisesRegex(qualification.QualificationError, "footprint_bytes must be an integer"):
+            qualification.trace_graph_epoch_headroom_failure(heartbeat)
+        graph.update(footprint_bytes=100, accepting_mutations=False, reason="footprint_limit")
+        self.assertEqual(
+            qualification.trace_graph_epoch_headroom_failure(heartbeat),
+            "TraceGraph is not accepting mutations (reason=footprint_limit)",
+        )
+        graph["blocked"] = True
+        self.assertEqual(
+            qualification.trace_graph_epoch_headroom_failure(heartbeat),
+            "the TraceGraph store is blocked (reason=footprint_limit)",
+        )
+        del heartbeat["tracegraph_storage_admission"]
+        self.assertEqual(
+            qualification.trace_graph_epoch_headroom_failure(heartbeat),
+            "heartbeat.tracegraph_storage_admission is missing",
+        )
+
+    def test_live_recorder_refuses_trace_graph_without_headroom_before_any_work(self) -> None:
+        initial = self.runtime["recorder_observations"][0]
+        for fault in ("proactive", "blocked", "not-accepting"):
+            with self.subTest(fault=fault):
+                heartbeat = copy.deepcopy(initial["heartbeat"])
+                graph = heartbeat["tracegraph_storage_admission"]
+                if fault == "proactive":
+                    graph.update(footprint_bytes=250, proactive_recovery_threshold_bytes=249)
+                elif fault == "blocked":
+                    graph.update(blocked=True, accepting_mutations=False, reason="footprint_limit")
+                else:
+                    graph["accepting_mutations"] = False
+                capture_path = self.root / f"headroom-{fault}.capture.json"
+                host = mock.Mock()
+                capture = mock.Mock()
+                with mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
+                        mock.patch.object(qualification.os, "geteuid", return_value=0), \
+                        mock.patch.object(qualification, "read_live_heartbeat", return_value=(heartbeat, {})), \
+                        mock.patch.object(qualification, "installed_runtime_host", host), \
+                        mock.patch.object(qualification, "capture_runtime_observation", capture), \
+                        mock.patch.object(qualification.time, "sleep") as sleep:
+                    with self.assertRaisesRegex(qualification.QualificationError,
+                                                r"^runtime preflight: .*Refusing before prewarm"):
+                        qualification.live_runtime_recording(
+                            root=ROOT, candidate_manifest=self.manifest,
+                            candidate_manifest_sha256=self.manifest_sha, dmg=self.dmg,
+                            heartbeat_path=self.root / "heartbeat_rich.json",
+                            data_dirs=[self.root], sqlite_overrides={}, capture_path=capture_path,
+                        )
+                host.assert_not_called()
+                capture.assert_not_called()
+                sleep.assert_not_called()
+                failure = qualification.read_json_file(capture_path, "headroom refusal")
+                self.assertEqual(failure["result"], "failed")
+                self.assertEqual(failure["phase"], "initial-readiness")
+                self.assertTrue(failure["failure"].startswith("runtime preflight: "))
+                self.assertNotIn("\n", failure["failure"])
+                self.assertFalse(pathlib.Path(str(capture_path) + ".readiness").exists())
+
     def test_live_recorder_refuses_to_reuse_an_earlier_readiness_directory(self) -> None:
         initial = copy.deepcopy(self.runtime["recorder_observations"][0])
         capture_path = self.root / "reused.capture.json"

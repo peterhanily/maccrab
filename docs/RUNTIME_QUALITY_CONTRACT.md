@@ -387,7 +387,10 @@ or sticky storage budget, a blocked alert family, a non-accepting or saturated
 TraceGraph recovery-writer barrier, a non-writable TraceStore, an
 open/failed configured LLM backend, an over-cap SQLite family, or a free-space-floor
 violation. It also fails during the epoch as soon as one of those states
-appears; it does not wait out the remaining samples. In particular, it never
+appears; it does not wait out the remaining samples. Its first heartbeat read,
+before any prewarm, also refuses a TraceGraph store that is blocked, is not
+accepting mutations, or has a footprint at or above its proactive recovery
+threshold; the threshold alone is not an epoch failure. In particular, it never
 derives shed from a balancing residual and never invents offered/completed
 counters from queue depth. `sequence_checkpoint.conservation`,
 `sequence_journal_conservation`, and

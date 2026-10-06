@@ -170,7 +170,10 @@ The second invocation validates and publishes the preserved DMG without
 rebuilding it. The recorder fails quickly, before the 900-second epoch, if the
 installed engine omits any required producer conservation ledger, if TraceStore
 is not an enabled full writer, if any cumulative loss/storage failure makes a
-zero-loss epoch impossible, or if a configured LLM has failed. An unconfigured
+zero-loss epoch impossible, or if a configured LLM has failed. Its first
+heartbeat read, before any prewarm, refuses with a one-line reason when
+TraceGraph is blocked, is not accepting mutations, or has `footprint_bytes` at
+or above `proactive_recovery_threshold_bytes`. An unconfigured
 LLM is supported and must remain disabled with no request activity. A configured,
 never-used schema-2 LLM may initially be `healthy=false`: before t0 the recorder
 runs an exact alert-only prewarm and requires one uniquely identified committed

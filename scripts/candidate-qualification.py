@@ -8775,6 +8775,37 @@ def log_diagnostic_count(
     return sum(1 for line in output.splitlines() if line_filter(line)), evidence
 
 
+def trace_graph_epoch_headroom_failure(heartbeat: Mapping[str, Any]) -> str | None:
+    """Return why the installed TraceGraph cannot start an epoch, or None.
+
+    A blocked or non-accepting store, or one already at its proactive recovery
+    threshold, cannot absorb the minute-5 burst. Without this check such an
+    attempt can spend prewarm and six minutes of epoch before failing at
+    sample 360.
+    """
+    path = "heartbeat.tracegraph_storage_admission"
+    graph = heartbeat.get("tracegraph_storage_admission")
+    if not isinstance(graph, dict):
+        return f"{path} is missing"
+    reason = graph.get("reason") or "unspecified"
+    if graph.get("blocked") is not False:
+        return f"the TraceGraph store is blocked (reason={reason})"
+    if graph.get("accepting_mutations") is not True:
+        return f"TraceGraph is not accepting mutations (reason={reason})"
+    if "footprint_bytes" in graph and "proactive_recovery_threshold_bytes" in graph:
+        footprint = int_value(graph["footprint_bytes"], f"{path}.footprint_bytes")
+        threshold = int_value(
+            graph["proactive_recovery_threshold_bytes"],
+            f"{path}.proactive_recovery_threshold_bytes",
+        )
+        if footprint >= threshold:
+            return (
+                f"the TraceGraph footprint ({footprint} bytes) is at or above its "
+                f"proactive recovery threshold ({threshold} bytes)"
+            )
+    return None
+
+
 def live_runtime_recording(
     *, root: pathlib.Path, candidate_manifest: Mapping[str, Any],
     candidate_manifest_sha256: str, dmg: pathlib.Path,
@@ -8901,6 +8932,13 @@ def live_runtime_recording(
 
     try:
         preflight_heartbeat, _ = read_live_heartbeat(heartbeat_path, candidate)
+        headroom_failure = trace_graph_epoch_headroom_failure(preflight_heartbeat)
+        if headroom_failure is not None:
+            fail(
+                f"runtime preflight: {headroom_failure}. Refusing before prewarm and the "
+                "900-second epoch; let the engine's TraceGraph retention recover (do not "
+                "raise caps or delete stores), then rerun"
+            )
         preflight_pid = heartbeat_counter(
             preflight_heartbeat, "engine_pid", "heartbeat"
         )
