@@ -2302,10 +2302,37 @@ public actor EventStore {
 
     private final class TransitionReclaimDeadline {
         let end: ContinuousClock.Instant
+        private let now: @Sendable () -> ContinuousClock.Instant
         init(end: ContinuousClock.Instant? = nil) {
             self.end = end ?? ContinuousClock.now.advanced(by: .seconds(30))
+            self.now = { ContinuousClock.now }
         }
-        var expired: Bool { ContinuousClock.now >= end }
+        init(budget: Duration, now: @escaping @Sendable () -> ContinuousClock.Instant) {
+            self.end = now().advanced(by: budget)
+            self.now = now
+        }
+        var expired: Bool { now() >= end }
+    }
+
+    /// Clock for a structural check that owns its deadline. Production leaves
+    /// it nil (ContinuousClock); tests bind a frozen clock so host load cannot
+    /// cut a large check short, or one that jumps past the budget.
+    @TaskLocal static var legacyStructuralCheckClock:
+        (@Sendable () -> ContinuousClock.Instant)?
+
+    static let legacyStructuralCheckDeadlineReason =
+        "legacy structural check reached its cooperative deadline; retry preserves storage"
+    static let legacyStructuralCheckVerdictReason =
+        "legacy structural quick_check reported an issue; original storage is preserved"
+
+    /// quick_check reads every page, so the fixed 30 s budget refused large
+    /// stores on slow or loaded hosts on every boot. Scale with the main file
+    /// at a conservative 8 MiB/s, between two and ten minutes.
+    static func legacyStructuralCheckBudget(databaseBytes: Int64) -> Duration {
+        let bytesPerSecond: Int64 = 8 * 1_048_576
+        let bytes = max(0, databaseBytes)
+        let seconds = bytes / bytesPerSecond + (bytes % bytesPerSecond == 0 ? 0 : 1)
+        return .seconds(min(600, max(120, seconds)))
     }
 
     private struct LegacyBootstrapReclaimPlan {
@@ -2428,8 +2455,21 @@ public actor EventStore {
             }
             leases.append(initial)
         }
-        let deadline = existingDeadline ?? TransitionReclaimDeadline()
+        let deadline: TransitionReclaimDeadline
+        if let existingDeadline {
+            deadline = existingDeadline
+        } else {
+            let databaseBytes = SQLitePersistentStoreAdmission.saturatingMultiply(
+                try transitionScalar(db, "PRAGMA page_count"),
+                by: try transitionScalar(db, "PRAGMA page_size"))
+            deadline = TransitionReclaimDeadline(
+                budget: legacyStructuralCheckBudget(databaseBytes: databaseBytes),
+                now: legacyStructuralCheckClock ?? { ContinuousClock.now })
+        }
         defer { withExtendedLifetime(deadline) {} }
+        // A verdict SQLite finished producing is authoritative even if the
+        // deadline passed meanwhile; only an interrupted check is an expiry.
+        var verdictObtained = false
         let cache = try transitionScalar(db, "PRAGMA cache_size", allowNegative: true)
         let mmap = try transitionScalar(db, "PRAGMA mmap_size")
         func restore() throws {
@@ -2557,23 +2597,30 @@ public actor EventStore {
                   sqlite3_column_bytes(statement, 0) == 2,
                   let value = sqlite3_column_text(statement, 0),
                   value[0] == 111, value[1] == 107 else {
-                throw EventStoreError.storageNotReady("legacy structural quick_check reported an issue; original storage is preserved")
+                verdictObtained = true
+                throw EventStoreError.storageNotReady(Self.legacyStructuralCheckVerdictReason)
             }
+            verdictObtained = true
+            // SQLite emits "ok" only after the whole check ran; an owned
+            // deadline must not interrupt the step that confirms it.
+            if existingDeadline == nil { sqlite3_progress_handler(db, 0, nil, nil) }
             let completed = sqlite3_step(statement)
             guard completed != SQLITE_ROW else {
                 throw EventStoreError.storageNotReady("legacy structural check did not return one complete verdict")
             }
             guard completed == SQLITE_DONE else { throw sqliteError(completed) }
             try Task.checkCancellation()
-            guard !deadline.expired else {
-                throw EventStoreError.storageNotReady("legacy structural check reached its cooperative deadline; retry preserves storage")
+            // A caller's shared bootstrap deadline still bounds its remaining
+            // work; an owned deadline accepts the completed ok verdict.
+            guard existingDeadline == nil || !deadline.expired else {
+                throw EventStoreError.storageNotReady(Self.legacyStructuralCheckDeadlineReason)
             }
             try restore()
         } catch {
             let original = error
             try restore()
-            if deadline.expired {
-                throw EventStoreError.storageNotReady("legacy structural check reached its cooperative deadline; retry preserves storage")
+            if deadline.expired, !verdictObtained {
+                throw EventStoreError.storageNotReady(Self.legacyStructuralCheckDeadlineReason)
             }
             throw original
         }

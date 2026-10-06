@@ -45,4 +45,47 @@ struct UpgradeBootHeartbeatTests {
         #expect(next["upgrade_source_events"] == nil)
         #expect(next["liveness"] as? Bool == false)
     }
+
+    @Test("A long synchronous boot step keeps the heartbeat fresh, and stops before the next phase")
+    func longBootStepKeepsHeartbeatFresh() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("boot-keepalive-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("heartbeat.json")
+        func payload() throws -> [String: Any] {
+            try #require(JSONSerialization.jsonObject(
+                with: Data(contentsOf: path)
+            ) as? [String: Any])
+        }
+        let startedAt = Date()
+        let entered = Date()
+        let value = DaemonSetup.keepingBootPhaseFresh(
+            supportDir: directory.path,
+            startedAt: startedAt,
+            interval: .milliseconds(50)
+        ) { () -> Int in
+            // Stands in for a long check: it returns only once the keepalive
+            // has written, bounded so a broken timer fails rather than hangs.
+            let limit = Date().addingTimeInterval(30)
+            while !FileManager.default.fileExists(atPath: path.path), Date() < limit {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            return 7
+        }
+        #expect(value == 7)
+        // Written by the timer while the step ran, not before it started.
+        let fresh = try payload()
+        #expect(fresh["boot_phase"] as? String == "starting")
+        let writtenAt = try #require(fresh["written_at_unix"] as? Double)
+        #expect(writtenAt > entered.timeIntervalSince1970)
+
+        // The caller's next phase, written right after return, is never
+        // replaced by a late keepalive tick.
+        DaemonSetup.writeBootPhase(
+            supportDir: directory.path, phase: "storage_not_ready", startedAt: startedAt
+        )
+        Thread.sleep(forTimeInterval: 0.3)
+        #expect(try payload()["boot_phase"] as? String == "storage_not_ready")
+    }
 }

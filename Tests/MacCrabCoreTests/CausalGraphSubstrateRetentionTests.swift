@@ -1765,7 +1765,7 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(bootstrap.contains(
             "let traceGraphAttached = state.causalStore != nil || state.causalGraphBridge != nil"))
         #expect(bootstrap.contains(
-            "guard traceGraphStartupRecovery.writableBeforeProducers || !traceGraphAttached else"))
+            "guard traceGraphStartupAdmission != .notReady || !traceGraphAttached else"))
         // The clause admits only a run with no writer: the detached branch
         // clears both handles.
         let detached = try #require(setup.range(of:
@@ -1775,7 +1775,7 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(branch.contains("causalStoreOuter = nil"))
     }
 
-    @Test("Bootstrap fails closed on graph non-convergence before every producer marker")
+    @Test("Bootstrap decides graph startup before every producer marker; after the drain it latches or detaches, never exits")
     func bootstrapRequiresTraceGraphStartupProofBeforeIngestion() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1797,11 +1797,31 @@ struct CausalGraphSubstrateRetentionTests {
             "recoverStorageBeforeProducers("
         ))
         let setupGuard = try #require(setup.range(of:
-            "guard recovery.writableBeforeProducers"
+            "let startup = await Self.admitTraceGraphStartup("
         ))
+        // The drain result no longer gates boot directly: a store that cannot
+        // reach headroom starts latched, and one that cannot be latched is
+        // closed and detached. Only the activation-boundary reprobe below can
+        // still fail pre-ingestion storage for TraceGraph.
+        #expect(!setup.contains("guard recovery.writableBeforeProducers"))
+        let setupDecision = try #require(setup.range(of:
+            "guard startup.admission == .latched else",
+            range: setupGuard.upperBound..<setup.endIndex
+        ))
+        let setupLatchedLog = try #require(setup.range(of:
+            "TraceGraph starts with graph writes latched",
+            range: setupDecision.upperBound..<setup.endIndex
+        ))
+        let detachBranch = setup[setupDecision.upperBound..<setupLatchedLog.lowerBound]
+        #expect(detachBranch.contains("await causalStore.close()"))
+        #expect(detachBranch.contains("causalGraphBridge = nil"))
+        #expect(detachBranch.contains("causalStoreOuter = nil"))
+        #expect(detachBranch.contains("break traceGraphStartup"))
         let activationBoundary = try #require(setup.range(of:
             "FINAL_PRE_INGESTION_STORAGE_ACTIVATION_BOUNDARY"
         ))
+        #expect(!setup[setupGuard.upperBound..<activationBoundary.lowerBound]
+            .contains("try DaemonBootstrap.failPreIngestionStorage("))
         let activationGraphProbe = try #require(setup.range(of:
             "activationCausalStore.storageAdmissionStatus()"
         ))
@@ -1824,17 +1844,24 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(recovery.lowerBound < setupGuard.lowerBound)
         #expect(setupGuard.lowerBound < activationBoundary.lowerBound)
         #expect(activationBoundary.lowerBound < activationGraphProbe.lowerBound)
+        let activationDecision = try #require(setup.range(of:
+            "guard activation.admission == .latched else",
+            range: activationGraphProbe.upperBound..<setup.endIndex
+        ))
+        #expect(!setup.contains("guard activationProof.writableBeforeProducers"))
         for marker in setupProducerMarkers {
             let producer = try #require(setup.range(of: marker))
             #expect(activationGraphProbe.lowerBound < producer.lowerBound,
                     "fresh TraceGraph activation proof must precede \(marker)")
+            #expect(activationDecision.lowerBound < producer.lowerBound,
+                    "TraceGraph activation decision must precede \(marker)")
         }
 
         let bootstrapProof = try #require(bootstrap.range(of:
             "let traceGraphStartupRecovery = state.causalStoreStartupRecovery"
         ))
         let failClosed = try #require(bootstrap.range(of:
-            "guard traceGraphStartupRecovery.writableBeforeProducers"
+            "guard traceGraphStartupAdmission != .notReady"
         ))
         let banner = try #require(bootstrap.range(of:
             "await StartupBanner.print(state: state)"

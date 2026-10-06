@@ -141,6 +141,57 @@ enum DaemonSetup {
         }
     }
 
+    /// How an open TraceGraph store enters the first event epoch.
+    enum TraceGraphStartupAdmission: Equatable {
+        /// Durable headroom was proven; ordinary graph writes are admitted.
+        case writable
+        /// The store is open with every ordinary graph mutation refused. The
+        /// periodic bounded recovery lane keeps draining it and the latch
+        /// clears below its resume target; events, alerts, and rules run.
+        case latched
+        /// No writable handle, a drain that failed outright, or a store that
+        /// would admit writes without a headroom proof. After the startup
+        /// drain the store is closed and TraceGraph is detached for the run;
+        /// at the activation boundary it fails closed.
+        case notReady
+    }
+
+    static func traceGraphStartupAdmission(
+        _ recovery: CausalGraphStartupRecoveryResult
+    ) -> TraceGraphStartupAdmission {
+        if recovery.writableBeforeProducers { return .writable }
+        // A drain that threw (an SQLite fault such as SQLITE_CORRUPT or EIO,
+        // or a failed max_page_count verification) is not a footprint
+        // condition. Latched, it would report footprint_limit while runtime
+        // recovery failed on every tick and never cleared it.
+        guard recovery.disposition != .nonconverged(.recoveryFailed),
+              let admission = recovery.finalAdmission,
+              admission.writableHandle,
+              admission.blocked,
+              !admission.acceptingMutations else {
+            return .notReady
+        }
+        return .latched
+    }
+
+    /// A store that could not prove headroom used to stop the engine before
+    /// ingestion, and sysextd relaunched it into the same store with nothing
+    /// protecting the host. Latch its writes instead and let runtime recovery
+    /// continue. Returns the proof refreshed with the latched admission.
+    static func admitTraceGraphStartup(
+        store: SQLiteCausalGraphStore,
+        recovery: CausalGraphStartupRecoveryResult
+    ) async -> (proof: CausalGraphStartupRecoveryResult, admission: TraceGraphStartupAdmission) {
+        guard !recovery.writableBeforeProducers,
+              recovery.disposition != .nonconverged(.recoveryFailed) else {
+            return (recovery, traceGraphStartupAdmission(recovery))
+        }
+        let proof = recovery.refreshed(
+            finalAdmission: await store.latchMutationsForDegradedStartup()
+        )
+        return (proof, traceGraphStartupAdmission(proof))
+    }
+
     static func startupFailureReason(_ error: Error) -> String {
         if error is DatabaseEncryptionAvailabilityError { return "key_unavailable" }
         if let graph = error as? TraceGraphStartupStorageError {
@@ -471,6 +522,40 @@ enum DaemonSetup {
         try? SecureFileIO.atomicReplace(
             at: supportDir + "/heartbeat.json", data: data, mode: 0o644
         )
+    }
+
+    /// Rewrites the "starting" boot phase every `interval` while one
+    /// synchronous boot step runs. EventStore's legacy structural check can
+    /// take up to ten minutes, past the app's 120 s heartbeat freshness
+    /// window; a stale boot heartbeat reads as a crashed engine and kicks the
+    /// app's system-extension watchdog. Returns only after any in-flight
+    /// rewrite, so a phase the caller writes next, including
+    /// storage_not_ready, is never overwritten.
+    static func keepingBootPhaseFresh<T>(
+        supportDir: String,
+        startedAt: Date,
+        interval: DispatchTimeInterval = .seconds(30),
+        _ body: () throws -> T
+    ) rethrows -> T {
+        let active = OSAllocatedUnfairLock(initialState: true)
+        let timer = DispatchSource.makeTimerSource(queue: .global())
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler {
+            active.withLock { running in
+                guard running else { return }
+                DaemonSetup.writeBootPhase(
+                    supportDir: supportDir,
+                    phase: "starting",
+                    startedAt: startedAt
+                )
+            }
+        }
+        timer.resume()
+        defer {
+            active.withLock { $0 = false }
+            timer.cancel()
+        }
+        return try body()
     }
 
     /// Boot's own backpressure budget for the pre-producer journal expiry
@@ -844,12 +929,17 @@ enum DaemonSetup {
                     )
                 },
                 operation: {
-                    try EventStore(
-                        directory: supportDir,
-                        storagePolicy: eventStoragePolicy,
-                        allowLegacyUpgradeHeadroom: true,
-                        liveMemoryBudget: .processShared
-                    )
+                    try Self.keepingBootPhaseFresh(
+                        supportDir: supportDir,
+                        startedAt: startedAt
+                    ) {
+                        try EventStore(
+                            directory: supportDir,
+                            storagePolicy: eventStoragePolicy,
+                            allowLegacyUpgradeHeadroom: true,
+                            liveMemoryBudget: .processShared
+                        )
+                    }
                 }
             )
         } catch let error as EventStoreError {
@@ -862,19 +952,29 @@ enum DaemonSetup {
                     failure: error
                 )
             }
-            eventStore = Self.recoverEventStore(
+            eventStore = Self.keepingBootPhaseFresh(
                 supportDir: supportDir,
-                storagePolicy: eventStoragePolicy,
-                logger: logger,
-                initialFailure: error
-            )
+                startedAt: startedAt
+            ) {
+                Self.recoverEventStore(
+                    supportDir: supportDir,
+                    storagePolicy: eventStoragePolicy,
+                    logger: logger,
+                    initialFailure: error
+                )
+            }
         } catch {
-            eventStore = Self.recoverEventStore(
+            eventStore = Self.keepingBootPhaseFresh(
                 supportDir: supportDir,
-                storagePolicy: eventStoragePolicy,
-                logger: logger,
-                initialFailure: error
-            )
+                startedAt: startedAt
+            ) {
+                Self.recoverEventStore(
+                    supportDir: supportDir,
+                    storagePolicy: eventStoragePolicy,
+                    logger: logger,
+                    initialFailure: error
+                )
+            }
         }
         if transition.pendingReserveFitsHardBoundary == true,
            let pending = transition.pendingReserveMiB {
@@ -1475,13 +1575,15 @@ enum DaemonSetup {
         }
         let causalStoreOpen = await openCausalStore()
         let causalStoreStartupAdmission = causalStoreOpen.startupAdmission
-        if let causalStore = causalStoreOpen.store {
+        traceGraphStartup: if let causalStore = causalStoreOpen.store {
             // rc.11 can restart with no in-memory latch while the inherited
             // family is already at the proactive boundary. Recover here—not in
             // DaemonBootstrap—because every collector-local producer below
             // this point owns a bounded buffer that can fill/drop before the
             // merged EventLoop drivers attach. Success requires strict durable
-            // headroom; the one-hour evidence floor is never crossed.
+            // headroom; the one-hour evidence floor is never crossed. A store
+            // that cannot reach headroom starts with its writes latched, and
+            // one that cannot be latched is closed and detached.
             let days = max(1, min(bootStorage.tracegraphRetentionDays, 3_650))
             let recovery = await causalStore.recoverStorageBeforeProducers(
                 configuredRetentionHours: days * 24,
@@ -1490,8 +1592,21 @@ enum DaemonSetup {
                 maximumPasses:
                     DaemonTimers.tracegraphStartupRecoveryMaximumPasses
             )
-            guard recovery.writableBeforeProducers else {
-                let admission = recovery.finalAdmission
+            let startup = await Self.admitTraceGraphStartup(
+                store: causalStore,
+                recovery: recovery
+            )
+            switch startup.admission {
+            case .writable:
+                if recovery.normalWriteAdmissionRestored {
+                    logger.notice("TraceGraph startup recovery restored normal writable admission before collector construction after \(recovery.passes) bounded pass(es); cutoffs=\(recovery.attemptedCutoffHours)")
+                } else if recovery.passes > 0 {
+                    logger.notice("TraceGraph startup recovery established durable headroom before collector construction in \(recovery.passes) bounded pass(es); cutoffs=\(recovery.attemptedCutoffHours)")
+                } else {
+                    logger.info("TraceGraph startup admission confirmed below its proactive boundary before collector construction")
+                }
+            case .latched, .notReady:
+                let admission = startup.proof.finalAdmission
                 let disposition: String
                 switch recovery.disposition {
                 case .writable:
@@ -1509,22 +1624,27 @@ enum DaemonSetup {
                     "detail=\(recovery.failureDetail ?? "none")",
                     "one-hour evidence floor preserved",
                 ].joined(separator: ", ")
-                try DaemonBootstrap.failPreIngestionStorage(
-                    supportDir: supportDir,
-                    startedAt: startedAt,
-                    component: "TraceGraph",
-                    reason: detail,
-                    failure: TraceGraphStartupStorageError(recovery: recovery)
-                )
+                guard startup.admission == .latched else {
+                    // An open store that cannot be latched (no writable
+                    // handle, or a drain that failed outright) used to stop
+                    // the engine here, and sysextd relaunched it into the same
+                    // store with no detection. Close it and detach TraceGraph
+                    // for this run, as for a store that could not open: with
+                    // no writer nothing reaches an unproven graph, and the
+                    // heartbeat reports the store unavailable.
+                    await causalStore.close()
+                    logger.fault("TraceGraph detached this run: \(detail, privacy: .public). Event detection, alerting and rules run without trace materialization.")
+                    causalGraphBridge = nil
+                    causalStoreOuter = nil
+                    causalStoreStartupRecovery = .unavailable(
+                        reason: nil,
+                        detail: "TraceGraph startup could not admit the open store: \(detail)"
+                    )
+                    break traceGraphStartup
+                }
+                logger.fault("TraceGraph starts with graph writes latched: \(detail, privacy: .public). Event detection, alerting and rules run; bounded recovery continues at runtime and clears the latch below its resume target.")
             }
-            causalStoreStartupRecovery = recovery
-            if recovery.normalWriteAdmissionRestored {
-                logger.notice("TraceGraph startup recovery restored normal writable admission before collector construction after \(recovery.passes) bounded pass(es); cutoffs=\(recovery.attemptedCutoffHours)")
-            } else if recovery.passes > 0 {
-                logger.notice("TraceGraph startup recovery established durable headroom before collector construction in \(recovery.passes) bounded pass(es); cutoffs=\(recovery.attemptedCutoffHours)")
-            } else {
-                logger.info("TraceGraph startup admission confirmed below its proactive boundary before collector construction")
-            }
+            causalStoreStartupRecovery = startup.proof
             let materializer = TraceMaterializer(
                 store: causalStore,
                 daemonVersion: MacCrabVersion.current,
@@ -1567,8 +1687,9 @@ enum DaemonSetup {
             // an engine whose events.db and alerts.db are entirely healthy —
             // trading all endpoint detection for one optional feature.
             //
-            // The genuinely fail-closed case (writable convergence could not be
-            // restored, above) still aborts. This one does not.
+            // An open store that cannot be admitted after its drain is
+            // detached above in the same way. Only the activation-boundary
+            // reprobe below still aborts.
             let unavailable = CausalGraphStartupRecoveryResult.unavailable(
                 reason: causalStoreStartupAdmission?.reason,
                 detail: "TraceGraph store actor could not open before collector construction"
@@ -1641,25 +1762,32 @@ enum DaemonSetup {
         // degrade decided above.
         if let activationCausalStore = causalStoreOuter {
             let activationAdmission = await activationCausalStore.storageAdmissionStatus()
-            let activationProof = causalStoreStartupRecovery.refreshed(
-                finalAdmission: activationAdmission
+            let activation = await Self.admitTraceGraphStartup(
+                store: activationCausalStore,
+                recovery: causalStoreStartupRecovery.refreshed(
+                    finalAdmission: activationAdmission
+                )
             )
-            guard activationProof.writableBeforeProducers else {
+            let activationProof = activation.proof
+            if activation.admission != .writable {
+                let admission = activationProof.finalAdmission
                 let detail = [
-                    "activation-boundary reprobe failed",
-                    "block=\(activationAdmission.reason?.rawValue ?? "none")",
-                    "footprint=\(activationAdmission.footprintBytes ?? -1)",
-                    "target=\(activationAdmission.resumeBelowBytes ?? -1)",
-                    "deficit=\(activationAdmission.recoveryDeficitBytes ?? -1)",
+                    "block=\(admission?.reason?.rawValue ?? "none")",
+                    "footprint=\(admission?.footprintBytes ?? -1)",
+                    "target=\(admission?.resumeBelowBytes ?? -1)",
+                    "deficit=\(admission?.recoveryDeficitBytes ?? -1)",
                     "one-hour evidence floor preserved",
                 ].joined(separator: ", ")
-                try DaemonBootstrap.failPreIngestionStorage(
-                    supportDir: supportDir,
-                    startedAt: startedAt,
-                    component: "TraceGraph",
-                    reason: detail,
-                    failure: TraceGraphStartupStorageError(block: activationAdmission.reason)
-                )
+                guard activation.admission == .latched else {
+                    try DaemonBootstrap.failPreIngestionStorage(
+                        supportDir: supportDir,
+                        startedAt: startedAt,
+                        component: "TraceGraph",
+                        reason: "activation-boundary reprobe failed, " + detail,
+                        failure: TraceGraphStartupStorageError(block: admission?.reason)
+                    )
+                }
+                logger.warning("TraceGraph graph writes are latched at the activation boundary: \(detail, privacy: .public)")
             }
             causalStoreStartupRecovery = activationProof
         } else {
