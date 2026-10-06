@@ -168,7 +168,7 @@ func runRepair(args: [String]) async {
         info("Reboot will clear the \(zombies.count) prior versions queued for uninstall.")
     }
     if activated.isEmpty {
-        info("Open /Applications/MacCrab.app and click \"Enable Protection\" on the Overview tab. macOS will prompt for approval in System Settings → General → Login Items & Extensions.")
+        info("Open /Applications/MacCrab.app; it requests activation on launch. Approve it in System Settings → General → Login Items & Extensions → Endpoint Security Extensions (macOS 15 and later) or Privacy & Security (macOS 13–14). If it still does not start, use System → Health → Reactivate System Extension in the app.")
     }
     print()
 }

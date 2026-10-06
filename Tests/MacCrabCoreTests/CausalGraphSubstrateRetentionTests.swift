@@ -1030,7 +1030,10 @@ struct CausalGraphSubstrateRetentionTests {
         await store.close()
     }
 
-    @Test("Periodic recovery queues one concurrent mutation and yields after one child quantum")
+    // The barrier exists for writers the store would still admit: an unlatched
+    // store draining proactively below its admission threshold. A latched
+    // writer is refused before the barrier instead (see the next test).
+    @Test("Periodic proactive recovery of an unlatched store queues one concurrent mutation and yields after one child quantum")
     func periodicRecoverySerializesForegroundMutationLosslessly() async throws {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("tracegraph-recovery-writer-\(UUID().uuidString).db")
@@ -1046,7 +1049,7 @@ struct CausalGraphSubstrateRetentionTests {
         )
         let traceID = "writer-preemption"
         try await store.saveTrace(
-            startupTrace(traceID, updatedAt: old, policyPayloadBytes: 256),
+            startupTrace(traceID, updatedAt: old, policyPayloadBytes: 1_048_576),
             members: (0..<600).map { index in
                 TraceMembership(
                     traceId: traceID,
@@ -1057,6 +1060,18 @@ struct CausalGraphSubstrateRetentionTests {
                 )
             }
         )
+        #expect(await store.walCheckpointTruncate())
+        let footprint = try #require(await store.storageFootprintBytes())
+        let proactive = await store.updateStorageAdmission(
+            maxFootprintBytes: footprint + 256 * 1_024 + 8 * 1_048_576,
+            freeSpaceFloorBytes: nil,
+            transactionReserveBytes: 8 * 1_048_576
+        )
+        #expect(!proactive.blocked, "this barrier case is an unlatched store")
+        #expect((proactive.footprintBytes ?? -1)
+                >= (proactive.proactiveRecoveryThresholdBytes ?? Int64.max))
+        #expect((proactive.recoveryDeficitBytes ?? 0) > 0,
+                "the pass drains proactively, below the admission threshold")
 
         let recovery = Task {
             try await store.recoverStorageBudget(
@@ -1107,6 +1122,78 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(after.recoveryMutationMaxWaitNanoseconds > 0)
         #expect(after.recoveryMutationOldestWaitNanoseconds == 0)
         #expect(after.shedMutationsTotal == 0)
+        await store.close()
+    }
+
+    @Test(
+        "A latched writer is refused before the recovery barrier and cannot cut the pass short",
+        .timeLimit(.minutes(1))
+    )
+    func latchedWriterIsRefusedWithoutWaitingOnRecoveryBarrier() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracegraph-latched-writer-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: path.path + suffix)
+            }
+        }
+        let gate = CascadeYieldGate()
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path.path,
+            cascadeYieldHook: { await gate.pauseOnce() }
+        )
+        let traceID = "latched-writer"
+        try await store.saveTrace(
+            startupTrace(traceID, updatedAt: old, policyPayloadBytes: 256),
+            members: (0..<600).map { index in
+                TraceMembership(
+                    traceId: traceID,
+                    entityId: "latched-member-\(index)",
+                    role: "context",
+                    layer: "context",
+                    addedAt: old
+                )
+            }
+        )
+        #expect(await store.walCheckpointTruncate())
+        let footprint = try #require(await store.storageFootprintBytes())
+        let reserve: Int64 = 8 * 1_048_576
+        let latched = await store.updateStorageAdmission(
+            maxFootprintBytes: footprint + reserve - 1,
+            freeSpaceFloorBytes: nil,
+            transactionReserveBytes: reserve
+        )
+        #expect(latched.blocked)
+        #expect(latched.reason == .footprintLimit)
+
+        let recovery = Task {
+            try await store.recoverStorageBudget(
+                retentionCutoff: cutoff,
+                orphanCutoff: cutoff
+            )
+        }
+        await gate.waitUntilPaused()
+        // Recovery is suspended between cascade quanta. The latched writer
+        // must be refused now; parking it behind the pass would end the pass
+        // after this quantum, and a stream of such writers starved recovery.
+        await #expect(throws: CausalGraphStorageAdmissionError.self) {
+            try await store.upsertEntity(self.ent("while-latched", lastSeen: self.recent))
+        }
+        let during = await store.storageAdmissionStatus()
+        #expect(during.recovering)
+        #expect(during.recoveryMutationWaiters == 0)
+        #expect(during.recoveryMutationWaitsTotal == 0)
+        #expect(during.shedMutationsTotal == 1)
+
+        await gate.resume()
+        let result = try await recovery.value
+        #expect(result.traceChildRowsDeleted == 600,
+                "the refused writer must not end the pass after one child quantum")
+        #expect(result.tracesDeleted == 1)
+        let after = await store.storageAdmissionStatus()
+        #expect(after.recoveryWriterPreemptionsTotal == 0)
+        #expect(after.recoveryMutationWaitsTotal == 0)
+        #expect(try await store.entity(id: "while-latched") == nil)
         await store.close()
     }
 
@@ -1678,7 +1765,7 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(bootstrap.contains(
             "let traceGraphAttached = state.causalStore != nil || state.causalGraphBridge != nil"))
         #expect(bootstrap.contains(
-            "guard traceGraphStartupRecovery.writableBeforeProducers || !traceGraphAttached else"))
+            "guard traceGraphStartupAdmission != .notReady || !traceGraphAttached else"))
         // The clause admits only a run with no writer: the detached branch
         // clears both handles.
         let detached = try #require(setup.range(of:
@@ -1688,7 +1775,7 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(branch.contains("causalStoreOuter = nil"))
     }
 
-    @Test("Bootstrap fails closed on graph non-convergence before every producer marker")
+    @Test("Bootstrap decides graph startup before every producer marker; after the drain it latches or detaches, never exits")
     func bootstrapRequiresTraceGraphStartupProofBeforeIngestion() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1710,11 +1797,31 @@ struct CausalGraphSubstrateRetentionTests {
             "recoverStorageBeforeProducers("
         ))
         let setupGuard = try #require(setup.range(of:
-            "guard recovery.writableBeforeProducers"
+            "let startup = await Self.admitTraceGraphStartup("
         ))
+        // The drain result no longer gates boot directly: a store that cannot
+        // reach headroom starts latched, and one that cannot be latched is
+        // closed and detached. Only the activation-boundary reprobe below can
+        // still fail pre-ingestion storage for TraceGraph.
+        #expect(!setup.contains("guard recovery.writableBeforeProducers"))
+        let setupDecision = try #require(setup.range(of:
+            "guard startup.admission == .latched else",
+            range: setupGuard.upperBound..<setup.endIndex
+        ))
+        let setupLatchedLog = try #require(setup.range(of:
+            "TraceGraph starts with graph writes latched",
+            range: setupDecision.upperBound..<setup.endIndex
+        ))
+        let detachBranch = setup[setupDecision.upperBound..<setupLatchedLog.lowerBound]
+        #expect(detachBranch.contains("await causalStore.close()"))
+        #expect(detachBranch.contains("causalGraphBridge = nil"))
+        #expect(detachBranch.contains("causalStoreOuter = nil"))
+        #expect(detachBranch.contains("break traceGraphStartup"))
         let activationBoundary = try #require(setup.range(of:
             "FINAL_PRE_INGESTION_STORAGE_ACTIVATION_BOUNDARY"
         ))
+        #expect(!setup[setupGuard.upperBound..<activationBoundary.lowerBound]
+            .contains("try DaemonBootstrap.failPreIngestionStorage("))
         let activationGraphProbe = try #require(setup.range(of:
             "activationCausalStore.storageAdmissionStatus()"
         ))
@@ -1737,17 +1844,24 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(recovery.lowerBound < setupGuard.lowerBound)
         #expect(setupGuard.lowerBound < activationBoundary.lowerBound)
         #expect(activationBoundary.lowerBound < activationGraphProbe.lowerBound)
+        let activationDecision = try #require(setup.range(of:
+            "guard activation.admission == .latched else",
+            range: activationGraphProbe.upperBound..<setup.endIndex
+        ))
+        #expect(!setup.contains("guard activationProof.writableBeforeProducers"))
         for marker in setupProducerMarkers {
             let producer = try #require(setup.range(of: marker))
             #expect(activationGraphProbe.lowerBound < producer.lowerBound,
                     "fresh TraceGraph activation proof must precede \(marker)")
+            #expect(activationDecision.lowerBound < producer.lowerBound,
+                    "TraceGraph activation decision must precede \(marker)")
         }
 
         let bootstrapProof = try #require(bootstrap.range(of:
             "let traceGraphStartupRecovery = state.causalStoreStartupRecovery"
         ))
         let failClosed = try #require(bootstrap.range(of:
-            "guard traceGraphStartupRecovery.writableBeforeProducers"
+            "guard traceGraphStartupAdmission != .notReady"
         ))
         let banner = try #require(bootstrap.range(of:
             "await StartupBanner.print(state: state)"
@@ -1807,6 +1921,7 @@ struct CausalGraphSubstrateRetentionTests {
     private func recoveryResult(
         deficit: Int64?,
         backlog: Bool?,
+        orphanBacklog: Bool = false,
         pinned: Bool = false,
         rowsDeleted: Int = 0
     ) -> CausalGraphStorageRecoveryResult {
@@ -1823,8 +1938,8 @@ struct CausalGraphSubstrateRetentionTests {
             recoveryTargetBytes: 100,
             recoveryDeficitBytes: deficit,
             traceBacklogRemaining: backlog,
-            orphanBacklogRemaining: false,
-            eligibleBacklogRemaining: backlog
+            orphanBacklogRemaining: orphanBacklog,
+            eligibleBacklogRemaining: orphanBacklog ? true : backlog
         )
     }
 
@@ -1911,6 +2026,276 @@ struct CausalGraphSubstrateRetentionTests {
             configuredRetentionHours: 90 * 24,
             now: start.addingTimeInterval(300)
         ) == 1, "aging rows are rechecked at the protected floor")
+    }
+
+    @Test("Recovery cadence tightens past orphan backlog and after stalled passes")
+    func recoveryCadenceIgnoresOrphanBacklogAndTightensOnStall() {
+        let gate = TraceGraphRecoveryCadenceGate()
+        let configured = 90 * 24
+        let rungs = DaemonTimers.tracegraphRecoveryCutoffHours
+        let limit = TraceGraphRecoveryCadenceGate.maximumPassesWithoutDeficitProgress
+        func record(
+            deficit: Int64,
+            traces: Bool,
+            orphans: Bool = false,
+            rowsDeleted: Int = 1
+        ) -> TraceGraphRecoveryCadenceGate.Outcome {
+            gate.recordRecoveryOutcome(
+                recoveryResult(
+                    deficit: deficit,
+                    backlog: traces,
+                    orphanBacklog: orphans,
+                    rowsDeleted: rowsDeleted
+                ),
+                configuredRetentionHours: configured,
+                cutoffRungs: rungs
+            )
+        }
+
+        // The field pin: no trace is left at this cutoff, but orphans keep
+        // crossing the fixed one-hour floor on every pass.
+        #expect(record(deficit: 90, traces: false, orphans: true) == .advanced(toHours: 72))
+
+        // Traces remain at 72h. A pass that deleted nothing was blocked (low
+        // free-space headroom, a legacy store, an overlapping pass), not
+        // stalled, so any number of them keeps this cutoff.
+        #expect(record(deficit: 90, traces: true) == .draining)
+        for _ in 0..<(limit * 3) {
+            #expect(record(deficit: 95, traces: true, rowsDeleted: 0) == .draining)
+        }
+
+        // Passes that delete rows yet stop setting a new deficit low do count.
+        for _ in 0..<(limit - 1) {
+            #expect(record(deficit: 95, traces: true) == .draining)
+        }
+        #expect(record(deficit: 90, traces: true) == .advancedAfterStall(toHours: 24))
+
+        // A new low resets the count, so a draining cutoff is not abandoned.
+        #expect(record(deficit: 80, traces: true) == .draining)
+        for _ in 0..<(limit - 1) {
+            #expect(record(deficit: 85, traces: true) == .draining)
+        }
+        #expect(record(deficit: 70, traces: true) == .draining)
+        #expect(record(deficit: 85, traces: true) == .draining)
+
+        // At the floor, eligible orphans keep the drain going; exhaustion is
+        // declared only once nothing at or above the floor is eligible.
+        #expect(record(deficit: 70, traces: false) == .advanced(toHours: 6))
+        #expect(record(deficit: 70, traces: false) == .advanced(toHours: 1))
+        #expect(record(deficit: 70, traces: false, orphans: true) == .draining)
+        #expect(record(deficit: 70, traces: false) == .evidenceFloorExhausted)
+    }
+
+    @Test(
+        "Periodic recovery converges a latched store on a sliding clock under continuous ingest",
+        .timeLimit(.minutes(2))
+    )
+    func periodicRecoveryConvergesOnSlidingClock() async throws {
+        let (store, url) = try await makeStore()
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: url.path + suffix)
+            }
+        }
+        let start = Date(timeIntervalSince1970: 2_100_000_000)
+        let tick = TraceGraphRecoveryCadenceGate.pressureIntervalSeconds
+        let maximumTicks = 40
+        let configuredHours = 90 * 24
+
+        // Field shape, scaled down: a busy host whose traces have aged past
+        // the one-hour floor but are younger than every coarse rung (here one
+        // to two hours old), plus recent traces the floor must protect.
+        for index in 0..<300 {
+            try await store.saveTrace(
+                startupTrace(
+                    "aged-\(index)",
+                    updatedAt: start.addingTimeInterval(-7_200 + Double(index) * 12),
+                    policyPayloadBytes: 32 * 1_024
+                ),
+                members: []
+            )
+        }
+        for index in 0..<20 {
+            try await store.saveTrace(
+                startupTrace(
+                    "protected-\(index)",
+                    updatedAt: start.addingTimeInterval(-600 + Double(index) * 10),
+                    policyPayloadBytes: 512
+                ),
+                members: []
+            )
+        }
+        // Graph substrate crossing the floor on every tick of the run: four
+        // edges per pressure interval. A pressured pass deletes aged edges and
+        // returns before their endpoints, so orphan backlog never empties;
+        // the old ladder held traces at configured retention on that backlog.
+        var entities: [TraceEntity] = []
+        var edges: [TraceEdge] = []
+        for index in 0..<(maximumTicks * 4) {
+            let seen = start.addingTimeInterval(-3_600 + Double(index) * tick / 4)
+            entities.append(ent("aging-src-\(index)", lastSeen: seen))
+            entities.append(ent("aging-dst-\(index)", lastSeen: seen))
+            edges.append(edg(
+                "aging-edge-\(index)",
+                from: "aging-src-\(index)",
+                to: "aging-dst-\(index)",
+                lastSeen: seen
+            ))
+        }
+        try await store.upsertBatch(entities: entities, edges: edges)
+        #expect(await store.walCheckpointTruncate())
+
+        let footprint = try #require(await store.storageFootprintBytes())
+        let reserve: Int64 = 8 * 1_048_576
+        let initial = await store.updateStorageAdmission(
+            maxFootprintBytes: footprint + reserve - 1,
+            freeSpaceFloorBytes: nil,
+            transactionReserveBytes: reserve
+        )
+        #expect(initial.blocked, "the store starts past its admission threshold")
+
+        let gate = TraceGraphRecoveryCadenceGate()
+        var attemptedCutoffHours: [Int] = []
+        var converged = false
+        for step in 0..<maximumTicks {
+            let now = start.addingTimeInterval(Double(step) * tick)
+            // Continuous ingest: the engine keeps offering new evidence, and
+            // the latch sheds it without parking it behind recovery.
+            _ = try? await store.saveTrace(
+                startupTrace("live-\(step)", updatedAt: now, policyPayloadBytes: 512),
+                members: []
+            )
+            let before = await store.storageAdmissionStatus()
+            guard let hours = gate.cutoffHoursIfShouldRun(
+                blocked: before.blocked,
+                footprintBytes: before.footprintBytes,
+                proactiveThresholdBytes: before.proactiveRecoveryThresholdBytes,
+                configuredRetentionHours: configuredHours,
+                now: now
+            ) else { continue }
+            attemptedCutoffHours.append(hours)
+            let budget = TraceGraphRecoveryCadenceGate.passBudget(
+                blockReason: before.reason)
+            let result = try await store.recoverStorageBudget(
+                retentionCutoff: now.addingTimeInterval(-Double(hours) * 3_600),
+                orphanCutoff: now.addingTimeInterval(-3_600),
+                maxTraceDeletes: budget.maxTraceDeletes,
+                maxVacuumPages: budget.maxVacuumPages
+            )
+            _ = gate.recordRecoveryOutcome(
+                result,
+                configuredRetentionHours: configuredHours,
+                cutoffRungs: DaemonTimers.tracegraphRecoveryCutoffHours
+            )
+            if result.recoveryDeficitBytes == 0 {
+                converged = true
+                break
+            }
+        }
+
+        #expect(converged, "recovery must reach resume_below once rows age past the floor")
+        #expect(Array(attemptedCutoffHours.prefix(5)) == [configuredHours, 72, 24, 6, 1],
+                "substrate crossing the floor every tick must not hold the trace cutoff")
+        #expect(attemptedCutoffHours.count <= 12, "convergence takes a bounded number of passes")
+        let after = await store.storageAdmissionStatus()
+        #expect(!after.blocked)
+        #expect(after.recoveryDeficitBytes == 0)
+        #expect(after.footprintLatchClearsTotal == 1)
+        #expect(after.shedMutationsTotal > 0, "ingest was offered and shed while latched")
+        for index in 0..<20 {
+            #expect(try await store.loadTrace(id: "protected-\(index)") != nil,
+                    "evidence younger than the one-hour floor survives convergence")
+        }
+        await store.close()
+    }
+
+    @Test(
+        "A footprint-latched store drains an excess of many default trace budgets in a few passes",
+        .timeLimit(.minutes(2))
+    )
+    func footprintLatchedRecoveryUsesLargerPassBudget() async throws {
+        let standard = TraceGraphRecoveryCadenceGate.defaultPassBudget
+        let latchedBudget = TraceGraphRecoveryCadenceGate.footprintLatchedPassBudget
+        #expect(TraceGraphRecoveryCadenceGate.passBudget(blockReason: .footprintLimit)
+                == latchedBudget)
+        for reason: CausalGraphStorageBlockReason? in [nil, .lowFreeSpace, .probeFailure] {
+            #expect(TraceGraphRecoveryCadenceGate.passBudget(blockReason: reason)
+                    == standard, "writers still queue behind passes in this state")
+        }
+        #expect(latchedBudget.maxTraceDeletes > standard.maxTraceDeletes)
+
+        let (store, url) = try await makeStore()
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: url.path + suffix)
+            }
+        }
+        let now = Date(timeIntervalSince1970: 2_200_000_000)
+        for index in 0..<3_200 {
+            try await store.saveTrace(
+                startupTrace(
+                    "excess-\(index)",
+                    updatedAt: now.addingTimeInterval(-7_200 + Double(index) / 10),
+                    policyPayloadBytes: 512
+                ),
+                members: []
+            )
+        }
+        for index in 0..<10 {
+            try await store.saveTrace(
+                startupTrace(
+                    "protected-\(index)",
+                    updatedAt: now.addingTimeInterval(-600),
+                    policyPayloadBytes: 512
+                ),
+                members: []
+            )
+        }
+        #expect(await store.walCheckpointTruncate())
+        let footprint = try #require(await store.storageFootprintBytes())
+        // A reserve above half the footprint makes the recovery target half
+        // the store, and lets one vacuum call return everything a pass frees,
+        // so trace deletes, not vacuum, bound each pass (as on the field host).
+        let reserve: Int64 = 32 * 1_048_576
+        let initial = await store.updateStorageAdmission(
+            maxFootprintBytes: footprint + reserve - 1,
+            freeSpaceFloorBytes: nil,
+            transactionReserveBytes: reserve
+        )
+        #expect(initial.blocked)
+        #expect(initial.reason == .footprintLimit)
+
+        var passes = 0
+        var tracesDeleted = 0
+        var converged = false
+        while passes < 20 {
+            let before = await store.storageAdmissionStatus()
+            let budget = TraceGraphRecoveryCadenceGate.passBudget(
+                blockReason: before.reason)
+            let result = try await store.recoverStorageBudget(
+                retentionCutoff: now.addingTimeInterval(-3_600),
+                orphanCutoff: now.addingTimeInterval(-3_600),
+                maxTraceDeletes: budget.maxTraceDeletes,
+                maxVacuumPages: budget.maxVacuumPages
+            )
+            passes += 1
+            tracesDeleted += result.tracesDeleted
+            if result.recoveryDeficitBytes == 0 {
+                converged = true
+                break
+            }
+        }
+
+        #expect(converged)
+        #expect(tracesDeleted >= 5 * standard.maxTraceDeletes,
+                "the excess must span at least five default pass budgets")
+        #expect(passes <= 2, "a latched store drains with the larger budget")
+        let after = await store.storageAdmissionStatus()
+        #expect(!after.blocked)
+        for index in 0..<10 {
+            #expect(try await store.loadTrace(id: "protected-\(index)") != nil)
+        }
+        await store.close()
     }
 
     @Test("Tightening rungs descend to a floor that protects the materialization window")

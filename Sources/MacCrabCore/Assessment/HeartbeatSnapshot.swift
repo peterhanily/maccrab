@@ -1546,6 +1546,11 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let autoVacuumMode: Int?
         public let footprintLatchTripsTotal: Int64?
         public let footprintLatchClearsTotal: Int64?
+        /// Engine wall-clock (unix seconds) of the most recent footprint-latch
+        /// trip / clear in this process epoch. Absent when that transition has
+        /// not happened, or from an engine that predates these keys.
+        public let footprintLatchLastTrippedAtUnix: Double?
+        public let footprintLatchLastClearedAtUnix: Double?
         public let recoveryRunsTotal: Int64?
         public let recoveryTracesDeletedTotal: Int64?
         public let recoveryTraceChildRowsDeletedTotal: Int64?
@@ -1623,6 +1628,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case autoVacuumMode = "auto_vacuum_mode"
             case footprintLatchTripsTotal = "footprint_latch_trips_total"
             case footprintLatchClearsTotal = "footprint_latch_clears_total"
+            case footprintLatchLastTrippedAtUnix = "footprint_latch_last_tripped_at_unix"
+            case footprintLatchLastClearedAtUnix = "footprint_latch_last_cleared_at_unix"
             case recoveryRunsTotal = "recovery_runs_total"
             case recoveryTracesDeletedTotal = "recovery_traces_deleted_total"
             case recoveryTraceChildRowsDeletedTotal = "recovery_trace_child_rows_deleted_total"

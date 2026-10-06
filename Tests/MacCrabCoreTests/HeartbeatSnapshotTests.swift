@@ -722,6 +722,28 @@ struct HeartbeatSnapshotTests {
         #expect(partial.traceGraphStorageAdmission?.recoveryMutationBarrierDegraded == true)
     }
 
+    @Test("Footprint latch transition times decode as optional unix seconds")
+    func traceGraphLatchTransitionTimesDecode() throws {
+        let h = try decode("""
+        {"tracegraph_storage_admission":{
+          "enabled":true,"blocked":false,"store_available":true,
+          "footprint_latch_trips_total":2,"footprint_latch_clears_total":2,
+          "footprint_latch_last_tripped_at_unix":1790000000.5,
+          "footprint_latch_last_cleared_at_unix":1790000600.25}}
+        """)
+        let status = try #require(h.traceGraphStorageAdmission)
+        #expect(status.footprintLatchLastTrippedAtUnix == 1_790_000_000.5)
+        #expect(status.footprintLatchLastClearedAtUnix == 1_790_000_600.25)
+
+        // Never tripped (or an older engine): absent, never a fabricated zero.
+        let never = try decode("""
+        {"tracegraph_storage_admission":{"enabled":true,"blocked":false,
+        "footprint_latch_trips_total":0,"footprint_latch_clears_total":0}}
+        """)
+        #expect(never.traceGraphStorageAdmission?.footprintLatchLastTrippedAtUnix == nil)
+        #expect(never.traceGraphStorageAdmission?.footprintLatchLastClearedAtUnix == nil)
+    }
+
     @Test("Active TraceGraph admission cannot hide a failed conserving batch")
     func traceGraphFailedBatchHealth() throws {
         let h = try decode("""

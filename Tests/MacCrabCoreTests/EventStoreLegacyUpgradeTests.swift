@@ -823,7 +823,12 @@ struct EventStoreLegacyUpgradeTests {
         )
         #expect(barrierEstimate > policy.transactionReserveBytes)
         print("Legacy upgrade fixture rows=\(rows) timestamp_index_bytes=\(fixture.timestampIndexBytes) schema_estimate_bytes=\(barrierEstimate) row_reserve_bytes=\(policy.transactionReserveBytes)")
-        let store = try EventStore(path: fixture.path, storagePolicy: policy)
+        // The structural check's budget is wall-clock. A frozen clock keeps
+        // this coverage independent of how loaded the test host is.
+        let frozen = ContinuousClock.now
+        let store = try EventStore.$legacyStructuralCheckClock.withValue({ frozen }) {
+            try EventStore(path: fixture.path, storagePolicy: policy)
+        }
         #expect(try hasInstalledBarrier(in: fixture))
         // This scale assertion measures schema transition and row preservation.
         // count() deliberately decodes/sanitizes the entire legacy corpus; its
@@ -837,7 +842,9 @@ struct EventStoreLegacyUpgradeTests {
         #expect(first.event?.id == fixture.first.id)
         #expect(first.event?.timestamp == fixture.first.timestamp)
         #expect(first.event?.process.args == fixture.first.process.args)
-        let reopened = try EventStore(path: fixture.path, storagePolicy: policy)
+        let reopened = try EventStore.$legacyStructuralCheckClock.withValue({ frozen }) {
+            try EventStore(path: fixture.path, storagePolicy: policy)
+        }
         #expect(try hasInstalledBarrier(in: fixture))
         if largeCorpus {
             #expect(try await reopened.maintenanceRetainedRecordCount() == rows)
@@ -1022,5 +1029,120 @@ struct EventStoreLegacyUpgradeTests {
             == recovered)
         #expect(reopenProgress.snapshots().last == recovered)
         #expect(try Self.committedRecoveryBoundary(at: fixture.path) == boundary)
+    }
+
+    /// The first reading anchors the owned deadline; every later reading is an
+    /// hour on, past the ten-minute ceiling, so the deadline is already expired
+    /// at the check's first progress callback.
+    private final class ExpiredAfterAnchorClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private let anchor = ContinuousClock.now
+        private var anchored = false
+
+        func now() -> ContinuousClock.Instant {
+            lock.lock()
+            defer { lock.unlock() }
+            guard anchored else {
+                anchored = true
+                return anchor
+            }
+            return anchor.advanced(by: .seconds(3_600))
+        }
+    }
+
+    private func structuralCheckPolicy(for fixture: Fixture) -> SQLitePersistentStorePolicy {
+        SQLitePersistentStorePolicy(
+            maxFootprintBytes: 512 * 1_048_576,
+            freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
+            transactionReserveBytes: 4 * 1_048_576,
+            storageVolumePath: fixture.directory.path
+        )
+    }
+
+    @Test("The owned structural-check budget scales with the main file between two and ten minutes")
+    func structuralCheckBudgetScalesWithDatabaseSize() {
+        let rate: Int64 = 8 * 1_048_576
+        #expect(EventStore.legacyStructuralCheckBudget(databaseBytes: -1) == .seconds(120))
+        #expect(EventStore.legacyStructuralCheckBudget(databaseBytes: 0) == .seconds(120))
+        #expect(EventStore.legacyStructuralCheckBudget(databaseBytes: 120 * rate) == .seconds(120))
+        #expect(EventStore.legacyStructuralCheckBudget(databaseBytes: 120 * rate + 1) == .seconds(121))
+        #expect(EventStore.legacyStructuralCheckBudget(databaseBytes: 300 * rate) == .seconds(300))
+        #expect(EventStore.legacyStructuralCheckBudget(databaseBytes: 600 * rate) == .seconds(600))
+        #expect(EventStore.legacyStructuralCheckBudget(databaseBytes: 600 * rate + 1) == .seconds(600))
+        #expect(EventStore.legacyStructuralCheckBudget(databaseBytes: Int64.max) == .seconds(600))
+    }
+
+    @Test("An owned structural-check expiry leaves the store byte-identical and a reopen installs the barrier")
+    func structuralCheckExpiryPreservesStoreBytes() async throws {
+        let fixture = try fixture(rows: 5_000)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let policy = structuralCheckPolicy(for: fixture)
+        let before = try Data(contentsOf: URL(fileURLWithPath: fixture.path))
+        try #require(!FileManager.default.fileExists(atPath: fixture.path + "-wal"))
+        let clock = ExpiredAfterAnchorClock()
+        do {
+            _ = try EventStore.$legacyStructuralCheckClock.withValue({ clock.now() }) {
+                try EventStore(path: fixture.path, storagePolicy: policy)
+            }
+            Issue.record("An expired structural check admitted the legacy store")
+        } catch let error as EventStoreError {
+            guard case .storageNotReady(let reason) = error else { throw error }
+            #expect(reason == EventStore.legacyStructuralCheckDeadlineReason)
+        }
+        #expect(try Data(contentsOf: URL(fileURLWithPath: fixture.path)) == before)
+        #expect(try !hasInstalledBarrier(in: fixture))
+        #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
+
+        // The next boot, on the production clock, retries the same store.
+        let store = try EventStore(path: fixture.path, storagePolicy: policy)
+        #expect(try hasInstalledBarrier(in: fixture))
+        #expect(try await store.count() == 5_000)
+        #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
+    }
+
+    @Test("An owned structural check accepts an ok verdict SQLite completed after the deadline")
+    func structuralCheckAcceptsCompletedVerdictAfterDeadline() async throws {
+        // Small enough that no statement in the check reaches the 1,000-op
+        // progress callback, so quick_check finishes while the clock already
+        // reads past the deadline. The fixed-budget code threw here.
+        let fixture = try fixture(rows: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let clock = ExpiredAfterAnchorClock()
+        let store = try EventStore.$legacyStructuralCheckClock.withValue({ clock.now() }) {
+            try EventStore(path: fixture.path, storagePolicy: structuralCheckPolicy(for: fixture))
+        }
+        #expect(try hasInstalledBarrier(in: fixture))
+        #expect(try await store.count() == 1)
+    }
+
+    @Test("A non-ok verdict past the deadline is reported as the verdict, not as an expiry")
+    func structuralCheckReportsVerdictDistinctFromExpiry() async throws {
+        let fixture = try fixture(rows: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        do {
+            var raw: OpaquePointer?
+            try #require(sqlite3_open(fixture.path, &raw) == SQLITE_OK)
+            let db = try #require(raw)
+            defer { sqlite3_close(db) }
+            // SQLite itself reports this constraint inconsistency through
+            // quick_check; no file corruption is injected.
+            try execute("""
+                CREATE TABLE quick_check_fixture(value INTEGER CHECK(value>0));
+                PRAGMA ignore_check_constraints=ON;
+                INSERT INTO quick_check_fixture VALUES(0);
+                PRAGMA ignore_check_constraints=OFF;
+                """, on: db)
+        }
+        let clock = ExpiredAfterAnchorClock()
+        do {
+            _ = try EventStore.$legacyStructuralCheckClock.withValue({ clock.now() }) {
+                try EventStore(path: fixture.path, storagePolicy: structuralCheckPolicy(for: fixture))
+            }
+            Issue.record("A non-ok structural verdict admitted the legacy store")
+        } catch let error as EventStoreError {
+            guard case .storageNotReady(let reason) = error else { throw error }
+            #expect(reason == EventStore.legacyStructuralCheckVerdictReason)
+        }
+        #expect(try !hasInstalledBarrier(in: fixture))
     }
 }

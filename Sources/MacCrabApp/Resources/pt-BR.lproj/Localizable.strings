@@ -405,13 +405,13 @@
 "welcome.allSet" = "Lista de Configuração";
 "welcome.ready" = "O MacCrab está pronto para proteger o seu Mac.";
 "welcome.feature.detection" = "Detecção em Tempo Real";
-"welcome.feature.detectionDesc" = "Centenas de regras de detecção monitoram seu Mac em busca de ameaças em tempo real";
+"welcome.feature.detectionDesc" = "Mais de cem regras de detecção monitoram seu Mac em busca de ameaças em tempo real";
 "welcome.feature.ai" = "Segurança de IA";
 "welcome.feature.aiDesc" = "Monitora ferramentas de programação com IA como Claude, Cursor e Copilot quanto a acesso a credenciais";
 "welcome.feature.prevention" = "Resposta Automatizada";
-"welcome.feature.preventionDesc" = "Módulos opcionais desviam domínios maliciosos, bloqueiam IPs nocivos, travam locais de persistência e podem encerrar processos ou colocar arquivos em quarentena em alertas de alta gravidade — a resposta segue a detecção";
+"welcome.feature.preventionDesc" = "Módulos opcionais desviam domínios maliciosos, travam locais de persistência e podem encerrar processos ou colocar arquivos em quarentena em alertas de alta gravidade — a resposta segue a detecção";
 "welcome.feature.privacy" = "Privado por padrão";
-"welcome.feature.privacyDesc" = "Executa no dispositivo por padrão — nada sai do seu Mac a menos que você ative o enriquecimento opcional";
+"welcome.feature.privacyDesc" = "Executa no dispositivo por padrão — seus eventos e alertas ficam no seu Mac a menos que você ative o enriquecimento opcional";
 "welcome.setup.engineActive" = "Motor de detecção ativo";
 "welcome.setup.prevention" = "Ative a prevenção na aba Prevenção";
 
@@ -1714,6 +1714,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "Adicionar feeds e IOCs personalizados";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "Fontes integradas: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus e MalwareBazaar exigem uma Auth-Key do abuse.ch. Consulte o estado dos provedores abaixo. Adicione indicadores externos pela pasta threat_intel indicada acima.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "Integrado · ativo — obtido a cada 4 h";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Integrado · ativado — a obtenção requer uma Auth-Key do abuse.ch";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "Integrado · autorize para habilitar a obtenção";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "Limpar busca de IOC";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "Integrações configuradas e ferramentas detectadas (%lld)";

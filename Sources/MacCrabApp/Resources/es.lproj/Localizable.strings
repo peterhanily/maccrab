@@ -405,13 +405,13 @@
 "welcome.allSet" = "Lista de configuración";
 "welcome.ready" = "MacCrab está listo para proteger su Mac.";
 "welcome.feature.detection" = "Detección en tiempo real";
-"welcome.feature.detectionDesc" = "Cientos de reglas de detección monitorizan su Mac en busca de amenazas en tiempo real";
+"welcome.feature.detectionDesc" = "Más de cien reglas de detección monitorizan su Mac en busca de amenazas en tiempo real";
 "welcome.feature.ai" = "Seguridad de IA";
 "welcome.feature.aiDesc" = "Monitoriza herramientas de programación con IA como Claude, Cursor y Copilot en busca de accesos a credenciales";
 "welcome.feature.prevention" = "Respuesta automatizada";
-"welcome.feature.preventionDesc" = "Módulos opcionales desvían dominios maliciosos, bloquean IPs dañinas, protegen las ubicaciones de persistencia y pueden terminar procesos o poner archivos en cuarentena ante alertas de gravedad alta — la respuesta sigue a la detección";
+"welcome.feature.preventionDesc" = "Módulos opcionales desvían dominios maliciosos, protegen las ubicaciones de persistencia y pueden terminar procesos o poner archivos en cuarentena ante alertas de gravedad alta — la respuesta sigue a la detección";
 "welcome.feature.privacy" = "Privado por defecto";
-"welcome.feature.privacyDesc" = "Se ejecuta en el dispositivo de forma predeterminada — nada sale de su Mac a menos que active el enriquecimiento opcional";
+"welcome.feature.privacyDesc" = "Se ejecuta en el dispositivo de forma predeterminada — sus eventos y alertas permanecen en su Mac a menos que active el enriquecimiento opcional";
 "welcome.setup.engineActive" = "Motor de detección activo";
 "welcome.setup.prevention" = "Active la prevención en la pestaña Prevención";
 
@@ -1714,6 +1714,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "Añadir fuentes e IOC personalizados";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "Fuentes incluidas: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus y MalwareBazaar requieren una Auth-Key de abuse.ch. Consulta el estado de los proveedores abajo. Añade indicadores externos mediante la carpeta threat_intel de arriba.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "Incluida · activa: se obtiene cada 4 h";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Incluida · activada: requiere una Auth-Key de abuse.ch para obtenerse";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "Incluida · acepta para habilitar la descarga";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "Borrar búsqueda de IOC";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "Integraciones configuradas y herramientas detectadas (%lld)";

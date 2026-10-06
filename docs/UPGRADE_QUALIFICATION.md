@@ -92,7 +92,12 @@ the shipped system-extension process. Before publishing a successor:
    menu bar stay unready until monitoring starts.
 4. Run the existing installed runtime qualification against that same
    candidate. Retain failed attempts as failures; source changes require a
-   new candidate and qualification.
+   new candidate and qualification. Rerunning the recorder under sudo moves
+   the failed attempt's capture sidecar and readiness diagnostics into
+   `<runtime report>.attempts/<n>/`; it never deletes or overwrites them, and
+   without sudo it refuses before moving anything. It
+   refuses in seconds, before any prewarm, when TraceGraph is blocked, is not
+   accepting mutations, or is at or above its proactive recovery threshold.
 
 ### Qualification lanes
 

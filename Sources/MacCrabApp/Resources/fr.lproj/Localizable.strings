@@ -405,13 +405,13 @@
 "welcome.allSet" = "Liste de configuration";
 "welcome.ready" = "MacCrab est prêt à protéger votre Mac.";
 "welcome.feature.detection" = "Détection en temps réel";
-"welcome.feature.detectionDesc" = "Des centaines de règles de détection surveillent les menaces sur votre Mac en temps réel";
+"welcome.feature.detectionDesc" = "Plus d'une centaine de règles de détection surveillent les menaces sur votre Mac en temps réel";
 "welcome.feature.ai" = "Sécurité IA";
 "welcome.feature.aiDesc" = "Surveille l'accès aux identifiants par les outils de codage IA comme Claude, Cursor et Copilot";
 "welcome.feature.prevention" = "Réponse automatisée";
-"welcome.feature.preventionDesc" = "Des modules optionnels détournent les domaines malveillants, bloquent les IP dangereuses, verrouillent les emplacements de persistance et peuvent tuer un processus ou mettre un fichier en quarantaine lors d'alertes de gravité élevée — la réponse suit la détection";
+"welcome.feature.preventionDesc" = "Des modules optionnels détournent les domaines malveillants, verrouillent les emplacements de persistance et peuvent tuer un processus ou mettre un fichier en quarantaine lors d'alertes de gravité élevée — la réponse suit la détection";
 "welcome.feature.privacy" = "Confidentiel par défaut";
-"welcome.feature.privacyDesc" = "Fonctionne sur l'appareil par défaut — rien ne quitte votre Mac sauf si vous activez l'enrichissement facultatif";
+"welcome.feature.privacyDesc" = "Fonctionne sur l'appareil par défaut — vos événements et alertes restent sur votre Mac sauf si vous activez l'enrichissement facultatif";
 "welcome.setup.engineActive" = "Moteur de détection actif";
 "welcome.setup.prevention" = "Activez la prévention dans l'onglet Prévention";
 
@@ -1714,6 +1714,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "Ajouter des flux et IOC personnalisés";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "Sources intégrées : abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus et MalwareBazaar nécessitent une Auth-Key abuse.ch. Consultez l’état des fournisseurs ci-dessous. Ajoutez des indicateurs externes via le dossier threat_intel ci-dessus.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "Intégré · actif — récupéré toutes les 4 h";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Intégré · activé — la récupération nécessite une Auth-Key abuse.ch";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "Intégré · consentement requis pour activer la récupération";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "Effacer la recherche d’IOC";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "Intégrations configurées et outils détectés (%lld)";

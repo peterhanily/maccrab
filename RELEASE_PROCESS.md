@@ -88,6 +88,18 @@ publish.
   and no GitHub/distribution mutation is attempted by the first-phase artifact
   build. It still performs the required Apple notarization submission, and the
   read-only remote preflight queries `origin`.
+- Free space is the first precondition checked, before the remote preflight,
+  the audits or any build, in every phase that runs clean CI (phase 1 and
+  phase 2; `--resume-publish` runs none).
+  `scripts/ci-local.sh --clean --free-space-preflight` applies CI's own budget
+  and changes nothing: 14,336 MiB free on both the `$TMPDIR` and checkout
+  volumes, less everything the clean run deletes before it measures (all of
+  `.build` except release DMGs, and the assessment harness build), credited in
+  full rather than capped at a warm build's 3 GiB. CI's own check after the
+  wipe stays the authority. After phase 1 builds the candidate and
+  removes its private export, it runs the same check again and warns if the
+  space left is not enough for phase 2's clean CI; the warning does not change
+  phase 1's result.
 - Before Step 0 (so a refusal costs seconds, not the clean CI), every run reads
   `origin`'s release tags and release branch. It refuses when the source does not
   descend from every published tag, when `v<version>` is already published
@@ -170,7 +182,10 @@ The second invocation validates and publishes the preserved DMG without
 rebuilding it. The recorder fails quickly, before the 900-second epoch, if the
 installed engine omits any required producer conservation ledger, if TraceStore
 is not an enabled full writer, if any cumulative loss/storage failure makes a
-zero-loss epoch impossible, or if a configured LLM has failed. An unconfigured
+zero-loss epoch impossible, or if a configured LLM has failed. Its first
+heartbeat read, before any prewarm, refuses with a one-line reason when
+TraceGraph is blocked, is not accepting mutations, or has `footprint_bytes` at
+or above `proactive_recovery_threshold_bytes`. An unconfigured
 LLM is supported and must remain disabled with no request activity. A configured,
 never-used schema-2 LLM may initially be `healthy=false`: before t0 the recorder
 runs an exact alert-only prewarm and requires one uniquely identified committed
@@ -207,11 +222,24 @@ log transcript to show a successful non-empty rule reload with no rejection or
 error; this is not represented as a live restart test. The recorder rechecks
 the exact source commit/tree and clean checkout after the 900-second capture.
 
+Rerunning the recorder after a failed attempt is safe. Before it writes
+anything, it renames that attempt's `.capture.json` and `.capture.json.readiness/`
+into the next free `<runtime report>.attempts/<n>/` (root-owned, mode 0700) as
+retained failure evidence; paths recorded inside a retained capture still name
+the original location, and the files keep their names and digests beside it.
+It never deletes them, and it never overwrites a
+file it did not create in the current run. A run without sudo is refused before
+it touches anything. Symlinked or wrong-type evidence paths, evidence on a
+different volume from the report (a rename cannot cross volumes), and an
+attempts directory that is redirected, shared or owned by another user, are
+refused, and nothing is moved.
+
 If preflight reports historical cumulative loss from an earlier candidate or
-an out-of-contract workload, first preserve the failed `.capture.json`, current
-heartbeat/status, and relevant logs. Then gracefully deactivate/reactivate
-Protection (or install and activate the exact candidate), verify a new engine
-PID, wait for retained-store recovery, and retry once with shipping defaults.
+an out-of-contract workload, first preserve the current heartbeat/status and
+relevant logs; the recorder retains the failed capture itself. Then gracefully
+deactivate/reactivate Protection (or install and activate the exact candidate),
+verify a new engine PID, wait for retained-store recovery, and retry once with
+shipping defaults.
 That is a clean process epoch, not a clean database. Do not delete stores, run
 `make clear-data`, raise caps, disable required features, or apply
 `--sqlite-cap` to a shipping family; those actions mask the condition under
@@ -240,7 +268,9 @@ capture mode and are rejected by `verify-release`.
 ### Step 1 — tests
 
 Each `release.sh` phase runs `scripts/ci-local.sh --clean`, including a fresh
-dependency resolution, builds, the full test suite, and all 20 local gates. The
+dependency resolution, builds, the full test suite, and all 20 local gates. Its
+free-space budget is checked when `release.sh` starts (Step 0) and again by
+`ci-local.sh` itself after the clean wipe. The
 first run does this before artifact construction. The qualified second run does
 it before publication, and the later tag hook repeats clean CI against the exact
 source commit/tree and exact final metadata tree. Release-mode clean CI also
@@ -444,7 +474,8 @@ release for the tag. It then runs only the post-push steps above, reading
 `release.json`, the casks and the release notes from the tagged commit. It runs
 no CI, builds nothing, and never moves or pushes a tag or branch. It may run from
 a detached checkout of the tag when later commits on the branch changed files
-the qualification gate reads.
+the qualification gate reads. Because it runs no CI, it also skips the
+free-space preflight.
 
 ### Step 6 — downstream distribution and verification
 

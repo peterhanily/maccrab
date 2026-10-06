@@ -559,7 +559,11 @@ public struct V2SystemWorkspace: View {
     private func traceGraphStorageBanner(
         _ storage: V2HeartbeatSnapshot.TraceGraphStorageAdmission
     ) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        // A hard admission block (e.g. the footprint latch) refuses writes by
+        // design and also trips the recovery barrier's degraded flag; title it
+        // as the pause it is, not as a write failure.
+        let paused = storage.blocked || !storage.graphWriteDegraded
+        return HStack(alignment: .top, spacing: 12) {
             ZStack {
                 Circle().fill(V2Theme.warning.opacity(0.18))
                 Image(systemName: "externaldrive.badge.exclamationmark")
@@ -570,12 +574,12 @@ public struct V2SystemWorkspace: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(String(
-                        localized: storage.graphWriteDegraded
-                            ? "system.traceGraphWriteDegradedTitle"
-                            : "system.traceGraphStoragePausedTitle",
-                        defaultValue: storage.graphWriteDegraded
-                            ? "TraceGraph evidence writes degraded"
-                            : "TraceGraph evidence persistence paused"
+                        localized: paused
+                            ? "system.traceGraphStoragePausedTitle"
+                            : "system.traceGraphWriteDegradedTitle",
+                        defaultValue: paused
+                            ? "TraceGraph evidence persistence paused"
+                            : "TraceGraph evidence writes degraded"
                     ))
                     .scaledSystem(13, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)

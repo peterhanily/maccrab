@@ -411,13 +411,13 @@
 "welcome.allSet" = "Setup Checklist";
 "welcome.ready" = "MacCrab is ready to protect your Mac.";
 "welcome.feature.detection" = "Real-Time Detection";
-"welcome.feature.detectionDesc" = "Hundreds of detection rules monitor your Mac for threats in real time";
+"welcome.feature.detectionDesc" = "More than a hundred detection rules monitor your Mac for threats in real time";
 "welcome.feature.ai" = "AI Safety";
 "welcome.feature.aiDesc" = "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access";
 "welcome.feature.prevention" = "Automated Response";
-"welcome.feature.preventionDesc" = "Optional modules sinkhole malicious domains, block bad IPs, lock persistence locations, and can kill or quarantine on high-severity alerts — response follows detection";
+"welcome.feature.preventionDesc" = "Optional modules sinkhole malicious domains, lock persistence locations, and can kill or quarantine on high-severity alerts — response follows detection";
 "welcome.feature.privacy" = "Private by default";
-"welcome.feature.privacyDesc" = "Runs on-device by default — nothing leaves your Mac unless you turn on optional enrichment";
+"welcome.feature.privacyDesc" = "Runs on-device by default — your events and alerts stay on your Mac unless you turn on optional enrichment";
 "welcome.setup.engineActive" = "Detection engine active";
 "welcome.setup.prevention" = "Enable prevention in the Prevention tab";
 
@@ -1759,6 +1759,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "Add custom feeds & IOCs";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "Built-in sources: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus and MalwareBazaar require an abuse.ch Auth-Key. See provider status below. Add external indicators through the threat_intel folder above.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "Built-in · active — fetched every 4h";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Built-in · enabled — fetching requires an abuse.ch Auth-Key";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "Built-in · opt in to enable fetching";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "Clear IOC search";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "Configured integrations & detected tools (%lld)";

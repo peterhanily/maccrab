@@ -405,13 +405,13 @@
 "welcome.allSet" = "Configuratiechecklist";
 "welcome.ready" = "MacCrab is klaar om je Mac te beschermen.";
 "welcome.feature.detection" = "Realtime detectie";
-"welcome.feature.detectionDesc" = "Honderden detectieregels bewaken je Mac in realtime op bedreigingen";
+"welcome.feature.detectionDesc" = "Meer dan honderd detectieregels bewaken je Mac in realtime op bedreigingen";
 "welcome.feature.ai" = "AI-veiligheid";
 "welcome.feature.aiDesc" = "Bewaakt AI-codeertools zoals Claude, Cursor en Copilot op toegang tot referenties";
 "welcome.feature.prevention" = "Geautomatiseerde reactie";
-"welcome.feature.preventionDesc" = "Optionele modules leiden kwaadaardige domeinen om, blokkeren schadelijke IP-adressen, vergrendelen persistentielocaties en kunnen bij meldingen met hoge ernst processen beëindigen of bestanden in quarantaine plaatsen — de reactie volgt op de detectie";
+"welcome.feature.preventionDesc" = "Optionele modules leiden kwaadaardige domeinen om, vergrendelen persistentielocaties en kunnen bij meldingen met hoge ernst processen beëindigen of bestanden in quarantaine plaatsen — de reactie volgt op de detectie";
 "welcome.feature.privacy" = "Privé door ontwerp";
-"welcome.feature.privacyDesc" = "Draait standaard op het apparaat — niets verlaat je Mac tenzij je de optionele verrijking inschakelt";
+"welcome.feature.privacyDesc" = "Draait standaard op het apparaat — je gebeurtenissen en meldingen blijven op je Mac tenzij je de optionele verrijking inschakelt";
 "welcome.setup.engineActive" = "Detectie-engine actief";
 "welcome.setup.prevention" = "Schakel preventie in op het tabblad Preventie";
 
@@ -1714,6 +1714,7 @@
 "ui.V2IntelligenceWorkspace.add.custom.feeds.iocs" = "Eigen feeds en IOC's toevoegen";
 "ui.V2IntelligenceWorkspace.built.in.abuse.ch.urlhaus.malwarebazaar.feodo" = "Ingebouwde bronnen: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — %@. URLhaus en MalwareBazaar vereisen een abuse.ch Auth-Key. Zie de aanbiederstatus hieronder. Voeg externe indicatoren toe via de map threat_intel hierboven.";
 "ui.V2IntelligenceWorkspace.built.in.active.fetched.every.4h" = "Ingebouwd · actief — elke 4 uur opgehaald";
+"ui.V2IntelligenceWorkspace.built.in.enabled.needs.abuse.ch.auth.key" = "Ingebouwd · ingeschakeld — ophalen vereist een abuse.ch Auth-Key";
 "ui.V2IntelligenceWorkspace.built.in.opt.in.to.enable.fetching" = "Ingebouwd · geef toestemming om ophalen in te schakelen";
 "ui.V2IntelligenceWorkspace.clear.ioc.search" = "IOC-zoekopdracht wissen";
 "ui.V2IntelligenceWorkspace.configured.integrations.detected.tools" = "Geconfigureerde integraties en gedetecteerde tools (%lld)";

@@ -55,6 +55,8 @@ MacCrab assumes the following trust boundaries:
 - Apple-signed system binaries (`/System/`, `/usr/libexec/`)
 - The user who installed and configured MacCrab
 - System Extension bundle integrity (enforced by AMFI + notarization ticket; the `.systemextension` is signed with Developer ID and an embedded provisioning profile)
+- First-party (MacCrab-signed) forensic plugins, which today are every plugin
+  in the Rave store; they run unsandboxed with MacCrab's own access
 
 ### Untrusted
 
@@ -63,10 +65,11 @@ MacCrab assumes the following trust boundaries:
 - External threat intelligence feeds (validated before use)
 - LLM API responses (never auto-executed, always advisory)
 - Clipboard content, browser extensions, USB devices
-- **Third-party forensic plugins** (rave marketplace) — executed **only** under a
-  deny-default sandbox with file reads brokered over a fd; TCC-protected stores
-  (Messages, Mail, Safari, …) are served as host-made snapshots, never the live
-  store; see the full lane in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8
+- **Third-party (non-MacCrab-signed) forensic plugins**, whether sideloaded or
+  from another publisher — executed **only** under a deny-default sandbox with
+  file reads brokered over a fd; TCC-protected stores (Messages, Mail, Safari,
+  …) are served as host-made snapshots, never the live store; see the full
+  lane in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8
 
 ### Out of Scope
 
@@ -82,18 +85,23 @@ MacCrab does **not** protect against:
 
 ### Privilege Model
 
-- **MacCrabAgent** (System Extension) runs under `sysextd` with the ES entitlement, in a sandboxed userspace context elevated by Apple. On release builds this replaces the legacy root-daemon model
+- **MacCrabAgent** (System Extension) runs as root, launched and managed by `sysextd`, with the ES entitlement. It is not App Sandboxed. On release builds this replaces the legacy root-daemon model
 - **maccrabd** (legacy) runs as root — retained only for local development when no ES entitlement is available; falls back through `eslogger` → `kdebug` → FSEvents
 - **maccrabctl** runs as the invoking user (reads database only)
 - **MacCrab.app** runs as the logged-in user (reads database; activates and replaces the System Extension)
-- **maccrab-mcp** runs as the invoking user (reads database, can suppress alerts)
+- **maccrab-mcp** runs as the invoking user (reads the database; suppressing alerts or campaigns, and other response, configuration and rule-authoring tools, work only for the capability tiers a human enables under Agent Control (MCP) in Settings)
 
 ### Data Protection
 
-- SQLite databases use WAL mode with `0o660` permissions (admin-group
-  read-write: the root sysext writes them and the admin-group dashboard reads /
-  suppresses — **not** world-readable). The key is encrypted at rest in Keychain
-- Optional AES-256 field-level encryption (key stored in macOS Keychain)
+- SQLite databases use WAL mode with `0o640` permissions, owned by root with
+  the admin group (the root sysext writes them; admin-group users such as the
+  dashboard can only read them — **not** world-readable). Suppressions and
+  other changes reach the engine as requests through its inbox, not as direct
+  database writes
+- AES-256-GCM column encryption is on by default, with the key in the macOS
+  Keychain, but covers only specific JSON columns in `traces.db` and
+  `tracegraph.db`. `events.db`, `alerts.db` and `campaigns.db` are stored in
+  plaintext (see [PRIVACY.md](PRIVACY.md#data-encryption))
 - Compiled rules are **world-readable by design** (`0o755` dir / `0o644` files):
   the non-root app reads them for rule display + integrity hashing. They carry no
   secrets; this is intentional, not `0o700`
@@ -116,25 +124,31 @@ MacCrab does **not** protect against:
 - Input validation on all parameters (length limits, format checks)
 - Parse errors return generic messages (no request body leakage)
 
-### Third-Party Plugin Execution (rave marketplace)
+### Third-Party Plugin Execution
 
-The forensic-plugin marketplace runs code MacCrab does not author on an
+The third-party plugin lane runs code MacCrab does not author on an
 FDA/TCC host. It is the most security-sensitive surface in the product and is
 documented in full as in-scope attacker #8 in
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). In brief:
 
 - First-party (MacCrab-signed) and untrusted third-party plugins run in **two
   disjoint lanes**; untrusted code runs **only** under a deny-default sandbox.
+  First-party plugins, which today are every plugin in the Rave catalog, run
+  **without** a sandbox, with MacCrab's own access.
 - A signed trampoline applies the `(deny default)` SBPL post-startup; a
   per-invocation **broker** is the file boundary (reads brokered over a fd, every
   component `O_NOFOLLOW`); TCC stores are served as **snapshots**, never live; no
   global mach-lookup, no metadata side channel on crown-jewels.
 - Containment is **proved** by an adversarial corpus (`make test-corpus`) against
   the exact shipped runner, for both C and Swift fixtures.
-- The runnable third-party lane ships **fail-closed and disabled by default**:
-  no third-party plugin executes until an operator explicitly establishes a
-  publisher trust anchor. Operators should independently review the lane before
-  enabling untrusted third-party code.
+- The third-party lane is **on by default but gated**: a third-party plugin
+  runs only after it is installed with publisher trust (an official-catalog
+  install trusts the signer key the signed catalog names; a sideload needs an
+  explicit `--trust-on-install` or `maccrabctl plugin trust`) and only when the
+  sandbox runtime is available. Creating
+  `~/Library/Application Support/MacCrab/tierb_third_party_disabled` turns the
+  lane off. Operators should independently review the lane before installing
+  untrusted third-party code.
 
 ### Release & Distribution Chain
 

@@ -468,6 +468,50 @@ def write_json_exclusive(path: pathlib.Path, value: Mapping[str, Any]) -> None:
         raise
 
 
+def write_run_owned_json(
+    path: pathlib.Path, value: Mapping[str, Any], identity: Tuple[int, int] | None,
+) -> Tuple[int, int]:
+    """Atomically write recorder evidence without replacing anyone else's file.
+
+    With no identity the path must not exist: a complete private temporary is
+    hard-linked into place, which fails on any existing entry, symlinks
+    included. Later writes replace only the exact (device, inode) an earlier
+    call returned, so a retry never overwrites evidence this run did not create.
+    """
+    if identity is not None:
+        try:
+            current = os.lstat(path)
+        except FileNotFoundError:
+            current = None
+        if current is None or not stat.S_ISREG(current.st_mode) \
+                or (current.st_dev, current.st_ino) != identity:
+            fail(f"refusing to overwrite {path}: it is no longer the file this run created")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
+    descriptor = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(canonical_json_bytes(value))
+            handle.flush()
+            os.fsync(handle.fileno())
+            written = os.fstat(handle.fileno())
+        if identity is None:
+            try:
+                os.link(str(temporary), str(path))
+            except FileExistsError:
+                fail(f"refusing to overwrite {path}: it already exists and this run did not create it")
+            temporary.unlink()
+        else:
+            os.replace(str(temporary), str(path))
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return written.st_dev, written.st_ino
+
+
 def chown_to_invoking_user(path: pathlib.Path) -> None:
     """Hand a root-written evidence file to the sudo caller, keeping mode 0600.
 
@@ -8731,14 +8775,49 @@ def log_diagnostic_count(
     return sum(1 for line in output.splitlines() if line_filter(line)), evidence
 
 
+def trace_graph_epoch_headroom_failure(heartbeat: Mapping[str, Any]) -> str | None:
+    """Return why the installed TraceGraph cannot start an epoch, or None.
+
+    A blocked or non-accepting store, or one already at its proactive recovery
+    threshold, cannot absorb the minute-5 burst. Without this check such an
+    attempt can spend prewarm and six minutes of epoch before failing at
+    sample 360.
+    """
+    path = "heartbeat.tracegraph_storage_admission"
+    graph = heartbeat.get("tracegraph_storage_admission")
+    if not isinstance(graph, dict):
+        return f"{path} is missing"
+    reason = graph.get("reason") or "unspecified"
+    if graph.get("blocked") is not False:
+        return f"the TraceGraph store is blocked (reason={reason})"
+    if graph.get("accepting_mutations") is not True:
+        return f"TraceGraph is not accepting mutations (reason={reason})"
+    if "footprint_bytes" in graph and "proactive_recovery_threshold_bytes" in graph:
+        footprint = int_value(graph["footprint_bytes"], f"{path}.footprint_bytes")
+        threshold = int_value(
+            graph["proactive_recovery_threshold_bytes"],
+            f"{path}.proactive_recovery_threshold_bytes",
+        )
+        if footprint >= threshold:
+            return (
+                f"the TraceGraph footprint ({footprint} bytes) is at or above its "
+                f"proactive recovery threshold ({threshold} bytes)"
+            )
+    return None
+
+
+def require_root_runtime_recorder() -> None:
+    if platform.system() != "Darwin" or os.geteuid() != 0:
+        fail("record-runtime must run with sudo on the installed reference Mac")
+
+
 def live_runtime_recording(
     *, root: pathlib.Path, candidate_manifest: Mapping[str, Any],
     candidate_manifest_sha256: str, dmg: pathlib.Path,
     heartbeat_path: pathlib.Path, data_dirs: Sequence[pathlib.Path],
     sqlite_overrides: Mapping[str, int], capture_path: pathlib.Path,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-    if platform.system() != "Darwin" or os.geteuid() != 0:
-        fail("record-runtime must run with sudo on the installed reference Mac")
+    require_root_runtime_recorder()
     candidate = object_value(candidate_manifest.get("candidate"), "candidate")
     verification = object_value(candidate_manifest.get("artifact_verification"), "artifact_verification")
     observations: List[Dict[str, Any]] = []
@@ -8763,12 +8842,15 @@ def live_runtime_recording(
     diagnostic_records: List[Dict[str, Any]] = []
     diagnostic_failure: str | None = None
     diagnostic_directory = capture_path.with_name(capture_path.name + ".readiness")
+    diagnostic_directory_created = False
+    capture_identity: Tuple[int, int] | None = None
     latest_readiness: Tuple[Dict[str, Any], str] | None = None
     last_diagnostic_key: Tuple[str, str] | None = None
     reload_evidence: Dict[str, Any] | None = None
     phase = "initial-readiness"
 
     def persist_capture(result: str, *, reason: str | None = None) -> None:
+        nonlocal capture_identity
         document: Dict[str, Any] = {
             "schema": RUNTIME_RECORDER_SCHEMA,
             "result": result,
@@ -8809,10 +8891,10 @@ def live_runtime_recording(
             }
         if reason is not None:
             document["failure"] = reason
-        write_json_exclusive(capture_path, document)
+        capture_identity = write_run_owned_json(capture_path, document, capture_identity)
 
     def retain_readiness(observation: Mapping[str, Any], stage: str, force: bool = False) -> None:
-        nonlocal latest_readiness, last_diagnostic_key
+        nonlocal latest_readiness, last_diagnostic_key, diagnostic_directory_created
         latest_readiness = (dict(observation), stage)
         heartbeat = object_value(observation.get("heartbeat"), "diagnostic heartbeat")
         key = (stage, sha256_bytes(canonical_json_bytes(heartbeat)))
@@ -8831,12 +8913,19 @@ def live_runtime_recording(
         maximum = 4 * math.ceil((RUNTIME_DRAIN_TIMEOUT_SECONDS + LLM_PREWARM_TIMEOUT_SECONDS) / READINESS_POLL_SECONDS) + 16
         if len(diagnostic_records) >= maximum:
             fail("bounded readiness diagnostic inventory exhausted")
-        if not diagnostic_records:
+        if not diagnostic_directory_created:
             capture_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            diagnostic_directory.mkdir(mode=0o700, parents=False, exist_ok=False)
+            try:
+                diagnostic_directory.mkdir(mode=0o700, parents=False, exist_ok=False)
+            except FileExistsError:
+                fail(
+                    f"readiness diagnostic directory {diagnostic_directory} already exists; "
+                    "record-runtime moves an earlier attempt's evidence aside before it starts"
+                )
+            diagnostic_directory_created = True
         path = diagnostic_directory / f"{len(diagnostic_records):04d}.json"
         record = {"phase": stage, "terminal_latest": force, "observation": dict(observation)}
-        write_json_exclusive(path, record)
+        write_run_owned_json(path, record, None)
         diagnostic_records.append({"path": str(path), "sha256": sha256_file(path), "phase": stage})
         last_diagnostic_key = key
 
@@ -8847,6 +8936,13 @@ def live_runtime_recording(
 
     try:
         preflight_heartbeat, _ = read_live_heartbeat(heartbeat_path, candidate)
+        headroom_failure = trace_graph_epoch_headroom_failure(preflight_heartbeat)
+        if headroom_failure is not None:
+            fail(
+                f"runtime preflight: {headroom_failure}. Refusing before prewarm and the "
+                "900-second epoch; let the engine's TraceGraph retention recover (do not "
+                "raise caps or delete stores), then rerun"
+            )
         preflight_pid = heartbeat_counter(
             preflight_heartbeat, "engine_pid", "heartbeat"
         )
@@ -10562,7 +10658,71 @@ def command_runtime_template(args: argparse.Namespace) -> None:
     print(f"runtime qualification template written: {args.output}")
 
 
+def retain_previous_runtime_attempt(
+    output: pathlib.Path, capture_path: pathlib.Path,
+) -> pathlib.Path | None:
+    """Move a failed attempt's capture evidence aside so a retry can start.
+
+    A failed record-runtime leaves its root-owned capture sidecar and readiness
+    directory. A retry used to die on the readiness mkdir, and would otherwise
+    have replaced the old sidecar. Both are renamed, never copied or deleted,
+    into the next free <output>.attempts/<n>/ as retained failure evidence.
+    Paths recorded inside a retained capture still name the original location;
+    the files keep their names and digests beside it.
+    """
+    readiness = capture_path.with_name(capture_path.name + ".readiness")
+    previous: List[Tuple[pathlib.Path, os.stat_result]] = []
+    for path, is_kind, kind in (
+        (capture_path, stat.S_ISREG, "regular file"),
+        (readiness, stat.S_ISDIR, "directory"),
+    ):
+        try:
+            status = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(status.st_mode):
+            fail(f"previous runtime attempt evidence is redirected: {path}")
+        if not is_kind(status.st_mode):
+            fail(f"previous runtime attempt evidence is not a {kind}: {path}")
+        previous.append((path, status))
+    if not previous:
+        return None
+    attempts = output.with_name(output.name + ".attempts")
+    # A rename cannot cross volumes. Check every item before creating anything,
+    # so evidence on another volume is refused whole instead of split in two.
+    try:
+        volume = os.stat(output.parent).st_dev
+    except OSError as exc:
+        fail(f"cannot create the runtime attempt directory {attempts}: {exc}")
+    for path, status in previous:
+        if status.st_dev != volume:
+            fail(f"previous runtime attempt evidence is not on the volume holding {attempts}: {path}")
+    try:
+        attempts.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        fail(f"cannot create the runtime attempt directory {attempts}: {exc}")
+    status = os.lstat(attempts)
+    if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.geteuid() \
+            or stat.S_IMODE(status.st_mode) & 0o077:
+        fail(f"runtime attempt directory must be a private directory owned by this user: {attempts}")
+    numbers = [int(entry.name) for entry in attempts.iterdir()
+               if re.fullmatch(r"[1-9][0-9]*", entry.name)]
+    destination = attempts / str(max(numbers, default=0) + 1)
+    try:
+        destination.mkdir(mode=0o700)
+        for path, _ in previous:
+            os.rename(path, destination / path.name)
+    except OSError as exc:
+        fail(f"cannot retain previous runtime attempt evidence in {destination}: {exc}")
+    return destination
+
+
 def command_record_runtime(args: argparse.Namespace) -> None:
+    # Before anything touches the filesystem: without sudo, retention below
+    # would move root-owned evidence only partly and leave it owned by the user.
+    require_root_runtime_recorder()
     root = pathlib.Path(args.source_root).resolve()
     manifest_path = absolute_path(args.candidate_manifest)
     dmg = absolute_path(args.dmg)
@@ -10610,6 +10770,9 @@ def command_record_runtime(args: argparse.Namespace) -> None:
     )
     if capture_path.is_symlink():
         fail("runtime capture output path is redirected")
+    retained = retain_previous_runtime_attempt(output, capture_path)
+    if retained is not None:
+        print(f"Previous runtime attempt evidence retained in {retained}")
     observations, host, workload, probes = live_runtime_recording(
         root=root,
         candidate_manifest=manifest,
