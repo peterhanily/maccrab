@@ -91,10 +91,12 @@ publish.
 - Free space is the first precondition checked, before the remote preflight,
   the audits or any build, in every phase that runs clean CI (phase 1 and
   phase 2; `--resume-publish` runs none).
-  `scripts/ci-local.sh --free-space-preflight` applies CI's own budget and
-  changes nothing: 14,336 MiB free on both the `$TMPDIR` and checkout volumes,
-  less the part of a warm build already in `.build` (at most 3 GiB), which the
-  clean run deletes before it measures. After phase 1 builds the candidate and
+  `scripts/ci-local.sh --clean --free-space-preflight` applies CI's own budget
+  and changes nothing: 14,336 MiB free on both the `$TMPDIR` and checkout
+  volumes, less everything the clean run deletes before it measures (all of
+  `.build` except release DMGs, and the assessment harness build), credited in
+  full rather than capped at a warm build's 3 GiB. CI's own check after the
+  wipe stays the authority. After phase 1 builds the candidate and
   removes its private export, it runs the same check again and warns if the
   space left is not enough for phase 2's clean CI; the warning does not change
   phase 1's result.

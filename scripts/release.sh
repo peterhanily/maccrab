@@ -248,10 +248,10 @@ fi
 # Free space comes first in every phase that runs clean CI. ci-local.sh checks
 # it too, but only after the remote preflight, the pre-release check, the audit
 # (and in phase 2 the qualification gate), the clean wipe and dependency
-# resolution. Its budget is reused here, crediting a warm build the clean run
-# will replace. --resume-publish runs no CI and builds nothing.
+# resolution. Its budget is reused here, crediting the build trees the clean
+# run deletes before it measures. --resume-publish runs no CI and builds nothing.
 if [ "$RESUME_PUBLISH" != "1" ]; then
-    if ! ./scripts/ci-local.sh --free-space-preflight; then
+    if ! ./scripts/ci-local.sh --clean --free-space-preflight; then
         echo "ERROR: not enough free disk for this release's clean local CI." >&2
         echo "       Nothing was built, tagged or pushed. Free space and rerun." >&2
         exit 1
@@ -533,7 +533,7 @@ end_candidate_phase() {
     local phase_two_free_space
     /bin/rm -rf "$BUILD_WORKSPACE"
     BUILD_WORKSPACE=""
-    if ! phase_two_free_space=$(./scripts/ci-local.sh --free-space-preflight 2>&1); then
+    if ! phase_two_free_space=$(./scripts/ci-local.sh --clean --free-space-preflight 2>&1); then
         echo "" >&2
         echo "WARNING: the space left after building this candidate is not enough for" >&2
         echo "         phase 2, which repeats clean local CI before publishing:" >&2

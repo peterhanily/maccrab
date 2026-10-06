@@ -805,9 +805,38 @@ for preflight_mode in warm clean; do
         MACCRAB_TEST_CI_BUILD_KIB=2831155 ./scripts/ci-local.sh "${preflight_args[@]}"
     assert_free_space_refused "$ci_preflight" "$preflight_mode preflight with 11 GiB" \
         'needs at least 11571 MiB free'
+    credit_wording='MiB of that build already on disk.'
+    if [ "$preflight_mode" = clean ]; then credit_wording='MiB of build output the clean run deletes first.'; fi
+    grep -qF -- "$credit_wording" "$ci_preflight/output.log" \
+        || fail "refused $preflight_mode preflight did not say what it credited"
     [ -f "$ci_preflight/.build/stale-build-object.o" ] && [ -z "$(ls -A "$ci_preflight/tmp")" ] \
         || fail "refused $preflight_mode preflight changed local state"
 done
+
+# Release CI is always clean, and a clean run deletes all of .build and the
+# harness build before it measures, so its preflight credits all of it, past
+# the warm 3 GiB cap. 6 GiB of build and 9 GiB free can pass clean CI, though
+# not a warm run, and a tree larger than the whole budget leaves nothing to find.
+ci_preflight_big="$TEST_ROOT/ci-free-preflight-clean-oversized"
+make_ci_fixture "$ci_preflight_big"
+mkdir -p "$ci_preflight_big/.build" "$ci_preflight_big/Tools/AssessmentHarness/.build"
+run_free_space_case "$ci_preflight_big" MACCRAB_TEST_CI_FREE_KIB=$((9 * GIB_KIB)) \
+    MACCRAB_TEST_CI_BUILD_KIB=$((6 * GIB_KIB)) ./scripts/ci-local.sh --clean --free-space-preflight
+[ "$free_space_status" -eq 0 ] \
+    && grep -qF 'Free-space preflight: local CI needs 8192 MiB free; both volumes have it.' \
+        "$ci_preflight_big/output.log" \
+    && grep -qxF -- '-sk -c -I MacCrab-v*.dmg .build Tools/AssessmentHarness/.build' "$ci_preflight_big/du.log" \
+    || { tail -20 "$ci_preflight_big/output.log" >&2; fail "clean preflight did not credit everything the clean run deletes"; }
+run_free_space_case "$ci_preflight_big" MACCRAB_TEST_CI_FREE_KIB=$((9 * GIB_KIB)) \
+    MACCRAB_TEST_CI_BUILD_KIB=$((6 * GIB_KIB)) ./scripts/ci-local.sh --free-space-preflight
+assert_free_space_refused "$ci_preflight_big" "warm preflight with an oversized .build" \
+    'needs at least 11264 MiB free'
+run_free_space_case "$ci_preflight_big" MACCRAB_TEST_CI_FREE_KIB=1024 \
+    MACCRAB_TEST_CI_BUILD_KIB=$((20 * GIB_KIB)) ./scripts/ci-local.sh --clean --free-space-preflight
+[ "$free_space_status" -eq 0 ] \
+    && grep -qF 'Free-space preflight: local CI needs 0 MiB free; both volumes have it.' \
+        "$ci_preflight_big/output.log" \
+    || { tail -20 "$ci_preflight_big/output.log" >&2; fail "clean preflight did not floor its requirement at zero"; }
 
 # A receipt lets a later branch push skip CI, so only a clean run that passed
 # every check may ask for one. Record the helper calls ci-local makes: a warm
@@ -1289,7 +1318,7 @@ make_release_fixture() {
         '    exit 86' \
         'fi' \
         '# release.sh asks for the free-space preflight separately from CI runs.' \
-        'if [ "${1:-}" = "--free-space-preflight" ]; then' \
+        'if [[ " $* " == *" --free-space-preflight "* ]]; then' \
         '    printf "%s\n" "$*" >> .fixture-ci-preflight.log' \
         '    preflight_calls=$(wc -l < .fixture-ci-preflight.log | tr -d " ")' \
         '    if [ "$preflight_calls" -ge "${MACCRAB_TEST_CI_PREFLIGHT_FAIL_FROM:-999999}" ]; then' \
@@ -1928,7 +1957,7 @@ run_release_control "$first_phase"
     && [ ! -s "$first_phase/gh.log" ] && [ ! -s "$first_phase/publish.log" ] \
     || fail "first-phase boundary allowed a source/ref or publication change"
 assert_retained_ci_transcript "$first_phase" 1
-[ "$(cat "$first_phase/.fixture-ci-preflight.log")" = $'--free-space-preflight\n--free-space-preflight' ] \
+[ "$(cat "$first_phase/.fixture-ci-preflight.log")" = $'--clean --free-space-preflight\n--clean --free-space-preflight' ] \
     && ! grep -q 'WARNING: the space left after building' "$first_phase/output.log" \
     || fail "first phase did not check free space first and forecast phase 2's clean CI"
 echo "PASS: accepted committed baseline reaches the real unpublished GA first-phase boundary"
@@ -1944,7 +1973,7 @@ run_release_control "$space_first" MACCRAB_TEST_CI_PREFLIGHT_FAIL_FROM=1
     || { tail -30 "$space_first/output.log" >&2; fail "a full disk did not stop the release first"; }
 ! grep -q 'Remote preflight' "$space_first/output.log" \
     && [ ! -e "$space_first/ci.log" ] && [ ! -s "$space_first/build.log" ] && [ ! -s "$space_first/gh.log" ] \
-    && [ "$(cat "$space_first/.fixture-ci-preflight.log")" = '--free-space-preflight' ] \
+    && [ "$(cat "$space_first/.fixture-ci-preflight.log")" = '--clean --free-space-preflight' ] \
     || fail "a full disk was found only after remote, CI or build work"
 assert_retained_ci_transcript "$space_first" 0
 echo "PASS: release.sh checks clean-CI free space before any other step"
@@ -2118,7 +2147,7 @@ printf '{}\n' > "$qualified_reuse/.qualification-evidence/MacCrab-v9.9.11-rc.1.r
     || fail "qualified second phase did not reach the isolated RC publisher"
 space_line=$(grep -n 'Free-space preflight: fixture volumes have room.' "$qualified_reuse/output.log" | head -1 | cut -d: -f1)
 gate_line=$(grep -n 'Qualification preflight: verifying preserved candidate' "$qualified_reuse/output.log" | head -1 | cut -d: -f1)
-[ "$(cat "$qualified_reuse/.fixture-ci-preflight.log")" = '--free-space-preflight' ] \
+[ "$(cat "$qualified_reuse/.fixture-ci-preflight.log")" = '--clean --free-space-preflight' ] \
     && [ -n "$space_line" ] && [ -n "$gate_line" ] && [ "$space_line" -lt "$gate_line" ] \
     || fail "qualified second phase did not check clean-CI free space before its qualification gate"
 
