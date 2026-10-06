@@ -72,6 +72,7 @@ RELEASE_CRITICAL_EXECUTORS=(
 # sanitizer reserved word). The pre-push hook passes --clean automatically on a
 # TAG push, so every release is gated on a from-scratch build.
 CLEAN_TREE=0
+FREE_SPACE_PREFLIGHT=0
 EXPECTED_RELEASE_COUNT=0
 EXPECTED_RELEASE_PATHS=()
 EXPECTED_RELEASE_SHAS=()
@@ -83,6 +84,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --clean)
             CLEAN_TREE=1
+            shift
+            ;;
+        --free-space-preflight)
+            FREE_SPACE_PREFLIGHT=1
             shift
             ;;
         --expect-release-dmg)
@@ -152,8 +157,9 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         -h|--help)
-            echo "usage: ci-local.sh [--clean] [--expect-release-commit OID] [--expect-release-source COMMIT TREE] [--expect-release-metadata-tree TREE] [--expect-release-dmg PATH SHA256]"
+            echo "usage: ci-local.sh [--clean] [--free-space-preflight] [--expect-release-commit OID] [--expect-release-source COMMIT TREE] [--expect-release-metadata-tree TREE] [--expect-release-dmg PATH SHA256]"
             echo "  --clean   wipe Swift build outputs and re-resolve; preserve release DMGs"
+            echo "  --free-space-preflight  check free space for a run, change nothing, and exit"
             echo "  --expect-release-commit  pin HEAD, source tree, and executing hook"
             echo "  --expect-release-dmg  require and preserve these exact release bytes"
             exit 0
@@ -185,6 +191,88 @@ elif [ -n "$EXPECTED_RELEASE_SOURCE_COMMIT" ] \
         || [ -n "$EXPECTED_RELEASE_METADATA_TREE" ]; then
     echo "release source/tree manifests require --expect-release-commit" >&2
     exit 2
+fi
+
+# EventStoreLegacyUpgradeTests builds a 1.5M-row legacy store under the
+# production 1 GiB free-space floor, peaking around 8-10 GiB in $TMPDIR while the
+# debug build occupies the checkout. With less room the v1.22.2 release CI died
+# twice ~25 minutes in with SQLITE_FULL/ENOSPC. The budget is that peak: 10 GiB
+# of fixture, the 1 GiB floor, and 3 GiB of debug build (2.3-2.7 GiB measured
+# with test products and resolved dependencies; rounding up is the margin).
+# A clean run has just deleted both build trees and needs all 14 GiB. A warm run
+# keeps its build, so the part of that 3 GiB already in .build is credited:
+# 11.3-11.7 GiB with a complete build, the full 14 with none. Release DMGs are not
+# build output, and a symlinked or unmeasurable .build earns no credit. Both
+# volumes are held to the whole budget, as they are normally one volume.
+CI_FIXTURE_PEAK_KIB=$((10 * 1024 * 1024))
+CI_STORE_FLOOR_KIB=$((1 * 1024 * 1024))
+CI_DEBUG_BUILD_KIB=$((3 * 1024 * 1024))
+compute_ci_free_space_budget() {
+    local tree wiped=()
+    CI_BUILD_ON_DISK_KIB=0
+    CI_BUILD_CREDIT="of that build already on disk"
+    if [ "$1" = "credit-build" ] && [ -d .build ] && [ ! -L .build ]; then
+        CI_BUILD_ON_DISK_KIB=$(/usr/bin/du -sk -I 'MacCrab-v*.dmg' .build 2>/dev/null \
+            | $AWK_BIN 'NR == 1 { print $1 }') || CI_BUILD_ON_DISK_KIB=0
+        case "$CI_BUILD_ON_DISK_KIB" in
+            ''|*[!0-9]*) CI_BUILD_ON_DISK_KIB=0 ;;
+        esac
+        if [ "$CI_BUILD_ON_DISK_KIB" -gt "$CI_DEBUG_BUILD_KIB" ]; then
+            CI_BUILD_ON_DISK_KIB=$CI_DEBUG_BUILD_KIB
+        fi
+    elif [ "$1" = "credit-clean-wipe" ]; then
+        # Everything the clean wipe deletes, uncapped: release DMGs are moved
+        # aside, and a symlinked tree loses only its link.
+        CI_BUILD_CREDIT="of build output the clean run deletes first"
+        for tree in .build Tools/AssessmentHarness/.build; do
+            if [ -d "$tree" ] && [ ! -L "$tree" ]; then wiped+=("$tree"); fi
+        done
+        if [ "${#wiped[@]}" -gt 0 ]; then
+            CI_BUILD_ON_DISK_KIB=$(/usr/bin/du -sk -c -I 'MacCrab-v*.dmg' "${wiped[@]}" 2>/dev/null \
+                | $AWK_BIN 'END { print $1 }') || CI_BUILD_ON_DISK_KIB=0
+            case "$CI_BUILD_ON_DISK_KIB" in
+                ''|*[!0-9]*) CI_BUILD_ON_DISK_KIB=0 ;;
+            esac
+        fi
+    fi
+    CI_MIN_FREE_KIB=$((CI_FIXTURE_PEAK_KIB + CI_STORE_FLOOR_KIB + CI_DEBUG_BUILD_KIB - CI_BUILD_ON_DISK_KIB))
+    if [ "$CI_MIN_FREE_KIB" -lt 0 ]; then
+        CI_MIN_FREE_KIB=0
+    fi
+}
+require_ci_free_space() {
+    local dir="$1" free_kib
+    free_kib=$(/bin/df -Pk "$dir" | $AWK_BIN 'NR == 2 { print $4 }') || free_kib=""
+    case "$free_kib" in
+        ''|*[!0-9]*)
+            echo "ERROR: could not measure free space on the volume holding $dir" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$free_kib" -lt "$CI_MIN_FREE_KIB" ]; then
+        echo "ERROR: local CI needs at least $((CI_MIN_FREE_KIB / 1024)) MiB free on the volume holding $dir; found $((free_kib / 1024)) MiB." >&2
+        echo "       Budget: 10 GiB legacy-upgrade test fixture + 1 GiB store floor + 3 GiB debug" >&2
+        echo "       build, less $((CI_BUILD_ON_DISK_KIB / 1024)) MiB $CI_BUILD_CREDIT. Otherwise the run" >&2
+        echo "       fails with SQLITE_FULL/ENOSPC about 25 minutes in. Free space and rerun." >&2
+        exit 1
+    fi
+}
+
+# --free-space-preflight lets release.sh refuse in seconds rather than after its
+# remote checks, audits and the clean wipe. It applies the same budget now and
+# changes nothing. With --clean it credits every build tree that run deletes
+# before it measures, beyond the warm 3 GiB cap, so a large tree the wipe will
+# free cannot refuse the release; the post-wipe check below stays the authority.
+if [ "$FREE_SPACE_PREFLIGHT" = "1" ]; then
+    if [ "$CLEAN_TREE" = "1" ]; then
+        compute_ci_free_space_budget credit-clean-wipe
+    else
+        compute_ci_free_space_budget credit-build
+    fi
+    require_ci_free_space "${TMPDIR:-/tmp}"
+    require_ci_free_space "$PROJECT_DIR"
+    echo "Free-space preflight: local CI needs $((CI_MIN_FREE_KIB / 1024)) MiB free; both volumes have it."
+    exit 0
 fi
 
 reject_hidden_release_index_state() {
@@ -653,50 +741,12 @@ if [ "$CLEAN_TREE" = "1" ]; then
         -- swift package resolve
 fi
 
-# EventStoreLegacyUpgradeTests builds a 1.5M-row legacy store under the
-# production 1 GiB free-space floor, peaking around 8-10 GiB in $TMPDIR while the
-# debug build occupies the checkout. With less room the v1.22.2 release CI died
-# twice ~25 minutes in with SQLITE_FULL/ENOSPC. The budget is that peak: 10 GiB
-# of fixture, the 1 GiB floor, and 3 GiB of debug build (2.3-2.7 GiB measured
-# with test products and resolved dependencies; rounding up is the margin).
-# A clean run has just deleted both build trees and needs all 14 GiB. A warm run
-# keeps its build, so the part of that 3 GiB already in .build is credited:
-# 11.3-11.7 GiB with a complete build, the full 14 with none. Release DMGs are not
-# build output, and a symlinked or unmeasurable .build earns no credit. Both
-# volumes are held to the whole budget, as they are normally one volume.
 # Measured after --clean's wipe and before any build.
-CI_FIXTURE_PEAK_KIB=$((10 * 1024 * 1024))
-CI_STORE_FLOOR_KIB=$((1 * 1024 * 1024))
-CI_DEBUG_BUILD_KIB=$((3 * 1024 * 1024))
-CI_BUILD_ON_DISK_KIB=0
-if [ "$CLEAN_TREE" != "1" ] && [ -d .build ] && [ ! -L .build ]; then
-    CI_BUILD_ON_DISK_KIB=$(/usr/bin/du -sk -I 'MacCrab-v*.dmg' .build 2>/dev/null \
-        | $AWK_BIN 'NR == 1 { print $1 }') || CI_BUILD_ON_DISK_KIB=0
-    case "$CI_BUILD_ON_DISK_KIB" in
-        ''|*[!0-9]*) CI_BUILD_ON_DISK_KIB=0 ;;
-    esac
-    if [ "$CI_BUILD_ON_DISK_KIB" -gt "$CI_DEBUG_BUILD_KIB" ]; then
-        CI_BUILD_ON_DISK_KIB=$CI_DEBUG_BUILD_KIB
-    fi
+if [ "$CLEAN_TREE" = "1" ]; then
+    compute_ci_free_space_budget no-build-credit
+else
+    compute_ci_free_space_budget credit-build
 fi
-CI_MIN_FREE_KIB=$((CI_FIXTURE_PEAK_KIB + CI_STORE_FLOOR_KIB + CI_DEBUG_BUILD_KIB - CI_BUILD_ON_DISK_KIB))
-require_ci_free_space() {
-    local dir="$1" free_kib
-    free_kib=$(/bin/df -Pk "$dir" | $AWK_BIN 'NR == 2 { print $4 }') || free_kib=""
-    case "$free_kib" in
-        ''|*[!0-9]*)
-            echo "ERROR: could not measure free space on the volume holding $dir" >&2
-            exit 1
-            ;;
-    esac
-    if [ "$free_kib" -lt "$CI_MIN_FREE_KIB" ]; then
-        echo "ERROR: local CI needs at least $((CI_MIN_FREE_KIB / 1024)) MiB free on the volume holding $dir; found $((free_kib / 1024)) MiB." >&2
-        echo "       Budget: 10 GiB legacy-upgrade test fixture + 1 GiB store floor + 3 GiB debug" >&2
-        echo "       build, less $((CI_BUILD_ON_DISK_KIB / 1024)) MiB of that build already on disk. Otherwise the run" >&2
-        echo "       fails with SQLITE_FULL/ENOSPC about 25 minutes in. Free space and rerun." >&2
-        exit 1
-    fi
-}
 require_ci_free_space "${TMPDIR:-/tmp}"
 require_ci_free_space "$PROJECT_DIR"
 

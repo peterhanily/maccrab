@@ -776,6 +776,68 @@ for volume in tmp project; do
         "could not measure free space on the volume holding $holder"
 done
 
+# --free-space-preflight is what release.sh runs first: the same budget, applied
+# before anything else and changing nothing. A clean run deletes the build it
+# replaces before measuring, so the build on disk is credited with --clean too.
+for preflight_mode in warm clean; do
+    ci_preflight="$TEST_ROOT/ci-free-preflight-$preflight_mode"
+    make_ci_fixture "$ci_preflight"
+    preflight_args=(--free-space-preflight)
+    if [ "$preflight_mode" = clean ]; then preflight_args=(--clean --free-space-preflight); fi
+    mkdir -p "$ci_preflight/.build" "$ci_preflight/Tools/AssessmentHarness/.build"
+    printf 'stale-object\n' > "$ci_preflight/.build/stale-build-object.o"
+    printf 'stale-harness-object\n' > "$ci_preflight/Tools/AssessmentHarness/.build/stale.o"
+    run_free_space_case "$ci_preflight" MACCRAB_TEST_CI_FREE_KIB=$((12 * GIB_KIB)) \
+        MACCRAB_TEST_CI_BUILD_KIB=2831155 ./scripts/ci-local.sh "${preflight_args[@]}"
+    [ "$free_space_status" -eq 0 ] || {
+        tail -20 "$ci_preflight/output.log" >&2
+        fail "$preflight_mode preflight refused 12 GiB with its debug build on disk"
+    }
+    grep -qF 'Free-space preflight: local CI needs 11571 MiB free; both volumes have it.' \
+        "$ci_preflight/output.log" || fail "$preflight_mode preflight did not report its budget"
+    [ "$(cat "$ci_preflight/df.log")" = $'tmp stale: build harness\nproject stale: build harness' ] \
+        || fail "$preflight_mode preflight did not check both volumes, once, before any wipe"
+    [ -f "$ci_preflight/.build/stale-build-object.o" ] \
+        && [ -f "$ci_preflight/Tools/AssessmentHarness/.build/stale.o" ] \
+        && [ ! -e "$ci_preflight/swift.log" ] && [ -z "$(ls -A "$ci_preflight/tmp")" ] \
+        || fail "$preflight_mode preflight wiped, built, or allocated CI state"
+    run_free_space_case "$ci_preflight" MACCRAB_TEST_CI_FREE_KIB=$((11 * GIB_KIB)) \
+        MACCRAB_TEST_CI_BUILD_KIB=2831155 ./scripts/ci-local.sh "${preflight_args[@]}"
+    assert_free_space_refused "$ci_preflight" "$preflight_mode preflight with 11 GiB" \
+        'needs at least 11571 MiB free'
+    credit_wording='MiB of that build already on disk.'
+    if [ "$preflight_mode" = clean ]; then credit_wording='MiB of build output the clean run deletes first.'; fi
+    grep -qF -- "$credit_wording" "$ci_preflight/output.log" \
+        || fail "refused $preflight_mode preflight did not say what it credited"
+    [ -f "$ci_preflight/.build/stale-build-object.o" ] && [ -z "$(ls -A "$ci_preflight/tmp")" ] \
+        || fail "refused $preflight_mode preflight changed local state"
+done
+
+# Release CI is always clean, and a clean run deletes all of .build and the
+# harness build before it measures, so its preflight credits all of it, past
+# the warm 3 GiB cap. 6 GiB of build and 9 GiB free can pass clean CI, though
+# not a warm run, and a tree larger than the whole budget leaves nothing to find.
+ci_preflight_big="$TEST_ROOT/ci-free-preflight-clean-oversized"
+make_ci_fixture "$ci_preflight_big"
+mkdir -p "$ci_preflight_big/.build" "$ci_preflight_big/Tools/AssessmentHarness/.build"
+run_free_space_case "$ci_preflight_big" MACCRAB_TEST_CI_FREE_KIB=$((9 * GIB_KIB)) \
+    MACCRAB_TEST_CI_BUILD_KIB=$((6 * GIB_KIB)) ./scripts/ci-local.sh --clean --free-space-preflight
+[ "$free_space_status" -eq 0 ] \
+    && grep -qF 'Free-space preflight: local CI needs 8192 MiB free; both volumes have it.' \
+        "$ci_preflight_big/output.log" \
+    && grep -qxF -- '-sk -c -I MacCrab-v*.dmg .build Tools/AssessmentHarness/.build' "$ci_preflight_big/du.log" \
+    || { tail -20 "$ci_preflight_big/output.log" >&2; fail "clean preflight did not credit everything the clean run deletes"; }
+run_free_space_case "$ci_preflight_big" MACCRAB_TEST_CI_FREE_KIB=$((9 * GIB_KIB)) \
+    MACCRAB_TEST_CI_BUILD_KIB=$((6 * GIB_KIB)) ./scripts/ci-local.sh --free-space-preflight
+assert_free_space_refused "$ci_preflight_big" "warm preflight with an oversized .build" \
+    'needs at least 11264 MiB free'
+run_free_space_case "$ci_preflight_big" MACCRAB_TEST_CI_FREE_KIB=1024 \
+    MACCRAB_TEST_CI_BUILD_KIB=$((20 * GIB_KIB)) ./scripts/ci-local.sh --clean --free-space-preflight
+[ "$free_space_status" -eq 0 ] \
+    && grep -qF 'Free-space preflight: local CI needs 0 MiB free; both volumes have it.' \
+        "$ci_preflight_big/output.log" \
+    || { tail -20 "$ci_preflight_big/output.log" >&2; fail "clean preflight did not floor its requirement at zero"; }
+
 # A receipt lets a later branch push skip CI, so only a clean run that passed
 # every check may ask for one. Record the helper calls ci-local makes: a warm
 # run never snapshots, a failing clean run never writes.
@@ -1255,6 +1317,17 @@ make_release_fixture() {
         '    env | grep -E "^(DEVELOPER_ID|APPLE_ID|APPLE_TEAM_ID|NOTARIZE_PASSWORD|NOTARIZE_KEYCHAIN_PROFILE|GH_TOKEN|GITHUB_TOKEN|SITE_REPO_TOKEN|TAP_REPO_TOKEN)=" >> "${MACCRAB_TEST_SECRET_LOG:-secret.log}"' \
         '    exit 86' \
         'fi' \
+        '# release.sh asks for the free-space preflight separately from CI runs.' \
+        'if [[ " $* " == *" --free-space-preflight "* ]]; then' \
+        '    printf "%s\n" "$*" >> .fixture-ci-preflight.log' \
+        '    preflight_calls=$(wc -l < .fixture-ci-preflight.log | tr -d " ")' \
+        '    if [ "$preflight_calls" -ge "${MACCRAB_TEST_CI_PREFLIGHT_FAIL_FROM:-999999}" ]; then' \
+        '        echo "ERROR: local CI needs at least 14336 MiB free on the volume holding fixture; found 1 MiB." >&2' \
+        '        exit 1' \
+        '    fi' \
+        '    echo "Free-space preflight: fixture volumes have room."' \
+        '    exit 0' \
+        'fi' \
         'printf "%s\n" "$*" >> "${MACCRAB_TEST_CI_LOG:-ci.log}"' \
         'if [ -n "${MACCRAB_TEST_CI_MOVES_REMOTE_BRANCH_TO:-}" ]; then printf "%s\n" "$MACCRAB_TEST_CI_MOVES_REMOTE_BRANCH_TO" > .fixture-remote-branch-commit; fi' \
         'if [ -f .fixture-ci-output ]; then cat .fixture-ci-output; else printf "fixture clean CI stdout\n"; fi' \
@@ -1662,7 +1735,7 @@ PYTHON
     # can exercise tag/push/upload behavior without a 15-minute host run.
     if [ "$stop_after_candidate" != "1" ]; then
         /usr/bin/sed -i '' \
-            's@^    exit 3 # exact-candidate-phase-boundary: fixture tests patch only their disposable copy$@    CANDIDATE_READY=1; QUALIFIED_CANDIDATE_SHA=$(shasum -a 256 "$DMG_PATH" | awk '\''{print $1}'\''); QUALIFIED_MANIFEST_SHA=$(shasum -a 256 "$CANDIDATE_MANIFEST" | awk '\''{print $1}'\''); QUALIFIED_RUNTIME_SHA=$(shasum -a 256 "$RUNTIME_REPORT" | awk '\''{print $1}'\''); QUALIFIED_CONTAINMENT_SHA=$(shasum -a 256 "$CONTAINMENT_REPORT" | awk '\''{print $1}'\'')@' \
+            's@^    end_candidate_phase # exact-candidate-phase-boundary: fixture tests patch only their disposable copy$@    CANDIDATE_READY=1; QUALIFIED_CANDIDATE_SHA=$(shasum -a 256 "$DMG_PATH" | awk '\''{print $1}'\''); QUALIFIED_MANIFEST_SHA=$(shasum -a 256 "$CANDIDATE_MANIFEST" | awk '\''{print $1}'\''); QUALIFIED_RUNTIME_SHA=$(shasum -a 256 "$RUNTIME_REPORT" | awk '\''{print $1}'\''); QUALIFIED_CONTAINMENT_SHA=$(shasum -a 256 "$CONTAINMENT_REPORT" | awk '\''{print $1}'\'')@' \
             "$fixture/scripts/release.sh"
     fi
     /usr/bin/sed -i '' "s#__FIXTURE_ROOT__#${fixture}#g" \
@@ -1884,7 +1957,45 @@ run_release_control "$first_phase"
     && [ ! -s "$first_phase/gh.log" ] && [ ! -s "$first_phase/publish.log" ] \
     || fail "first-phase boundary allowed a source/ref or publication change"
 assert_retained_ci_transcript "$first_phase" 1
+[ "$(cat "$first_phase/.fixture-ci-preflight.log")" = $'--clean --free-space-preflight\n--clean --free-space-preflight' ] \
+    && ! grep -q 'WARNING: the space left after building' "$first_phase/output.log" \
+    || fail "first phase did not check free space first and forecast phase 2's clean CI"
 echo "PASS: accepted committed baseline reaches the real unpublished GA first-phase boundary"
+
+# Free space is the first check: a full disk stops the release before the remote
+# preflight, the audits, clean CI or any build.
+space_first="$TEST_ROOT/release-free-space-first"
+make_release_fixture "$space_first" accepted 1
+run_release_control "$space_first" MACCRAB_TEST_CI_PREFLIGHT_FAIL_FROM=1
+[ "$release_control_status" -eq 1 ] \
+    && grep -q "not enough free disk for this release's clean local CI" "$space_first/output.log" \
+    && grep -q 'local CI needs at least 14336 MiB free' "$space_first/output.log" \
+    || { tail -30 "$space_first/output.log" >&2; fail "a full disk did not stop the release first"; }
+! grep -q 'Remote preflight' "$space_first/output.log" \
+    && [ ! -e "$space_first/ci.log" ] && [ ! -s "$space_first/build.log" ] && [ ! -s "$space_first/gh.log" ] \
+    && [ "$(cat "$space_first/.fixture-ci-preflight.log")" = '--clean --free-space-preflight' ] \
+    || fail "a full disk was found only after remote, CI or build work"
+assert_retained_ci_transcript "$space_first" 0
+echo "PASS: release.sh checks clean-CI free space before any other step"
+
+# Once phase 1 has built its candidate and removed the private export, it
+# forecasts phase 2's clean CI and warns, without changing its own outcome.
+space_forecast="$TEST_ROOT/release-phase-two-space-forecast"
+make_release_fixture "$space_forecast" accepted 1
+run_release_control "$space_forecast" MACCRAB_TEST_CI_PREFLIGHT_FAIL_FROM=2
+[ "$release_control_status" -eq 3 ] \
+    || { tail -50 "$space_forecast/output.log" >&2; fail "the phase-2 space forecast changed the first phase's outcome"; }
+grep -q 'WARNING: the space left after building this candidate is not enough for' "$space_forecast/output.log" \
+    && grep -q '^         local CI needs at least 14336 MiB free' "$space_forecast/output.log" \
+    && ! grep -q 'ERROR: local CI needs' "$space_forecast/output.log" \
+    || fail "phase 1 did not warn that phase 2's clean CI lacks space"
+[ "$(tr '\n' ' ' < "$space_forecast/build.log")" = 'unsigned-build assemble sign publish ' ] \
+    && [ "$(/usr/bin/wc -l < "$space_forecast/.fixture-ci-preflight.log" | /usr/bin/tr -d ' ')" = 2 ] \
+    || fail "the phase-2 space forecast did not follow the completed candidate build"
+forecast_line=$(grep -n 'WARNING: the space left' "$space_forecast/output.log" | head -1 | cut -d: -f1)
+stopped_line=$(grep -n 'PUBLICATION STOPPED' "$space_forecast/output.log" | head -1 | cut -d: -f1)
+[ "$stopped_line" -lt "$forecast_line" ] || fail "the phase-2 space warning was not shown after the next steps"
+echo "PASS: phase 1 warns when the space its build left is not enough for phase 2's clean CI"
 
 # The documented RUNTIME_REPORT / CONTAINMENT_REPORT environment overrides must
 # survive argument parsing: release.sh used to reset both to "" before applying
@@ -2034,6 +2145,11 @@ printf '{}\n' > "$qualified_reuse/.qualification-evidence/MacCrab-v9.9.11-rc.1.r
     || fail "qualified second phase did not report preserved-candidate reuse"
 /usr/bin/grep -q 'release create' "$qualified_reuse/gh.log" \
     || fail "qualified second phase did not reach the isolated RC publisher"
+space_line=$(grep -n 'Free-space preflight: fixture volumes have room.' "$qualified_reuse/output.log" | head -1 | cut -d: -f1)
+gate_line=$(grep -n 'Qualification preflight: verifying preserved candidate' "$qualified_reuse/output.log" | head -1 | cut -d: -f1)
+[ "$(cat "$qualified_reuse/.fixture-ci-preflight.log")" = '--clean --free-space-preflight' ] \
+    && [ -n "$space_line" ] && [ -n "$gate_line" ] && [ "$space_line" -lt "$gate_line" ] \
+    || fail "qualified second phase did not check clean-CI free space before its qualification gate"
 
 qualified_ga_sparkle="$TEST_ROOT/release-qualified-ga-sparkle"
 make_qualified_ga_sparkle_fixture "$qualified_ga_sparkle"
@@ -3482,6 +3598,7 @@ grep -q 'runs from the commit v9.9.11 names' "$resume_flow/output.log" \
 /usr/bin/git -C "$resume_flow" -c core.hooksPath=.no-hooks checkout -q --detach v9.9.11
 rm -f "$resume_flow/gh.log" "$resume_flow/publish.log" "$resume_flow/git.log"
 resume_ci_runs=$(/usr/bin/wc -l < "$resume_flow/ci.log" | /usr/bin/tr -d ' ')
+resume_space_checks=$(/bin/cat "$resume_flow/.fixture-ci-preflight.log" 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' ')
 run_release_with "$resume_flow" 9.9.11 -- --resume-publish
 if [ "$release_with_status" -ne 0 ]; then
     tail -60 "$resume_flow/output.log" >&2
@@ -3517,7 +3634,8 @@ resume_metadata_dir=$(dirname "$(dirname "$(cat "$resume_flow/.fixture-published
     || fail "--resume-publish moved or pushed a tag or branch"
 [ "$(/usr/bin/wc -l < "$resume_flow/ci.log" | /usr/bin/tr -d ' ')" = "$resume_ci_runs" ] \
     && [ ! -s "$resume_flow/build.log" ] \
-    || fail "--resume-publish ran CI or rebuilt the qualified candidate"
+    && [ "$(/bin/cat "$resume_flow/.fixture-ci-preflight.log" 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = "$resume_space_checks" ] \
+    || fail "--resume-publish ran CI, its free-space preflight, or rebuilt the qualified candidate"
 
 # Once the release exists, a second resume must not touch it. (The fake appcast
 # generator's untracked snapshot.path would otherwise stop it as unclean source.)

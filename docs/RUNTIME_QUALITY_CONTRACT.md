@@ -328,7 +328,10 @@ process in its dedicated process group is terminated and reaped on failure.
 Both transitive workload executors and their SHA-256 values are part of the
 workload binding. The recorder leaves a restart-safe
 `.runtime.json.capture.json` while sampling, including the failing phase and
-reason when it aborts. A passing report embeds each raw
+reason when it aborts. A rerun first moves an earlier attempt's capture and
+readiness directory, unmodified, into the next free
+`.runtime.json.attempts/<n>/`, and never overwrites a file it did not create.
+A passing report embeds each raw
 rich heartbeat, heartbeat-file digest/ownership, Darwin process counters, and
 complete SQLite-family observation; it then canonically hashes and normalizes
 those observations. The verifier repeats that normalization, reconciles sample
@@ -384,7 +387,10 @@ or sticky storage budget, a blocked alert family, a non-accepting or saturated
 TraceGraph recovery-writer barrier, a non-writable TraceStore, an
 open/failed configured LLM backend, an over-cap SQLite family, or a free-space-floor
 violation. It also fails during the epoch as soon as one of those states
-appears; it does not wait out the remaining samples. In particular, it never
+appears; it does not wait out the remaining samples. Its first heartbeat read,
+before any prewarm, also refuses a TraceGraph store that is blocked, is not
+accepting mutations, or has a footprint at or above its proactive recovery
+threshold; the threshold alone is not an epoch failure. In particular, it never
 derives shed from a balancing residual and never invents offered/completed
 counters from queue depth. `sequence_checkpoint.conservation`,
 `sequence_journal_conservation`, and
