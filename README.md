@@ -6,7 +6,7 @@
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
 [![Tests](https://img.shields.io/badge/tests-5044%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20shipped%20(stable%20tier%20on%20by%20default)-blueviolet)](#what-runs-on-a-default-install)
-[![Version](https://img.shields.io/badge/version-1.22.5-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.22.6-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -707,10 +707,18 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-This source tree targets **v1.22.5**. See [CHANGELOG.md](CHANGELOG.md) for the full
+This source tree targets **v1.22.6**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.22.6** — The Endpoint Security sensor no longer loses events during a
+  build storm, and TraceGraph writes leave the detection lanes; TraceGraph no
+  longer fills on AI-agent developer Macs and recovers in minutes when it does; a
+  storage condition at startup no longer puts the engine in a relaunch loop;
+  the plugin store no longer claims installs run fully sandboxed, and the
+  catalog shows each plugin's signed name, description and icon; System Health,
+  MCP and the docs describe what a default install actually does. Installs older
+  than v1.22.0 see this update as critical.
 - **v1.22.5** — the Homebrew cask installs again on Homebrew 7 (`postflight_steps`);
   a past write failure no longer keeps protection degraded until restart; the
   diagnostics export explains the protection verdict; the pre-push gate tests
