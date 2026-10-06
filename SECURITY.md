@@ -55,6 +55,8 @@ MacCrab assumes the following trust boundaries:
 - Apple-signed system binaries (`/System/`, `/usr/libexec/`)
 - The user who installed and configured MacCrab
 - System Extension bundle integrity (enforced by AMFI + notarization ticket; the `.systemextension` is signed with Developer ID and an embedded provisioning profile)
+- First-party (MacCrab-signed) forensic plugins, which today are every plugin
+  in the Rave store; they run unsandboxed with MacCrab's own access
 
 ### Untrusted
 
@@ -63,10 +65,11 @@ MacCrab assumes the following trust boundaries:
 - External threat intelligence feeds (validated before use)
 - LLM API responses (never auto-executed, always advisory)
 - Clipboard content, browser extensions, USB devices
-- **Third-party forensic plugins** (rave marketplace) — executed **only** under a
-  deny-default sandbox with file reads brokered over a fd; TCC-protected stores
-  (Messages, Mail, Safari, …) are served as host-made snapshots, never the live
-  store; see the full lane in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8
+- **Third-party (non-MacCrab-signed) forensic plugins**, whether sideloaded or
+  from another publisher — executed **only** under a deny-default sandbox with
+  file reads brokered over a fd; TCC-protected stores (Messages, Mail, Safari,
+  …) are served as host-made snapshots, never the live store; see the full
+  lane in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8
 
 ### Out of Scope
 
@@ -86,7 +89,7 @@ MacCrab does **not** protect against:
 - **maccrabd** (legacy) runs as root — retained only for local development when no ES entitlement is available; falls back through `eslogger` → `kdebug` → FSEvents
 - **maccrabctl** runs as the invoking user (reads database only)
 - **MacCrab.app** runs as the logged-in user (reads database; activates and replaces the System Extension)
-- **maccrab-mcp** runs as the invoking user (reads database, can suppress alerts; response, configuration and rule-authoring tools work only for the capability tiers a human enables under Agent Control (MCP) in Settings)
+- **maccrab-mcp** runs as the invoking user (reads the database; suppressing alerts or campaigns, and other response, configuration and rule-authoring tools, work only for the capability tiers a human enables under Agent Control (MCP) in Settings)
 
 ### Data Protection
 
@@ -121,16 +124,16 @@ MacCrab does **not** protect against:
 - Input validation on all parameters (length limits, format checks)
 - Parse errors return generic messages (no request body leakage)
 
-### Third-Party Plugin Execution (rave marketplace)
+### Third-Party Plugin Execution
 
-The forensic-plugin marketplace runs code MacCrab does not author on an
+The third-party plugin lane runs code MacCrab does not author on an
 FDA/TCC host. It is the most security-sensitive surface in the product and is
 documented in full as in-scope attacker #8 in
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). In brief:
 
 - First-party (MacCrab-signed) and untrusted third-party plugins run in **two
   disjoint lanes**; untrusted code runs **only** under a deny-default sandbox.
-  First-party plugins, which today are all 19 plugins in the Rave catalog, run
+  First-party plugins, which today are every plugin in the Rave catalog, run
   **without** a sandbox, with MacCrab's own access.
 - A signed trampoline applies the `(deny default)` SBPL post-startup; a
   per-invocation **broker** is the file boundary (reads brokered over a fd, every
