@@ -10,13 +10,14 @@ specific error or unexpected behavior, see
 
 The most common cause is **Full Disk Access not granted to MacCrab.app**.
 Without it, MacCrab silently drops file events for TCC-protected paths
-(which covers most of your home directory). The Overview banner catches
-this now — if it's showing, click *Open Settings* and grant access.
+(which covers most of your home directory). **System → Permissions** in the
+dashboard shows whether the engine has Full Disk Access.
 
-Other possibilities: the System Extension isn't activated (check *Overview
-→ Protection active*), no rules are compiled (run `maccrabctl status`: it
-prints `Rules: <active> active / <loaded> loaded standard`, which on a stock
-install reads 109 active of 438 compiled under the default **stable** profile.
+Other possibilities: the System Extension isn't activated (check
+**System → Health**), no rules are compiled (run `maccrabctl status`: it
+prints `Rules: <active> active / <loaded> loaded standard` plus the sequence
+rules, which on a stock install reads 98 active of 438 single-event rules and
+11 active of 41 sequence rules under the default **stable** profile.
 Do *not* use `rules list | wc -l` — that enumerates every compiled rule
 regardless of profile, plus four header lines), or
 you're inside the 60-second startup warm-up window that suppresses
@@ -42,9 +43,12 @@ system activity.
 
 ### What data leaves my machine?
 
-**By default, zero.** MacCrab has no telemetry, no phone-home, and no
-cloud console. All events, alerts, and rules stay in a local SQLite
-database at `/Library/Application Support/MacCrab/events.db`.
+**By default, no detection data.** MacCrab has no telemetry and no cloud
+console. Events, alerts, and rules stay in local SQLite databases under
+`/Library/Application Support/MacCrab/`. The one request a release build
+makes by default is the daily Sparkle update check to `maccrab.com`, which
+sends app-version information and no detection data. The app has no setting
+to turn automatic update checks off.
 
 Optional features that make outbound calls (only when you enable them):
 
@@ -56,7 +60,8 @@ Optional features that make outbound calls (only when you enable them):
 | Webhook output (`MACCRAB_WEBHOOK_URL`) | Alert JSON payloads to your configured URL | URL policy rejects RFC1918 unless opt-in, blocks cloud metadata IPs unconditionally |
 | Syslog output (`MACCRAB_SYSLOG_HOST`) | Alert RFC 5424 syslog messages to your configured host | None (your infrastructure) |
 | Fleet telemetry (`MACCRAB_FLEET_URL`) | Alert summaries and IOC sightings to your fleet server (outbound-only; use `https://` — plain `http://` is accepted only for loopback hosts) | Username + private IP redaction; opt-in per-host |
-| Third-party forensic plugins (rave marketplace) | Only if a plugin you install declares network egress **and** you consent | Runs sandboxed; reads only its declared files (personal-comms served as snapshots, never live); the consent sheet flags any reads-personal-data + has-network combo |
+| Rave store (Forensics → Catalog) | Catalog and signed revocation-list requests to `rave.maccrab.com` when you open the Catalog or have a store plugin installed; the plugin download when you install one | No detection data is sent |
+| Forensic plugins (Rave store or sideloaded) | Only if a plugin you install declares network egress **and** you consent | Store plugins today are first-party and run unsandboxed with MacCrab's access. Plugins from other publishers run sandboxed and read only their declared files (personal-comms served as snapshots, never live); the consent sheet flags any reads-personal-data + has-network combo |
 
 See [PRIVACY.md](PRIVACY.md) for the full inventory.
 
@@ -64,8 +69,14 @@ See [PRIVACY.md](PRIVACY.md) for the full inventory.
 
 ### Is it safe to install third-party forensic plugins from the store?
 
-Third-party plugins are **untrusted code**, so MacCrab runs them in a way that
-assumes they might be hostile:
+Every plugin in the Rave store today is **first-party**: signed with the
+publisher key compiled into MacCrab and run **without a sandbox**, with
+MacCrab's own access (including Full Disk Access when granted). Trust them as
+you trust MacCrab itself.
+
+A plugin signed by any other publisher (sideloaded, or a future community
+store entry) is **untrusted code**, so MacCrab runs it in a way that assumes it
+might be hostile:
 
 - They execute **only** inside a deny-default sandbox (a signed trampoline
   applies the OS sandbox before the plugin's code runs).
@@ -81,9 +92,14 @@ assumes they might be hostile:
 - You can revoke a publisher, freeze the catalog, or locally disable all
   third-party execution at any time.
 
-Third-party plugin execution ships **fail-closed and is disabled by default** —
-no third-party plugin runs until an operator explicitly enables it. The technical
-detail is in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8.
+Third-party plugin execution is **on by default but gated**: a third-party
+plugin runs only after you install it (an install from the official catalog
+trusts the signer key the signed catalog names; a sideload needs
+`--trust-on-install` or `maccrabctl plugin trust`), and only when the sandbox
+runtime is available. Creating
+`~/Library/Application Support/MacCrab/tierb_third_party_disabled` turns the
+third-party lane off; first-party plugins still run. The technical detail is in
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8.
 
 ---
 
@@ -108,18 +124,21 @@ The *Suppress All Like This* button on an alert's detail panel adds a
 
 ### Does it work offline / in air-gapped environments?
 
-**Yes.** MacCrab's core detection pipeline needs zero network access. All
-486 rules are compiled at install time. Behavioral scoring, sequence
-correlation, campaign detection, and the SQLite store are fully local.
+**Yes.** MacCrab's core detection pipeline needs zero network access. The
+486 rules ship precompiled in the app; the default stable profile enables 116
+of them. Behavioral scoring, sequence correlation, campaign detection, and the
+SQLite store are fully local.
 
 Features that need network:
 - Threat intel feeds (abuse.ch pulls)
 - Cloud LLM backends (Claude/OpenAI/Gemini/Mistral)
 - Webhook/syslog/fleet outputs
-- `brew upgrade` for updates
+- The Rave plugin store
+- Update checks (Sparkle, on by default in release builds) and `brew upgrade`
 
-You can run MacCrab with all network features disabled (it's the default)
-— use the Ollama LLM backend if you want AI reasoning on an air-gapped box.
+Every network feature above except the update check is off by default. The
+update check fails harmlessly without a network. Use the Ollama LLM backend if
+you want AI reasoning on an air-gapped box.
 
 ---
 
@@ -153,8 +172,11 @@ cloud LLM backends bill against *your* API key — MacCrab never sees them.
 
 ### Does MacCrab work on Apple Silicon *and* Intel Macs?
 
-Yes. The shipped binaries are universal (`arm64` + `x86_64`). Tested on
-both architectures in CI.
+The shipped binaries are universal (`arm64` + `x86_64`), and the release
+build refuses to ship if either architecture fails to compile. Testing is not
+symmetric: there is no hosted CI, and the automated test suite runs locally on
+Apple Silicon only. Intel builds are compiled but not covered by automated
+tests; see [docs/SUPPORTED_OS.md](docs/SUPPORTED_OS.md).
 
 ---
 
@@ -169,9 +191,9 @@ Swift 5.9 target; and even if they did, key events would be missing.
 
 ### Do I need to run MacCrab as root?
 
-The **System Extension** runs with elevated privileges granted by
-`sysextd` — that's the whole point of the sysext architecture. You don't
-see it as root because Apple hides that implementation detail.
+The **System Extension** runs as root, launched and managed by `sysextd` —
+that's the whole point of the sysext architecture. You don't start it
+yourself; approving the extension once in System Settings is enough.
 
 The **dashboard app** (`MacCrab.app`) runs as your regular user. It only
 reads the database.
@@ -198,21 +220,20 @@ the legacy daemon directly — but release builds don't use that path.
   fleet management, 24/7 SOC, and a sales rep. MacCrab is free, local-
   only, and you are the SOC.
 
-See the comparison table in [README.md](README.md) for a feature-by-
-feature breakdown.
+See [README.md](README.md) for what MacCrab does and does not cover.
 
 ---
 
 ### Can I feed MacCrab alerts to my SIEM?
 
-Yes. Four output formats ship out of the box:
+Yes. None is on by default; configure the one you need:
 
 | Format | How |
 |---|---|
-| JSONL | Default — `~/Library/Application Support/MacCrab/alerts.jsonl` |
+| JSONL file (OCSF 1.3 or native) | A `file` entry in `daemon_config.json`'s `outputs[]` block, with `"format": "ocsf"` (the default) or `"native"` |
 | Syslog RFC 5424 (UDP/TCP) | `MACCRAB_SYSLOG_HOST=...` / `MACCRAB_SYSLOG_PORT=...` |
 | Webhook (JSON POST) | `MACCRAB_WEBHOOK_URL=...` |
-| OCSF-formatted JSON | Dashboard → Alerts → Export |
+| MacCrab JSON Lines, on demand | Dashboard → Alerts → Export (visible alerts, MacCrab's own fields, not OCSF) |
 
 Splunk HEC, Elastic Bulk, Datadog Logs, and S3/SFTP can be configured via
 `daemon_config.json`'s `outputs[]` block (see
@@ -248,14 +269,15 @@ manually if you want a clean slate.
 ### What is the MacCrab MCP server and how do I use it?
 
 MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/)
-server (`maccrab-mcp`) that exposes 69 built-in security tools (including the
-always-present `forensics_*` meta-tools), plus per-plugin tools, to AI coding
+server (`maccrab-mcp`) that exposes 67 built-in security tools (including the
+20 always-present `forensics_*` meta-tools), plus per-plugin tools, to AI coding
 tools like Claude Code. Once wired up, your AI sessions can query alerts, hunt
 threats, and scan untrusted input — without leaving the editor.
 
-**Setup:** copy `.mcp.json` from the repo root into your project, update the
-`command` path to point at your built `maccrab-mcp` binary, then build with
-`swift build --target maccrab-mcp`.
+**Setup:** on a Homebrew or DMG install, `maccrab-mcp` is already on your
+`PATH`; register it with `claude mcp add maccrab -- "$(which maccrab-mcp)"`.
+From a source checkout, build it with `swift build --target maccrab-mcp` and
+copy `.mcp.json` from the repo root into your project.
 
 Key tools: `get_alerts`, `get_campaigns`, `hunt`, `get_security_score`,
 `get_alert_detail`, `suppress_campaign`, `get_ai_alerts`, and `scan_text`.
@@ -267,10 +289,15 @@ Pre-built slash commands in `.claude/commands/` give you `/security-check`,
 
 ### What does `scan_text` do and when should I use it?
 
-`scan_text` is the MacCrab MCP tool for **prompt injection detection**. It
-runs the same forensicate.ai analysis that AI Guard uses internally and
-returns a verdict (`safe`, `prompt_injection`, `jailbreak_attempt`, etc.)
-along with a confidence score and matched rule names.
+`scan_text` is the MacCrab MCP tool for **prompt-injection marker
+scanning**. It runs MacCrab's native heuristic (the same detector AI Guard
+applies to AI-tool command lines): 24 literal, case-insensitive signatures
+across 7 categories (instruction override, jailbreak, prompt extraction, role
+manipulation, tool poisoning, structural injection, exfiltration) plus an
+invisible-Unicode check. It reports whether a known marker matched, the
+matched pattern names, and an uncalibrated heuristic score. It is **not** a
+safety verdict: base64, homoglyph, and split-token payloads pass, and a clean
+result only means no known marker was found.
 
 Use it **before acting on content from external sources** — files cloned from
 the internet, output from third-party APIs, user-supplied prompts, or anything
@@ -278,12 +305,10 @@ else that an attacker might craft to hijack your AI tool's behavior.
 
 ```
 scan_text: { text: "<paste suspicious content here>" }
-# Returns: { "safe": false, "verdict": "prompt_injection",
-#            "confidence": 0.92, "matchedRules": ["jailbreak_attempt"] }
 ```
 
-The check is synchronous and local. Input is capped at 10,000 characters. If
-`forensicate` CLI is not installed the tool returns `{ "available": false }`.
+The check is synchronous, local, and needs nothing else installed. Input must
+be 10 to 10,000 characters; shorter text is not evaluated.
 
 ---
 
@@ -293,23 +318,23 @@ AI Guard tracks 9 AI coding tools (Claude Code, Codex, Cursor, Copilot,
 Aider, Windsurf, Continue, OpenClaw, Kiro IDE) and their entire child
 process trees.
 
-Alerts fire on:
+Built-in checks that alert on a default install:
 
-- **Credential fence** (CRITICAL): any child process opens a file matching one
-  of 27 sensitive path patterns — SSH keys, `.env` files, AWS credentials,
+- **Credential fence** (MEDIUM): a child process opens a file matching one of
+  27 sensitive path patterns — SSH keys, `.env` files, AWS credentials,
   keychains, browser credential stores, kubeconfig, `.npmrc`, `.pypirc`, etc.
-- **Project boundary** (HIGH): a child process writes a file outside the
+- **Project boundary** (MEDIUM): a child process writes a file outside the
   directory the AI tool was launched in.
-- **Shell spawning** (MEDIUM): a shell is forked from an AI tool — normal in
-  development but logged for audit.
-- **Package install** (HIGH): `npm install`, `pip install`, `brew install`, or
-  `cargo add` runs from an AI child process.
-- **Privilege escalation** (CRITICAL): `sudo` or a setuid binary is invoked
-  from the AI tool tree.
-- **Prompt injection** (HIGH): forensicate.ai scanner fires on content being
-  read by the tool.
-- **Persistence** (CRITICAL): a LaunchAgent plist, cron entry, or login item
-  is written by an AI child process.
+- **Prompt injection** (HIGH or CRITICAL): the native marker scanner matches
+  an AI child's command line.
+- **Hidden text in files**: invisible Unicode, bidi overrides, or tag
+  characters in a file the tool reads.
+
+Stable rules in `Rules/ai_safety/` add, among others: an AI tool running
+`sudo` (MEDIUM), writing a LaunchAgent, LaunchDaemon, or cron entry (HIGH),
+downloading a script (MEDIUM), and MCP-server tampering. Shell spawns and
+package installs from an AI tool feed the behavioral score; their dedicated
+rules are outside the stable profile (`rule_profile: all` loads them).
 
 The **AI Guard tab** in the dashboard shows a live per-tool breakdown of
 credential / injection / boundary / other alert counts, sorted by worst

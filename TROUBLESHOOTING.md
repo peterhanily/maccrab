@@ -7,15 +7,16 @@ Common issues and how to diagnose them. If your problem isn't here, check
 
 ## Protection won't activate — System Extension stays stuck
 
-**Symptom:** You click *Enable Protection* in MacCrab.app, the panel goes to
-"Approval required" (or stays on "Activating"), and nothing happens.
+**Symptom:** MacCrab asks macOS to load its extension on first launch (and
+again if you click *Enable Protection* at the end of the setup sheet), but
+**System → Health** in the dashboard never shows the engine running.
 
 **Fix:**
 
 1. Open **System Settings → General → Login Items & Extensions → Endpoint
-   Security Extensions**. (On macOS 13, the pane is under
-   **Privacy & Security → Security**.)
-2. Toggle **MacCrab** on.
+   Security Extensions** (macOS 15 and later). On macOS 13 and 14, the
+   approval is under **Privacy & Security**.
+2. Toggle **MacCrab** on (or click **Allow**).
 3. Authenticate when prompted.
 
 **Diagnostic commands:**
@@ -24,13 +25,13 @@ Common issues and how to diagnose them. If your problem isn't here, check
 # List system extensions — look for com.maccrab.agent
 systemextensionsctl list
 
-# Watch sysextd's opinion in real time while you click Enable Protection
+# Watch sysextd's opinion in real time while you retry activation
 log stream --predicate 'subsystem == "com.apple.sysextd"' --info
 ```
 
 If `systemextensionsctl list` shows the extension as `[activated waiting for
-user]`, the approval prompt was dismissed. Click *Try again* in the MacCrab
-panel to re-present it.
+user]`, the approval prompt was dismissed. Use **System → Health → Reactivate
+System Extension** in the dashboard to submit the request again.
 
 ### Known rejection signatures (from v1.3.x)
 
@@ -70,8 +71,9 @@ ls -la ~/Library/Application\ Support/com.apple.TCC/TCC.db
 ### Other causes for silent detection
 
 - **No rules loaded.** Check `maccrabctl status` — the `Rules:` line reports
-  `<active> active / <loaded> loaded standard`, 109 active of 438
-  compiled under the default stable rule profile (set `rule_profile: all` in
+  `<active> active / <loaded> loaded standard` plus the sequence rules: 98
+  active of 438 single-event rules, plus 11 active of 41 sequence rules,
+  under the default stable rule profile (set `rule_profile: all` in
   `daemon_config.json` to activate the rest). `rules list | wc -l` is *not*
   this number: it counts every compiled rule plus four header lines,
   irrespective of profile. If the active count is zero, run
@@ -87,8 +89,8 @@ ls -la ~/Library/Application\ Support/com.apple.TCC/TCC.db
 
 ## Dashboard stuck on "Disconnected"
 
-**Symptom:** Menubar app shows the red offline dot, and the Overview banner
-says "Enable protection above…" even though the extension is active.
+**Symptom:** Menubar app shows the red offline dot, and **System → Health**
+reports the engine offline, even though the extension is active.
 
 **Diagnostic:**
 
@@ -96,16 +98,18 @@ says "Enable protection above…" even though the extension is active.
 # Is the sysext actually running?
 pgrep -l com.maccrab.agent
 
-# Is the database being written to?
-ls -la ~/Library/Application\ Support/MacCrab/events.db*
+# Is the database being written to? (release installs; a dev maccrabd
+# without sudo writes under ~/Library/Application Support/MacCrab instead)
+ls -la /Library/Application\ Support/MacCrab/events.db*
 # WAL file timestamp should be recent
 ```
 
 **Common causes:**
 
-- Extension crashed silently. Restart it: toggle off/on in System Settings
-  or `systemextensionsctl uninstall 79S425CW99 com.maccrab.agent` then
-  re-activate via the app.
+- Extension crashed silently. Restart it: toggle it off and on in System
+  Settings, or use **System → Health → Reactivate System Extension**. To
+  remove it completely, use **Remove System Extension** in Settings → General;
+  `systemextensionsctl uninstall` only works with SIP disabled.
 - Database location mismatch — release installs write to
   `/Library/Application Support/MacCrab/`; dev `swift run maccrabd`
   writes to `~/Library/Application Support/MacCrab/`. Running both on the
@@ -173,12 +177,14 @@ sudo find /Library/MobileDevice/Provisioning\ Profiles -name 'com.maccrab.*' -de
 # Reactivate the sysext
 systemextensionsctl reset 2>/dev/null || true
 open /Applications/MacCrab.app
-# Click Enable Protection
+# The app re-requests activation on launch; if it does not come back, use
+# System → Health → Reactivate System Extension
 ```
 
-The cask's `postflight` runs this cleanup automatically. If it didn't run
-(because you installed from source or did a partial upgrade), the commands
-above do the same work.
+The cask's `postflight_steps` removes the legacy LaunchDaemon plists
+automatically; the provisioning-profile sweep runs only in
+`scripts/install.sh`. If neither ran (because you installed from source or
+did a partial upgrade), the commands above do the same work.
 
 ---
 

@@ -7,10 +7,12 @@
 > on-device. Prompt and tool content remain redacted unless you explicitly
 > enable local capture.
 
-Status: **stable** as of v1.9.0. Default-off (operator opts in via the
-**Receive agent traces** toggle in **Intelligence → Agent Traces**, or via
-the `MACCRAB_AGENT_TRACES=1 + MACCRAB_OTLP_RECEIVER=1` env pair for
-headless deployments).
+Status: **stable** as of v1.9.0. **Off by default.** The operator opts in
+with the **Receive agent traces** toggle under **Investigation → Agent
+Traces**, or, for the development `maccrabd` only, the
+`MACCRAB_AGENT_TRACES=1 + MACCRAB_OTLP_RECEIVER=1` env pair (a System
+Extension cannot be given environment variables). Nothing below happens
+until it is on.
 
 ## What it does
 
@@ -20,8 +22,9 @@ kernel events MacCrab already observes. Two correlation paths run in
 parallel:
 
 1. **TRACEPARENT (high-confidence).** When an agent runs a Bash subprocess
-   it injects a `TRACEPARENT` env var into the child's environment.
-   MacCrab's Endpoint Security collector reads that env at `execve` time,
+   it injects a `TRACEPARENT` env var into the child's environment. With
+   Agent Traces on, MacCrab's Endpoint Security collector reads that env at
+   `execve` time,
    parses the W3C trace context, and binds it to the process. Every
    subsequent kernel event from that process (and its descendants) carries
    the originating `trace_id` / `span_id`.
@@ -30,6 +33,11 @@ parallel:
    present (Cursor, Copilot CLI, an unconfigured Claude Code), MacCrab
    walks the process ancestry and tags events whose ancestor binary
    matches a known AI tool.
+
+Both paths stamp the `agent_trace_id` / `machine_agent_confidence` fields
+only while Agent Traces is on. With it off (the default), AI Guard still
+tags AI-tool descendants with `ai_tool` for its own checks, but the rules in
+[Detection rules shipped](#detection-rules-shipped) cannot fire.
 
 A third path (OTLP receiver → TraceStore) lets MacCrab ingest the agent's
 self-reported tool spans on `127.0.0.1:4318`. With both halves wired,
@@ -180,10 +188,17 @@ verification**. Full detail: [`maccrabtrace.v1.spec.md` §6.4](maccrabtrace.v1.s
 ## Enabling
 
 v1.9.0 ships the receiver, store machinery, and the in-dashboard
-toggle. **Settings → Intelligence → Agent Traces** has a switch that
-starts/stops the receiver on the running daemon via SIGHUP — no env
-vars or restart required. The env-var path below is kept for CI / dev
-hosts where the dashboard isn't running:
+toggle. **Investigation → Agent Traces** has a **Receive agent traces**
+switch. On a release install it sends a request through the engine's inbox
+(a dev `maccrabd` gets a SIGHUP instead); the receiver starts or stops on the
+running engine, but `TRACEPARENT` binding only starts at the next engine
+start. Turning the switch off stops the receiver and does **not** turn
+binding back off: the engine keeps `agent_traces_enabled: true` in the
+root-owned `/Library/Application Support/MacCrab/agent_traces_config.json`.
+Set it to `false` there and restart the Mac to stop binding. After that, the
+switch alone cannot turn Agent Traces back on: set `agent_traces_enabled` to
+`true` in the same file and restart to re-enable it. The env-var path
+below works only for a development `maccrabd` started from a shell:
 
 ```bash
 # Daemon side — set in the daemon's environment.
@@ -274,7 +289,11 @@ invariants for this subsystem:
 ## Detection rules shipped
 
 Three confidence-aware rules in `Rules/ai_safety/` consume the
-`MachineAgentConfidence` enrichment field. Status is `stable` as of v1.9.0.
+`MachineAgentConfidence` enrichment field. Status is `stable` as of v1.9.0, so
+the default profile enables them, but they cannot fire until Agent Traces is on
+because nothing else sets that field. The same holds for the graph rule
+`maccrab_ai_agent_lethal_trifecta`, which needs a direct (TRACEPARENT) agent
+link.
 
 | Rule | Severity | Confidence gate | What it catches |
 |---|---|---|---|

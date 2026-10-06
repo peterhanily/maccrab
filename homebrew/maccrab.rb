@@ -62,9 +62,9 @@ cask "maccrab" do
     # untouched until that transaction succeeds.
 
     # The system extension itself is not installed here. It ships
-    # inside MacCrab.app/Contents/Library/SystemExtensions/ and is
-    # registered with sysextd the first time the user opens the app
-    # and clicks "Enable Protection" (see SystemExtensionPanel.swift).
+    # inside MacCrab.app/Contents/Library/SystemExtensions/ and the app
+    # submits its activation request on first launch
+    # (SystemExtensionManager.swift); the user then approves it.
   end
 
   # v1.7.11 cask-only patch: clean up the user-context LaunchAgent that
@@ -93,8 +93,8 @@ cask "maccrab" do
             # every routine upgrade — dropping real-time protection and popping
             # an approval modal mid-upgrade. On upgrade the freshly-installed
             # app re-activates idempotently, so no teardown is needed. On a
-            # true uninstall, deactivate via the app's own "Disable Protection"
-            # flow or the bundled scripts/uninstall.sh (which submits the
+            # true uninstall, deactivate via "Remove System Extension" in the
+            # app's Settings or the bundled scripts/uninstall.sh (which submits the
             # signed OSSystemExtensionRequest the same way the app does); a
             # leftover sysextd ledger entry is cosmetic and reconciles once the
             # bundle is gone. See caveats.
@@ -129,10 +129,13 @@ cask "maccrab" do
     MacCrab protects the system via an Endpoint Security system
     extension. To activate:
 
-      1. Open /Applications/MacCrab.app
-      2. Click "Enable Protection" on the Overview tab
-      3. Approve the extension in System Settings > General >
+      1. Open /Applications/MacCrab.app. On first launch it asks
+         macOS to load the extension (the setup sheet ends with
+         "Enable Protection").
+      2. Approve the extension in System Settings > General >
          Login Items & Extensions > Endpoint Security Extensions
+         (macOS 15 and later), or in System Settings > Privacy &
+         Security (macOS 13 and 14).
 
     For full detection coverage also grant Full Disk Access to
     MacCrab.app in System Settings > Privacy & Security > Full
@@ -146,8 +149,8 @@ cask "maccrab" do
     intentionally leaves the Endpoint Security extension registered (Homebrew
     runs the same uninstall steps on every `brew upgrade`, so forcing a
     deactivate here would drop protection on routine upgrades). To fully
-    remove the extension, click "Disable Protection" on MacCrab's
-    Overview tab before uninstalling. Any leftover entry clears after a reboot (confirm with
+    remove the extension, click "Remove System Extension" in MacCrab's
+    Settings (General tab) before uninstalling. Any leftover entry clears after a reboot (confirm with
     `systemextensionsctl list`).
 
     Your data (alerts, baselines, settings) is preserved at
