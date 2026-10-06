@@ -3,6 +3,228 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **The heartbeat reports when TraceGraph storage last paused and resumed.**
+  The tracegraph_storage_admission block now includes
+  footprint_latch_last_tripped_at_unix and
+  footprint_latch_last_cleared_at_unix. Each key is omitted until that
+  transition has happened. The engine now logs when the size pause clears, and
+  logs when graph writes actually resume. Before, it never logged a resume
+  after a size pause.
+
+### Fixed
+- **TraceGraph no longer creates a new trace every time the same unsigned
+  binary runs from a temp or download folder.** The "Unsigned binary executed
+  from download path" anchor had no deduplication, and its identity included
+  the process id. Every event from such a process, and every re-run of it,
+  became a separate trace. On one AI-agent developer Mac that was 61 traces a
+  minute from only 361 programs, enough to fill the store. Repeats are now
+  grouped by the binary's signing identity, or by its path when it has no Team
+  ID. The first run still raises a trace; repeats within five minutes do not.
+- **A full TraceGraph store now drains back to normal instead of staying
+  paused for hours.** Bounded recovery could keep old traces pinned at the
+  configured retention, because graph rows kept aging past the one-hour floor.
+  It also stopped early whenever a few free pages appeared, or whenever a
+  write it was going to refuse anyway was waiting. And it removed at most 256
+  traces per 30-second pass. Recovery now tightens the trace cutoff when that
+  cutoff holds no more eligible traces, or after passes that delete rows stop
+  shrinking the excess. It clears stale graph rows in the same pass and
+  refuses writes the full store would reject without interrupting recovery.
+  While writes are paused for size it removes up to 2,000 traces per pass. The
+  one-hour protection for recent evidence and every size cap are unchanged.
+- **A TraceGraph store that cannot shrink at startup no longer stops the
+  engine.** When the trace graph was at or above its proactive storage
+  threshold and every remaining row was newer than the one-hour evidence
+  floor, the startup drain could not get below its resume target. The engine
+  reported `storage_not_ready` and exited, and the system extension was
+  relaunched into the same store, with nothing protecting the Mac while the
+  loop repeated. The engine now starts with TraceGraph writes paused
+  (`accepting_mutations` false, `blocked` true, reason `footprint_limit`).
+  Event detection, alerting, Sigma and sequence rules run as normal, and the
+  periodic bounded recovery resumes graph writes once the protected rows age
+  out. A TraceGraph store that cannot be opened for writing still stops
+  startup, as before.
+- **A TraceGraph store that cannot be used at startup no longer stops the
+  engine or hides the fault.** The engine first tries to drain the trace graph
+  below its storage target. If that drain fails with an SQLite error, or the
+  store opened read-only, the store is now closed and TraceGraph is turned off
+  for that run. Before, a failed drain was shown as a `footprint_limit` pause
+  that never cleared, and a read-only store made the engine exit and relaunch
+  into the same state over and over. Event detection, alerting, Sigma and
+  sequence rules keep running, and the heartbeat reports the trace store as
+  unavailable.
+- **Upgrading a large events database no longer times out its integrity check
+  on every launch.** Before installing the upgrade barrier, the engine checks
+  the inherited `events.db` with SQLite's `quick_check`, which reads every
+  page, under a fixed 30-second budget. On a large store or a busy Mac the
+  check ran out of time on every launch and the engine relaunched into the
+  same refusal. The budget now scales with the database size at 8 MiB/s,
+  between two and ten minutes. A check that finishes with a clean result just
+  after the budget is accepted, and a store that fails the check is reported
+  as failing it rather than as a timeout. Upgrades that start above a lowered
+  storage cap keep their existing 30-second budget.
+- **The dashboard no longer reports the engine as crashed while it checks a
+  large events database at startup.** The upgrade integrity check can now take
+  up to ten minutes. During that time the engine updates its "starting"
+  heartbeat every 30 seconds, so the app shows the engine as starting. Before,
+  the app treated the heartbeat as stale and could restart the system
+  extension in the middle of the check.
+- **System Health explains a paused TraceGraph store accurately.** When the
+  TraceGraph store passes its write limit, the banner is titled "TraceGraph
+  evidence persistence paused". It reports, in MiB:
+  - the write limit, the cap, the resume target, the current size, and how
+  much more must be freed;
+    - when the limit last tripped and last cleared, if the engine reports it.
+
+  It also says that graph rules are paused and no new traces are recorded.
+  Trace queries still work but return only older evidence, and recovery
+  deletes the oldest of it (never anything under an hour old) to make room.
+  Events, alerts, Sigma rules and sequence rules keep running. Writes resume
+  on their own, except on a legacy store created before v1.12.6 that cannot
+  shrink online. For that store, the banner says to raise the TraceGraph
+  storage limit or convert the store offline. Protection still shows as
+  degraded while the store is paused.
+- **MCP trace tools say when TraceGraph persistence is paused.** `get_traces`,
+  `hunt_trace` and `trace_from_event` no longer imply that nothing happened
+  while the store is blocked, not accepting writes, or unavailable. They give:
+  - the reason, plus, for the size limit, the write threshold, resume target,
+  current size and cap;
+  - that existing traces are still queryable and that recovery is deleting the
+  oldest of them;
+  - how much space must still be freed, or, for a legacy store, that an
+  offline conversion or a higher limit is needed.
+
+  With an engine from this release they also say when the current pause began
+  and when the previous one cleared.
+
+  A heartbeat older than two minutes is reported as possibly out of date, with
+  a warning that the engine may not be running, instead of claiming detection
+  continues.
+- **The plugin store no longer claims first-party scanners are
+  network-denied.** First-party plugins run without a sandbox with MacCrab's
+  own access. The capability chip in the store detail panel and the install
+  consent sheet now reads "Network: not restricted (runs with MacCrab's own
+  access)" instead of "Network: none (default-deny)". Only third-party plugins
+  run in the deny-by-default sandbox.
+- **The threat-intel feed sheet tells the truth about URLhaus and
+  MalwareBazaar.** Both feeds are now described as needing an abuse.ch
+  Auth-Key instead of being labelled "Keyless". With enrichment on, the sheet
+  shows "active — fetched every 4h" only when a key is stored in Settings →
+  Network enrichment. Otherwise it says "fetching requires an abuse.ch
+  Auth-Key". Feodo Tracker stays keyless.
+- **In-app Docs and the Welcome screen no longer overstate what MacCrab does.**
+  - AI features are off until you enable them; Ollama is the default backend
+  only after that.
+  - Trace bundles are signed `.tar.gz` directories. The Secure Enclave holds
+  the signing key only when one is available. Replay re-runs single-event
+  rules and does not reproduce sequence, behavioural or baseline verdicts.
+    - Honeyfiles are part of an opt-in tier.
+    - `maccrab-mcp` lives inside MacCrab.app.
+    - The built-in abuse.ch feeds are fixed in the engine and opt-in.
+    - The example rule now compiles.
+  - Welcome now says "more than a hundred" detection rules are on by default
+  instead of "hundreds".
+  - Welcome no longer promises IP blocking. MacCrab writes PF rules but does
+  not enable PF.
+  - Welcome now says your events and alerts stay on your Mac, rather than that
+  nothing leaves it, because update checks still go out.
+  - The CLI, the dev daemon banner, the security score and the in-app
+  troubleshooting text no longer point to an "Enable Protection" button
+  outside the first-run wizard; they name System → Health → Reactivate System
+  Extension.
+- **The README and FAQ no longer describe more than a default install does.**
+  The rules badge reads "486 shipped". A new "What runs on a default install"
+  section says the stable profile enables 116 of the 486 rules (98
+  single-event, 11 sequence, 7 graph). It also names the eight of those that
+  cannot fire on a default install: seven wait for Agent Traces or deception,
+  and `skill_md_poisoning_install` cannot fire on any install. The docs now
+  say "enabled" where they used to say "loaded", matching `maccrabctl status`.
+
+  Other corrections:
+  - The System Extension runs as root and is not sandboxed.
+  - Self-defense is six periodic checks; the parent-process check never
+    fires for the System Extension, whose parent is launchd.
+  - Endpoint Security subscribes to at most 20 event types; network
+    connections and TCC changes come from separate monitors.
+  - The clipboard check runs in the app, not the extension.
+  - Project-boundary enforcement flags writes only, not reads.
+  - The network collector polls every 10 seconds.
+  - Banners default to critical alerts only.
+
+  The FAQ also corrects:
+  - the `maccrabctl status` counts;
+  - `scan_text`, which is a native heuristic with no external dependency;
+  - the AI Guard severities;
+  - SIEM outputs: there is no default alerts.jsonl, and the dashboard export
+    is not OCSF;
+  - the architecture answer: there is no hosted CI, and automated tests run
+    on Apple Silicon only.
+- **The privacy policy now discloses the app's clipboard check and the plugin
+  store's requests.** While the menubar app runs, it checks the clipboard
+  every 3 seconds to catch ClickFix paste-and-run commands. It keeps only text
+  shaped like a shell delivery command. That text goes to the engine in a
+  private file the engine deletes, is held in memory, and up to 200 characters
+  of it are quoted in a matching alert. There is no setting to turn this off.
+  The outbound table also gains rave.maccrab.com, and it no longer claims a
+  Settings switch for automatic update checks, because none exists.
+- **Plugin sandboxing is described accurately.** Every plugin in the Rave
+  store is first-party and runs without a sandbox, with MacCrab's own access.
+  Only plugins from other publishers or sideloaded ones run in the
+  deny-default sandbox. That lane is on by default for plugins installed with
+  publisher trust, and the `tierb_third_party_disabled` file turns it off.
+  README, FAQ, SECURITY, PRIVACY, TRUST and THREAT_MODEL had said every plugin
+  was sandboxed and that third-party execution was off by default. SECURITY
+  now lists first-party plugins as trusted. It also says suppressing alerts
+  over MCP needs a capability tier that a human grants.
+- **Agent Traces documentation says it is off by default.** The README and
+  AGENT_TRACES described TRACEPARENT attribution as always on. It needs the
+  **Receive agent traces** toggle under Investigation → Agent Traces, and
+  binding begins at the next engine start. On a release install, switching the
+  toggle off stops the receiver but not the binding. The docs now explain how
+  to turn binding off, and how to turn it back on afterwards, because the
+  toggle alone cannot re-enable it.
+- **The Homebrew caveats and troubleshooting guides point to controls that
+  exist.**
+  - The app requests activation itself on first launch.
+  - Removal is **Remove System Extension** in Settings → General.
+  - Recovery is System → Health → Reactivate System Extension.
+  - The "Enable Protection" and "Disable Protection" buttons on Overview,
+    and the "Try again" panel, no longer exist.
+  - The approval path is now given for both macOS 13–14 and macOS 15 and later.
+  - TROUBLESHOOTING now quotes the rule counts `maccrabctl status` actually
+    prints.
+
+### Release tooling
+- **A failed installed-host recording can be retried without moving root-owned
+  files by hand.** A second `record-runtime` attempt died with
+  `FileExistsError` on the first attempt's readiness directory, and its first
+  write would have replaced the failed capture. Before it starts, the recorder
+  now renames the earlier capture sidecar and readiness directory into the
+  next free `<report>.attempts/<n>/`. It never deletes them, and it writes its
+  own evidence so that it can only replace files it created in the same run.
+- **`record-runtime` without sudo now refuses before it moves anything.**
+  Retention used to run before the sudo check. A forgotten `sudo` moved the
+  root-owned capture into a user-owned `<report>.attempts/`, could not move
+  the readiness directory, and blocked every later sudo retry. The sudo check
+  now runs first. Retention also refuses evidence on a different volume from
+  the report, so nothing is left half-moved.
+- **The runtime recorder refuses, within seconds, a TraceGraph store that
+  cannot take the epoch.** An installed engine already at its TraceGraph
+  proactive recovery threshold passed every pre-epoch check, then failed six
+  minutes into the 900-second epoch. The first heartbeat read, before any
+  prewarm, now refuses with a one-line reason when the store is blocked, is
+  not accepting mutations, or has its footprint at or above that threshold.
+- **`release.sh` checks free disk before anything else.** Each phase that runs
+  clean CI now first runs `ci-local.sh --clean --free-space-preflight`. It
+  applies CI's own budget of 14,336 MiB free on the temp and checkout volumes,
+  and credits everything the clean run wipes before it measures (`.build` and
+  the assessment-harness build) in full. Before this change a full disk was
+  found only after the remote checks, the audits, the clean wipe and
+  dependency resolution. After building a candidate, phase 1 also warns when
+  the space left is not enough for phase 2's clean CI.
+
 ## [1.22.5] — 2026-10-04
 
 ### Added
