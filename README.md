@@ -5,7 +5,7 @@
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
 [![Tests](https://img.shields.io/badge/tests-4892%20passing-brightgreen)]()
-[![Rules](https://img.shields.io/badge/rules-486%20shipped%2C%20116%20loaded%20by%20default-blueviolet)](#what-runs-on-a-default-install)
+[![Rules](https://img.shields.io/badge/rules-486%20shipped%20(stable%20tier%20on%20by%20default)-blueviolet)](#what-runs-on-a-default-install)
 [![Version](https://img.shields.io/badge/version-1.22.5-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -108,7 +108,7 @@ Read the full [Privacy Policy](PRIVACY.md).
 
 ## Security
 
-MacCrab's detection engine runs as a System Extension: a root userspace process that `sysextd` launches and manages, as Endpoint Security requires. It is not App Sandboxed. The CLI and dashboard run as your user with read-only database access. The engine re-checks its own binary and rule hashes, watches its config files, and flags a debugger, a changed parent process, or loader-injection variables in its own environment; [Self-Defense](#detection-stack) below lists what those checks do and do not cover.
+MacCrab's detection engine runs as a System Extension: a root userspace process that macOS launches and `sysextd` manages, as Endpoint Security requires. It is not App Sandboxed. The CLI and dashboard run as your user with read-only database access. The engine re-checks its own binary and rule hashes, watches its config files, and flags a debugger or loader-injection variables in its own environment; [Self-Defense](#detection-stack) below lists what those checks do and do not cover.
 
 To report a vulnerability, **do not open a public issue** -- email maccrab@peterhanily.com instead.
 
@@ -370,6 +370,7 @@ See the Monitors and Collectors table below for the full list including USB, cli
 
 </details>
 
+<a id="monitors--collectors"></a>
 <details>
 <summary><strong>Monitors and Collectors (click to expand)</strong></summary>
 
@@ -425,11 +426,11 @@ Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, C
 |-----------|-------------|
 | **AI process tracker** | Identifies and tracks AI tool processes and their child process trees |
 | **Credential fence** | Alerts when AI tool children access any of 27 sensitive path patterns (SSH keys, `.env` files, AWS credentials, keychains, browser credential stores, kubeconfig, and more) |
-| **Project boundary enforcement** | Detects when AI tools read or write files outside the current project directory |
+| **Project boundary enforcement** | Detects when AI tools write files outside the current project directory |
 | **Prompt injection scanner** | Native structural scan of files AI tools read — invisible/zero-width unicode, bidi overrides (Trojan Source), and Unicode tag-character smuggling. No external dependency. |
 | **Activity by tool** | Dashboard AI Guard tab shows a live per-tool alert breakdown (credential / injection / boundary / other) sorted by severity |
 
-32 AI-safety rules ship in `Rules/ai_safety/`; 17 are in the default stable profile, and 5 of those cannot fire until you turn on Agent Traces or deploy deception bait (see [What runs on a default install](#what-runs-on-a-default-install)). Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
+32 AI-safety rules ship in `Rules/ai_safety/`; 17 are in the default stable profile, and 6 of those cannot fire on a default install: five wait for Agent Traces or deception bait, and one cannot fire at all (see [What runs on a default install](#what-runs-on-a-default-install)). Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
 
 </details>
 
@@ -442,7 +443,7 @@ This brings AgentSight-style correlation ([arXiv:2508.02736](https://arxiv.org/a
 
 **How it works:**
 
-Agent Traces is **off by default**. Turn it on with **Receive agent traces** under **Investigation → Agent Traces** in the dashboard. The receiver starts immediately; `TRACEPARENT` binding starts the next time the engine starts. On a release install, turning the toggle off stops the receiver but leaves `TRACEPARENT` binding on, because the engine keeps `agent_traces_enabled: true` in the root-owned `/Library/Application Support/MacCrab/agent_traces_config.json`; set it to `false` there and restart the Mac to turn binding off.
+Agent Traces is **off by default**. Turn it on with **Receive agent traces** under **Investigation → Agent Traces** in the dashboard. The receiver starts immediately; `TRACEPARENT` binding starts the next time the engine starts. On a release install, turning the toggle off stops the receiver but leaves `TRACEPARENT` binding on, because the engine keeps `agent_traces_enabled: true` in the root-owned `/Library/Application Support/MacCrab/agent_traces_config.json`; set it to `false` there and restart the Mac to turn binding off. After that, the toggle alone cannot turn Agent Traces back on: set `agent_traces_enabled` to `true` in the same file and restart to re-enable it.
 
 1. **TRACEPARENT in process env** — when Agent Traces is on and an AI coding tool spawns a child, MacCrab's ES collector reads the `TRACEPARENT` W3C trace-context value from the exec env block. The trace ID binds every descendant process to the originating LLM turn. With it off, AI Guard still attributes AI-tool child processes by process lineage, at lower confidence.
 2. **Loopback OTLP receiver** — MacCrab listens on `127.0.0.1:4318` (the OTel-canonical OTLP/HTTP port) for spans emitted by the AI tool's instrumentation. Loopback only — never routable from off-host. Off by default (see above).
@@ -534,11 +535,10 @@ Every event passes through enrichment before rule evaluation:
 2. **Rules integrity** -- hash of the compiled rules directory. A change outside a rule update raises a high alert; deleting the directory raises a critical one.
 3. **Config file watch** -- `actions.json` and `suppressions.json`, when they exist.
 4. **Anti-debug** -- a debugger attached to the engine (`P_TRACED` via `sysctl`).
-5. **Parent-process change** -- the engine being re-parented.
-6. **Loader-injection variables** -- `DYLD_INSERT_LIBRARIES` and similar variables in the engine's own environment.
-7. **Duplicate engine** -- another process running under the engine's name is logged, not alerted on.
+5. **Loader-injection variables** -- `DYLD_INSERT_LIBRARIES` and similar variables in the engine's own environment.
+6. **Duplicate engine** -- another process running under the engine's name is logged, not alerted on.
 
-What it does not cover: it does not detect edits to database contents (the engine writes them constantly; the AES-GCM trace columns and the TraceGraph hash chain are the integrity checks there). It cannot intercept `SIGKILL`. Its LaunchDaemon-plist watch only applies to legacy pre-1.3 installs that still have the plist. Detecting another process reading the engine's task port or injecting a thread needs experimental-tier rules (`rule_profile: all`); the default stable profile does not subscribe to those events. Separately, the engine records a **MacCrab Self-Protection** alert when a control-plane change weakens detection, such as disabling an Endpoint Security subscription or clamping a detection threshold.
+What it does not cover: it does not detect edits to database contents (the engine writes them constantly; the AES-GCM trace columns and the TraceGraph hash chain are the integrity checks there). It cannot intercept `SIGKILL`. Its parent-process check only applies to a development `maccrabd` started from a shell: the System Extension's parent is launchd (PID 1), which that check skips. Its LaunchDaemon-plist watch only applies to legacy pre-1.3 installs that still have the plist. Detecting another process reading the engine's task port or injecting a thread needs experimental-tier rules (`rule_profile: all`); the default stable profile does not subscribe to those events. Separately, the engine records a **MacCrab Self-Protection** alert when a control-plane change weakens detection, such as disabling an Endpoint Security subscription or clamping a detection threshold.
 
 </details>
 
@@ -614,12 +614,14 @@ breakdown. To regenerate this section after editing rules: `make readme-coverage
 ### What runs on a default install
 
 Shipping a rule does not mean it runs. Unless `rule_profile` is `all`, the
-engine loads only rules marked `status: stable`: **116 of the 486** (98
-single-event, 11 sequence, 7 graph). `maccrabctl status` reports the
-single-event and sequence figures for the running engine.
+engine enables only rules marked `status: stable`: **116 of the 486** (98
+single-event, 11 sequence, 7 graph). The other single-event rules load but
+stay disabled; out-of-profile sequence and graph rules are skipped.
+`maccrabctl status` reports the single-event and sequence figures for the
+running engine as `active`.
 
-Seven of those 116 cannot fire until you turn on a feature that is off by
-default:
+Eight of those 116 cannot fire on a default install. Seven wait for a feature
+that is off by default:
 
 - **Agent Traces** (`agent_traces_enabled`): `agent_traceparent_credential_access`,
   `agent_filesystem_violation_high_conf`, and `agent_filesystem_violation_probable`
@@ -629,6 +631,10 @@ default:
 - **Deception** (`deception_enabled`, with bait planted by
   `maccrabctl deception deploy`): `honeyfile_accessed`,
   `canary_skill_or_rules_read`, and `honeyprompt_canary_package_install`.
+
+One cannot fire on any install: `skill_md_poisoning_install` requires
+`FileAction: create`, but the engine reads `FileContent` only for close
+events, so no single event carries both.
 
 Graph rules also evaluate only traces that TraceGraph has stored, so they pause
 while TraceGraph storage is refusing writes. `maccrabctl status` shows that
@@ -680,8 +686,8 @@ this Mac — built-in collectors and analyzers plus optional community plugins.
 
 - **[Rave store](https://rave.maccrab.com)** — browse and install signed forensic
   plugins. Every plugin is Ed25519-signed and declares its read-set + network
-  access so you consent **before** install. All 19 plugins in the store today
-  are first-party: they match the publisher key compiled into MacCrab and run
+  access so you consent **before** install. Every plugin in the store today
+  is first-party: each matches the publisher key compiled into MacCrab and runs
   **without a sandbox**, with MacCrab's own access (including Full Disk Access
   when granted). A plugin signed by any other publisher runs only under a
   deny-default `sandbox_init` profile with brokered file reads. That

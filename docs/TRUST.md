@@ -134,8 +134,8 @@ build). Forensic **plugins** are a separate trust chain with three tiers.
 Trust decides *whether* a plugin runs and *which lane* it runs in. A
 first-party plugin runs unsandboxed with MacCrab's own access; every other
 plugin runs under the sandbox + fd broker, which gate what it can reach (see
-[`PLUGIN_AUTHORING.md`](PLUGIN_AUTHORING.md)). All 19 plugins in the rave
-catalog today are first-party, so the curated-store tier below has no members
+[`PLUGIN_AUTHORING.md`](PLUGIN_AUTHORING.md)). Every plugin in the rave
+catalog today is first-party, so the curated-store tier below has no members
 yet.
 
 | Tier | Who vouches | How it runs | Provenance shown |

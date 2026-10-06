@@ -33,18 +33,21 @@ residual risk remains.
 **Goal:** persistence, credential theft, lateral movement, exfiltration.
 
 **MacCrab defenses:**
-- Endpoint Security captures process exec/fork/exit, file create/write/
-  rename/unlink, network connect, and TCC permission changes in real
-  time.
+- Endpoint Security captures process exec/fork/exit and file create/write/
+  rename/unlink in real time. Network connections come from a 10-second
+  poll, and TCC permission changes from a monitor that watches the TCC
+  databases.
 - 486 Sigma-style rules (438 single-event + 41 sequence + 7 graph)
   match adversary-known patterns (LaunchAgent drops, suspicious process
   trees, AMOS/Atomic Stealer wallet paths, XCSSET clipboard injection,
   etc.). This count describes the full corpus. Since v1.21.4 the daemon
   defaults to the stable rule profile — only rules marked `status: stable`
-  load by default: 116 of the 486 (98 single-event, 11 sequence, 7 graph).
-  Seven of those cannot fire until Agent Traces or the deception tier is
-  enabled (see the README's "What runs on a default install"). The majority
-  are disabled unless the operator opts into a broader profile. See
+  are enabled by default: 116 of the 486 (98 single-event, 11 sequence,
+  7 graph). Eight of those cannot fire on a default install: seven until
+  Agent Traces or the deception tier is enabled, and
+  `skill_md_poisoning_install` on no install (see the README's "What runs on
+  a default install"). The majority are disabled unless the operator opts
+  into a broader profile. See
   [`COVERAGE.md`](COVERAGE.md).
 - Sequence rules correlate multi-step kill chains within bounded
   windows (longest is `ransomware_kill_chain.yml` at 10 minutes;
@@ -232,8 +235,8 @@ an FDA/TCC host.
   only after a byte-match to a compiled-in publisher anchor; an untrusted
   third-party plugin runs **only** sandboxed. The lanes never cross and both
   fail-closed — a plugin that isn't provably first-party can never reach the
-  unsandboxed lane. All 19 plugins in the Rave catalog today are first-party,
-  so they take the unsandboxed lane; the defenses below apply to other
+  unsandboxed lane. Every plugin in the Rave catalog today is first-party,
+  so each takes the unsandboxed lane; the defenses below apply to other
   publishers' plugins.
 - **Deny-default sandbox.** The third-party plugin runs under `(deny default)`
   SBPL applied post-startup by the signed `maccrab-tierb-sandbox-host` trampoline

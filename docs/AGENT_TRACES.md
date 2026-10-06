@@ -195,7 +195,9 @@ running engine, but `TRACEPARENT` binding only starts at the next engine
 start. Turning the switch off stops the receiver and does **not** turn
 binding back off: the engine keeps `agent_traces_enabled: true` in the
 root-owned `/Library/Application Support/MacCrab/agent_traces_config.json`.
-Set it to `false` there and restart the Mac to stop binding. The env-var path
+Set it to `false` there and restart the Mac to stop binding. After that, the
+switch alone cannot turn Agent Traces back on: set `agent_traces_enabled` to
+`true` in the same file and restart to re-enable it. The env-var path
 below works only for a development `maccrabd` started from a shell:
 
 ```bash
@@ -288,7 +290,7 @@ invariants for this subsystem:
 
 Three confidence-aware rules in `Rules/ai_safety/` consume the
 `MachineAgentConfidence` enrichment field. Status is `stable` as of v1.9.0, so
-the default profile loads them, but they cannot fire until Agent Traces is on
+the default profile enables them, but they cannot fire until Agent Traces is on
 because nothing else sets that field. The same holds for the graph rule
 `maccrab_ai_agent_lethal_trifecta`, which needs a direct (TRACEPARENT) agent
 link.
