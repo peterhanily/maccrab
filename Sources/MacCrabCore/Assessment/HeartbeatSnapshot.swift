@@ -222,9 +222,10 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// v1.22.7: when the current degraded state opened (engine clock). Absent
     /// while not degraded and from older engines — never a fabricated zero.
     public let esSensorDegradedSinceUnix: Double?
-    /// v1.22.7: the per-tick loss fraction (lost / offered across the kernel,
-    /// ES-collector and merged-lane stages) the evaluator judged on the tick
-    /// that wrote this heartbeat. nil from older engines.
+    /// v1.22.7: the per-tick loss fraction the evaluator judged on the tick
+    /// that wrote this heartbeat — the worst of lost / offered across the
+    /// kernel, ES-collector and merged-lane stages and each merged lane's own
+    /// lost / offered. nil from older engines.
     public let esSensorLossFractionTick: Double?
     public let esClientSplitDegraded: Bool?
 

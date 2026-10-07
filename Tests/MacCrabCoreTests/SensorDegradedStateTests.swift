@@ -8,7 +8,16 @@
 //   3. the meta-alert stays edge-triggered — fire counts are unchanged;
 //   4. the loss fraction is judged against the supplied offer denominator with
 //      the ES-collector and merged-lane stages both counted, and the
-//      cumulative→delta box stamps the open time once per episode.
+//      cumulative→delta box stamps the open time once per episode;
+//   5. the spike latch ALONE never holds the state: a tick is dirty only with
+//      loss evidence (a fire, a drop at any stage, the exec collapse) or the
+//      bounded sustained-loss latch — the latch itself stays armed for as
+//      long as the file rate exceeds the frozen baseline, which on a build
+//      host is the whole session;
+//   6. each merged lane is judged against its OWN offers, so a priority-lane
+//      eviction storm is not diluted by a lossless file lane, and the
+//      heartbeat text names the lane and never restates "spiked"/"evasion"
+//      over a held tick's 0% numbers.
 
 import Testing
 import Foundation
@@ -54,6 +63,36 @@ struct SensorDegradedStateTests {
             input: Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
                          kernelDropDelta: 700, collectorDropDelta: 0, benignHighIOSigner: false),
             baseline: b)
+    }
+
+    /// Spike held with NO loss of any kind: the file rate stays 50× the frozen
+    /// baseline (so the latch stays armed) but every loss counter is 0 and
+    /// exec is at baseline — a build host after the opening tick.
+    private func losslessSpikeTick(_ b: Eval.Baseline) -> Eval.Result {
+        Eval.evaluate(
+            input: Input(fileEventsThisTick: 50_000, processEventsThisTick: 500,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+    }
+
+    /// The zero-drop fire a settled host produces: spike + exec collapse with
+    /// every drop counter at 0 (the base evaluator test proves it fires).
+    private func collapseOpenTick(_ b: Eval.Baseline) -> Eval.Result {
+        Eval.evaluate(
+            input: Input(fileEventsThisTick: 50_000, processEventsThisTick: 10,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+    }
+
+    /// No spike in the processed file types, but 20_000 evictions at the
+    /// priority lane against 123_000 priority offers (16%) while the file lane
+    /// offers 150_000 lossless events: all-lanes reads 20k/273k = 7%.
+    private func priorityStormInput(perLane: Bool) -> Input {
+        Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
+              kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false,
+              laneDropDelta: 20_000, offeredThisTick: 273_000,
+              priorityLane: perLane ? Eval.LaneSample(offered: 123_000, lost: 20_000) : nil,
+              fileLane: perLane ? Eval.LaneSample(offered: 150_000, lost: 0) : nil)
     }
 
     private func fired(_ r: Eval.Result) -> Bool {
@@ -202,23 +241,169 @@ struct SensorDegradedStateTests {
 
     @Test("honest denominator: a loud lane that is mostly delivered is not sustained loss")
     func honestDenominatorPreventsInflatedFraction() {
-        // A NOTIFY_SIGNAL-style flood: 120_000 offered per tick, 10_000 evicted
-        // at the lane = 8.3%, below the 15% bound. The pre-v1.22.7 denominator
-        // (eight processed types = 3_000, plus the 10_000 drops) read 77%.
+        // A NOTIFY_SIGNAL-style flood on the priority lane: 120_000 offered per
+        // tick, 10_000 evicted at that SAME lane = 8.3%, below the 15% bound
+        // whichever pair is judged. The pre-v1.22.7 denominator (eight
+        // processed types = 3_000, plus the 10_000 drops) read 77%.
         var b = warmedBaseline()
         var fires = 0
         for _ in 0..<4 {
             let r = Eval.evaluate(
                 input: Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
                              kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false,
-                             laneDropDelta: 10_000, offeredThisTick: 120_000),
+                             laneDropDelta: 10_000, offeredThisTick: 120_000,
+                             priorityLane: Eval.LaneSample(offered: 120_000, lost: 10_000),
+                             fileLane: Eval.LaneSample(offered: 0, lost: 0)),
                 baseline: b)
             b = r.newBaseline
             #expect(abs(r.lossFraction - 10_000.0 / 120_000.0) < 1e-9)
+            #expect(r.worstLane == nil, "the lane's own fraction equals the combined one")
             if fired(r) { fires += 1 }
         }
         #expect(fires == 0)
         #expect(!b.stateActive)
+    }
+
+    @Test("per-lane: a priority-lane eviction storm is judged against priority offers, not diluted by a lossless file lane")
+    func priorityLaneStormIsNotDiluted() {
+        var b = warmedBaseline()
+        var fires = 0
+        var reason: Eval.Reason?
+        for i in 0..<4 {
+            let r = Eval.evaluate(input: priorityStormInput(perLane: true), baseline: b)
+            b = r.newBaseline
+            #expect(abs(r.lossFraction - 20_000.0 / 123_000.0) < 1e-9, "tick \(i): got \(r.lossFraction)")
+            #expect(r.worstLane == .priority)
+            #expect(r.worstLaneSample == Eval.LaneSample(offered: 123_000, lost: 20_000))
+            if fired(r) { fires += 1; reason = r.reason }
+        }
+        #expect(fires == 1, "the sustained-loss branch opens on the 2nd elevated tick and latches")
+        #expect(reason == .sustainedLoss)
+        #expect(b.stateActive)
+
+        // The same losses judged only all-lanes read 7% and never fire — the
+        // dilution the per-lane pair exists to remove.
+        var diluted = warmedBaseline()
+        var dilutedFires = 0
+        for _ in 0..<4 {
+            let r = Eval.evaluate(input: priorityStormInput(perLane: false), baseline: diluted)
+            diluted = r.newBaseline
+            #expect(abs(r.lossFraction - 20_000.0 / 273_000.0) < 1e-9)
+            #expect(r.worstLane == nil)
+            if fired(r) { dilutedFires += 1 }
+        }
+        #expect(dilutedFires == 0)
+    }
+
+    @Test("a latched spike with zero loss does not hold the state: it clears after the clean ticks while the latch stays armed")
+    func latchedSpikeWithoutLossClearsState() {
+        var b = warmedBaseline()
+        let open = collapseOpenTick(b); b = open.newBaseline
+        #expect(fired(open))
+        #expect(open.degradedState)
+        #expect(open.lossEvidenceThisTick)
+        for i in 1...6 {
+            let r = losslessSpikeTick(b); b = r.newBaseline
+            #expect(!fired(r), "tick \(i): the latch must still suppress a re-fire")
+            #expect(b.degradedActive, "tick \(i): the latch stays armed while the rate exceeds the frozen baseline")
+            #expect(!r.lossEvidenceThisTick)
+            #expect(r.lossFraction == 0)
+            if i < Eval.stateClearCleanTicks {
+                #expect(r.degradedState, "tick \(i) of \(Eval.stateClearCleanTicks) must still read degraded")
+                #expect(r.activeReason == .spikeWithLoss)
+            } else {
+                #expect(!r.degradedState, "tick \(i): no loss evidence for \(Eval.stateClearCleanTicks) ticks must clear the state")
+                #expect(r.activeReason == nil)
+                #expect(r.activeSeverity == nil)
+            }
+        }
+    }
+
+    @Test("loss resuming inside a still-latched spike re-opens the state without a second fire")
+    func lossResumingInsideLatchedSpikeReopensState() {
+        var b = warmedBaseline()
+        b = collapseOpenTick(b).newBaseline
+        for _ in 0..<4 { b = losslessSpikeTick(b).newBaseline }
+        #expect(!b.stateActive)
+        #expect(b.degradedActive)
+        let resumed = Eval.evaluate(
+            input: Input(fileEventsThisTick: 50_000, processEventsThisTick: 500,
+                         kernelDropDelta: 100, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        b = resumed.newBaseline
+        #expect(!fired(resumed), "the latch holds — alert volume is unchanged")
+        #expect(resumed.degradedState)
+        #expect(resumed.lossEvidenceThisTick)
+        #expect(resumed.activeReason == .spikeWithLoss)
+        #expect(resumed.activeSeverity == .high)
+        #expect(b.cleanTicks == 0)
+        // And it clears again on the usual schedule once the loss stops.
+        for _ in 1..<Eval.stateClearCleanTicks { b = losslessSpikeTick(b).newBaseline; #expect(b.stateActive) }
+        b = losslessSpikeTick(b).newBaseline
+        #expect(!b.stateActive)
+    }
+
+    @Test("heartbeat text: a held tick with no loss says so instead of restating the opening branch")
+    func heldTickDetailIsNeutral() {
+        var b = warmedBaseline()
+        for _ in 0..<3 { b = floodTick(b).newBaseline }
+        var held = quietTick(b)   // clean tick 1: state held, nothing lost
+        #expect(held.degradedState)
+        #expect(!held.lossEvidenceThisTick)
+        held.degradedSince = Date(timeIntervalSince1970: 1_790_000_000)
+        let text = Eval.heartbeatDescription(for: held, nowUnix: 1_790_000_060)
+        #expect(text.severity == "high")
+        #expect(text.detail.contains("state held"))
+        #expect(text.detail.contains("no loss this tick"))
+        #expect(text.detail.contains("opened 60 s ago"))
+        #expect(text.detail.contains("0 kernel-dropped"))
+        #expect(text.detail.contains("(0% loss)"))
+        #expect(text.detail.contains("clears after 1 more clean tick"))
+        #expect(!text.detail.contains("spiked"))
+        #expect(!text.detail.contains("evasion"))
+
+        // Held by the sustained-loss latch after the loss stopped: the window
+        // is what keeps it open, and the text says that.
+        var s = warmedBaseline()
+        for _ in 0..<6 { s = lossTick(s).newBaseline }
+        let windowHeld = quietTick(s)
+        #expect(windowHeld.degradedState && !windowHeld.lossEvidenceThisTick)
+        let windowText = Eval.heartbeatDescription(for: windowHeld, nowUnix: 0)
+        #expect(windowText.detail.contains("sustained-loss window is still elevated"))
+        #expect(!windowText.detail.contains("evasion"))
+    }
+
+    @Test("heartbeat text: fire ticks and held ticks with loss describe the opening branch with this tick's stage counts")
+    func fireTickDetailNamesBranchAndStages() {
+        let open = floodTick(warmedBaseline())
+        let text = Eval.heartbeatDescription(for: open, nowUnix: 0)
+        #expect(text.severity == "high")
+        #expect(text.detail.contains("spiked above baseline"))
+        #expect(text.detail.contains("100 kernel-dropped"))
+        #expect(text.detail.contains("0 dropped at the ES-collector stage"))
+        #expect(text.detail.contains("0 evicted at the merged detection lanes"))
+        let held = floodTick(open.newBaseline)
+        #expect(!fired(held) && held.degradedState && held.lossEvidenceThisTick)
+        #expect(Eval.heartbeatDescription(for: held, nowUnix: 0).detail.contains("spiked above baseline"))
+        let closed = quietTick(quietTick(open.newBaseline).newBaseline)
+        #expect(!closed.degradedState)
+        let closedText = Eval.heartbeatDescription(for: closed, nowUnix: 0)
+        #expect(closedText.severity.isEmpty && closedText.detail.isEmpty)
+    }
+
+    @Test("heartbeat text: names the lane whose own fraction is being judged")
+    func detailNamesWorstLane() {
+        var b = warmedBaseline()
+        var opened: Eval.Result?
+        for _ in 0..<2 {
+            let r = Eval.evaluate(input: priorityStormInput(perLane: true), baseline: b)
+            b = r.newBaseline
+            if fired(r) { opened = r }
+        }
+        guard let r = opened else { Issue.record("expected the priority storm to fire"); return }
+        let text = Eval.heartbeatDescription(for: r, nowUnix: 0)
+        #expect(text.detail.contains("sustained event loss"))
+        #expect(text.detail.contains("16% loss at the priority lane: 20000 lost of 123000 priority-lane offers"))
     }
 
     @Test("seed tick and a calm tick report a zero loss fraction and no state")
@@ -307,6 +492,31 @@ struct SensorDegradedStateBoxTests {
         #expect(r.collectorDropDelta == 150)
         #expect(r.laneDropDelta == 300)
         #expect(abs(r.lossFraction - 0.05) < 1e-9, "got \(r.lossFraction)")
+    }
+
+    @Test("per-lane cumulative pairs become per-tick samples and the worst lane is named")
+    func laneDeltasFeedTheEvaluator() {
+        let box = SensorDegradationState()
+        _ = box.step(fileCumulative: 0, processCumulative: 0, kernelDropCumulative: 0,
+                     collectorDropCumulative: 0, benignHighIOSigner: false,
+                     laneDropCumulative: 0, offeredCumulative: 0,
+                     priorityLaneCumulative: (offered: 0, lost: 0),
+                     fileLaneCumulative: (offered: 0, lost: 0))
+        _ = box.step(fileCumulative: 1_000, processCumulative: 500, kernelDropCumulative: 0,
+                     collectorDropCumulative: 0, benignHighIOSigner: false,
+                     laneDropCumulative: 0, offeredCumulative: 1_500,
+                     priorityLaneCumulative: (offered: 500, lost: 0),
+                     fileLaneCumulative: (offered: 1_000, lost: 0))
+        let r = box.step(fileCumulative: 3_500, processCumulative: 1_000, kernelDropCumulative: 0,
+                         collectorDropCumulative: 0, benignHighIOSigner: false,
+                         laneDropCumulative: 20_000, offeredCumulative: 274_500,
+                         priorityLaneCumulative: (offered: 123_500, lost: 20_000),
+                         fileLaneCumulative: (offered: 151_000, lost: 0))
+        #expect(r.offered == 273_000)
+        #expect(r.laneDropDelta == 20_000)
+        #expect(r.worstLane == .priority)
+        #expect(r.worstLaneSample == Eval.LaneSample(offered: 123_000, lost: 20_000))
+        #expect(abs(r.lossFraction - 20_000.0 / 123_000.0) < 1e-9, "got \(r.lossFraction)")
     }
 
     @Test("an offer counter reset (client reconnect) clamps to zero instead of a giant denominator")
