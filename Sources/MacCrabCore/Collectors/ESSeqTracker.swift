@@ -68,6 +68,14 @@ public final class ESSeqTracker: @unchecked Sendable {
     /// admission guard before they consume retained-worker capacity. This is a
     /// policy/filter outcome, not a loss.
     private var intentionallyFilteredBeforeWorkerByTypeMap: [UInt32: UInt64] = [:]
+    /// v1.22.7: messages the retained-message WORKER rejected by policy after
+    /// the callback handed them off (path-dependent OPEN/WRITE/CLOSE admission
+    /// now runs there, off the kernel dequeue path). Policy, not loss.
+    private var intentionallyFilteredOnWorkerByTypeMap: [UInt32: UInt64] = [:]
+    /// v1.22.7: repeated WRITE/OPEN callbacks by the same (pid, pidversion) on
+    /// the same path inside the coalescing window. The first callback for the
+    /// key was yielded; these were folded into it and counted here.
+    private var coalescedOnWorkerByTypeMap: [UInt32: UInt64] = [:]
     /// Messages for which normalization produced an Event and the worker offered
     /// that Event to the collector-local AsyncStream. The separate stream-yield
     /// telemetry records whether the offer enqueued or evicted an older event.
@@ -170,6 +178,25 @@ public final class ESSeqTracker: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Record a message the worker rejected by policy after the hand-off. It is
+    /// part of the processed denominator like a callback-stage reject, and like
+    /// one it never enters the latency histogram (that gauge measures the
+    /// retained path that produced an Event).
+    public func recordFilteredOnWorker(eventType: UInt32) {
+        lock.lock()
+        processedByTypeMap[eventType, default: 0] &+= 1
+        intentionallyFilteredOnWorkerByTypeMap[eventType, default: 0] &+= 1
+        lock.unlock()
+    }
+
+    /// Record a WRITE/OPEN repeat folded into the first callback for its key.
+    public func recordCoalescedOnWorker(eventType: UInt32) {
+        lock.lock()
+        processedByTypeMap[eventType, default: 0] &+= 1
+        coalescedOnWorkerByTypeMap[eventType, default: 0] &+= 1
+        lock.unlock()
+    }
+
     /// Bucket one latency sample. Caller holds `lock`.
     private func recordLatencyLocked(micros: UInt64) {
         let bounds = Self.latencyBoundsMicros
@@ -201,6 +228,8 @@ public final class ESSeqTracker: @unchecked Sendable {
 
         processedByTypeMap.removeAll(keepingCapacity: true)
         intentionallyFilteredBeforeWorkerByTypeMap.removeAll(keepingCapacity: true)
+        intentionallyFilteredOnWorkerByTypeMap.removeAll(keepingCapacity: true)
+        coalescedOnWorkerByTypeMap.removeAll(keepingCapacity: true)
         normalizedYieldedByTypeMap.removeAll(keepingCapacity: true)
         for i in 0..<latencyBuckets.count { latencyBuckets[i] = 0 }
         latencyTotalCount = 0
@@ -238,6 +267,23 @@ public final class ESSeqTracker: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return intentionallyFilteredBeforeWorkerByTypeMap
+    }
+
+    /// Per-event-type count of worker-stage policy rejects (v1.22.7). These
+    /// messages were retained and handed off, then discarded by the same
+    /// admission policy the callback used to run inline. Not a loss.
+    public func intentionallyFilteredOnWorkerByType() -> [UInt32: UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return intentionallyFilteredOnWorkerByTypeMap
+    }
+
+    /// Per-event-type count of WRITE/OPEN repeats coalesced into the first
+    /// callback for their (pid, pidversion, path) key (v1.22.7).
+    public func coalescedOnWorkerByType() -> [UInt32: UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return coalescedOnWorkerByTypeMap
     }
 
     /// Per-event-type count of normalized Events offered to the collector-local

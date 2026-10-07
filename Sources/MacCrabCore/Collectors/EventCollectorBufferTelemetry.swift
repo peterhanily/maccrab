@@ -15,6 +15,22 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
         }
     }
 
+    /// Enrichment key the ES worker stamps on an `open` that was admitted by
+    /// the dynamic-AI demand policy alone (an attributed agent's ordinary text
+    /// read) rather than by the static credential / agent-content allowlists.
+    /// Only that class of OPEN is a flood source, so only it rides the file
+    /// lane (see `finalLane(for:)`).
+    public static let openAdmissionEnrichmentKey = "open_admission"
+    /// The value for a dynamic-AI-admitted OPEN.
+    public static let dynamicAIOpenAdmission = "dynamic_ai"
+
+    /// The type-level rule: the file family rides the file lane except the
+    /// two rare, high-value `.file` actions a write flood must never evict —
+    /// `open` (credential / honeyfile / agent-content reads, which the
+    /// single-event credential rules, the wall-clock sequence windows and
+    /// the injection-evidence weld all need in order and persisted) and
+    /// `btm_add` (the only sensor for a ghost login item). A dynamic-AI OPEN
+    /// is the one exception, decided per event in `finalLane(for:)`.
     public static func routesToFile(_ category: EventCategory, action: String) -> Bool {
         guard category == .file else { return false }
         switch action {
@@ -23,8 +39,24 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
         }
     }
 
+    /// The per-event lane. v1.22.7: an `open` stamped
+    /// `open_admission = dynamic_ai` rides the FILE lane. Measured on the
+    /// maintainer's host (attempt4 capture): 47,931 admitted dynamic-AI OPENs
+    /// in one 30 s esbuild burst backlogged the priority lane to 76,684 and
+    /// evicted exec/fork/exit — the one loss nothing downstream can
+    /// reconstruct. Every other `open` (the static credential / agent-content
+    /// allowlists, and any non-ES producer) keeps the priority lane, which is
+    /// near-empty once that flood and NOTIFY_SIGNAL are off it: the ambient
+    /// 74-minute sample had the file lane evicting 68% of its offers against
+    /// 21% on priority, and the sequence engine measures its windows in
+    /// wall-clock processing time, so a credential OPEN must not trail its
+    /// exec by a lane backlog.
     public static func finalLane(for event: Event) -> EventPipelineLane {
-        routesToFile(event.eventCategory, action: event.eventAction) ? .file : .priority
+        if event.eventCategory == .file, event.eventAction == "open",
+           event.enrichments[openAdmissionEnrichmentKey] == dynamicAIOpenAdmission {
+            return .file
+        }
+        return routesToFile(event.eventCategory, action: event.eventAction) ? .file : .priority
     }
 }
 
