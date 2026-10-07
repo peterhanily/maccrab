@@ -3,22 +3,33 @@
 //
 // v1.22.7 ES ingress throughput. Deterministic, in-process, no sleeps. Feeds a
 // synthetic build-storm mix (50k OPEN + 20k CLOSE + 4k SIGNAL + lineage) through
-// the three ingress stages this release changed, and pins the properties that
-// the installed-host captures showed were missing:
+// the ingress stages this release changed, and pins the properties that the
+// installed-host captures showed were missing:
 //
-//   1. the callback-boundary admission policy cost (the work that ran inline on
-//      the ES handler thread before v1.22.7, where ESClient.h:632 says the next
-//      kernel message is dequeued only when the handler returns);
-//   2. the merged-lane routing of a dynamic-AI OPEN flood (attempt4: 47,931
-//      admitted OPENs in 30 s rode the priority lane and backlogged it to
-//      76,684, evicting exec/fork/exit);
-//   3. the per-client ESMessageWorker reserve (an OPEN flood must not consume
-//      the write-family budget on the file client).
+//   1. the callback-boundary cost — the DROP policy that ran inline on the ES
+//      handler thread before v1.22.7 (ESClient.h:632 says the next kernel
+//      message is dequeued only when the handler returns) versus the
+//      field-only callback plus the byte-level protected-OPEN classification
+//      it now runs, and the full hand-off (tracker + retain + box + submit);
+//   2. the merged-lane routing: a dynamic-AI OPEN flood rides the file lane,
+//      credential / agent-content OPENs and lineage stay on priority (attempt4:
+//      47,931 admitted OPENs in 30 s rode the priority lane and backlogged it
+//      to 76,684, evicting exec/fork/exit);
+//   3. the per-client ESMessageWorker reserve: an OPEN flood can consume
+//      neither the write-family budget nor a protected OPEN's slot;
+//   4. the worker-side cost of a coalesced WRITE repeat (decided before the
+//      ProcessInfo/Event build).
+//
+// The registry used here has the production shape: `ESCollector.
+// dynamicAIFileInterestRegistry` holds ONLY the dynamic-AI built-in
+// requirement (ESCollector.swift, "Dynamic AI consumers are an additional
+// exception"), not the compiled rule corpus.
 //
 // Every assertion is a GOAL property; the "before" run on the base commit is
 // expected to fail the routing and reserve assertions — that failure is the
 // measurement. Numbers are printed with a BENCH prefix so a before/after diff
-// can be read off the test log.
+// can be read off the test log. Absolute numbers are debug-build and
+// load-dependent; the in-run ratios are not.
 
 import Darwin
 import EndpointSecurity
@@ -73,12 +84,15 @@ struct ESIngressStormBenchmarkTests {
         )
     }
 
-    private func fileEvent(action: String, fileAction: FileAction, path: String) -> Event {
+    private func fileEvent(
+        action: String, fileAction: FileAction, path: String, enrichments: [String: String] = [:]
+    ) -> Event {
         Event(
             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
             eventCategory: .file, eventType: .change, eventAction: action,
             process: process(pid: 43, name: "node"),
-            file: FileInfo(path: path, action: fileAction)
+            file: FileInfo(path: path, action: fileAction),
+            enrichments: enrichments
         )
     }
 
@@ -90,9 +104,27 @@ struct ESIngressStormBenchmarkTests {
         )
     }
 
-    // MARK: 1. Callback-boundary policy cost
+    /// The system-wide OPEN mix the callback sees: project sources, build
+    /// caches, .git objects, framework/Library reads, and a 1% credential /
+    /// agent-content slice.
+    private func systemOpenPaths() -> [String] {
+        var paths: [String] = []
+        for i in 0..<100 { paths.append("/Users/x/project/packages/app/src/components/Widget\(i).ts") }
+        for i in 0..<60 { paths.append("/Users/x/project/node_modules/.cache/esbuild/chunk-\(i).js") }
+        for i in 0..<40 { paths.append("/Users/x/project/.git/objects/ab/\(i)cdef0123456789") }
+        for i in 0..<40 { paths.append("/private/var/folders/hf/T/com.apple.dt/cache\(i).bin") }
+        for i in 0..<40 { paths.append("/System/Library/Frameworks/Foundation.framework/Versions/C/Resources/\(i).strings") }
+        for i in 0..<16 { paths.append("/Users/x/Library/Caches/com.apple.dt.Xcode/DerivedData/\(i).o") }
+        paths.append("/Users/x/.ssh/id_ed25519")
+        paths.append("/Users/x/.aws/credentials")
+        paths.append("/Users/x/.claude/settings.json")
+        paths.append("/Users/x/Library/Application Support/Google/Chrome/Default/Login Data")
+        return paths
+    }
 
-    @Test("OPEN admission policy: cost per decision for the admitted dynamic-AI storm shape")
+    // MARK: 1. Callback-boundary cost
+
+    @Test("OPEN admission policy: cost per decision for the admitted dynamic-AI storm shape (now on the worker)")
     func openPolicyDecisionCost() {
         let registry = attributedRegistry()
         let paths = (0..<512).map {
@@ -106,6 +138,7 @@ struct ESIngressStormBenchmarkTests {
                 eventType: Self.openType,
                 path: paths[i & 511],
                 processID: 43,
+                protectedPath: false,
                 dynamicAIRegistry: registry
             ) {
                 admitted += 1
@@ -119,11 +152,36 @@ struct ESIngressStormBenchmarkTests {
         #expect(perDecision < 5_000_000)
     }
 
-    /// In-process A/B on one storm mix: the policy the base handler ran inline
-    /// per message versus the v1.22.7 field-only callback. Measuring both in the
-    /// same run makes the ratio independent of host load (sibling test runs
-    /// skew absolute numbers by 5x on the maintainer's machine).
-    @Test("mixed storm: field-only callback vs the inline policy it replaced (100k: 50k OPEN + 20k CLOSE + 4k SIGNAL + 26k lineage)")
+    @Test("protected-OPEN classification on raw bytes: cost per OPEN over the system-wide mix, and parity")
+    func protectedOpenClassificationCost() {
+        let paths = systemOpenPaths()
+        let n = 100_000
+        var protected = 0
+        let start = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<n where ESCollector.isProtectedOpenPath(paths[i % paths.count]) {
+            protected += 1
+        }
+        let elapsed = DispatchTime.now().uptimeNanoseconds &- start
+        let perDecision = elapsed / UInt64(n)
+        print("BENCH protected_open_bytes ns/decision=\(perDecision) protected=\(protected)/\(n) distinct_paths=\(paths.count)")
+        let expected = paths.map { ESCollector.isCredentialReadPath($0) || ESCollector.isAgentContentReadPath($0) }
+            .filter { $0 }.count
+        #expect(protected == expected * (n / paths.count) + (0..<(n % paths.count)).filter {
+            ESCollector.isCredentialReadPath(paths[$0]) || ESCollector.isAgentContentReadPath(paths[$0])
+        }.count)
+        // Budget: the callback thread is the kernel dequeue rate. attempt4
+        // offered 3.4-3.9k OPENs/s system-wide and 9.1k file messages/s in the
+        // storm window; at this bound the classification costs under 4% of a
+        // core there. Debug build, loaded host: the number is the measurement.
+        #expect(perDecision <= 10_000, "protected-OPEN byte classification budget (ns/OPEN): \(perDecision)")
+    }
+
+    /// In-process A/B on one storm mix: the DROP policy the base handler ran
+    /// inline per message versus what the v1.22.7 callback runs — the
+    /// field-only policy plus, for every OPEN, the byte-level protected-path
+    /// classification. Measuring both in the same run makes the ratio
+    /// independent of host load.
+    @Test("mixed storm: v1.22.7 callback work vs the inline policy it replaced (100k: 50k OPEN + 20k CLOSE + 4k SIGNAL + 26k lineage)")
     func mixedStormCallbackAB() {
         let registry = attributedRegistry()
         let textPaths = (0..<256).map { "/Users/x/project/src/module\($0).ts" }
@@ -140,11 +198,15 @@ struct ESIngressStormBenchmarkTests {
         storm.reserveCapacity(100_000)
         for i in 0..<50_000 {
             // Half admitted text reads, half temp/binary churn — the measured
-            // attempt4 split was 41% admitted during the esbuild burst.
-            storm.append(Message(
-                type: Self.openType,
-                path: (i & 1 == 0) ? textPaths[i & 255] : binaryPaths[i & 255],
-                closeModified: true, signal: 0, targetPID: 0))
+            // attempt4 split was 41% admitted during the esbuild burst. Every
+            // 500th OPEN is a credential read riding inside the flood.
+            let path: String
+            if i % 500 == 0 {
+                path = "/Users/x/.ssh/id_ed25519"
+            } else {
+                path = (i & 1 == 0) ? textPaths[i & 255] : binaryPaths[i & 255]
+            }
+            storm.append(Message(type: Self.openType, path: path, closeModified: true, signal: 0, targetPID: 0))
         }
         for _ in 0..<20_000 {
             storm.append(Message(type: Self.closeType, path: "/Users/x/project/src/a.ts",
@@ -174,16 +236,20 @@ struct ESIngressStormBenchmarkTests {
         }
         let nanosBefore = DispatchTime.now().uptimeNanoseconds &- startBefore
 
-        // B: the v1.22.7 field-only callback.
+        // B: the v1.22.7 callback — field-only drop policy, then for a
+        // retained OPEN the byte-level protected classification.
         var keptAfter: [UInt32: Int] = [:]
+        var protectedOpens = 0
         let startAfter = DispatchTime.now().uptimeNanoseconds
         for m in storm {
-            if !ESCollector.shouldDropAtCallback(
+            if ESCollector.shouldDropAtCallback(
                 eventType: m.type, closeModified: m.closeModified,
                 signal: m.signal, signalTargetPID: m.targetPID,
                 signalTargetExecutable: "/usr/local/bin/node"
-            ) {
-                keptAfter[m.type, default: 0] += 1
+            ) { continue }
+            keptAfter[m.type, default: 0] += 1
+            if m.type == Self.openType, let path = m.path, ESCollector.isProtectedOpenPath(path) {
+                protectedOpens += 1
             }
         }
         let nanosAfter = DispatchTime.now().uptimeNanoseconds &- startAfter
@@ -194,12 +260,14 @@ struct ESIngressStormBenchmarkTests {
         func render(_ m: [UInt32: Int]) -> [String] {
             m.map { "\(ESCollector.eventTypeName($0.key))=\($0.value)" }.sorted()
         }
-        print("BENCH callback_ab messages=\(n) inline_policy_per_s=\(perSecondBefore) field_only_per_s=\(perSecondAfter) speedup=\(nanosAfter == 0 ? 0 : nanosBefore / nanosAfter)x kept_inline=\(render(keptBefore)) kept_field_only=\(render(keptAfter))")
+        print("BENCH callback_ab messages=\(n) inline_policy_per_s=\(perSecondBefore) callback_v1227_per_s=\(perSecondAfter) speedup=\(nanosAfter == 0 ? 0 : nanosBefore / nanosAfter)x protected_opens=\(protectedOpens) kept_inline=\(render(keptBefore)) kept_v1227=\(render(keptAfter))")
 
         #expect(storm.count == 100_000)
-        // The field-only callback retains every path-dependent type for the
-        // worker, still rejects unmodified CLOSE, and drops the signal flood.
+        // The v1.22.7 callback retains every OPEN for the worker, flags the
+        // credential reads riding inside the flood, still rejects unmodified
+        // CLOSE, and drops the signal flood.
         #expect(keptAfter[Self.openType] == 50_000)
+        #expect(protectedOpens == 100)
         #expect(keptAfter[Self.closeType] == nil)
         #expect(keptAfter[Self.signalType] == nil, "non-security-tool signals never reach the worker")
         #expect(keptAfter[Self.execType] == 8_667)
@@ -208,35 +276,99 @@ struct ESIngressStormBenchmarkTests {
         // The inline policy kept the whole signal flood for the priority lane.
         #expect(keptBefore[Self.signalType] == 4_000)
         // Floor: the kernel offered 9.1k file messages/s in the attempt4 storm
-        // window; the callback must clear that by two orders of magnitude so
-        // it can never be the dequeue bottleneck, even on a loaded host.
-        #expect(perSecondAfter >= 200_000, "field-only callback floor (decisions/s): \(perSecondAfter)")
-        #expect(nanosAfter * 10 < nanosBefore, "the field-only callback must be at least 10x cheaper than the inline policy")
+        // window; the callback must clear that by more than an order of
+        // magnitude so it can never be the dequeue bottleneck on a loaded host.
+        #expect(perSecondAfter >= 200_000, "v1.22.7 callback floor (messages/s): \(perSecondAfter)")
+        #expect(nanosAfter * 10 < nanosBefore, "the v1.22.7 callback must be at least 10x cheaper than the inline policy")
+    }
+
+    /// The full hand-off a retained message pays on the callback thread:
+    /// tracker.record (D1 seq accounting), the box allocation, the retain and
+    /// ESMessageWorker.submit — everything but es_retain_message itself. This
+    /// is the number the "callback cost" claim must be read against.
+    @Test("hand-off cost per retained message through a draining worker")
+    func handoffCostPerMessage() {
+        final class Box {
+            let startNanos: UInt64
+            let eventType: UInt32
+            let protectedOpen: Bool
+            init(startNanos: UInt64, eventType: UInt32, protectedOpen: Bool) {
+                self.startNanos = startNanos
+                self.eventType = eventType
+                self.protectedOpen = protectedOpen
+            }
+        }
+        let tracker = ESSeqTracker()
+        let worker = ESMessageWorker(
+            maxInFlight: 4096, label: "bench.handoff", reservesLineageSlots: true,
+            process: { _ in },
+            free: { handle in Unmanaged<Box>.fromOpaque(handle).release() }
+        )
+        let n = 100_000
+        var accepted = 0
+        var paceSpins = 0
+        let start = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<n {
+            if worker.inFlightCount() >= 3072 {
+                while worker.inFlightCount() > 2048 {
+                    paceSpins += 1
+                    if paceSpins > 50_000_000 { break }
+                    sched_yield()
+                }
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+            tracker.record(eventType: Self.openType, seqNum: UInt64(i), globalSeq: UInt64(i),
+                           callbackUptimeNanoseconds: now)
+            let box = Box(startNanos: now, eventType: Self.openType, protectedOpen: false)
+            if worker.submit(
+                UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()),
+                lineageCritical: ESCollector.usesWorkerReserve(eventType: Self.openType, protectedOpen: false),
+                eventType: Self.openType
+            ) {
+                accepted += 1
+            }
+        }
+        let elapsed = DispatchTime.now().uptimeNanoseconds &- start
+        worker.shutdownAndDrain()
+        let perMessage = elapsed / UInt64(n)
+        let perSecond = elapsed == 0 ? UInt64.max : UInt64(n) * 1_000_000_000 / elapsed
+        print("BENCH handoff ns/msg=\(perMessage) msgs_per_s=\(perSecond) accepted=\(accepted)/\(n)")
+        #expect(perSecond >= 100_000, "hand-off floor (messages/s): \(perSecond)")
     }
 
     // MARK: 2. Merged-lane routing
 
-    @Test("a dynamic-AI OPEN flood never shares a lane with exec/fork/exit")
+    @Test("a dynamic-AI OPEN flood rides the file lane; credential/agent-content OPENs and lineage stay on priority")
     func openFloodDoesNotRideTheLineageLane() {
-        var priority = 0
-        var file = 0
-        var lineageOnPriority = 0
+        let stamp = [EventPipelineLane.openAdmissionEnrichmentKey: EventPipelineLane.dynamicAIOpenAdmission]
+        var dynamicOnPriority = 0
+        var dynamicOnFile = 0
         for i in 0..<50_000 {
             let event = fileEvent(
                 action: "open", fileAction: .open,
-                path: "/Users/x/project/src/module\(i & 255).ts"
+                path: "/Users/x/project/src/module\(i & 255).ts",
+                enrichments: stamp
             )
-            if EventPipelineLane.finalLane(for: event) == .priority { priority += 1 } else { file += 1 }
+            if EventPipelineLane.finalLane(for: event) == .priority { dynamicOnPriority += 1 } else { dynamicOnFile += 1 }
         }
+        var protectedOnPriority = 0
+        let protectedPaths = ["/Users/x/.ssh/id_ed25519", "/Users/x/.aws/credentials",
+                              "/Users/x/.claude/settings.json", "/Users/x/.claude/skills/x/SKILL.md"]
+        for i in 0..<1_000 {
+            let event = fileEvent(action: "open", fileAction: .open, path: protectedPaths[i & 3])
+            if EventPipelineLane.finalLane(for: event) == .priority { protectedOnPriority += 1 }
+        }
+        var lineageOnPriority = 0
         for i in 0..<26_000 {
             let action = ["exec", "fork", "exit"][i % 3]
             let event = processEvent(action: action, type: action == "exit" ? .end : .start)
             if EventPipelineLane.finalLane(for: event) == .priority { lineageOnPriority += 1 }
         }
-        print("BENCH lane_routing open_on_priority=\(priority) open_on_file=\(file) lineage_on_priority=\(lineageOnPriority)")
+        print("BENCH lane_routing dynamic_open_on_priority=\(dynamicOnPriority) dynamic_open_on_file=\(dynamicOnFile) protected_open_on_priority=\(protectedOnPriority)/1000 lineage_on_priority=\(lineageOnPriority)")
         #expect(lineageOnPriority == 26_000, "lineage always rides the priority lane")
-        #expect(priority == 0, "OPEN volume must not be able to evict lineage from the priority lane")
-        #expect(file == 50_000)
+        #expect(dynamicOnPriority == 0, "OPEN volume must not be able to evict lineage from the priority lane")
+        #expect(dynamicOnFile == 50_000)
+        #expect(protectedOnPriority == 1_000, "credential / agent-content OPENs ride priority, in order with their exec")
     }
 
     // MARK: 3. Worker reserve on the file client
@@ -288,7 +420,7 @@ struct ESIngressStormBenchmarkTests {
     func fileClientWorkerReserveProtectsWriteFamily() {
         // Pre-v1.22.7 file-client configuration: no reserve, every type equal.
         let before = writeFamilySurvivesOpenFlood(reservesLineageSlots: false, openIsCritical: true)
-        // v1.22.7 file-client configuration: reserve held; OPEN is never critical.
+        // v1.22.7 file-client configuration: reserve held; an ordinary OPEN is never critical.
         let after = writeFamilySurvivesOpenFlood(reservesLineageSlots: true, openIsCritical: false)
         print("BENCH worker_reserve before(open=\(before.openAccepted) write_accepted=\(before.writeAccepted) write_refused=\(before.writeRefused)) after(open=\(after.openAccepted) write_accepted=\(after.writeAccepted) write_refused=\(after.writeRefused))")
         #expect(after.writeRefused == 0, "write-family must never be refused because OPENs filled the budget")
@@ -296,6 +428,81 @@ struct ESIngressStormBenchmarkTests {
         #expect(after.openAccepted == 3072)
         // The base configuration is the regression this test exists to catch.
         #expect(before.writeRefused == 1024)
+    }
+
+    @Test("file-client worker: a credential or agent-content OPEN is accepted with the ordinary-OPEN slots full")
+    func protectedOpenSurvivesOpenFlood() {
+        let cap = 4096
+        let gate = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: cap, label: "bench.file-client.protected", reservesLineageSlots: true,
+            process: { _ in gate.wait() }, free: { _ in }
+        )
+        var token = 1
+        func handle() -> UnsafeRawPointer {
+            token += 1
+            return UnsafeRawPointer(bitPattern: token)!
+        }
+        func submitOpen(_ path: String) -> Bool {
+            // Exactly the handler's decision: reserve-eligible iff the raw path
+            // is on the static credential / agent-content allowlists.
+            worker.submit(
+                handle(),
+                lineageCritical: ESCollector.usesWorkerReserve(
+                    eventType: Self.openType, protectedOpen: ESCollector.isProtectedOpenPath(path)
+                ),
+                eventType: Self.openType
+            )
+        }
+        var ordinaryAccepted = 0
+        for i in 0..<cap where submitOpen("/Users/x/project/src/module\(i & 255).ts") {
+            ordinaryAccepted += 1
+        }
+        let sshAccepted = submitOpen("/Users/x/.ssh/id_ed25519")
+        let agentConfigAccepted = submitOpen("/Users/x/.claude/settings.json")
+        let decoyAccepted = submitOpen("/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt")
+        let ordinaryRefused = !submitOpen("/Users/x/project/README.md")
+        let refusedByType = worker.backpressureDroppedByEventType()
+        print("BENCH worker_protected_open ordinary_accepted=\(ordinaryAccepted)/\(cap) ssh=\(sshAccepted) agent_config=\(agentConfigAccepted) decoy=\(decoyAccepted) ordinary_refused_after=\(ordinaryRefused) dropped_by_type=\(refusedByType)")
+        for _ in 0..<cap { gate.signal() }
+        worker.shutdownAndDrain()
+        #expect(ordinaryAccepted == 3072, "ordinary OPENs stop at the non-reserved budget")
+        #expect(sshAccepted, "a credential OPEN must never be shed behind the OPEN flood")
+        #expect(agentConfigAccepted, "an agent-content OPEN must never be shed behind the OPEN flood")
+        #expect(decoyAccepted, "a honeyfile OPEN must never be shed behind the OPEN flood")
+        #expect(ordinaryRefused, "the flood itself is what gets refused, and it is counted")
+        #expect(refusedByType[Self.openType] == 1025)
+    }
+
+    // MARK: 4. Coalesced repeat cost on the worker
+
+    @Test("a coalesced WRITE repeat costs the worker the exemption scan and a table probe, before any build")
+    func coalescedRepeatCostOnWorker() {
+        let coalescer = ESRepeatCoalescer()
+        let paths = (0..<256).map { "/Users/x/project/dist/chunk-\($0).js" }
+        let n = 100_000
+        var coalesced = 0
+        var exempt = 0
+        let start = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<n {
+            let path = paths[i & 255]
+            // The worker's decision path for an admitted WRITE, in order.
+            if ESCollector.isRepeatCoalescingExempt(path: path) {
+                exempt += 1
+                continue
+            }
+            if coalescer.shouldCoalesce(path: path, pid: 43, pidversion: 7, kind: .write,
+                                        nowNanos: UInt64(i) * 1_000) {
+                coalesced += 1
+            }
+        }
+        let elapsed = DispatchTime.now().uptimeNanoseconds &- start
+        let perDecision = elapsed / UInt64(n)
+        print("BENCH coalesce_decision ns/decision=\(perDecision) coalesced=\(coalesced)/\(n) exempt=\(exempt) entries=\(coalescer.count)")
+        #expect(exempt == 0)
+        #expect(coalesced == n - 256, "every repeat inside the window folds into the first write")
+        #expect(coalescer.count == 256)
+        #expect(perDecision <= 5_000, "coalesce decision budget (ns): \(perDecision)")
     }
 
     @Test("paced storm through the worker: zero lineage-critical loss and a submit throughput floor")
