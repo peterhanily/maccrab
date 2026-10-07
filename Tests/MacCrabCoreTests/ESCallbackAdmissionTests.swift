@@ -23,7 +23,10 @@ struct ESCallbackAdmissionTests {
         return registry
     }
 
-    @Test("ordinary OPEN and unmodified CLOSE never consume worker slots")
+    // v1.22.7: this is the worker-stage policy. Unmodified CLOSE is still
+    // rejected at the callback (field-only); OPEN is retained and rejected on
+    // the worker, off the kernel dequeue thread (see ESIngressAdmissionTests).
+    @Test("ordinary OPEN and unmodified CLOSE are rejected by the admission policy")
     func rejectsTheMeasuredFirehose() {
         #expect(ESCollector.shouldDropBeforeWorker(
             eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,

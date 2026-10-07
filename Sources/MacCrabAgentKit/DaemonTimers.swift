@@ -3560,6 +3560,17 @@ enum DaemonTimers {
             let esNormalizedYieldedByType: [String: UInt64] =
                 (state.collector?.esNormalizedYieldedByType() ?? [:])
                     .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
+            // v1.22.7: the path-dependent OPEN/WRITE/CLOSE admission moved off
+            // the ES callback onto the retained-message worker, and repeated
+            // WRITE/OPEN callbacks per (pid, pidversion, path) are coalesced
+            // there. Both are policy outcomes, counted so they never read as
+            // silent loss and never inflate `es_copy_backpressure_dropped_*`.
+            let esIntentionallyFilteredOnWorkerByType: [String: UInt64] =
+                (state.collector?.esIntentionallyFilteredOnWorkerByType() ?? [:])
+                    .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
+            let esCoalescedOnWorkerByType: [String: UInt64] =
+                (state.collector?.esCoalescedOnWorkerByType() ?? [:])
+                    .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
             let esHandlerP99Micros = state.collector?.esHandlerP99Micros() ?? 0
             let esStreamYieldDropped = state.collector?.esStreamYieldDropped() ?? 0
             let esCopyBackpressureDropped = state.collector?.esCopyBackpressureDropped() ?? 0
@@ -4656,6 +4667,8 @@ enum DaemonTimers {
                 // to the collector-local bounded stream. Neither map folds in
                 // copy-backpressure or stream eviction loss.
                 "es_intentionally_filtered_before_worker_by_type": esIntentionallyFilteredBeforeWorkerByType,
+                "es_intentionally_filtered_on_worker_by_type": esIntentionallyFilteredOnWorkerByType,
+                "es_coalesced_on_worker_by_type": esCoalescedOnWorkerByType,
                 "es_normalized_yielded_by_type": esNormalizedYieldedByType,
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,

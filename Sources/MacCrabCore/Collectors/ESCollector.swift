@@ -897,22 +897,26 @@ public final class ESCollector: @unchecked Sendable {
         return true                                            // provable log noise ⇒ DROP
     }
 
-    // MARK: - Callback-to-worker admission
+    // MARK: - Worker-stage admission policy
 
-    /// Decide whether an ES message that the normaliser would discard can be
-    /// discarded *before* it consumes one of the bounded worker's in-flight
-    /// slots. This is the same set of cheap, detection-preserving predicates
-    /// enforced again in `normalise(message:)` as defence in depth.
+    /// The detection-preserving admission policy for a retained ES message.
+    /// `normalise(message:)` applies it on the worker before the heap-allocating
+    /// `processFromESProcess` build; a reject there is counted per type as
+    /// `es_intentionally_filtered_on_worker_by_type`.
     ///
-    /// This placement matters: filtering only inside the serial worker still
-    /// lets the system-wide OPEN and unmodified-CLOSE firehoses fill all 4,096
-    /// retained-message slots. Live rc.2 telemetry reproduced exactly that
-    /// failure: 23,097 callback-to-worker drops in 65 seconds, of which 22,960
-    /// were OPEN/CLOSE, while both downstream merged-stream drop counters were
-    /// zero. Those discarded messages never reached any detection engine.
+    /// v1.22.7: until this release the path-dependent half (OPEN allowlists +
+    /// dynamic-AI demand, WRITE/CLOSE log-sink guard) also ran inline on the ES
+    /// callback, which is the kernel dequeue thread. That was right when the
+    /// rc.2 OPEN/unmodified-CLOSE firehose filled the 4,096 retained slots
+    /// (23,097 hand-off drops in 65 s) and wrong once the dynamic-AI policy
+    /// made an admitted OPEN cost ~77 µs on that thread: the kernel dropped
+    /// 37,318 messages in one 30 s esbuild burst while the worker never filled.
+    /// The field-only half stays on the callback (`shouldDropAtCallback`); the
+    /// worker now absorbs the OPEN flood with a type-aware reserve so it cannot
+    /// evict the write family (`reserveEligibleRawValues`).
     ///
-    /// Pure and internal so tests can pin callback admission to the normaliser's
-    /// allowlists without constructing an `es_message_t`.
+    /// Pure and internal so tests can pin the policy without constructing an
+    /// `es_message_t`.
     static func shouldDropBeforeWorker(
         eventType: UInt32,
         path: String? = nil,
@@ -1038,74 +1042,118 @@ public final class ESCollector: @unchecked Sendable {
         }
     }
 
-    /// Extract only the fields required by `shouldDropBeforeWorker` while the
-    /// borrowed ES message is valid on the callback boundary. Kept messages are
-    /// still normalised on the worker; high-volume rejected messages are never
-    /// retained or enqueued.
-    private static func shouldDropBeforeWorker(
+    // MARK: - Callback-boundary admission (v1.22.7: field-only)
+    //
+    // ESClient.h:632-633 — "Messages are handled strictly serially and in the
+    // order they are delivered. Returning control from the handler causes the
+    // next available message to be dequeued." The handler's wall-time per
+    // message IS the kernel dequeue rate; the headers expose no queue depth
+    // and the only drop signal is the seq_num gap. Until v1.22.7 the handler
+    // decoded the OPEN/WRITE/CLOSE path and ran the full OPEN admission policy
+    // inline (static allowlists + the dynamic-AI demand policy). Measured in
+    // ESIngressStormBenchmarkTests on the base commit: 77 µs per admitted
+    // dynamic-AI OPEN and 27k mixed decisions/s — and in the attempt4 capture
+    // the kernel dropped 37,318 messages in the 30 s window where 47,931 OPENs
+    // were admitted, with copy-backpressure at zero (the worker was never
+    // full; the handler was the bottleneck). Everything below is an integer
+    // or bool read on the borrowed message; the path-dependent policy runs on
+    // the retained-message worker (`processRetained` → `normalise`).
+
+    /// The field-only callback policy. Pure so tests can pin it without an
+    /// `es_message_t`. `signalTargetExecutable` is an autoclosure: the token is
+    /// decoded only for a fatal signal.
+    static func shouldDropAtCallback(
+        eventType: UInt32,
+        closeModified: Bool = true,
+        isPlatformBinary: Bool = false,
+        protection: Int32 = 0,
+        mode: UInt32 = 0,
+        signal: Int32 = 0,
+        signalTargetPID: Int32 = -1,
+        signalTargetExecutable: @autoclosure () -> String = ""
+    ) -> Bool {
+        switch eventType {
+        case ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue:
+            return !closeModified
+
+        case ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue:
+            return !modeGrantsExecutionOrEscalation(mode)
+
+        case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ.rawValue,
+             ES_EVENT_TYPE_NOTIFY_TRACE.rawValue,
+             ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE.rawValue,
+             ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED.rawValue:
+            return isPlatformBinary
+
+        case ES_EVENT_TYPE_NOTIFY_MMAP.rawValue,
+             ES_EVENT_TYPE_NOTIFY_MPROTECT.rawValue:
+            return (protection & PROT_WRITE) == 0 || (protection & PROT_EXEC) == 0
+
+        case ES_EVENT_TYPE_NOTIFY_SIGNAL.rawValue:
+            return !shouldKeepSignal(
+                sig: signal,
+                targetPID: signalTargetPID,
+                targetExecutable: signalTargetExecutable()
+            )
+
+        default:
+            return false
+        }
+    }
+
+    /// Read only fixed-width fields off the borrowed ES message. No path token
+    /// is decoded here except for a fatal NOTIFY_SIGNAL (see `shouldKeepSignal`).
+    private static func shouldDropAtCallback(
         message: UnsafePointer<es_message_t>
     ) -> Bool {
         let msg = message.pointee
         let eventType = msg.event_type.rawValue
 
-        // This side effect is confined to process-start events and happens
-        // before any file admission read. It never retains the borrowed ES
-        // message and only swaps/updates bounded lock-backed callback state.
+        // This side effect is confined to process-start events. It never
+        // retains the borrowed ES message and only swaps/updates bounded
+        // lock-backed callback state.
         bridgeDynamicAIProcessStart(message: message)
 
         switch msg.event_type {
-        case ES_EVENT_TYPE_NOTIFY_OPEN:
-            return shouldDropBeforeWorker(
-                eventType: eventType,
-                path: esFileToPath(msg.event.open.file),
-                isPlatformBinary: msg.process.pointee.is_platform_binary,
-                processID: audit_token_to_pid(msg.process.pointee.audit_token)
-            )
-
         case ES_EVENT_TYPE_NOTIFY_CLOSE:
-            guard msg.event.close.modified else {
-                return shouldDropBeforeWorker(
-                    eventType: eventType,
-                    closeModified: false
-                )
-            }
-            return shouldDropBeforeWorker(
+            return shouldDropAtCallback(
                 eventType: eventType,
-                path: esFileToPath(msg.event.close.target),
-                closeModified: true
+                closeModified: msg.event.close.modified
             )
 
-        case ES_EVENT_TYPE_NOTIFY_WRITE:
-            return shouldDropBeforeWorker(
+        case ES_EVENT_TYPE_NOTIFY_SIGNAL:
+            let target = msg.event.signal.target
+            return shouldDropAtCallback(
                 eventType: eventType,
-                path: esFileToPath(msg.event.write.target)
+                signal: msg.event.signal.sig,
+                signalTargetPID: audit_token_to_pid(target.pointee.audit_token),
+                signalTargetExecutable: esFileToPath(target.pointee.executable)
             )
 
         case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ,
              ES_EVENT_TYPE_NOTIFY_TRACE,
              ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE,
              ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED:
-            return shouldDropBeforeWorker(
+            return shouldDropAtCallback(
                 eventType: eventType,
                 isPlatformBinary: msg.process.pointee.is_platform_binary
             )
 
         case ES_EVENT_TYPE_NOTIFY_MMAP:
-            return shouldDropBeforeWorker(
+            return shouldDropAtCallback(
                 eventType: eventType,
                 protection: msg.event.mmap.protection
             )
 
         case ES_EVENT_TYPE_NOTIFY_MPROTECT:
-            return shouldDropBeforeWorker(
+            return shouldDropAtCallback(
                 eventType: eventType,
                 protection: msg.event.mprotect.protection
             )
 
         case ES_EVENT_TYPE_NOTIFY_SETMODE:
-            return shouldDropBeforeWorker(
+            return shouldDropAtCallback(
                 eventType: eventType,
-                path: esFileToPath(msg.event.setmode.target),
                 mode: UInt32(msg.event.setmode.mode)
             )
 
@@ -1297,6 +1345,113 @@ public final class ESCollector: @unchecked Sendable {
         ES_EVENT_TYPE_NOTIFY_EXIT.rawValue,
     ]
 
+    /// v1.22.7: the types allowed to use the slots an `ESMessageWorker` holds in
+    /// reserve — lineage (above) plus the write family. The file client now
+    /// reserves too: with the path-dependent OPEN admission moved onto the
+    /// worker, every OPEN is retained first, so an OPEN flood could otherwise
+    /// fill the file worker and shed the CREATE/WRITE/CLOSE/RENAME/UNLINK
+    /// messages that persistence and credential-write detection depend on.
+    /// OPEN and SIGNAL are deliberately absent: they are the flood sources.
+    static let reserveEligibleRawValues: Set<UInt32> = lineageCriticalRawValues.union([
+        ES_EVENT_TYPE_NOTIFY_CREATE.rawValue,
+        ES_EVENT_TYPE_NOTIFY_WRITE.rawValue,
+        ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue,
+        ES_EVENT_TYPE_NOTIFY_RENAME.rawValue,
+        ES_EVENT_TYPE_NOTIFY_UNLINK.rawValue,
+    ])
+
+    // MARK: - NOTIFY_SIGNAL callback policy (v1.22.7)
+    //
+    // No consumer reads signal events: no YAML rule selects `signal` (single,
+    // sequence or graph — every textual hit in Rules/ is prose, `Signal.app`
+    // or a sequence step name), the TraceGraph bridge maps the action to nil
+    // (EventToRollingCausalGraphBridge.mapAction), SelfDefense polls getppid /
+    // integrity rather than ES, and no Detection / AIGuard / Deception type
+    // reads the `target.*` enrichments. Measured on the maintainer's host: a
+    // ~4.1k/s NOTIFY_SIGNAL flood (kill(pid, 0) liveness probes and job-control
+    // signals from build tooling) filled 92% of the priority lane and evicted
+    // exec/fork/exit with it. The subscription stays — a fatal signal aimed at
+    // MacCrab or at another security tool is the self-defense observation worth
+    // a row in events.db — but everything else is dropped at the callback by
+    // integer compare alone and counted as intentional filtering.
+
+    /// Signals that end or freeze a process. Anything else (0, SIGCHLD, SIGUSR*,
+    /// SIGCONT, SIGWINCH, SIGPIPE, SIGALRM…) carries no detection input.
+    static let fatalSignals: Set<Int32> = [
+        SIGHUP, SIGINT, SIGQUIT, SIGABRT, SIGKILL, SIGSEGV, SIGTERM, SIGSTOP,
+    ]
+
+    /// Executable basenames of MacCrab's own processes and of the EDR agents
+    /// `EDRMonitor` knows (its `.edr` category process names — keep in sync).
+    static let securityToolProcessNames: Set<String> = [
+        // MacCrab
+        "com.maccrab.agent", "maccrabd", "MacCrab", "MacCrabApp", "maccrabctl", "maccrab-mcp",
+        // CrowdStrike Falcon
+        "falcond", "falcon-sensor", "CSFalconService", "falconctl",
+        // SentinelOne
+        "sentineld", "SentinelAgent", "sentinelctl", "SentinelMonitor",
+        // Carbon Black
+        "cbagentd", "CbDefense", "cbdaemon", "CbOsxSensorService",
+        // Microsoft Defender for Endpoint
+        "wdavdaemon", "mdatp", "MicrosoftDefender", "MicrosoftDefenderATP",
+        // Tanium
+        "TaniumClient", "taniumd", "TaniumEndpointIndex",
+        // Velociraptor / osquery / Sophos
+        "velociraptor", "osqueryd", "orbit", "osqueryctl",
+        "SophosScanD", "SophosAntiVirus", "SophosServiceManager", "SophosCleanD",
+    ]
+
+    /// The engine's own pid, read once; a signal at it is always kept.
+    static let ownProcessID: Int32 = getpid()
+
+    /// Keep a NOTIFY_SIGNAL only when it is fatal AND aimed at MacCrab itself or
+    /// a security tool. `targetExecutable` is an autoclosure so the borrowed
+    /// path token is decoded only for the rare fatal signal — never for the
+    /// flood (unit-tested: the closure is not evaluated for a non-fatal signal).
+    static func shouldKeepSignal(
+        sig: Int32,
+        targetPID: Int32,
+        ownPID: Int32 = ownProcessID,
+        targetExecutable: @autoclosure () -> String
+    ) -> Bool {
+        guard fatalSignals.contains(sig) else { return false }
+        if targetPID == ownPID { return true }
+        let executable = targetExecutable()
+        let basename = executable.split(separator: "/").last.map(String.init) ?? executable
+        return securityToolProcessNames.contains(basename)
+    }
+
+    // MARK: - Repeat coalescing policy (v1.22.7)
+
+    /// Which coalescing window a retained message participates in. Only WRITE
+    /// and OPEN repeat per file at build-storm rates; CREATE/RENAME/UNLINK are
+    /// one-per-file by nature and a modified CLOSE is the terminal event that
+    /// closes the window and carries the write count.
+    static func repeatCoalescingKind(for eventType: UInt32) -> ESRepeatCoalescer.Kind? {
+        switch eventType {
+        case ES_EVENT_TYPE_NOTIFY_WRITE.rawValue: return .write
+        case ES_EVENT_TYPE_NOTIFY_OPEN.rawValue: return .open
+        default: return nil
+        }
+    }
+
+    /// Paths for which EVERY callback must reach the pipeline: credential and
+    /// secret locations (the OPEN allowlist plus CredentialFence's canonical
+    /// set, which also covers the default honeyfile names and the decoy root),
+    /// agent-content / agent-config files, and persistence locations (the
+    /// TraceGraph persistence kinds, StartupItems, LaunchAgents/LaunchDaemons
+    /// anywhere). Behaviour scoring accumulates per persistence write and the
+    /// honeyfile rule is per access, so none of these may be folded.
+    static func isRepeatCoalescingExempt(path: String) -> Bool {
+        if isCredentialReadPath(path) || isAgentContentReadPath(path) { return true }
+        if path.contains("/LaunchAgents/") || path.contains("/LaunchDaemons/")
+            || path.contains("/StartupItems/") {
+            return true
+        }
+        let classification = TraceGraphFileObservationPolicy.classify(path: path)
+        return classification.persistenceType != nil || classification.fileKind == .credentialFile
+    }
+
     /// The full pre-split subscription list — `subscribedEvents` plus the
     /// optional OPEN, introspection and memory-protection families. Used verbatim
     /// for the degraded single client AND as the domain that
@@ -1396,6 +1551,10 @@ public final class ESCollector: @unchecked Sendable {
         reservesLineageSlots: Bool = true
     ) -> ESClientContext {
         let tracker = ESSeqTracker()
+        // v1.22.7: per-client repeat coalescer. Owned by this worker's serial
+        // queue (the only mutator), so it carries no lock; its counts go through
+        // the locked tracker for the heartbeat.
+        let coalescer = ESRepeatCoalescer()
         let worker = ESMessageWorker(
             maxInFlight: maxInFlight,
             label: "com.maccrab.es.message-worker.\(label)",
@@ -1410,6 +1569,7 @@ public final class ESCollector: @unchecked Sendable {
                     traceContinuation: traceContinuation,
                     deliveryTelemetry: deliveryTelemetry,
                     tracker: tracker,
+                    coalescer: coalescer,
                     logger: logger
                 )
             },
@@ -1496,15 +1656,15 @@ public final class ESCollector: @unchecked Sendable {
                 canaryNonces = canary.noteExecIfCanary(commandLine: args.joined(separator: " "))
             }
             // D4 handler-entry timestamp — the worker measures end-to-end latency
-            // (arrival → normalise-done, including queue wait) against it. Run
-            // the normaliser-equivalent admission guard BEFORE retaining/enqueueing:
-            // otherwise messages that can only be discarded still consume the
-            // bounded worker and shed unrelated detection input under ordinary load.
-            // OPEN/WRITE admission decodes one borrowed path token. Drain that
-            // temporary at the callback boundary; the worker's autorelease pool
-            // is never entered for messages intentionally rejected here.
+            // (arrival → normalise-done, including queue wait) against it.
+            // v1.22.7: the callback guard is FIELD-ONLY (unmodified CLOSE, chmod
+            // mode bits, W+X bits, platform-binary introspection, non-fatal or
+            // non-security-tool SIGNAL). Every path-dependent decision runs on
+            // the worker so this thread returns to the kernel in microseconds
+            // (see "Callback-boundary admission"). The autorelease pool only
+            // matters for a fatal SIGNAL's one path decode.
             let rejectedBeforeWorker = autoreleasepool {
-                ESCollector.shouldDropBeforeWorker(message: message)
+                ESCollector.shouldDropAtCallback(message: message)
             }
             if rejectedBeforeWorker {
                 // Preserve the `es_processed_by_type` denominator, but do not
@@ -1524,7 +1684,7 @@ public final class ESCollector: @unchecked Sendable {
             // hand-off. Record the third point against the message we just lost.
             let accepted = worker.submit(
                 UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()),
-                lineageCritical: ESCollector.lineageCriticalRawValues.contains(evType),
+                lineageCritical: ESCollector.reserveEligibleRawValues.contains(evType),
                 eventType: evType
             )
             if !accepted, let canary = canary { canary.noteDroppedAtHandoff(canaryNonces) }
@@ -1568,7 +1728,10 @@ public final class ESCollector: @unchecked Sendable {
 
         // The exec/process context carries the D3 canary — its EXEC events feed
         // the recognizer. The file context never sees EXEC, so it gets no canary.
-        let fileCtx = makeContext(label: "file", types: fileTypes, canary: nil, reservesLineageSlots: false)
+        // v1.22.7: the file client reserves too. Every OPEN is now retained
+        // before its path policy runs, so without a reserve an OPEN flood could
+        // shed the write family at the hand-off (`reserveEligibleRawValues`).
+        let fileCtx = makeContext(label: "file", types: fileTypes, canary: nil, reservesLineageSlots: true)
         let execCtx = makeContext(label: "exec", types: execTypes, canary: canaryRegistry, reservesLineageSlots: true)
 
         // FIRST client (file).
@@ -1935,6 +2098,19 @@ public final class ESCollector: @unchecked Sendable {
         )
     }
 
+    /// v1.22.7: per-event-type messages the retained-message worker rejected by
+    /// policy (the path-dependent OPEN/WRITE/CLOSE admission that used to run
+    /// on the callback). Surfaced as `es_intentionally_filtered_on_worker_by_type`.
+    public func esIntentionallyFilteredOnWorkerByType() -> [UInt32: UInt64] {
+        Self.mergeCountMaps(contexts.map { $0.tracker.intentionallyFilteredOnWorkerByType() })
+    }
+
+    /// v1.22.7: per-event-type WRITE/OPEN repeats folded into the first callback
+    /// for their (pid, pidversion, path). Surfaced as `es_coalesced_on_worker_by_type`.
+    public func esCoalescedOnWorkerByType() -> [UInt32: UInt64] {
+        Self.mergeCountMaps(contexts.map { $0.tracker.coalescedOnWorkerByType() })
+    }
+
     /// Per-event-type normalized Events offered to the collector-local stream.
     /// Whether an offer evicted an older buffered event remains accounted by the
     /// collector delivery telemetry and is deliberately not folded into this map.
@@ -2067,6 +2243,7 @@ public final class ESCollector: @unchecked Sendable {
         traceContinuation: AsyncStream<TraceBindingSignal>.Continuation,
         deliveryTelemetry: EventCollectorBufferTelemetry,
         tracker: ESSeqTracker,
+        coalescer: ESRepeatCoalescer,
         logger: Logger
     ) {
         autoreleasepool {
@@ -2081,7 +2258,14 @@ public final class ESCollector: @unchecked Sendable {
                 selfTrace = emitTraceSignals(message: message, into: traceContinuation)
             }
 
-            var event = normalise(message: message)
+            // v1.22.7: `normalise` applies the path-dependent admission policy
+            // (OPEN allowlists + dynamic-AI demand, WRITE/CLOSE log-sink guard)
+            // that used to run on the ES callback thread. A nil here is that
+            // policy saying no — counted per type, never read as a loss.
+            guard var event = normalise(message: message) else {
+                tracker.recordFilteredOnWorker(eventType: evType)
+                return
+            }
             // v1.21.4 (P6 fix): SELF-STAMP this exec's OWN event with the
             // TRACEPARENT it inherited in its env. The parallel `.bind` signal
             // yielded above only ever helps DESCENDANTS — the exec event of the
@@ -2092,29 +2276,58 @@ public final class ESCollector: @unchecked Sendable {
             // type explicitly too. Only write keys not already present so a
             // future upstream stamp is never clobbered.
             if let ctx = selfTrace,
-               evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue,
-               var stamped = event {
-                for (k, v) in TraceCorrelator.selfStampEnrichments(context: ctx, pid: stamped.process.pid)
-                where stamped.enrichments[k] == nil {
-                    stamped.enrichments[k] = v
+               evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue {
+                for (k, v) in TraceCorrelator.selfStampEnrichments(context: ctx, pid: event.process.pid)
+                where event.enrichments[k] == nil {
+                    event.enrichments[k] = v
                 }
-                event = stamped
             }
 
-            var yielded = false
-            var yieldDropped = false
-            if let event = event {
-                yielded = true
-                let result = continuation.yield(event)
-                deliveryTelemetry.recordYield(offered: event, result: result)
-                if case .dropped = result { yieldDropped = true }
-                // v1.21.4 Phase-2 (D3) NOTE: the coverage-canary recognizer no
-                // longer runs here. It was moved ONTO the ES callback boundary
-                // (see `openClient`) so "seen at callback" measures kernel
-                // delivery, not downstream worker processing.
-            } else {
-                logger.debug("Dropped unhandled ES event type: \(evType)")
+            // v1.22.7 repeat coalescing. A WRITE/OPEN by the same (pid,
+            // pidversion) on the same path inside the window is folded into the
+            // first one, which already passed unchanged; the matching modified
+            // CLOSE closes the window and carries the write count. Credential /
+            // honeyfile / persistence / agent-config paths are exempt
+            // (`isRepeatCoalescingExempt`). Keyed on the kernel-attested audit
+            // token so a recycled pid never inherits another process's window.
+            if let file = event.file {
+                let token = message.pointee.process.pointee.audit_token
+                let pid = audit_token_to_pid(token)
+                let pidversion = UInt32(bitPattern: audit_token_to_pidversion(token))
+                if let kind = repeatCoalescingKind(for: evType) {
+                    if !isRepeatCoalescingExempt(path: file.path),
+                       coalescer.shouldCoalesce(
+                           ESRepeatCoalescer.Key(pid: pid, pidversion: pidversion, path: file.path),
+                           kind: kind,
+                           nowNanos: box.startNanos
+                       ) {
+                        tracker.recordCoalescedOnWorker(eventType: evType)
+                        return
+                    }
+                } else if evType == ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue
+                            || evType == ES_EVENT_TYPE_NOTIFY_RENAME.rawValue
+                            || evType == ES_EVENT_TYPE_NOTIFY_UNLINK.rawValue {
+                    let terminalPath = evType == ES_EVENT_TYPE_NOTIFY_RENAME.rawValue
+                        ? (file.sourcePath ?? file.path)
+                        : file.path
+                    let coalescedWrites = coalescer.terminate(
+                        ESRepeatCoalescer.Key(pid: pid, pidversion: pidversion, path: terminalPath)
+                    )
+                    if coalescedWrites > 0, evType == ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue {
+                        event.enrichments["coalesced_write_count"] = String(coalescedWrites)
+                    }
+                }
             }
+
+            let result = continuation.yield(event)
+            deliveryTelemetry.recordYield(offered: event, result: result)
+            var yieldDropped = false
+            if case .dropped = result { yieldDropped = true }
+            // v1.21.4 Phase-2 (D3) NOTE: the coverage-canary recognizer no
+            // longer runs here. It was moved ONTO the ES callback boundary
+            // (see `openClient`) so "seen at callback" measures kernel
+            // delivery, not downstream worker processing.
+            //
             // v1.21.4 Phase-0 D4: end-to-end handler latency (arrival → done,
             // including the queue-wait now that processing is off-thread) plus
             // the yield-outcome backlog gauge. `box.startNanos` was captured at
@@ -2123,7 +2336,7 @@ public final class ESCollector: @unchecked Sendable {
             tracker.recordProcessed(
                 eventType: evType,
                 elapsedNanos: elapsedNanos,
-                yielded: yielded,
+                yielded: true,
                 yieldDropped: yieldDropped
             )
         }
