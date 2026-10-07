@@ -15,6 +15,8 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   after a size pause.
 
 ### Fixed
+- **Five supply-chain rules no longer cite a blog post that is offline.**
+  Their MITRE ATT&CK references are unchanged.
 - **Homebrew upgrade instructions use the tap's full cask name.** Settings,
   the FAQ, UPGRADE.md and TROUBLESHOOTING.md now say
   `brew upgrade --cask peterhanily/maccrab/maccrab`, the same form as the
