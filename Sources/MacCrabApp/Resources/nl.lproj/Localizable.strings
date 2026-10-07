@@ -579,7 +579,7 @@
 "settings.alerts.help" = "Door MacCrab geactiveerde detecties. Blijven behouden bij elke opschoning van de gebeurtenissenstroom.";
 "settings.alerts.label" = "Waarschuwingsgeschiedenis";
 "settings.appearance" = "Weergave";
-"settings.brewInstalled.hint" = "Geïnstalleerd via Homebrew. Automatische updates op de achtergrond staan uit; werk bij met `brew upgrade --cask maccrab`. Handmatige controles hierboven werken nog steeds.";
+"settings.brewInstalled.hint" = "Geïnstalleerd via Homebrew. Automatische updates op de achtergrond staan uit; werk bij met `brew upgrade --cask peterhanily/maccrab/maccrab`. Handmatige controles hierboven werken nog steeds.";
 "settings.campaigns.help" = "Meerstaps aanvalsketens die MacCrab heeft gecorreleerd.";
 "settings.campaigns.label" = "Campagnegeschiedenis";
 "settings.catalogReopen" = "Heropen het tabblad Catalogus na het wijzigen van deze instelling.";

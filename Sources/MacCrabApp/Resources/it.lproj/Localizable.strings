@@ -579,7 +579,7 @@
 "settings.alerts.help" = "Rilevamenti generati da MacCrab. Sopravvivono a qualsiasi eliminazione del flusso eventi.";
 "settings.alerts.label" = "Cronologia avvisi";
 "settings.appearance" = "Aspetto";
-"settings.brewInstalled.hint" = "Installato tramite Homebrew. L'aggiornamento automatico in background è disattivato; aggiorna con `brew upgrade --cask maccrab`. I controlli manuali qui sopra funzionano comunque.";
+"settings.brewInstalled.hint" = "Installato tramite Homebrew. L'aggiornamento automatico in background è disattivato; aggiorna con `brew upgrade --cask peterhanily/maccrab/maccrab`. I controlli manuali qui sopra funzionano comunque.";
 "settings.campaigns.help" = "Catene di attacco in più fasi correlate da MacCrab.";
 "settings.campaigns.label" = "Cronologia campagne";
 "settings.catalogReopen" = "Riapri il pannello Catalogo dopo aver modificato questa impostazione.";

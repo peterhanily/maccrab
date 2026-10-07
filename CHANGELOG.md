@@ -15,6 +15,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   after a size pause.
 
 ### Fixed
+- **Homebrew upgrade instructions use the tap's full cask name.** Settings,
+  the FAQ, UPGRADE.md and TROUBLESHOOTING.md now say
+  `brew upgrade --cask peterhanily/maccrab/maccrab`, the same form as the
+  install command.
 - **The privacy audit matches tracking domains on whole labels.** A domain
   that only ends with a listed name is no longer treated as a known tracker,
   so it no longer skips the single-domain spike alert. The list now names
