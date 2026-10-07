@@ -1798,6 +1798,7 @@
 "system.sensorDegradedChipHigh" = "功能降級";
 "system.sensorDegradedChipLow" = "參考資訊";
 "system.sensorDegradedDefaultDetail" = "檔案事件量急劇超過基準，同時核心正在捨棄 ES 訊息，導致程序／exec 涵蓋不足。";
+"system.sensorDegradedSinceLabel" = "降級開始於";
 "system.sensorDegradedTitle" = "防護降級 — 可能存在利用遙測遺失進行規避的行為";
 "system.sequenceContinuityDegradedTitle" = "序列重新啟動連續性下降";
 "system.sequenceContinuityGapChip" = "偵測連續性缺口";

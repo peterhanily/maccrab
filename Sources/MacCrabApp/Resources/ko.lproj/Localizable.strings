@@ -1798,6 +1798,7 @@
 "system.sensorDegradedChipHigh" = "저하됨";
 "system.sensorDegradedChipLow" = "참고";
 "system.sensorDegradedDefaultDetail" = "파일 이벤트가 평소 수준을 크게 넘는 동안 커널이 ES 메시지를 버려 프로세스/exec 수집 범위가 부족해지고 있습니다.";
+"system.sensorDegradedSinceLabel" = "저하 시작";
 "system.sensorDegradedTitle" = "보호 저하 — 원격 측정 누락을 이용한 회피 가능성";
 "system.sequenceContinuityDegradedTitle" = "재시작 시 시퀀스 연속성이 저하되었습니다";
 "system.sequenceContinuityGapChip" = "탐지 연속성 공백";

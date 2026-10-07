@@ -1543,6 +1543,7 @@
 "system.sensorDegradedChipHigh" = "Degradado";
 "system.sensorDegradedChipLow" = "Consultivo";
 "system.sensorDegradedDefaultDetail" = "Um volume de eventos de arquivo acima da linha de base coincide com o descarte de mensagens ES pelo kernel, reduzindo a cobertura de processos e execuções.";
+"system.sensorDegradedSinceLabel" = "Degradada desde";
 "system.sensorDegradedTitle" = "Proteção degradada — possível evasão por perda de telemetria";
 "system.sequenceContinuityDegradedTitle" = "Continuidade da sequência após reinício prejudicada";
 "system.sequenceContinuityGapChip" = "Lacuna na continuidade da detecção";
