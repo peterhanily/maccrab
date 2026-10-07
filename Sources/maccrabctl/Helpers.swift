@@ -280,7 +280,7 @@ extension MacCrabCtl {
         print("MacCrab Detection Engine v\(MacCrabVersion.current)")
         // LOCALIZE: "License: Apache 2.0 (code), DRL 1.1 (rules)"
         print("License: Apache 2.0 (code), DRL 1.1 (rules)")
-        print("https://github.com/maccrab-detection/maccrab")
+        print("https://github.com/peterhanily/maccrab")
     }
 
     static func formatBytes(_ bytes: UInt64) -> String {
