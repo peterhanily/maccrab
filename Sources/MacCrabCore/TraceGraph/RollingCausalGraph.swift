@@ -28,6 +28,7 @@
 //   - ESCollector wiring (a separate increment that touches v1.9 code)
 
 import Foundation
+import os
 import os.log
 
 /// A hard-bounded insertion-ordered cache for recently materialized anchors.
@@ -153,6 +154,104 @@ public enum CausalGraphWriteResponsiveness {
             + 2 * Double(sqliteBusyTimeoutMilliseconds) / 1_000
 }
 
+/// Nonisolated admission latch shared by the rolling writer and the lane-side
+/// ingest hand-off.
+///
+/// The rolling actor arms it when the store refuses a batch or an anchor
+/// materialization with a typed `CausalGraphStorageAdmissionError`, and clears
+/// it on the next committed batch. The detection lane consults it without an
+/// actor hop: while armed, every hand-off is shed here except one probe per
+/// retry interval, which is the write that discovers recovery. On an
+/// installed host a latched store previously cost one actor hop plus one
+/// refused write per event (~1.9M failed attempts); it now costs one refused
+/// write per interval.
+public final class CausalGraphAdmissionShedLatch: @unchecked Sendable {
+    public struct Snapshot: Sendable, Equatable {
+        public let armed: Bool
+        public let shedTotal: UInt64
+        public let probesTotal: UInt64
+        public let armsTotal: UInt64
+    }
+
+    public static let defaultRetryInterval: Duration = .seconds(1)
+
+    private struct State {
+        var retryAt: ContinuousClock.Instant?
+        var shedTotal: UInt64 = 0
+        var probesTotal: UInt64 = 0
+        var armsTotal: UInt64 = 0
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let retryInterval: Duration
+    private let now: @Sendable () -> ContinuousClock.Instant
+
+    init(
+        retryInterval: Duration = CausalGraphAdmissionShedLatch.defaultRetryInterval,
+        now: @escaping @Sendable () -> ContinuousClock.Instant
+    ) {
+        precondition(retryInterval > .zero)
+        self.retryInterval = retryInterval
+        self.now = now
+    }
+
+    /// The retry interval as event-time seconds, for the anchor shed window.
+    static func seconds(_ duration: Duration) -> TimeInterval {
+        let parts = duration.components
+        return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+    }
+
+    /// True when the caller must shed this event without touching the writer.
+    /// Exactly one caller per retry interval passes while armed; that probe
+    /// re-arms the window, so a sustained latch costs one write attempt per
+    /// interval instead of one per event.
+    public func shouldShed() -> Bool {
+        state.withLock { locked in
+            guard let retryAt = locked.retryAt else { return false }
+            let current = now()
+            if current < retryAt {
+                locked.shedTotal = Self.saturatingIncrement(locked.shedTotal)
+                return true
+            }
+            locked.retryAt = current.advanced(by: retryInterval)
+            locked.probesTotal = Self.saturatingIncrement(locked.probesTotal)
+            return false
+        }
+    }
+
+    func arm() {
+        state.withLock { locked in
+            if locked.retryAt == nil {
+                locked.armsTotal = Self.saturatingIncrement(locked.armsTotal)
+            }
+            locked.retryAt = now().advanced(by: retryInterval)
+        }
+    }
+
+    func clear() {
+        state.withLock { $0.retryAt = nil }
+    }
+
+    public var isArmed: Bool {
+        state.withLock { $0.retryAt != nil }
+    }
+
+    public func snapshot() -> Snapshot {
+        state.withLock {
+            Snapshot(
+                armed: $0.retryAt != nil,
+                shedTotal: $0.shedTotal,
+                probesTotal: $0.probesTotal,
+                armsTotal: $0.armsTotal
+            )
+        }
+    }
+
+    private static func saturatingIncrement(_ value: UInt64) -> UInt64 {
+        value == UInt64.max ? value : value + 1
+    }
+}
+
 /// Exact conservation counters for rolling-graph persistence.
 ///
 /// At an actor-isolated snapshot:
@@ -188,6 +287,12 @@ public struct CausalGraphIngestionWriteTelemetry: Sendable, Equatable {
     public let writeRowsFailedTotal: UInt64
     public let writeRowsInFlight: Int
     public let coalescedNoopRowsTotal: UInt64
+    /// Anchors whose forced flush or materialization the store refused with a
+    /// typed admission error. Each enters the short shed-dedup window.
+    public let anchorShedTotal: UInt64
+    /// Anchors skipped because the same behavioural anchor was shed inside the
+    /// current window: no forced flush, no refused write, no retry per event.
+    public let anchorShedDedupSuppressedTotal: UInt64
     public let pendingEntityRows: Int
     public let pendingEdgeRows: Int
     /// Age of the oldest uncommitted batch, including an in-flight transaction.
@@ -582,6 +687,11 @@ public actor RollingCausalGraph {
     private var writeRowsFailedTotal: UInt64 = 0
     private var writeRowsInFlight = 0
     private var coalescedNoopRowsTotal: UInt64 = 0
+    private var anchorShedTotal: UInt64 = 0
+    private var anchorShedDedupSuppressedTotal: UInt64 = 0
+
+    /// Lane-side admission latch; see `CausalGraphAdmissionShedLatch`.
+    public nonisolated let admissionShedLatch: CausalGraphAdmissionShedLatch
 
     /// Anchors already materialized this window, keyed by anchor identity.
     /// High-rate anchors are aggregated by stable behavioural identity. Process
@@ -591,6 +701,13 @@ public actor RollingCausalGraph {
         capacity: 4096,
         window: 300
     )
+
+    /// Anchors the store refused inside the current retry window. Keyed like
+    /// `recentAnchorKeys`, with a per-entity fallback for anchor kinds that are
+    /// never behaviourally deduplicated, so no anchor retries once per event
+    /// while the store is latched. Entries expire with the retry interval, so
+    /// the first anchor after recovery still materializes.
+    private var recentShedAnchorKeys: RecentAnchorDedupCache
 
     public init(
         store: CausalGraphStore,
@@ -616,7 +733,8 @@ public actor RollingCausalGraph {
         ingestionWritePolicy: CausalGraphIngestionWritePolicy,
         anchorCallback: (@Sendable (Trace, AnchorTrigger) async -> Void)? = nil,
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant,
-        persistBatch: @escaping @Sendable ([TraceEntity], [TraceEdge]) async throws -> Void
+        persistBatch: @escaping @Sendable ([TraceEntity], [TraceEdge]) async throws -> Void,
+        admissionShedRetryInterval: Duration = CausalGraphAdmissionShedLatch.defaultRetryInterval
     ) {
         self.store = store
         self.materializer = materializer
@@ -625,6 +743,14 @@ public actor RollingCausalGraph {
         self.anchorCallback = anchorCallback
         self.monotonicNow = monotonicNow
         self.persistBatch = persistBatch
+        self.admissionShedLatch = CausalGraphAdmissionShedLatch(
+            retryInterval: admissionShedRetryInterval,
+            now: monotonicNow
+        )
+        self.recentShedAnchorKeys = RecentAnchorDedupCache(
+            capacity: 4096,
+            window: CausalGraphAdmissionShedLatch.seconds(admissionShedRetryInterval)
+        )
     }
 
     private func anchorDedupKey(_ anchor: AnchorTrigger) -> String? {
@@ -660,6 +786,23 @@ public actor RollingCausalGraph {
     private func recordMaterializedAnchor(_ anchor: AnchorTrigger, now: Date) {
         guard let key = anchorDedupKey(anchor) else { return }
         recentAnchorKeys.record(key, at: now)
+    }
+
+    /// Every anchor kind gets a shed key: the behavioural identity where one
+    /// exists, otherwise the anchor entity itself. A refused persistence or
+    /// external anchor is still refused by the same latched store one event
+    /// later, so retrying it per event only produces failed writes.
+    private func anchorShedDedupKey(_ anchor: AnchorTrigger) -> String {
+        anchorDedupKey(anchor) ?? "\(anchor.defaultTitle):\(anchor.anchorEntityId)"
+    }
+
+    private func anchorRecentlyShed(_ anchor: AnchorTrigger, now: Date) -> Bool {
+        recentShedAnchorKeys.contains(anchorShedDedupKey(anchor), at: now)
+    }
+
+    private func recordShedAnchor(_ anchor: AnchorTrigger, now: Date) {
+        recentShedAnchorKeys.record(anchorShedDedupKey(anchor), at: now)
+        anchorShedTotal = Self.saturatingAdd(anchorShedTotal, 1)
     }
 
     // MARK: - Ingestion
@@ -913,9 +1056,24 @@ public actor RollingCausalGraph {
         // novel anchor must be visible synchronously to TraceMaterializer.
         let hasNovelAnchor = anchors.contains {
             !anchorIsDuplicate($0, now: event.timestamp)
+                && !anchorRecentlyShed($0, now: event.timestamp)
         }
         if hasNovelAnchor || shouldFlushPendingBatch {
-            try await flushPending()
+            do {
+                try await flushPending()
+            } catch let error as CausalGraphStorageAdmissionError {
+                // The store refused the forced flush. Repeats of these anchors
+                // inside the retry window must not force another refused write
+                // each; the latch below already sheds ordinary events.
+                if hasNovelAnchor {
+                    for anchor in anchors
+                    where !anchorIsDuplicate(anchor, now: event.timestamp)
+                        && !anchorRecentlyShed(anchor, now: event.timestamp) {
+                        recordShedAnchor(anchor, now: event.timestamp)
+                    }
+                }
+                throw error
+            }
         } else {
             schedulePendingFlushIfNeeded()
         }
@@ -1019,6 +1177,7 @@ public actor RollingCausalGraph {
             try await storeWrite.value
             inFlightStoreWrite = nil
             inFlightFirstEnqueuedAt = nil
+            admissionShedLatch.clear()
             writeBatchesInFlight -= 1
             eventsInFlight -= batch.eventCount
             writeRowsInFlight -= rowCount
@@ -1037,6 +1196,9 @@ public actor RollingCausalGraph {
         } catch {
             inFlightStoreWrite = nil
             inFlightFirstEnqueuedAt = nil
+            if error is CausalGraphStorageAdmissionError {
+                admissionShedLatch.arm()
+            }
             writeBatchesInFlight -= 1
             eventsInFlight -= batch.eventCount
             writeRowsInFlight -= rowCount
@@ -1088,6 +1250,8 @@ public actor RollingCausalGraph {
             writeRowsFailedTotal: writeRowsFailedTotal,
             writeRowsInFlight: writeRowsInFlight,
             coalescedNoopRowsTotal: coalescedNoopRowsTotal,
+            anchorShedTotal: anchorShedTotal,
+            anchorShedDedupSuppressedTotal: anchorShedDedupSuppressedTotal,
             pendingEntityRows: pendingWriteBatch.entities.count,
             pendingEdgeRows: pendingWriteBatch.edges.count,
             oldestOutstandingAgeSeconds: age,
@@ -1111,6 +1275,11 @@ public actor RollingCausalGraph {
         var materialized: [Trace] = []
         for anchor in anchors {
             if anchorIsDuplicate(anchor, now: timestamp) { continue }
+            if anchorRecentlyShed(anchor, now: timestamp) {
+                anchorShedDedupSuppressedTotal = Self.saturatingAdd(
+                    anchorShedDedupSuppressedTotal, 1)
+                continue
+            }
             do {
                 let trace = try await materializer.materialize(
                     anchorEntityId: anchor.anchorEntityId,
@@ -1132,6 +1301,10 @@ public actor RollingCausalGraph {
                 // Expected shed while the central SQLite gate is latched. The
                 // store owns the counter and transition-only operational log;
                 // warning once per normal anchor would become a log flood.
+                // Remember the refusal so the same anchor is not retried by
+                // every following event, and arm the lane-side latch.
+                recordShedAnchor(anchor, now: timestamp)
+                admissionShedLatch.arm()
                 continue
             } catch {
                 logger.error("materialization failed for anchor \(String(describing: anchor), privacy: .public): \(error.localizedDescription, privacy: .public)")
