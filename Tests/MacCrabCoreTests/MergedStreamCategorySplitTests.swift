@@ -39,16 +39,18 @@ struct MergedStreamCategorySplitTests {
         }
     }
 
-    @Test("rare high-value .file signals (credential OPEN, BTM) ride priority, not the flood stream")
-    func credentialOpenAndBTMRidePriority() {
-        // Pre-GA review fix: these are low-volume + persistence/credential-
-        // critical, so a file-WRITE flood must not be able to shed them.
-        #expect(!DaemonState.ridesFileStream(.file, action: "open"),
-                "credential-read OPEN must ride the priority stream")
+    @Test("BTM rides priority; OPEN rides the file stream with the rest of the file flood")
+    func btmRidesPriorityAndOpenRidesFile() {
+        // Pre-GA review fix: BTM is low-volume + persistence-critical, so a
+        // file-WRITE flood must not be able to shed it.
         #expect(!DaemonState.ridesFileStream(.file, action: "btm_add"),
                 "BTM launch-item registration must ride the priority stream")
-        // ...while write-family file noise still rides the file stream.
-        for action in ["write", "create", "rename", "unlink", "close_modified", "setowner", "setmode"] {
+        // v1.22.7: OPEN used to ride priority as a "low-volume credential
+        // read". Since dynamic-AI admission it is a flood source — 47,931
+        // admitted OPENs in one 30 s esbuild burst backlogged the priority
+        // lane to 76,684 and evicted exec/fork/exit (attempt4 capture). It now
+        // rides the file stream like every other file-category action.
+        for action in ["open", "write", "create", "rename", "unlink", "close_modified", "setowner", "setmode"] {
             #expect(DaemonState.ridesFileStream(.file, action: action),
                     "\(action) is file-write flood and must ride the file stream")
         }

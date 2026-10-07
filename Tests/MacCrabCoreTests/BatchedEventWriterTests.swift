@@ -1100,8 +1100,8 @@ struct BatchedEventWriterTests {
         #expect((await store.storageAdmissionSnapshot())?.latchedFailure == nil)
     }
 
-    @Test("file OPEN and BTM events retain priority classification through the real writer")
-    func specialFileActionsPersistOnPriorityLane() async throws {
+    @Test("file OPEN rides the file lane and BTM the priority lane through the real writer")
+    func specialFileActionsPersistOnTheirLanes() async throws {
         let (store, dir) = try tempStore()
         defer { try? FileManager.default.removeItem(at: dir) }
         let writer = BatchedEventWriter(
@@ -1120,7 +1120,9 @@ struct BatchedEventWriterTests {
             eventAction: "btm_add",
             fileAction: .create
         )
-        #expect(EventPipelineLane.finalLane(for: credentialOpen) == .priority)
+        // v1.22.7: OPEN rides the file lane (an admitted dynamic-AI OPEN flood
+        // must not be able to evict lineage from priority); BTM stays priority.
+        #expect(EventPipelineLane.finalLane(for: credentialOpen) == .file)
         #expect(EventPipelineLane.finalLane(for: btmAdd) == .priority)
 
         await writer.enqueue(credentialOpen)
@@ -1128,8 +1130,8 @@ struct BatchedEventWriterTests {
         await writer.shutdown()
 
         let telemetry = await writer.telemetrySnapshot()
-        #expect(telemetry.offeredByLane == ["priority": 2, "file": 0])
-        #expect(telemetry.persistedByLane == ["priority": 2, "file": 0])
+        #expect(telemetry.offeredByLane == ["priority": 1, "file": 1])
+        #expect(telemetry.persistedByLane == ["priority": 1, "file": 1])
         #expect(telemetry.droppedCount == 0)
         let stored = try await store.exactEventsSnapshot(
             since: .distantPast,

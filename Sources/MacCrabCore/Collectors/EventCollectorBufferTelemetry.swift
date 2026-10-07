@@ -15,10 +15,20 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
         }
     }
 
+    /// v1.22.7: `open` now rides the FILE lane. It was kept on the priority
+    /// lane when OPEN was credential-only and low-volume; since the dynamic-AI
+    /// admission (ordinary text reads by an attributed agent process) OPEN is a
+    /// flood source. Measured on the maintainer's host (attempt4 capture):
+    /// 47,931 admitted OPENs in one 30 s esbuild burst backlogged the priority
+    /// lane to 76,684 and evicted exec/fork/exit — the one loss nothing
+    /// downstream can reconstruct. Credential OPENs now share the file lane's
+    /// protection with persistence writes; repeat coalescing on the ES worker
+    /// bounds that lane's flood. BTM registration stays on priority: rare, and
+    /// the only sensor for a ghost login item.
     public static func routesToFile(_ category: EventCategory, action: String) -> Bool {
         guard category == .file else { return false }
         switch action {
-        case "open", "btm_add": return false
+        case "btm_add": return false
         default: return true
         }
     }

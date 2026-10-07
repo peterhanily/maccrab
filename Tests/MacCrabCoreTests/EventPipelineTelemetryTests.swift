@@ -107,10 +107,12 @@ struct EventPipelineTelemetryTests {
         }
         let telemetry = EventCollectorBufferTelemetry(capacity: 2)
         let oldFile = makeEvent(category: .file, action: "write", pid: 1)
-        let priorityOpen = makeEvent(category: .file, action: "open", pid: 2)
+        // v1.22.7: `open` rides the file lane; `btm_add` is the file-category
+        // action that still rides priority.
+        let priorityBTM = makeEvent(category: .file, action: "btm_add", pid: 2)
         let newFile = makeEvent(category: .file, action: "rename", pid: 3)
 
-        for event in [oldFile, priorityOpen, newFile] {
+        for event in [oldFile, priorityBTM, newFile] {
             let result = continuation.yield(event)
             telemetry.recordYield(offered: event, result: result)
         }
