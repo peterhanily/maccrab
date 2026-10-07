@@ -16,10 +16,14 @@ BUILD_ID=""
 RELEASE_NOTES_MD=""
 IMMEDIATE="${MACCRAB_APPCAST_IMMEDIATE:-0}"
 PHASED_INTERVAL="${MACCRAB_PHASED_ROLLOUT_INTERVAL:-86400}"
+# Sparkle 2 critical marker: users below this version cannot skip the update
+# and see it at once. Empty means an ordinary update.
+CRITICAL_BELOW="${MACCRAB_CRITICAL_BELOW:-}"
 
 usage() {
     echo "usage: $0 --dmg MacCrab-vX.dmg --version X --build-number MAJOR.MINOR.PATCH.N" >&2
     echo "          [--release-notes-md FILE] [--phased-rollout-interval N|--immediate]" >&2
+    echo "          [--critical-below MAJOR.MINOR.PATCH]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -29,6 +33,7 @@ while [[ $# -gt 0 ]]; do
         --build-number) [[ $# -ge 2 ]] || { usage; exit 2; }; BUILD_ID="$2"; shift 2 ;;
         --release-notes-md) [[ $# -ge 2 ]] || { usage; exit 2; }; RELEASE_NOTES_MD="$2"; shift 2 ;;
         --phased-rollout-interval) [[ $# -ge 2 ]] || { usage; exit 2; }; PHASED_INTERVAL="$2"; shift 2 ;;
+        --critical-below) [[ $# -ge 2 ]] || { usage; exit 2; }; CRITICAL_BELOW="$2"; shift 2 ;;
         --immediate|--critical) IMMEDIATE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         # There is intentionally no --sparkle-bin override. An override turns
@@ -148,6 +153,12 @@ if [[ "$IMMEDIATE" == "1" ]]; then
 else
     GEN_ARGS+=(--phased-interval "$PHASED_INTERVAL")
     echo "  Appcast rollout: PHASED — ${PHASED_INTERVAL}s per group" >&2
+fi
+if [[ -n "$CRITICAL_BELOW" ]]; then
+    if ! [[ "$CRITICAL_BELOW" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "--critical-below must be MAJOR.MINOR.PATCH" >&2; exit 2
+    fi
+    GEN_ARGS+=(--critical-below "$CRITICAL_BELOW")
 fi
 
 # Generation includes CDATA splitting and a namespace-wrapped XML parse. Only a
