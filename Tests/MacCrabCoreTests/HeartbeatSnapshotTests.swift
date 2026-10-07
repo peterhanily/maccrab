@@ -744,6 +744,31 @@ struct HeartbeatSnapshotTests {
         #expect(never.traceGraphStorageAdmission?.footprintLatchLastClearedAtUnix == nil)
     }
 
+    @Test("Sensor-degraded since-time and loss fraction decode as optional fields")
+    func sensorDegradedStateFieldsDecode() throws {
+        let h = try decode("""
+        {"es_sensor_degraded":true,"es_sensor_degraded_severity":"high",
+         "es_sensor_degraded_since_unix":1790000030.0,
+         "es_sensor_loss_fraction_tick":0.125}
+        """)
+        #expect(h.esSensorDegraded == true)
+        #expect(h.esSensorDegradedSinceUnix == 1_790_000_030.0)
+        #expect(h.esSensorLossFractionTick == 0.125)
+
+        // Not degraded (key omitted) or an older engine: absent, never a
+        // fabricated zero.
+        let closed = try decode("""
+        {"es_sensor_degraded":false,"es_sensor_loss_fraction_tick":0}
+        """)
+        #expect(closed.esSensorDegradedSinceUnix == nil)
+        #expect(closed.esSensorLossFractionTick == 0)
+        let older = try decode("""
+        {"es_sensor_degraded":false}
+        """)
+        #expect(older.esSensorDegradedSinceUnix == nil)
+        #expect(older.esSensorLossFractionTick == nil)
+    }
+
     @Test("Active TraceGraph admission cannot hide a failed conserving batch")
     func traceGraphFailedBatchHealth() throws {
         let h = try decode("""

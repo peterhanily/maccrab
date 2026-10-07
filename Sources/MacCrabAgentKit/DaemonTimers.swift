@@ -89,6 +89,13 @@ enum SensorDegradationEvaluator {
     /// Sliding-window size (ticks) for the elevated-loss shift register. 4 × 30 s
     /// ≈ 2 min. Must be ≤ 8 (UInt8 mask).
     static let sustainedLossWindow: UInt8 = 4
+    /// v1.22.7: the degraded STATE that the heartbeat publishes as
+    /// `es_sensor_degraded` (distinct from the rising-edge meta-alert) clears
+    /// only after this many CONSECUTIVE ticks with neither latch active:
+    /// 2 × 30 s = 60 s of clean telemetry. Before v1.22.7 the heartbeat
+    /// reported the edge itself, so a sustained-loss episode read `true` for
+    /// exactly one tick and `false` for the rest of it.
+    static let stateClearCleanTicks = 2
 
     /// Rolling baseline carried tick-to-tick. `degradedActive` is the latch
     /// that makes a sustained flood fire exactly once (rising-edge only).
@@ -113,6 +120,19 @@ enum SensorDegradationEvaluator {
         /// evade by keeping a *consecutive* counter from ever advancing — the
         /// windowed count still accumulates (rc.4-verify evasion fix).
         var recentElevatedMask: UInt8 = 0
+        /// v1.22.7: level-triggered degraded STATE. Raised on any tick where
+        /// either latch above is active and held through `stateClearCleanTicks`
+        /// consecutive clean ticks before it clears. This is what the heartbeat
+        /// publishes as `es_sensor_degraded`; the latches alone still gate the
+        /// meta-alert, so alert volume is unchanged.
+        var stateActive: Bool = false
+        /// Consecutive ticks with neither latch active while `stateActive`.
+        var cleanTicks: Int = 0
+        /// Branch and severity of the fire that opened (or last renewed) the
+        /// current state, held while it is active so every tick's heartbeat can
+        /// describe the episode rather than only the tick it fired on.
+        var activeReason: Reason? = nil
+        var activeSeverity: Severity? = nil
     }
 
     /// Per-tick inputs, all derived from the D1/D4 monotonic counters' deltas.
@@ -133,12 +153,26 @@ enum SensorDegradationEvaluator {
         /// queue or the collector's AsyncStream buffer overflows. Those are the
         /// dominant coverage-loss signal now, so D2 must gate on them too, not
         /// just `kernelDropDelta` (else a real flood degrades the sensor
-        /// silently). NOT the merged-stream `events_dropped` — that is a
-        /// downstream consumer stage, deliberately kept out of the ES-sensor
-        /// verdict.
+        /// silently). Since v1.21.4 (audit) the merged-lane evictions are part
+        /// of the verdict too; v1.22.7 carries them separately in
+        /// `laneDropDelta` so the detail text can name the stage.
         var collectorDropDelta: UInt64
         /// The dominant high-I/O writer this window is a known-benign signer.
         var benignHighIOSigner: Bool
+        /// v1.22.7: losses at the merged detection lanes this tick (priority +
+        /// file AsyncStream evictions and terminated yields). These used to be
+        /// folded into `collectorDropDelta`; they still count toward the
+        /// conjunction and the loss fraction exactly as before. Defaults to 0
+        /// for ES-stage-only inputs.
+        var laneDropDelta: UInt64 = 0
+        /// v1.22.7: the loss-fraction denominator — everything the sensor
+        /// should have delivered this tick: the ES collector's offers into its
+        /// own stream plus every loss before that offer (kernel drops + copy
+        /// backpressure). nil derives the pre-v1.22.7 denominator (processed
+        /// file + process events + drops), which counted only eight event types
+        /// against losses from all of them and so inflated the fraction under a
+        /// NOTIFY_SIGNAL- or NOTIFY_OPEN-heavy flood.
+        var offeredThisTick: Double? = nil
     }
 
     enum Outcome: Equatable {
@@ -172,12 +206,35 @@ enum SensorDegradationEvaluator {
         var processBaseline: Double
         var kernelDropDelta: UInt64
         var collectorDropDelta: UInt64
+        var laneDropDelta: UInt64 = 0
+        /// v1.22.7: the denominator and per-tick loss fraction the sustained-
+        /// loss branch judged (published as `es_sensor_loss_fraction_tick`).
+        var offered: Double = 0
+        var lossFraction: Double = 0
+        /// v1.22.7: the level-triggered state after this tick
+        /// (`Baseline.stateActive`), with the episode's branch and severity
+        /// while it is active.
+        var degradedState: Bool = false
+        var activeReason: Reason? = nil
+        var activeSeverity: Severity? = nil
+        /// When the current state opened. Stamped by `SensorDegradationState`
+        /// (the pure evaluator has no clock); nil while not degraded.
+        var degradedSince: Date? = nil
     }
 
     /// Pure evaluation: given this tick's inputs and the prior baseline,
     /// decide whether the sensor is degraded and return the advanced baseline.
     static func evaluate(input: Input, baseline: Baseline) -> Result {
         var b = baseline
+        // #12 / v1.22.7: every loss stage counts. `offered` = everything the
+        // sensor SHOULD have delivered this tick; see `Input.offeredThisTick`
+        // for why the caller supplies it rather than deriving it from the eight
+        // processed file/process types.
+        let dropped = Double(input.kernelDropDelta) + Double(input.collectorDropDelta)
+            + Double(input.laneDropDelta)
+        let offered = input.offeredThisTick
+            ?? (input.fileEventsThisTick + input.processEventsThisTick + dropped)
+        let dropFraction = offered > 0 ? min(1, dropped / offered) : 0
 
         // First observation: seed the baseline; a spike needs history.
         guard b.seeded else {
@@ -190,7 +247,9 @@ enum SensorDegradationEvaluator {
                 fileRate: input.fileEventsThisTick, fileBaseline: input.fileEventsThisTick,
                 processRate: input.processEventsThisTick, processBaseline: input.processEventsThisTick,
                 kernelDropDelta: input.kernelDropDelta,
-                collectorDropDelta: input.collectorDropDelta
+                collectorDropDelta: input.collectorDropDelta,
+                laneDropDelta: input.laneDropDelta,
+                offered: offered, lossFraction: dropFraction
             )
         }
 
@@ -206,17 +265,14 @@ enum SensorDegradationEvaluator {
         // kernelDropDelta to ~0); without it the meta-alert never fires on a
         // real flood.
         let conjunction = spike
-            && (input.kernelDropDelta > 0 || input.collectorDropDelta > 0 || processCollapse)
+            && (input.kernelDropDelta > 0 || input.collectorDropDelta > 0
+                || input.laneDropDelta > 0 || processCollapse)
 
-        // #12: spike-independent sustained-loss signal. `offered` = events the
-        // sensor SHOULD have processed this tick = processed (file + exec) + lost
-        // (kernel + collector drops). A high loss fraction over a meaningful
-        // volume means the sensor is degraded even if the absolute rate never
-        // crossed the spike multiplier (the gradual-ramp / already-busy-host
-        // evasion). Requires the volume floor so an idle box can't trip it.
-        let dropped = Double(input.kernelDropDelta) + Double(input.collectorDropDelta)
-        let offered = input.fileEventsThisTick + input.processEventsThisTick + dropped
-        let dropFraction = offered > 0 ? dropped / offered : 0
+        // #12: spike-independent sustained-loss signal. A high loss fraction
+        // (lost / offered, computed above) over a meaningful volume means the
+        // sensor is degraded even if the absolute rate never crossed the spike
+        // multiplier (the gradual-ramp / already-busy-host evasion). Requires
+        // the volume floor so an idle box can't trip it.
         let lossElevated = offered >= minOfferedForLossFraction
             && dropFraction >= sustainedDropFraction
         // Slide the elevated-loss window: shift in this tick's bit, keep the low
@@ -249,6 +305,27 @@ enum SensorDegradationEvaluator {
         if !spike { b.degradedActive = false }
         if !sustainedLoss { b.sustainedLossActive = false }
 
+        // v1.22.7: advance the level-triggered state from the latches. A fire
+        // records the episode's branch + severity; any tick with a latch active
+        // keeps the state up and resets the clean-tick count; only
+        // `stateClearCleanTicks` consecutive clean ticks clear it.
+        if case let .degraded(severity, _) = outcome {
+            b.activeReason = reason
+            b.activeSeverity = severity
+        }
+        if b.degradedActive || b.sustainedLossActive {
+            b.stateActive = true
+            b.cleanTicks = 0
+        } else if b.stateActive {
+            b.cleanTicks += 1
+            if b.cleanTicks >= stateClearCleanTicks {
+                b.stateActive = false
+                b.cleanTicks = 0
+                b.activeReason = nil
+                b.activeSeverity = nil
+            }
+        }
+
         // Don't learn from anomalies: freeze the baseline while spiking so a
         // flood can't poison it (which would blind the next episode).
         if !spike {
@@ -269,7 +346,12 @@ enum SensorDegradationEvaluator {
             fileRate: input.fileEventsThisTick, fileBaseline: baseline.fileEventEwma,
             processRate: input.processEventsThisTick, processBaseline: baseline.processEventEwma,
             kernelDropDelta: input.kernelDropDelta,
-            collectorDropDelta: input.collectorDropDelta
+            collectorDropDelta: input.collectorDropDelta,
+            laneDropDelta: input.laneDropDelta,
+            offered: offered, lossFraction: dropFraction,
+            degradedState: b.stateActive,
+            activeReason: b.activeReason,
+            activeSeverity: b.activeSeverity
         )
     }
 }
@@ -985,18 +1067,29 @@ final class SensorDegradationState: @unchecked Sendable {
     private var lastProcessCumulative: UInt64 = 0
     private var lastKernelDropCumulative: UInt64 = 0
     private var lastCollectorDropCumulative: UInt64 = 0
+    private var lastLaneDropCumulative: UInt64 = 0
+    private var lastOfferedCumulative: UInt64 = 0
     private var haveLastCumulative = false
+    /// v1.22.7: when the current degraded state opened; stamped once on the
+    /// tick the state rises, held through the episode, cleared with the state.
+    private var degradedSince: Date?
 
     /// Fold this tick's CUMULATIVE counters (monotonic since the last ES
     /// client (re)create) into per-tick deltas, then evaluate. A client
     /// reconnect resets the kernel counters to a lower value; a negative delta
     /// is clamped to 0 so a restart isn't miscounted as a giant burst.
+    /// `laneDropCumulative` carries the merged-lane stage and
+    /// `offeredCumulative` the loss-fraction denominator (see
+    /// `Input.offeredThisTick`); both default for ES-stage-only callers.
     func step(
         fileCumulative: UInt64,
         processCumulative: UInt64,
         kernelDropCumulative: UInt64,
         collectorDropCumulative: UInt64,
-        benignHighIOSigner: Bool
+        benignHighIOSigner: Bool,
+        laneDropCumulative: UInt64 = 0,
+        offeredCumulative: UInt64? = nil,
+        now: Date = Date()
     ) -> SensorDegradationEvaluator.Result {
         lock.lock(); defer { lock.unlock() }
 
@@ -1009,6 +1102,8 @@ final class SensorDegradationState: @unchecked Sendable {
             lastProcessCumulative = processCumulative
             lastKernelDropCumulative = kernelDropCumulative
             lastCollectorDropCumulative = collectorDropCumulative
+            lastLaneDropCumulative = laneDropCumulative
+            lastOfferedCumulative = offeredCumulative ?? 0
             haveLastCumulative = true
             return SensorDegradationEvaluator.Result(
                 outcome: .noAlert, newBaseline: baseline,
@@ -1022,21 +1117,36 @@ final class SensorDegradationState: @unchecked Sendable {
         let processDelta = delta(processCumulative, lastProcessCumulative)
         let dropDelta = delta(kernelDropCumulative, lastKernelDropCumulative)
         let collectorDropDelta = delta(collectorDropCumulative, lastCollectorDropCumulative)
+        let laneDropDelta = delta(laneDropCumulative, lastLaneDropCumulative)
+        let offeredDelta = offeredCumulative.map { delta($0, lastOfferedCumulative) }
 
         lastFileCumulative = fileCumulative
         lastProcessCumulative = processCumulative
         lastKernelDropCumulative = kernelDropCumulative
         lastCollectorDropCumulative = collectorDropCumulative
+        lastLaneDropCumulative = laneDropCumulative
+        lastOfferedCumulative = offeredCumulative ?? 0
 
         let input = SensorDegradationEvaluator.Input(
             fileEventsThisTick: Double(fileDelta),
             processEventsThisTick: Double(processDelta),
             kernelDropDelta: dropDelta,
             collectorDropDelta: collectorDropDelta,
-            benignHighIOSigner: benignHighIOSigner
+            benignHighIOSigner: benignHighIOSigner,
+            laneDropDelta: laneDropDelta,
+            // An unapplied `Double.init` here resolves to `init(bitPattern:)`
+            // (labels are not part of the function type) and turns 10_000
+            // into a denormal; spell the conversion out.
+            offeredThisTick: offeredDelta.map { Double($0) }
         )
-        let result = SensorDegradationEvaluator.evaluate(input: input, baseline: baseline)
+        var result = SensorDegradationEvaluator.evaluate(input: input, baseline: baseline)
         baseline = result.newBaseline
+        if result.degradedState {
+            if degradedSince == nil { degradedSince = now }
+        } else {
+            degradedSince = nil
+        }
+        result.degradedSince = degradedSince
         return result
     }
 }
@@ -3775,62 +3885,79 @@ enum DaemonTimers {
             // MacCrab)? Bounded query (off the hot path, 30 s cadence). Only
             // downgrades severity — never silences the alert.
             let benignHighIOSigner = await Self.dominantFileWriterIsBenign(state: state)
+            // Stage-separated loss accounting for the ES source. The
+            // ES-collector stage (Phase-3 worker-queue copy backpressure,
+            // Phase-4/collector AsyncStream eviction, terminated yields) is
+            // what a real flood produces after the retain-worker + client
+            // split, so D2 gates on it, not just kernel drops. The merged
+            // detection lanes (priority + file AsyncStream, drained by the two
+            // consumers — the stage of the original 400k-drop incident and of
+            // the 96.8% of loss measured in v1.22.6) were folded into the
+            // same number since v1.21.4 (audit); v1.22.7 carries them
+            // separately so the detail text can name the stage. Both still
+            // count toward the conjunction and the loss fraction. The
+            // denominator is everything the sensor should have delivered —
+            // the collector's offers into its own stream plus every loss
+            // before that offer — instead of the eight processed file/process
+            // types alone, which inflated the fraction under a NOTIFY_SIGNAL
+            // or NOTIFY_OPEN flood whose processed events it never counted.
+            let esSource = EventPipelineSource.endpointSecurity.key
+            func esLaneSum(_ map: [String: [String: UInt64]]) -> UInt64 {
+                map[esSource]?.values.reduce(UInt64(0), addSaturating) ?? 0
+            }
+            let esCollectorStageDropped = [
+                esCopyBackpressureDropped,
+                esStreamYieldDropped,
+                esLaneSum(eventPipeline.upstreamTerminatedBySourceAndLane),
+            ].reduce(UInt64(0), addSaturating)
+            let esLaneStageDropped = addSaturating(
+                esLaneSum(eventPipeline.mergedDroppedBySourceAndLane),
+                esLaneSum(eventPipeline.mergedTerminatedBySourceAndLane)
+            )
+            let esSensorOffered = [
+                esGlobalDropped,
+                esCopyBackpressureDropped,
+                esLaneSum(eventPipeline.collectorOfferedBySourceAndLane),
+            ].reduce(UInt64(0), addSaturating)
             let sensorResult = sensorDegradation.step(
                 fileCumulative: fileEventsCumulative,
                 processCumulative: processEventsCumulative,
                 kernelDropCumulative: esGlobalDropped,
-                // ES-collector-stage userspace drops (Phase-3 worker queue +
-                // Phase-4/collector AsyncStream). These, not kernel drops, are
-                // what a real flood produces after the retain-worker + client
-                // split — so D2 gates on them too (see Input.collectorDropDelta).
-                // v1.21.4 (audit): include the DOWNSTREAM merged-stream evictions
-                // (priority + file AsyncStream, drained by the two consumers) in
-                // D2's coverage-loss signal — that is the exact stage of the
-                // original 400k-drop incident, and it was previously invisible to
-                // the sensor-degraded conjunction (only the ES copy/kernel stage
-                // was folded in). These are already in `events_dropped`; D2 now
-                // sees them too so it fires when enrichment/detection is the
-                // bottleneck, not just the ES stage.
-                collectorDropCumulative: {
-                    let source = EventPipelineSource.endpointSecurity.key
-                    let upstreamTerminated = eventPipeline
-                        .upstreamTerminatedBySourceAndLane[source]?
-                        .values.reduce(UInt64(0), addSaturating) ?? 0
-                    let mergedDropped = eventPipeline
-                        .mergedDroppedBySourceAndLane[source]?
-                        .values.reduce(UInt64(0), addSaturating) ?? 0
-                    let mergedTerminated = eventPipeline
-                        .mergedTerminatedBySourceAndLane[source]?
-                        .values.reduce(UInt64(0), addSaturating) ?? 0
-                    return [
-                        esCopyBackpressureDropped,
-                        esStreamYieldDropped,
-                        upstreamTerminated,
-                        mergedDropped,
-                        mergedTerminated,
-                    ].reduce(UInt64(0), addSaturating)
-                }(),
-                benignHighIOSigner: benignHighIOSigner
+                collectorDropCumulative: esCollectorStageDropped,
+                benignHighIOSigner: benignHighIOSigner,
+                laneDropCumulative: esLaneStageDropped,
+                offeredCumulative: esSensorOffered,
+                now: Date(timeIntervalSince1970: nowUnix)
             )
-            var esSensorDegraded = false
+            // v1.22.7: `es_sensor_degraded` is the level-triggered STATE (held
+            // while either latch is active and through
+            // `stateClearCleanTicks` clean ticks), not the one-tick rising
+            // edge; the meta-alert below stays edge-triggered exactly as
+            // before, so alert volume does not change.
+            let esSensorDegraded = sensorResult.degradedState
             var esSensorDegradedSeverity = ""
             var esSensorDegradedDetail = ""
-            if case let .degraded(severity, benignAttribution) = sensorResult.outcome {
-                esSensorDegraded = true
+            if esSensorDegraded, let severity = sensorResult.activeSeverity {
                 esSensorDegradedSeverity = severity.rawValue
-                let attribution = benignAttribution ? " (benign attribution)" : ""
+                let attribution = severity == .low ? " (benign attribution)" : ""
                 // Plain interpolation (no String(format:) — avoids the CVarArg
                 // %@/%llu pitfalls this codebase has been bitten by).
-                // Describe the branch that ACTUALLY fired. The previous single
-                // template asserted a file spike AND an exec-channel collapse
-                // unconditionally, so a sustained-loss fire reported exec
-                // throughput as having "fallen" when it had risen — and told the
-                // operator an attacker was suppressing telemetry when the real
-                // condition was the userspace worker shedding load.
+                // Name every stage so the operator can see WHERE this tick's
+                // loss is: the kernel queue, the ES-collector stage, or the
+                // merged detection lanes.
+                let lossPercent = Int((sensorResult.lossFraction * 100).rounded())
                 let dropped = "\(sensorResult.kernelDropDelta) kernel-dropped, "
-                    + "\(sensorResult.collectorDropDelta) dropped at the collector or pipeline stage "
-                    + "(backpressure, stream-yield or merged-stream eviction)"
-                switch sensorResult.reason {
+                    + "\(sensorResult.collectorDropDelta) dropped at the ES-collector stage "
+                    + "(copy backpressure, collector-stream eviction, terminated yields), "
+                    + "\(sensorResult.laneDropDelta) evicted at the merged detection lanes, "
+                    + "of \(Int(sensorResult.offered)) offered (\(lossPercent)% loss)"
+                // Describe the branch that opened the episode. The previous
+                // single template asserted a file spike AND an exec-channel
+                // collapse unconditionally, so a sustained-loss fire reported
+                // exec throughput as having "fallen" when it had risen — and
+                // told the operator an attacker was suppressing telemetry when
+                // the real condition was the userspace worker shedding load.
+                switch sensorResult.activeReason {
                 case .sustainedLoss:
                     esSensorDegradedDetail =
                         "ES sensor degraded\(attribution) — sustained event loss without a rate spike: \(dropped) this tick. File rate \(Int(sensorResult.fileRate))/tick (baseline \(Int(sensorResult.fileBaseline))), process/exec \(Int(sensorResult.processRate))/tick (baseline \(Int(sensorResult.processBaseline))). A chronic loss fraction can indicate telemetry-drop evasion, but it is equally consistent with the sensor being unable to keep up — check load before concluding evasion."
@@ -3839,6 +3966,8 @@ enum DaemonTimers {
                     esSensorDegradedDetail =
                         "ES sensor degraded\(attribution) — file-event rate \(Int(sensorResult.fileRate))/tick spiked above baseline \(Int(sensorResult.fileBaseline)) while \(dropped), and process/exec throughput \(execVerb) to \(Int(sensorResult.processRate))/tick (baseline \(Int(sensorResult.processBaseline))). Possible telemetry-drop evasion; verify what is generating the file storm."
                 }
+            }
+            if case let .degraded(severity, _) = sensorResult.outcome {
                 let alert = Alert(
                     ruleId: "maccrab.self-defense.\(ESClientMonitor.ESHealthEvent.EventType.sensorDegraded.rawValue)",
                     ruleTitle: "Sensor Degraded: possible telemetry-drop evasion",
@@ -4683,6 +4812,12 @@ enum DaemonTimers {
                 "es_sensor_degraded": esSensorDegraded,
                 "es_sensor_degraded_severity": esSensorDegradedSeverity,
                 "es_sensor_degraded_detail": esSensorDegradedDetail,
+                // v1.22.7: the per-tick loss fraction the evaluator judged
+                // (lost / offered across the kernel, ES-collector and
+                // merged-lane stages; 0 until the second tick has a delta).
+                // `es_sensor_degraded_since_unix` is added below only while
+                // the state is open.
+                "es_sensor_loss_fraction_tick": sensorResult.lossFraction,
                 // Wave 9D additions. `last_event_insert_error_kind` is
                 // an empty string when no event-insert error has been
                 // recorded since boot — JSONSerialization can't carry
@@ -4824,6 +4959,11 @@ enum DaemonTimers {
             ]
             if let payloadPoisonTotal {
                 payload["payload_truncated_total"] = payloadPoisonTotal
+            }
+            // v1.22.7: omitted (not null) while no degraded episode is open, so
+            // consumers can read absence as "not degraded".
+            if let degradedSince = sensorResult.degradedSince {
+                payload["es_sensor_degraded_since_unix"] = degradedSince.timeIntervalSince1970
             }
             if eventTypeCountSnapshot?.isComplete == true {
                 // Backward-compatible alias only when the label is literally

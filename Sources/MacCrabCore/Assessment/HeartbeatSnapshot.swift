@@ -219,6 +219,13 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     public let esSensorDegraded: Bool?
     public let esSensorDegradedDetail: String?
     public let esSensorDegradedSeverity: String?
+    /// v1.22.7: when the current degraded state opened (engine clock). Absent
+    /// while not degraded and from older engines — never a fabricated zero.
+    public let esSensorDegradedSinceUnix: Double?
+    /// v1.22.7: the per-tick loss fraction (lost / offered across the kernel,
+    /// ES-collector and merged-lane stages) the evaluator judged on the tick
+    /// that wrote this heartbeat. nil from older engines.
+    public let esSensorLossFractionTick: Double?
     public let esClientSplitDegraded: Bool?
 
     // MARK: Self-defense
@@ -315,6 +322,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case esSensorDegraded = "es_sensor_degraded"
         case esSensorDegradedDetail = "es_sensor_degraded_detail"
         case esSensorDegradedSeverity = "es_sensor_degraded_severity"
+        case esSensorDegradedSinceUnix = "es_sensor_degraded_since_unix"
+        case esSensorLossFractionTick = "es_sensor_loss_fraction_tick"
         case esClientSplitDegraded = "es_client_split_degraded"
         case dbTamperDecryptFailures = "db_tamper_decrypt_failures"
         case fdaCheckedAtUnix = "fda_checked_at_unix"
