@@ -1460,7 +1460,8 @@ enum EventLoop {
                 let responseEngine = state.responseEngine
                 let behaviorWarmingUp = state.isWarmingUp
                 let detachedEvent = enrichedEvent
-                await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
+                stageStartedNanos = DispatchTime.now().uptimeNanoseconds
+                let notarizationAdmission = await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
                     label: "notarization-check"
                 ) {
                     let notarResult = await notarizationChecker.check(binaryPath: execPath)
@@ -1542,6 +1543,11 @@ enum EventLoop {
                             }
                         }
                     }
+                }
+                // Charged only when the detection plane was saturated and the
+                // spctl assessment ran on this lane; a plain submit is `other`.
+                if notarizationAdmission == .ranInlineOnOverload {
+                    stageAwaits.record(.derivedWorkInline, startedAt: stageStartedNanos)
                 }
             }
 
@@ -2563,6 +2569,7 @@ enum EventLoop {
                     state: state
                 )
                 stageAwaits.record(.settlement, startedAt: stageStartedNanos)
+                stageStartedNanos = DispatchTime.now().uptimeNanoseconds
                 enrichedEvent = await EventJournalAdmissionContext
                     .withTerminalRevision(terminalAdmission) {
                         await dispatchReviewedMatches(
@@ -2570,11 +2577,13 @@ enum EventLoop {
                             reviewed: reviewedDispatch
                         )
                     }
+                stageAwaits.record(.matchDispatch, startedAt: stageStartedNanos)
             }
 
             // Replay cannot overtake the initial evaluation. Publish the final
             // synchronous event revision now, apply any terminal patches that
             // won the two-lane race, then drain work completed during this event.
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             if hasPendingHeavyEnrichment {
                 await DeferredEnrichmentDispatcher.markReadyAndDispatch(
                     event: enrichedEvent,
@@ -2586,6 +2595,7 @@ enum EventLoop {
                 )
             }
             await DeferredEnrichmentDispatcher.drainAvailable(state: state)
+            stageAwaits.record(.deferredEnrichmentDrain, startedAt: stageStartedNanos)
 
             // Establish the lexical lifetime after every terminal/deferred path.
             // Merely assigning the lease above would allow ARC to release it at

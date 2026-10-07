@@ -12,10 +12,19 @@ enum EventPipelineStage: Int, CaseIterable, Sendable {
     case enrichmentReservation
     case enricher
     case journalBaseAdmission
+    /// Derived work the saturated detection plane ran on the lane itself
+    /// (the `spctl` notarization assessment); zero when it was submitted.
+    case derivedWorkInline
     case rules
     case sequences
     case settlement
+    /// `dispatchReviewedMatches`: alert-sink submits, response actions and
+    /// campaign updates for this event's rule and sequence matches.
+    case matchDispatch
     case traceGraphHandoff
+    /// Terminal heavy-enrichment publication plus the inline drain of
+    /// deferred results completed during this event.
+    case deferredEnrichmentDrain
     case other
 
     var key: String {
@@ -24,10 +33,13 @@ enum EventPipelineStage: Int, CaseIterable, Sendable {
         case .enrichmentReservation: return "enrichment_reservation"
         case .enricher: return "enricher"
         case .journalBaseAdmission: return "journal_base_admission"
+        case .derivedWorkInline: return "derived_work_inline"
         case .rules: return "rules"
         case .sequences: return "sequences"
         case .settlement: return "settlement"
+        case .matchDispatch: return "match_dispatch"
         case .traceGraphHandoff: return "tracegraph_handoff"
+        case .deferredEnrichmentDrain: return "deferred_enrichment_drain"
         case .other: return "other"
         }
     }
@@ -41,10 +53,13 @@ struct EventPipelineStageAwaits: Sendable, Equatable {
     private var enrichmentReservation: UInt64 = 0
     private var enricher: UInt64 = 0
     private var journalBaseAdmission: UInt64 = 0
+    private var derivedWorkInline: UInt64 = 0
     private var rules: UInt64 = 0
     private var sequences: UInt64 = 0
     private var settlement: UInt64 = 0
+    private var matchDispatch: UInt64 = 0
     private var traceGraphHandoff: UInt64 = 0
+    private var deferredEnrichmentDrain: UInt64 = 0
 
     init() {}
 
@@ -61,10 +76,13 @@ struct EventPipelineStageAwaits: Sendable, Equatable {
         case .enrichmentReservation: Self.addSaturating(&enrichmentReservation, nanos)
         case .enricher: Self.addSaturating(&enricher, nanos)
         case .journalBaseAdmission: Self.addSaturating(&journalBaseAdmission, nanos)
+        case .derivedWorkInline: Self.addSaturating(&derivedWorkInline, nanos)
         case .rules: Self.addSaturating(&rules, nanos)
         case .sequences: Self.addSaturating(&sequences, nanos)
         case .settlement: Self.addSaturating(&settlement, nanos)
+        case .matchDispatch: Self.addSaturating(&matchDispatch, nanos)
         case .traceGraphHandoff: Self.addSaturating(&traceGraphHandoff, nanos)
+        case .deferredEnrichmentDrain: Self.addSaturating(&deferredEnrichmentDrain, nanos)
         case .other: break
         }
     }
@@ -75,10 +93,13 @@ struct EventPipelineStageAwaits: Sendable, Equatable {
         case .enrichmentReservation: return enrichmentReservation
         case .enricher: return enricher
         case .journalBaseAdmission: return journalBaseAdmission
+        case .derivedWorkInline: return derivedWorkInline
         case .rules: return rules
         case .sequences: return sequences
         case .settlement: return settlement
+        case .matchDispatch: return matchDispatch
         case .traceGraphHandoff: return traceGraphHandoff
+        case .deferredEnrichmentDrain: return deferredEnrichmentDrain
         case .other: return 0
         }
     }
