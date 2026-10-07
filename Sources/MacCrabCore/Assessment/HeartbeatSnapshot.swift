@@ -1595,6 +1595,21 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let writeFailureRecent: Bool?
         public let writeLastFailureAtUnix: Double?
 
+        // v1.22.7: the bounded lane → TraceGraph hand-off queue in front of
+        // the rolling writer. An event lost here (evicted, offered after the
+        // queue finished, shed by the armed admission latch, or unmappable on
+        // the service side) never entered the ledger above, so it is judged
+        // separately, with the producer's own recency verdict.
+        public let ingestQueueDroppedTotal: Int64?
+        public let ingestQueueTerminatedTotal: Int64?
+        public let ingestLatchedShedTotal: Int64?
+        public let ingestQueueRejectedTotal: Int64?
+        public let ingestQueueLossTotal: Int64?
+        public let ingestQueueBacklog: Int?
+        public let ingestQueueInFlight: Int?
+        public let ingestQueueLossRecent: Bool?
+        public let ingestQueueLossLastAtUnix: Double?
+
         private enum CodingKeys: String, CodingKey {
             case enabled
             case acceptingMutations = "accepting_mutations"
@@ -1668,6 +1683,15 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case oldestOutstandingAgeSeconds = "oldest_outstanding_age_seconds"
             case writeFailureRecent = "write_failure_recent"
             case writeLastFailureAtUnix = "write_last_failure_at_unix"
+            case ingestQueueDroppedTotal = "ingest_queue_dropped_total"
+            case ingestQueueTerminatedTotal = "ingest_queue_terminated_total"
+            case ingestLatchedShedTotal = "ingest_latched_shed_total"
+            case ingestQueueRejectedTotal = "ingest_queue_rejected_total"
+            case ingestQueueLossTotal = "ingest_queue_loss_total"
+            case ingestQueueBacklog = "ingest_queue_backlog"
+            case ingestQueueInFlight = "ingest_queue_in_flight"
+            case ingestQueueLossRecent = "ingest_queue_loss_recent"
+            case ingestQueueLossLastAtUnix = "ingest_queue_loss_last_at_unix"
         }
 
         /// input = committed + failed + in-flight + pending.
@@ -1940,6 +1964,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             guard writeTelemetryPresent else { return false }
             return !writeTelemetryComplete
                 || hasCurrentWriteFailure
+                || hasCurrentIngestQueueLoss
                 || hasOutstandingBacklog != false
                 || writeConservationMaintained != true
         }
@@ -1951,6 +1976,20 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public var hasCurrentWriteFailure: Bool {
             if let writeFailureRecent { return writeFailureRecent }
             return hasStickyWriteFailure != false
+        }
+
+        /// Loss at the lane hand-off queue, judged like a write failure: the
+        /// producer's recency verdict wins, lifetime totals stay sticky
+        /// without one, and a producer that predates the queue reports none.
+        public var hasCurrentIngestQueueLoss: Bool {
+            if let ingestQueueLossRecent { return ingestQueueLossRecent }
+            return Self.anyPositive([
+                ingestQueueLossTotal,
+                ingestQueueDroppedTotal,
+                ingestQueueTerminatedTotal,
+                ingestLatchedShedTotal,
+                ingestQueueRejectedTotal,
+            ]) == true
         }
 
         private static func anyPositive(_ values: [Int64?]) -> Bool? {

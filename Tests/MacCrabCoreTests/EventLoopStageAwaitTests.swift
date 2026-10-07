@@ -98,6 +98,15 @@ struct EventLoopStageAwaitTests {
         }
         #expect(!eventLoop.contains("await bridge.process(enrichedEvent)"),
                 "the lane must not await TraceGraph ingestion inline")
+        // Inline derived work is charged only when the detection plane was
+        // saturated and the work actually ran on the lane.
+        #expect(eventLoop.contains("if notarizationAdmission == .ranInlineOnOverload {"))
+        // The heartbeat reads the hand-off queue before the rolling writer so
+        // `ingest_events_total >= completed - filtered - rejected` holds.
+        let timersSource = try Self.repositorySource("Sources/MacCrabAgentKit/DaemonTimers.swift")
+        let queueRead = try #require(timersSource.range(of: "let q = bridge.ingestQueueTelemetry()"))
+        let writerRead = try #require(timersSource.range(of: "let w = await bridge.writeTelemetry()"))
+        #expect(queueRead.lowerBound < writerRead.lowerBound)
         #expect(eventLoop.contains("bridge.offer(enrichedEvent)"))
         #expect(eventLoop.contains("static func serviceTraceGraphIngest(state: DaemonState)"))
         #expect(eventLoop.contains("await bridge.runIngestService"))
@@ -130,6 +139,12 @@ struct EventLoopStageAwaitTests {
             "ingest_admission_latched",
             "ingest_admission_probes_total",
             "ingest_admission_latch_arms_total",
+            "ingest_latched_passthrough_total",
+            "ingest_queue_filtered_total",
+            "ingest_queue_rejected_total",
+            "ingest_queue_loss_total",
+            "ingest_queue_loss_recent",
+            "ingest_queue_loss_last_at_unix",
             "anchor_shed_total",
             "anchor_shed_dedup_suppressed_total",
         ] {

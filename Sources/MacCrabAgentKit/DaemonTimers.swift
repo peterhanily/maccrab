@@ -4027,6 +4027,13 @@ enum DaemonTimers {
                 if let at = s.footprintLatchLastTrippedAt { d["footprint_latch_last_tripped_at_unix"] = at.timeIntervalSince1970 }
                 if let at = s.footprintLatchLastClearedAt { d["footprint_latch_last_cleared_at_unix"] = at.timeIntervalSince1970 }
                 if let bridge = state.causalGraphBridge {
+                    // v1.22.7: read the lane hand-off queue BEFORE the rolling
+                    // writer. The service completes a dequeue only after the
+                    // writer has ledgered it, so in this order every snapshot
+                    // satisfies ingest_events_total >= ingest_queue_completed_total
+                    // - ingest_queue_filtered_total - ingest_queue_rejected_total,
+                    // which the qualification gate checks.
+                    let q = bridge.ingestQueueTelemetry()
                     let w = await bridge.writeTelemetry()
                     d["ingest_events_total"] = Int64(clamping: w.inputEventsTotal)
                     d["ingest_events_committed_total"] = Int64(clamping: w.eventsCommittedTotal)
@@ -4057,7 +4064,6 @@ enum DaemonTimers {
                     // or shed here never reached the rolling writer, so they are
                     // a separate accounted outcome and the ingest_events_*
                     // conservation above stays exact.
-                    let q = bridge.ingestQueueTelemetry()
                     d["ingest_queue_capacity"] = q.capacity
                     d["ingest_queue_handoffs_total"] = Int64(clamping: q.handoffsTotal)
                     d["ingest_queue_skipped_non_graph_total"] = Int64(clamping: q.skippedNonGraphTotal)
@@ -4073,6 +4079,20 @@ enum DaemonTimers {
                     d["ingest_admission_latched"] = q.admissionLatched
                     d["ingest_admission_probes_total"] = Int64(clamping: q.admissionProbesTotal)
                     d["ingest_admission_latch_arms_total"] = Int64(clamping: q.admissionLatchArmsTotal)
+                    d["ingest_latched_passthrough_total"] = Int64(clamping: q.latchedPassThroughTotal)
+                    d["ingest_queue_filtered_total"] = Int64(clamping: q.filteredTotal)
+                    d["ingest_queue_rejected_total"] = Int64(clamping: q.rejectedTotal)
+                    // Loss at the hand-off queue (dropped + terminated +
+                    // latched-shed + rejected) is judged for recency the same
+                    // way as a failed write below, against the engine clock.
+                    d["ingest_queue_loss_total"] = Int64(clamping: q.lossTotal)
+                    if let lostAt = q.lastLossAt {
+                        d["ingest_queue_loss_last_at_unix"] = lostAt.timeIntervalSince1970
+                        d["ingest_queue_loss_recent"] = Date().timeIntervalSince(lostAt)
+                            <= MacCrabCore.HeartbeatSnapshot.recentWriteFailureWindowSeconds
+                    } else {
+                        d["ingest_queue_loss_recent"] = false
+                    }
                     // Recency is judged here, against the engine clock, so the
                     // app never has to compare a stale file with its own clock.
                     if let failedAt = w.lastWriteFailureAt {

@@ -468,6 +468,23 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "ingest_events_pending": boundaries["trace-graph-mutation"]["queued"],
                 "ingest_events_in_flight": boundaries["trace-graph-mutation"]["in_flight"],
                 **sample["trace_graph_write_accounting"],
+                # v1.22.7 bounded lane -> TraceGraph hand-off queue: every
+                # graph input the lane admitted was dequeued and ledgered.
+                "ingest_queue_handoffs_total": boundaries["trace-graph-mutation"]["offered"],
+                "ingest_queue_skipped_non_graph_total": 0,
+                "ingest_latched_shed_total": 0,
+                "ingest_latched_passthrough_total": 0,
+                "ingest_queue_offered_total": boundaries["trace-graph-mutation"]["offered"],
+                "ingest_queue_dropped_total": 0,
+                "ingest_queue_terminated_total": 0,
+                "ingest_queue_dequeued_total": boundaries["trace-graph-mutation"]["offered"],
+                "ingest_queue_completed_total": boundaries["trace-graph-mutation"]["offered"],
+                "ingest_queue_filtered_total": 0,
+                "ingest_queue_rejected_total": 0,
+                "ingest_queue_backlog": 0,
+                "ingest_queue_in_flight": 0,
+                "ingest_queue_loss_total": 0,
+                "ingest_queue_loss_recent": False,
             },
             "traces_storage_admission": {
                 "enabled": True,
@@ -677,6 +694,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "trace_writable": True,
                 "trace_recovering": False,
                 "trace_shed_mutations_total": 0,
+                "trace_ingest_handoff_loss_total": 0,
                 "event_budget_fault": False,
             }
         )
@@ -4676,6 +4694,7 @@ class CandidateQualificationTests(unittest.TestCase):
             ("event", "trace-graph-mutation explicitly_shed=1"),
             ("batch", "write_batches_failed_total=1"),
             ("row", "write_rows_failed_total=1"),
+            ("handoff", "trace_graph_handoff_loss"),
         ):
             with self.subTest(failure_kind=failure_kind):
                 observations = copy.deepcopy(
@@ -4693,6 +4712,14 @@ class CandidateQualificationTests(unittest.TestCase):
                     elif failure_kind == "batch":
                         graph["write_attempts_total"] += 1
                         graph["write_batches_failed_total"] += 1
+                    elif failure_kind == "handoff":
+                        # One graph input evicted from the bounded hand-off
+                        # queue: the writer ledger below it stays clean.
+                        graph["ingest_queue_handoffs_total"] += 1
+                        graph["ingest_queue_offered_total"] += 1
+                        graph["ingest_queue_dropped_total"] += 1
+                        graph["ingest_queue_loss_total"] += 1
+                        observation["trace_ingest_handoff_loss_total"] += 1
                     else:
                         graph["write_rows_attempted_total"] += 1
                         graph["write_rows_failed_total"] += 1
