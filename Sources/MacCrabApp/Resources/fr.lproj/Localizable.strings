@@ -1543,6 +1543,7 @@
 "system.sensorDegradedChipHigh" = "Dégradé";
 "system.sensorDegradedChipLow" = "Indicatif";
 "system.sensorDegradedDefaultDetail" = "Un afflux d’événements de fichiers dépasse le niveau habituel tandis que le noyau abandonne des messages ES, réduisant la couverture des processus et exécutions.";
+"system.sensorDegradedSinceLabel" = "Dégradée depuis";
 "system.sensorDegradedTitle" = "Protection dégradée — possible évasion par perte de télémétrie";
 "system.sequenceContinuityDegradedTitle" = "Continuité des séquences dégradée après redémarrage";
 "system.sequenceContinuityGapChip" = "Interruption de continuité de détection";

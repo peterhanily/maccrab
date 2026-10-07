@@ -1543,6 +1543,7 @@
 "system.sensorDegradedChipHigh" = "Работа нарушена";
 "system.sensorDegradedChipLow" = "Рекомендация";
 "system.sensorDegradedDefaultDetail" = "Поток файловых событий резко превышает обычный уровень, а ядро отбрасывает сообщения ES, сокращая охват процессов и запусков.";
+"system.sensorDegradedSinceLabel" = "Снижена с";
 "system.sensorDegradedTitle" = "Защита работает с ограничениями — возможно уклонение через потерю телеметрии";
 "system.sequenceContinuityDegradedTitle" = "Нарушена непрерывность последовательностей при перезапуске";
 "system.sequenceContinuityGapChip" = "Разрыв непрерывности обнаружения";

@@ -1543,6 +1543,7 @@
 "system.sensorDegradedChipHigh" = "Verminderd";
 "system.sensorDegradedChipLow" = "Adviserend";
 "system.sensorDegradedDefaultDetail" = "Een stroom bestandsgebeurtenissen stijgt boven de basislijn terwijl de kernel ES-berichten weggooit, waardoor proces-/uitvoeringsdekking tekortschiet.";
+"system.sensorDegradedSinceLabel" = "Verminderd sinds";
 "system.sensorDegradedTitle" = "Bescherming verminderd — mogelijke ontwijking via telemetrieverlies";
 "system.sequenceContinuityDegradedTitle" = "Sequentiecontinuïteit na herstart verminderd";
 "system.sequenceContinuityGapChip" = "Onderbreking in detectiecontinuïteit";

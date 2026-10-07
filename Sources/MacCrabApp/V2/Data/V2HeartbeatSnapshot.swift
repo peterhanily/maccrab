@@ -64,6 +64,13 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     public let esSensorDegraded: Bool
     public let esSensorDegradedDetail: String?
     public let esSensorDegradedSeverity: String?
+    /// v1.22.7: when the degraded state opened (engine clock). nil while not
+    /// degraded and on heartbeats from older engines, which only reported the
+    /// one-tick rising edge.
+    public let esSensorDegradedSince: Date?
+    /// v1.22.7: the evaluator's per-tick loss fraction (0...1); nil on older
+    /// heartbeats.
+    public let esSensorLossFractionTick: Double?
     /// v1.18: engine-side LLM health (from the `llm` block). nil when the
     /// heartbeat predates this field. `configured == false` means the engine
     /// has no LLM backend wired; configured-but-not-healthy means enabled
@@ -1237,6 +1244,10 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             esSensorDegraded: raw["es_sensor_degraded"] as? Bool ?? false,
             esSensorDegradedDetail: (raw["es_sensor_degraded_detail"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             esSensorDegradedSeverity: (raw["es_sensor_degraded_severity"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            // v1.22.7 — absent on older heartbeats and while not degraded.
+            esSensorDegradedSince: (raw["es_sensor_degraded_since_unix"] as? NSNumber)
+                .map { Date(timeIntervalSince1970: $0.doubleValue) },
+            esSensorLossFractionTick: (raw["es_sensor_loss_fraction_tick"] as? NSNumber)?.doubleValue,
             llm: llm,
             prevention: prevention,
             traceGraphStorageAdmission: traceGraphStorageAdmission,

@@ -611,12 +611,19 @@ enum EventLoop {
                 startTime: event.process.startTime
             )
             let processingStartedNanos = DispatchTime.now().uptimeNanoseconds
+            // v1.22.7: awaited nanoseconds per shared-actor stage, published with
+            // this event's completion mark so the heartbeat can name the
+            // limiting stage. Two monotonic reads per listed stage; the
+            // remainder is attributed to `other` at completion.
+            var stageAwaits = EventPipelineStageAwaits()
+            var stageStartedNanos = processingStartedNanos
             state.eventPipelineTelemetry.recordDequeued(lane: lane)
             defer {
                 let elapsed = DispatchTime.now().uptimeNanoseconds &- processingStartedNanos
                 state.eventPipelineTelemetry.recordCompleted(
                     lane: lane,
-                    elapsedNanos: elapsed
+                    elapsedNanos: elapsed,
+                    stageAwaits: stageAwaits
                 )
             }
             eventCount.increment()
@@ -626,7 +633,9 @@ enum EventLoop {
             // category heuristics miscredited mixed ES/UL/TCC/network traffic.
             // This is event accounting only for NetworkCollector: its separate
             // completed-poll telemetry determines whether polling is progressing.
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             await state.collectorRegistry.recordTick(name: envelope.source.key)
+            stageAwaits.record(.collectorRegistry, startedAt: stageStartedNanos)
 
             // v1.10.0 perf: notify MCPAttributor of process exits so its
             // pid→server cache evicts proactively rather than waiting for
@@ -648,8 +657,11 @@ enum EventLoop {
             // Reserve before enrichment so a pending heavyweight result always
             // has bounded external ownership. Saturation back-pressures this
             // consumer; it never turns into an unreported event eviction.
-            guard let heavyReservation = await state.deferredEnrichmentBuffer
-                .reserveEventSlot() else {
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
+            let reservedEventSlot = await state.deferredEnrichmentBuffer
+                .reserveEventSlot()
+            stageAwaits.record(.enrichmentReservation, startedAt: stageStartedNanos)
+            guard let heavyReservation = reservedEventSlot else {
                 // Reservation admission seals only after ingestion has been
                 // asked to stop. Do not begin unowned enrichment past that
                 // terminal boundary.
@@ -657,7 +669,9 @@ enum EventLoop {
             }
 
             // Enrich the event (lineage, code signing)
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             var enrichedEvent = await state.enricher.enrich(event)
+            stageAwaits.record(.enricher, startedAt: stageStartedNanos)
 
             // YARA enrichment for file events (Phase 3)
             if enrichedEvent.eventCategory == .file {
@@ -1188,12 +1202,14 @@ enum EventLoop {
             // lineage materialization, and direct trace correlation so those
             // fields are immutable in the base rather than terminal overlays.
             let journalBaseEvent = enrichedEvent
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             let journalBoundary = await admitJournalBase(
                 journalBaseEvent,
                 lane: lane,
                 sourceReservation: heavyReservation,
                 state: state
             )
+            stageAwaits.record(.journalBaseAdmission, startedAt: stageStartedNanos)
             let journalAdmission = journalBoundary?.admission
             let retention = await state.deferredEnrichmentBuffer
                 .retainWithOwnership(
@@ -1444,7 +1460,8 @@ enum EventLoop {
                 let responseEngine = state.responseEngine
                 let behaviorWarmingUp = state.isWarmingUp
                 let detachedEvent = enrichedEvent
-                await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
+                stageStartedNanos = DispatchTime.now().uptimeNanoseconds
+                let notarizationAdmission = await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
                     label: "notarization-check"
                 ) {
                     let notarResult = await notarizationChecker.check(binaryPath: execPath)
@@ -1526,6 +1543,11 @@ enum EventLoop {
                             }
                         }
                     }
+                }
+                // Charged only when the detection plane was saturated and the
+                // spctl assessment ran on this lane; a plain submit is `other`.
+                if notarizationAdmission == .ranInlineOnOverload {
+                    stageAwaits.record(.derivedWorkInline, startedAt: stageStartedNanos)
                 }
             }
 
@@ -2188,122 +2210,20 @@ enum EventLoop {
                 }
             }
 
-            // v1.10.0 TraceGraph ingestion. Bridge handles category/action
-            // mapping internally and returns nil-equivalent for events
-            // that aren't in the causal graph schema. Anchor materialization
-            // happens inside the bridge → rolling graph → materializer
-            // path. Errors are logged inside the bridge and don't block
-            // the rest of the event loop.
-            //
-            // v1.12.0: when the bridge materializes a Trace AND a graph
-            // rule evaluator is loaded, walk the neighborhood around the
-            // trace's root entity and run every graph rule against the
-            // entities + edges. Matches become Alerts on the standard
-            // sink — same flow as Sigma single-event matches above.
-            //
-            // v1.12.0 post-audit (B3): the per-trace neighborhood SQL
-            // walk runs in the bounded, joinable derived-work plane. Pre-fix,
-            // a burst of anchor materializations (one `npm install` can
-            // fire dozens) would serialize on the single causalStore
-            // SQLite actor — same actor that handles every event/edge
-            // insertion — and head-of-line-block the main event pump.
-            // The work stays off the hot path, while daemon shutdown now owns
-            // and joins every task before the alert sink is sealed.
+            // v1.22.7: TraceGraph ingestion is handed to a bounded queue drained
+            // by `serviceTraceGraphIngest` on its own task. The lane previously
+            // awaited `bridge.process` here, which joined in-flight store writes,
+            // storage admission and the recovery barrier (measured: 348 barrier
+            // waits, 462 s total, max 85.8 s, inside the event lane) and evicted
+            // lineage events from the merged streams. `offer` is nonisolated
+            // and never suspends; overflow and latched-store sheds are counted
+            // in the bridge's ingest-queue telemetry, never silent. Graph-rule
+            // evaluation for materialized traces runs in `evaluateGraphRules`
+            // from the service task, with the same anchor event it had here.
             if let bridge = state.causalGraphBridge {
-                let materialized = await bridge.process(enrichedEvent)
-                if !materialized.isEmpty,
-                   let evaluator = state.currentGraphEvaluator(),
-                   let store = state.causalStore {
-                    let traceList = materialized
-                    let anchorEventId = enrichedEvent.id.uuidString
-                    let anchorProcPath = enrichedEvent.process.executable
-                    let anchorProcName = enrichedEvent.process.name
-                    let anchorEvent = enrichedEvent
-                    let alertSink = state.alertSink
-                    await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
-                        label: "graph-rule-evaluation"
-                    ) {
-                        for trace in traceList {
-                            guard let rootId = trace.rootEntityId else { continue }
-                            let window = TimeWindow(
-                                start: trace.createdAt.addingTimeInterval(-300),
-                                end: trace.createdAt.addingTimeInterval(300)
-                            )
-                            let subtree: GraphSubtree
-                            do {
-                                subtree = try await store.neighborhood(
-                                    of: rootId,
-                                    depth: 3,
-                                    within: window
-                                )
-                            } catch {
-                                continue
-                            }
-                            let matches = await evaluator.evaluate(
-                                entities: subtree.entities,
-                                edges: subtree.edges
-                            )
-                            for match in matches {
-                                let alert = Alert(
-                                    ruleId: match.ruleId,
-                                    ruleTitle: match.ruleTitle,
-                                    severity: Severity(rawValue: match.severity) ?? .medium,
-                                    eventId: anchorEventId,
-                                    processPath: anchorProcPath,
-                                    processName: anchorProcName,
-                                    description: "Multi-entity graph rule fired against trace \(trace.id). Bindings: \(match.bindings.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))",
-                                    mitreTactics: nil,
-                                    mitreTechniques: match.attack.isEmpty ? nil : match.attack.joined(separator: ",")
-                                )
-                                do {
-                                    _ = try await alertSink.submit(alert: alert, event: anchorEvent)
-                                } catch {
-                                    await StorageErrorTracker.shared.recordAlertError(error)
-                                }
-
-                                // v1.21.4: record the graph-rule → trace hit in
-                                // trace_rule_hits. Two payoffs: (1) durable
-                                // provenance — which graph rule fired against which
-                                // trace, with the full node bindings; (2) it gives
-                                // `recordRuleHit` its first production caller, so the
-                                // retention sweep's orphan-guard forward-proofing
-                                // (SQLiteCausalGraphStore.{edge,entity}OrphanGuardSQL,
-                                // STG-1/F5) — which already excludes rows referenced
-                                // by matched_entity_id / matched_edge_id — now
-                                // actually pins the primary entity/edge a surviving
-                                // hit points at. Best-effort: a store-write failure
-                                // must never disturb the detection path.
-                                let ruleHitExplanation: String = {
-                                    let obj: [String: Any] = [
-                                        "bindings": match.bindings,
-                                        "matched_edge_ids": match.matchedEdgeIds,
-                                        "attack": match.attack,
-                                    ]
-                                    if let data = try? JSONSerialization.data(
-                                        withJSONObject: obj, options: [.sortedKeys]
-                                    ), let s = String(data: data, encoding: .utf8) {
-                                        return s
-                                    }
-                                    return "{}"
-                                }()
-                                let ruleHit = TraceRuleHit(
-                                    id: UUID().uuidString,
-                                    traceId: trace.id,
-                                    ruleId: match.ruleId,
-                                    ruleTitle: match.ruleTitle,
-                                    ruleVersion: trace.rulesetVersion,
-                                    severity: match.severity,
-                                    matchedEventId: anchorEventId,
-                                    matchedEntityId: match.bindings.values.sorted().first,
-                                    matchedEdgeId: match.matchedEdgeIds.sorted().first,
-                                    matchedAt: trace.createdAt,
-                                    explanationJson: ruleHitExplanation
-                                )
-                                try? await store.recordRuleHit(ruleHit)
-                            }
-                        }
-                    }
-                }
+                stageStartedNanos = DispatchTime.now().uptimeNanoseconds
+                bridge.offer(enrichedEvent)
+                stageAwaits.record(.traceGraphHandoff, startedAt: stageStartedNanos)
             }
 
             // v1.12.0 — Bayesian-style intent advisory update. Each event
@@ -2585,10 +2505,14 @@ enum EventLoop {
             )
 
             // Layer 1: Single-event Sigma rules
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             var primaryMatches = await state.ruleEngine.evaluate(enrichedEvent)
+            stageAwaits.record(.rules, startedAt: stageStartedNanos)
 
             // Layer 2: Temporal sequence rules (Phase 2)
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
+            stageAwaits.record(.sequences, startedAt: stageStartedNanos)
             primaryMatches.append(contentsOf: sequenceMatches)
             state.eventPipelineTelemetry.recordRuleEvaluationCompleted(
                 lane: lane,
@@ -2636,6 +2560,7 @@ enum EventLoop {
                 // terminal receipt here, and AlertSink's later exact evidence
                 // check, establish the durable proof. Any batching change must
                 // preserve those checks and explicitly report unsettled work.
+                stageStartedNanos = DispatchTime.now().uptimeNanoseconds
                 let terminalAdmission = await settleTerminalJournalRevision(
                     enrichedEvent,
                     lane: lane,
@@ -2643,6 +2568,8 @@ enum EventLoop {
                     unchangedFrom: journalBaseEvent,
                     state: state
                 )
+                stageAwaits.record(.settlement, startedAt: stageStartedNanos)
+                stageStartedNanos = DispatchTime.now().uptimeNanoseconds
                 enrichedEvent = await EventJournalAdmissionContext
                     .withTerminalRevision(terminalAdmission) {
                         await dispatchReviewedMatches(
@@ -2650,11 +2577,13 @@ enum EventLoop {
                             reviewed: reviewedDispatch
                         )
                     }
+                stageAwaits.record(.matchDispatch, startedAt: stageStartedNanos)
             }
 
             // Replay cannot overtake the initial evaluation. Publish the final
             // synchronous event revision now, apply any terminal patches that
             // won the two-lane race, then drain work completed during this event.
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             if hasPendingHeavyEnrichment {
                 await DeferredEnrichmentDispatcher.markReadyAndDispatch(
                     event: enrichedEvent,
@@ -2666,6 +2595,7 @@ enum EventLoop {
                 )
             }
             await DeferredEnrichmentDispatcher.drainAvailable(state: state)
+            stageAwaits.record(.deferredEnrichmentDrain, startedAt: stageStartedNanos)
 
             // Establish the lexical lifetime after every terminal/deferred path.
             // Merely assigning the lease above would allow ARC to release it at
@@ -2693,6 +2623,135 @@ enum EventLoop {
         }
 
         logger.info("Event stream ended. Daemon exiting.")
+    }
+
+    /// TraceGraph ingest service: drains the bridge's bounded hand-off queue
+    /// for the daemon's lifetime on its own task, so neither detection lane
+    /// ever waits on a graph store write, storage admission, or the recovery
+    /// barrier. Spawned by DaemonBootstrap after the lanes' consumer plane is
+    /// configured and finished by EventIngestionLifecycle only after both
+    /// lanes have returned, so no hand-off can land on a finished queue.
+    static func serviceTraceGraphIngest(state: DaemonState) async {
+        guard let bridge = state.causalGraphBridge else { return }
+        await bridge.runIngestService { traces, anchorEvent in
+            await evaluateGraphRules(
+                state: state,
+                traces: traces,
+                anchorEvent: anchorEvent
+            )
+        }
+    }
+
+    /// v1.12.0: when the bridge materializes a Trace AND a graph rule
+    /// evaluator is loaded, walk the neighborhood around the trace's root
+    /// entity and run every graph rule against the entities + edges. Matches
+    /// become Alerts on the standard sink — same flow as Sigma single-event
+    /// matches. Moved verbatim out of the lane loop in v1.22.7; the anchor
+    /// event is the enriched event that was handed to the queue.
+    ///
+    /// v1.12.0 post-audit (B3): the per-trace neighborhood SQL walk runs in
+    /// the bounded, joinable derived-work plane. Pre-fix, a burst of anchor
+    /// materializations (one `npm install` can fire dozens) would serialize
+    /// on the single causalStore SQLite actor — same actor that handles every
+    /// event/edge insertion — and head-of-line-block the main event pump.
+    /// Daemon shutdown owns and joins every task before the alert sink is
+    /// sealed.
+    static func evaluateGraphRules(
+        state: DaemonState,
+        traces: [Trace],
+        anchorEvent: Event
+    ) async {
+        guard !traces.isEmpty,
+              let evaluator = state.currentGraphEvaluator(),
+              let store = state.causalStore else { return }
+        let traceList = traces
+        let anchorEventId = anchorEvent.id.uuidString
+        let anchorProcPath = anchorEvent.process.executable
+        let anchorProcName = anchorEvent.process.name
+        let alertSink = state.alertSink
+        await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
+            label: "graph-rule-evaluation"
+        ) {
+            for trace in traceList {
+                guard let rootId = trace.rootEntityId else { continue }
+                let window = TimeWindow(
+                    start: trace.createdAt.addingTimeInterval(-300),
+                    end: trace.createdAt.addingTimeInterval(300)
+                )
+                let subtree: GraphSubtree
+                do {
+                    subtree = try await store.neighborhood(
+                        of: rootId,
+                        depth: 3,
+                        within: window
+                    )
+                } catch {
+                    continue
+                }
+                let matches = await evaluator.evaluate(
+                    entities: subtree.entities,
+                    edges: subtree.edges
+                )
+                for match in matches {
+                    let alert = Alert(
+                        ruleId: match.ruleId,
+                        ruleTitle: match.ruleTitle,
+                        severity: Severity(rawValue: match.severity) ?? .medium,
+                        eventId: anchorEventId,
+                        processPath: anchorProcPath,
+                        processName: anchorProcName,
+                        description: "Multi-entity graph rule fired against trace \(trace.id). Bindings: \(match.bindings.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))",
+                        mitreTactics: nil,
+                        mitreTechniques: match.attack.isEmpty ? nil : match.attack.joined(separator: ",")
+                    )
+                    do {
+                        _ = try await alertSink.submit(alert: alert, event: anchorEvent)
+                    } catch {
+                        await StorageErrorTracker.shared.recordAlertError(error)
+                    }
+
+                    // v1.21.4: record the graph-rule → trace hit in
+                    // trace_rule_hits. Two payoffs: (1) durable
+                    // provenance — which graph rule fired against which
+                    // trace, with the full node bindings; (2) it gives
+                    // `recordRuleHit` its first production caller, so the
+                    // retention sweep's orphan-guard forward-proofing
+                    // (SQLiteCausalGraphStore.{edge,entity}OrphanGuardSQL,
+                    // STG-1/F5) — which already excludes rows referenced
+                    // by matched_entity_id / matched_edge_id — now
+                    // actually pins the primary entity/edge a surviving
+                    // hit points at. Best-effort: a store-write failure
+                    // must never disturb the detection path.
+                    let ruleHitExplanation: String = {
+                        let obj: [String: Any] = [
+                            "bindings": match.bindings,
+                            "matched_edge_ids": match.matchedEdgeIds,
+                            "attack": match.attack,
+                        ]
+                        if let data = try? JSONSerialization.data(
+                            withJSONObject: obj, options: [.sortedKeys]
+                        ), let s = String(data: data, encoding: .utf8) {
+                            return s
+                        }
+                        return "{}"
+                    }()
+                    let ruleHit = TraceRuleHit(
+                        id: UUID().uuidString,
+                        traceId: trace.id,
+                        ruleId: match.ruleId,
+                        ruleTitle: match.ruleTitle,
+                        ruleVersion: trace.rulesetVersion,
+                        severity: match.severity,
+                        matchedEventId: anchorEventId,
+                        matchedEntityId: match.bindings.values.sorted().first,
+                        matchedEdgeId: match.matchedEdgeIds.sorted().first,
+                        matchedAt: trace.createdAt,
+                        explanationJson: ruleHitExplanation
+                    )
+                    try? await store.recordRuleHit(ruleHit)
+                }
+            }
+        }
     }
 
     struct ReviewedMatchDispatch: Sendable {

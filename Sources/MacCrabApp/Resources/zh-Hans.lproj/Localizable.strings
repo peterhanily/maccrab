@@ -1798,6 +1798,7 @@
 "system.sensorDegradedChipHigh" = "功能降级";
 "system.sensorDegradedChipLow" = "参考信息";
 "system.sensorDegradedDefaultDetail" = "文件事件量急剧超过基线，同时内核正在丢弃 ES 消息，导致进程／exec 覆盖不足。";
+"system.sensorDegradedSinceLabel" = "降级开始于";
 "system.sensorDegradedTitle" = "防护降级 — 可能存在利用遥测丢失进行规避的行为";
 "system.sequenceContinuityDegradedTitle" = "序列重启连续性下降";
 "system.sequenceContinuityGapChip" = "检测连续性缺口";

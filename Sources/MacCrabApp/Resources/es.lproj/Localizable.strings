@@ -1503,6 +1503,7 @@
 "system.sensorDegradedChipHigh" = "Degradado";
 "system.sensorDegradedChipLow" = "Orientativo";
 "system.sensorDegradedDefaultDetail" = "Un aluvión de eventos de archivos supera el nivel habitual mientras el kernel descarta mensajes de ES, reduciendo la cobertura de procesos y ejecuciones.";
+"system.sensorDegradedSinceLabel" = "Degradada desde";
 "system.sensorDegradedTitle" = "Protección degradada — posible evasión mediante pérdida de telemetría";
 "system.sequenceContinuityDegradedTitle" = "Continuidad de secuencias degradada tras el reinicio";
 "system.sequenceContinuityGapChip" = "Interrupción de continuidad de detección";

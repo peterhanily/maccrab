@@ -51,6 +51,15 @@ struct EventLossObservabilityWiringTests {
         #expect(timers.contains(
             "\"es_intentionally_filtered_before_worker_by_type\": esIntentionallyFilteredBeforeWorkerByType"
         ))
+        // v1.22.7: worker-stage policy rejects and coalesced repeats.
+        #expect(collector.contains("esIntentionallyFilteredOnWorkerByType()"))
+        #expect(collector.contains("esCoalescedOnWorkerByType()"))
+        #expect(timers.contains(
+            "\"es_intentionally_filtered_on_worker_by_type\": esIntentionallyFilteredOnWorkerByType"
+        ))
+        #expect(timers.contains(
+            "\"es_coalesced_on_worker_by_type\": esCoalescedOnWorkerByType"
+        ))
         #expect(timers.contains(
             "\"es_normalized_yielded_by_type\": esNormalizedYieldedByType"
         ))

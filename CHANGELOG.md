@@ -6,6 +6,27 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The heartbeat separates intentional sensor filtering from loss.** New keys
+  `es_intentionally_filtered_on_worker_by_type` and
+  `es_coalesced_on_worker_by_type` count the worker-stage policy rejects and
+  the coalesced repeats described under Changed, so neither can be mistaken
+  for a dropped event.
+- **The heartbeat names the limiting detection-lane stage.**
+  `event_pipeline.stage_await_nanos_by_lane_and_stage` records how long each
+  lane waited on the collector registry, enrichment reservation, the enricher,
+  journal base admission, inline derived work, rules, sequences, settlement,
+  match dispatch, the TraceGraph hand-off and the deferred-enrichment drain.
+- **TraceGraph hand-off loss is visible.** The heartbeat reports
+  `ingest_queue_loss_total` with a recency verdict (`ingest_queue_loss_recent`
+  and `ingest_queue_loss_last_at_unix`). The dashboard's TraceGraph
+  write-health verdict degrades on recent loss at the hand-off queue, and the
+  installed-host qualification gate requires the queue ledger to conserve at
+  every sample and its loss to be zero throughout the epoch.
+- **The heartbeat says when a sensor-degraded episode opened.**
+  `es_sensor_degraded_since_unix` is present only while the state is open, and
+  `es_sensor_loss_fraction_tick` carries the worst of this tick's all-stage and
+  per-lane loss fractions. The System workspace sensor banner shows when the
+  episode opened.
 - **The heartbeat reports when TraceGraph storage last paused and resumed.**
   The tracegraph_storage_admission block now includes
   footprint_latch_last_tripped_at_unix and
@@ -14,7 +35,87 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   logs when graph writes actually resume. Before, it never logged a resume
   after a size pause.
 
+### Changed
+- **Signal events no longer flood the priority detection lane.** No detection
+  consumed `NOTIFY_SIGNAL` events, yet a build storm delivered about four
+  thousand of them a second into the lane shared with exec, fork and exit.
+  The Endpoint Security callback now drops a signal unless it is a fatal
+  signal aimed at MacCrab itself, at an EDR agent the EDR monitor knows, or at
+  LuLu, BlockBlock, OverSight or Santa. Dropped signals are counted under
+  `es_intentionally_filtered_before_worker_by_type`.
+- **Repeated writes and reads of the same file by the same process are
+  coalesced.** Repeated WRITE and OPEN callbacks from one process on one path
+  within a 2-second window, anchored at the first one, are folded into it.
+  The first always passes unchanged, so a continuous writer is observed once
+  per window. The modified CLOSE carries `coalesced_write_count`, and the
+  heartbeat reports `es_coalesced_on_worker_by_type`. Credential, honeyfile,
+  persistence and agent-config paths are never coalesced. A modified close,
+  rename or unlink of a path by any process ends every reader's window on it,
+  so a re-read after a third-party modification is observed again.
+- **The file-client ES worker reserves a quarter of its budget for the write
+  family and for protected opens.** An OPEN flood can no longer shed
+  persistence writes or credential reads at the hand-off.
+- **The detection lanes no longer wait on TraceGraph.** Enriched events are
+  handed to a bounded ingest queue of 8,192 entries, newest kept, drained by a
+  dedicated service task. A slow or recovering causal-graph store cannot stall
+  rule evaluation or evict events from the merged lanes. Measured lane
+  hand-off went from 6.3k events a second with a slow store to over 700k, and
+  completes while a store write is blocked. Queue evictions, latched-store
+  sheds, filtered and rejected hand-offs and admission probes are counted
+  under `tracegraph_storage_admission.ingest_queue_*`,
+  `ingest_latched_shed_total` and `ingest_admission_*`. The existing ingest
+  conservation ledger is unchanged. The service stops at the shutdown deadline
+  and logs any hand-offs it could not drain.
+- **A paused TraceGraph store sheds cheaply and recovers within a second.**
+  While the store is latched, ordinary events are shed on a lock-only fast
+  path with one probe write per second, while process events, credential,
+  persistence and untrusted-content file events and agent-attributed events
+  still reach the graph. Every probe is a real write attempt, so the latch
+  clears within one interval of the store recovering. An anchor the store
+  refused is not retried by every following event; a repeat after the next
+  committed batch, or after one second, materializes. Counted under
+  `anchor_shed_total`, `anchor_shed_dedup_suppressed_total` and
+  `ingest_latched_passthrough_total`.
+- **`es_sensor_degraded` is a held state, not a one-tick edge.** It stays true
+  while a file-flood or sustained-loss episode is active and clears 60 seconds
+  (two consecutive clean 30-second ticks) after the last tick with loss
+  evidence. A sustained-loss episode can take up to 120 seconds after loss
+  stops, because its latch releases only once fewer than two of the last four
+  ticks were elevated. A still-elevated file rate with no loss does not hold
+  the state. The Sensor Degraded alert is still raised once per episode. The
+  loss fraction is judged against everything the sensor should have delivered
+  (collector offers plus kernel drops and copy backpressure) and, separately,
+  against each merged detection lane's own offers, so a priority-lane eviction
+  storm is no longer diluted by a busy but lossless file lane. The detail text
+  names the kernel, ES-collector and merged-lane loss counts and the lane
+  being judged, and a held tick with no loss says so.
+
 ### Fixed
+- **A build storm can no longer make the kernel drop Endpoint Security
+  messages.** The ES callback used to decode paths and run the OPEN admission
+  policy on the kernel dequeue thread. Every path-dependent drop decision now
+  runs on the per-client worker before any allocation. Measured on the same
+  100k-message storm, the policy the handler used to run inline decided about
+  26k messages a second; the new callback, which does field gates plus a
+  byte-level credential and agent-content classification of each OPEN, runs
+  at about 1.1 million a second, and the full retain-and-hand-off costs about
+  2 microseconds per message.
+- **A flood of agent text reads can no longer evict exec, fork and exit from
+  the priority detection lane.** An `open` admitted only by the dynamic-AI
+  demand policy is stamped `open_admission=dynamic_ai` and rides the file
+  lane. Credential, honeyfile and agent-content opens keep the priority lane
+  and the priority storage path, in order with their exec, so the
+  credential-read rules, the wall-clock sequence windows and the
+  injection-evidence weld keep their inputs.
+- **A credential, honeyfile or agent-content read can no longer be shed at
+  the ES worker hand-off behind an OPEN flood.** The callback classifies the
+  raw path bytes, and such opens use the worker's reserved slots, which
+  ordinary opens and signals never can.
+- **`storage_errors.json` is no longer rewritten on every failed insert.** It
+  was rewritten inline and non-atomically, about 52 times a second during a
+  storage write pause. It is now published at most once per second with
+  coalesced counts, written atomically (temporary file plus rename, symlinks
+  refused) off the event path, and the last write of a burst still lands.
 - **Five supply-chain rules no longer cite a blog post that is offline.**
   Their MITRE ATT&CK references are unchanged.
 - **Homebrew upgrade instructions use the tap's full cask name.** Settings,
@@ -211,6 +312,17 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
     prints.
 
 ### Release tooling
+- **A deterministic ES ingress storm benchmark.** `ESIngressStormBenchmarkTests`
+  runs an in-process storm covering the callback before and after, the
+  byte-level protected-OPEN classification cost and parity, the hand-off cost,
+  the worker reserve for the write family and protected opens, lane routing by
+  admission class, the coalesce-decision cost and a paced zero-lineage-loss
+  run, printing BENCH-prefixed numbers in the test log.
+- **A release can be marked critical for older installs.** `MACCRAB_CRITICAL_BELOW=X`
+  makes `release.sh` write Sparkle 2's `<sparkle:criticalUpdate sparkle:version="X">`
+  into the appcast item, so installs below X see the update immediately and
+  cannot skip it, while newer installs are updated normally. The item validator
+  accepts only that shape, and the release fixtures cover it.
 - **A failed installed-host recording can be retried without moving root-owned
   files by hand.** A second `record-runtime` attempt died with
   `FileExistsError` on the first attempt's readiness directory, and its first

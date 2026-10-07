@@ -245,6 +245,29 @@ SITE_REPO_TOKEN=must_not_leak NOTARIZE_PASSWORD=must_not_leak PYTHONPATH=/attack
     --item "$FIXTURE/item.xml" --expected-version 1.2.3 --expected-build 1.2.3.42 >/dev/null
 pass "checked fixture tools ran with release secrets stripped and emitted valid XML"
 
+# A critical item carries Sparkle 2's top-level marker with the last version
+# it is critical for; the validator accepts it, rejects a malformed version
+# and rejects a marker that carries text.
+SITE_REPO_TOKEN=must_not_leak NOTARIZE_PASSWORD=must_not_leak PYTHONPATH=/attacker \
+    "$FIXTURE/scripts/generate-appcast-entry.sh" \
+    --dmg "$DMG" --version 1.2.3 --build-number 1.2.3.42 \
+    --release-notes-md "$NOTES" --phased-rollout-interval 60 --critical-below 1.2.0 \
+    > "$FIXTURE/item-critical.xml"
+/usr/bin/grep -q '<sparkle:criticalUpdate sparkle:version="1.2.0"></sparkle:criticalUpdate>' "$FIXTURE/item-critical.xml" \
+    || { echo "  ✗ critical marker missing from generated item" >&2; exit 1; }
+/usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C \
+    /usr/bin/python3 -I "$FIXTURE/scripts/_appcast_xml.py" validate-item \
+    --item "$FIXTURE/item-critical.xml" --expected-version 1.2.3 --expected-build 1.2.3.42 >/dev/null
+expect_failure "malformed --critical-below rejected" \
+    "$FIXTURE/scripts/generate-appcast-entry.sh" \
+    --dmg "$DMG" --version 1.2.3 --build-number 1.2.3.42 \
+    --release-notes-md "$NOTES" --phased-rollout-interval 60 --critical-below 1.2
+/usr/bin/sed 's|></sparkle:criticalUpdate>|>x</sparkle:criticalUpdate>|' "$FIXTURE/item-critical.xml" > "$FIXTURE/item-critical-bad.xml"
+expect_failure "criticalUpdate marker with text rejected" \
+    /usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C \
+    /usr/bin/python3 -I "$FIXTURE/scripts/_appcast_xml.py" validate-item --item "$FIXTURE/item-critical-bad.xml"
+pass "critical appcast marker generated, validated, and malformed forms rejected"
+
 /bin/rm -f "$FIXTURE/.build/artifacts/sparkle/Sparkle/bin/sign-update-ran"
 printf '\n# substituted\n' >> "$FIXTURE/.build/artifacts/sparkle/Sparkle/bin/sign_update"
 expect_failure "substituted Sparkle tool rejected before execution" \

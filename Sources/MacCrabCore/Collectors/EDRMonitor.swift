@@ -266,6 +266,14 @@ public actor EDRMonitor {
         let capabilities: [String]
     }
 
+    /// v1.22.7: the `.edr` process names, projected once from `knownTools` so
+    /// `ESCollector.securityToolProcessNames` (the NOTIFY_SIGNAL keep-list)
+    /// is derived from this roster rather than mirrored by hand. Pinned by
+    /// `ESIngressAdmissionTests`.
+    static let edrProcessNames: Set<String> = Set(
+        knownTools.filter { $0.category == .edr }.flatMap(\.processNames)
+    )
+
     // MARK: - Init
 
     public init(pollInterval: TimeInterval = 120) {

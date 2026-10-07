@@ -1934,6 +1934,16 @@ else
         echo "  ✗ MACCRAB_APPCAST_IMMEDIATE must be 0 or 1" >&2
         exit 2
     fi
+    # MACCRAB_CRITICAL_BELOW=X marks the item critical for installs below X:
+    # Sparkle shows it at once and does not let those users skip it.
+    if [ -n "${MACCRAB_CRITICAL_BELOW:-}" ]; then
+        if ! printf '%s' "${MACCRAB_CRITICAL_BELOW}" | /usr/bin/grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "  ✗ MACCRAB_CRITICAL_BELOW must be MAJOR.MINOR.PATCH" >&2
+            exit 2
+        fi
+        APPCAST_ROLLOUT_ARGS+=(--critical-below "${MACCRAB_CRITICAL_BELOW}")
+        echo "  Appcast item marked CRITICAL for installs below ${MACCRAB_CRITICAL_BELOW}"
+    fi
     # The generator gets no GitHub/notary credentials. Its only executable
     # dependencies are the checked SwiftPM tools and fixed Apple utilities.
     if /usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR=/private/tmp LC_ALL=C LANG=C \

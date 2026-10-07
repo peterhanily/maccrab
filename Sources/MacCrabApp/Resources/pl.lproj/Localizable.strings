@@ -1543,6 +1543,7 @@
 "system.sensorDegradedChipHigh" = "Ograniczone działanie";
 "system.sensorDegradedChipLow" = "Informacja pomocnicza";
 "system.sensorDegradedDefaultDetail" = "Zalew zdarzeń plikowych przekracza poziom bazowy, a jądro odrzuca komunikaty ES, ograniczając widoczność procesów i uruchomień.";
+"system.sensorDegradedSinceLabel" = "Ograniczona od";
 "system.sensorDegradedTitle" = "Ograniczona ochrona — możliwe unikanie wykrycia przez utratę telemetrii";
 "system.sequenceContinuityDegradedTitle" = "Ciągłość sekwencji po restarcie jest ograniczona";
 "system.sequenceContinuityGapChip" = "Luka w ciągłości wykrywania";

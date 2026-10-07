@@ -744,6 +744,31 @@ struct HeartbeatSnapshotTests {
         #expect(never.traceGraphStorageAdmission?.footprintLatchLastClearedAtUnix == nil)
     }
 
+    @Test("Sensor-degraded since-time and loss fraction decode as optional fields")
+    func sensorDegradedStateFieldsDecode() throws {
+        let h = try decode("""
+        {"es_sensor_degraded":true,"es_sensor_degraded_severity":"high",
+         "es_sensor_degraded_since_unix":1790000030.0,
+         "es_sensor_loss_fraction_tick":0.125}
+        """)
+        #expect(h.esSensorDegraded == true)
+        #expect(h.esSensorDegradedSinceUnix == 1_790_000_030.0)
+        #expect(h.esSensorLossFractionTick == 0.125)
+
+        // Not degraded (key omitted) or an older engine: absent, never a
+        // fabricated zero.
+        let closed = try decode("""
+        {"es_sensor_degraded":false,"es_sensor_loss_fraction_tick":0}
+        """)
+        #expect(closed.esSensorDegradedSinceUnix == nil)
+        #expect(closed.esSensorLossFractionTick == 0)
+        let older = try decode("""
+        {"es_sensor_degraded":false}
+        """)
+        #expect(older.esSensorDegradedSinceUnix == nil)
+        #expect(older.esSensorLossFractionTick == nil)
+    }
+
     @Test("Active TraceGraph admission cannot hide a failed conserving batch")
     func traceGraphFailedBatchHealth() throws {
         let h = try decode("""
@@ -857,6 +882,71 @@ struct HeartbeatSnapshotTests {
         "store_available":true,"ingest_events_total":1,"write_failure_recent":false}}
         """)
         #expect(incomplete.traceGraphStorageAdmission?.graphWriteDegraded == true)
+    }
+
+    @Test("Loss at the lane hand-off queue degrades the graph with the producer's recency verdict")
+    func traceGraphIngestQueueLossDegrades() throws {
+        func admission(_ queueFields: String) throws -> HeartbeatSnapshot.TraceGraphStorageAdmission {
+            let snapshot = try decode("""
+            {"tracegraph_storage_admission": {
+                "enabled": true, "blocked": false, "store_available": true,
+                "startup_blocked": false, "reason": "",
+                "ingest_events_total": 2, "ingest_events_committed_total": 2, "ingest_events_failed_total": 0,
+                "ingest_events_in_flight": 0, "ingest_events_pending": 0,
+                "entity_observations_total": 2, "edge_observations_total": 0,
+                "relevance_suppressed_file_events_total": 0, "relevance_suppressed_rows_total": 0,
+                "write_attempts_total": 1, "write_batches_committed_total": 1, "write_batches_failed_total": 0,
+                "write_batches_in_flight": 0, "write_rows_attempted_total": 1, "write_rows_committed_total": 1,
+                "write_rows_failed_total": 0, "write_rows_in_flight": 0, "coalesced_noop_rows_total": 1,
+                "pending_entity_rows": 0, "pending_edge_rows": 0, "oldest_outstanding_age_seconds": 0,
+                "write_failure_recent": false\(queueFields.isEmpty ? "" : ", " + queueFields)
+            }}
+            """)
+            return try #require(snapshot.traceGraphStorageAdmission)
+        }
+
+        // A producer that predates the queue reports no loss.
+        let legacy = try admission("")
+        #expect(!legacy.hasCurrentIngestQueueLoss)
+        #expect(!legacy.graphWriteDegraded)
+
+        let healthy = try admission("""
+            "ingest_queue_dropped_total": 0, "ingest_queue_terminated_total": 0,
+            "ingest_latched_shed_total": 0, "ingest_queue_rejected_total": 0,
+            "ingest_queue_loss_total": 0, "ingest_queue_backlog": 3, "ingest_queue_in_flight": 1,
+            "ingest_queue_loss_recent": false
+        """)
+        #expect(healthy.ingestQueueBacklog == 3)
+        #expect(healthy.ingestQueueInFlight == 1)
+        #expect(!healthy.hasCurrentIngestQueueLoss)
+        #expect(!healthy.graphWriteDegraded, "a busy but lossless queue is healthy")
+
+        // Dropped graph inputs with a current verdict degrade the graph even
+        // though the writer ledger below them is clean.
+        let recentLoss = try admission("""
+            "ingest_queue_dropped_total": 4096, "ingest_queue_terminated_total": 0,
+            "ingest_latched_shed_total": 0, "ingest_queue_rejected_total": 0,
+            "ingest_queue_loss_total": 4096, "ingest_queue_backlog": 0, "ingest_queue_in_flight": 0,
+            "ingest_queue_loss_recent": true, "ingest_queue_loss_last_at_unix": 1790000000
+        """)
+        #expect(recentLoss.ingestQueueLossLastAtUnix == 1_790_000_000)
+        #expect(recentLoss.hasCurrentIngestQueueLoss)
+        #expect(recentLoss.graphWriteDegraded)
+
+        // The producer's verdict wins: an old loss is history.
+        let historicalLoss = try admission("""
+            "ingest_queue_dropped_total": 4096, "ingest_queue_loss_total": 4096,
+            "ingest_queue_loss_recent": false
+        """)
+        #expect(!historicalLoss.hasCurrentIngestQueueLoss)
+        #expect(!historicalLoss.graphWriteDegraded)
+
+        // Without a verdict the lifetime totals stay sticky, as for writes.
+        let stickyLoss = try admission("""
+            "ingest_latched_shed_total": 7
+        """)
+        #expect(stickyLoss.hasCurrentIngestQueueLoss)
+        #expect(stickyLoss.graphWriteDegraded)
     }
 
     @Test("transition-aware evidence and timer ledgers remain fail-visible")

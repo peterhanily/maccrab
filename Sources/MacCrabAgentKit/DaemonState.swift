@@ -1412,8 +1412,12 @@ final class DaemonState {
     /// tcc/auth/registry) rides the `priority` stream and is protected from that
     /// eviction. Explicit + testable so a future high-volume category isn't
     /// silently routed onto the priority stream (which would reopen the gap).
-    static func ridesFileStream(_ category: EventCategory, action: String) -> Bool {
-        EventPipelineLane.routesToFile(category, action: action)
+    /// v1.22.7: decided per EVENT through the one shared classifier, because
+    /// a dynamic-AI `open` rides the file lane while a credential `open` keeps
+    /// priority — the yield closure and every downstream lane derivation
+    /// (`BatchedEventWriter`, `EventStore`, pipeline telemetry) must agree.
+    static func ridesFileStream(_ event: Event) -> Bool {
+        EventPipelineLane.finalLane(for: event) == .file
     }
 
     /// One read of every collector-local delivery boundary. Every snapshot is
@@ -1472,10 +1476,7 @@ final class DaemonState {
         )
         let pipelineTelemetry = eventPipelineTelemetry
         let yield: @Sendable (EventPipelineSource, Event) -> Void = { source, event in
-            let lane: EventPipelineLane = DaemonState.ridesFileStream(
-                event.eventCategory,
-                action: event.eventAction
-            ) ? .file : .priority
+            let lane: EventPipelineLane = DaemonState.ridesFileStream(event) ? .file : .priority
             let envelope = EventPipelineEnvelope(source: source, event: event)
             if lane == .file {
                 pipelineTelemetry.yield(envelope, to: fCont, lane: lane)

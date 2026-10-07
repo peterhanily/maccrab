@@ -479,6 +479,15 @@ free-space preflight.
 
 ### Step 6 — downstream distribution and verification
 
+**Critical updates.** Set `MACCRAB_CRITICAL_BELOW=MAJOR.MINOR.PATCH` when running
+`release.sh` to mark the appcast item critical for installs below that version:
+Sparkle 2 shows it to those users immediately and does not let them skip it,
+while newer installs see an ordinary update. The generator writes
+`<sparkle:criticalUpdate sparkle:version="X">` and the validator rejects any
+other shape. Use it when an older line has a security defect that the current
+release fixes; record the reason in the release notes.
+
+
 The release flow that delivers v<version> to existing v(N-1) users
 via Sparkle auto-update:
 

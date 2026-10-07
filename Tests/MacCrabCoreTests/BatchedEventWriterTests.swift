@@ -1100,7 +1100,7 @@ struct BatchedEventWriterTests {
         #expect((await store.storageAdmissionSnapshot())?.latchedFailure == nil)
     }
 
-    @Test("file OPEN and BTM events retain priority classification through the real writer")
+    @Test("credential OPEN and BTM persist on priority; a dynamic-AI OPEN persists on file, through the real writer")
     func specialFileActionsPersistOnPriorityLane() async throws {
         let (store, dir) = try tempStore()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1120,22 +1120,35 @@ struct BatchedEventWriterTests {
             eventAction: "btm_add",
             fileAction: .create
         )
+        // v1.22.7: only an OPEN the ES worker stamped as admitted by the
+        // dynamic-AI demand policy (an attributed agent's ordinary text read —
+        // the measured flood source) rides the file lane. A credential OPEN
+        // carries no stamp and keeps priority, in order with its exec.
+        var dynamicAIOpen = makeFileEvent(
+            22,
+            eventAction: "open",
+            fileAction: .open
+        )
+        dynamicAIOpen.enrichments[EventPipelineLane.openAdmissionEnrichmentKey] =
+            EventPipelineLane.dynamicAIOpenAdmission
         #expect(EventPipelineLane.finalLane(for: credentialOpen) == .priority)
         #expect(EventPipelineLane.finalLane(for: btmAdd) == .priority)
+        #expect(EventPipelineLane.finalLane(for: dynamicAIOpen) == .file)
 
         await writer.enqueue(credentialOpen)
         await writer.enqueue(btmAdd)
+        await writer.enqueue(dynamicAIOpen)
         await writer.shutdown()
 
         let telemetry = await writer.telemetrySnapshot()
-        #expect(telemetry.offeredByLane == ["priority": 2, "file": 0])
-        #expect(telemetry.persistedByLane == ["priority": 2, "file": 0])
+        #expect(telemetry.offeredByLane == ["priority": 2, "file": 1])
+        #expect(telemetry.persistedByLane == ["priority": 2, "file": 1])
         #expect(telemetry.droppedCount == 0)
         let stored = try await store.exactEventsSnapshot(
             since: .distantPast,
             category: .file
         )
-        #expect(Set(stored.events.map(\.id)) == [credentialOpen.id, btmAdd.id])
+        #expect(Set(stored.events.map(\.id)) == [credentialOpen.id, btmAdd.id, dynamicAIOpen.id])
         expectConserved(telemetry, lane: .priority)
         expectConserved(telemetry, lane: .file)
     }

@@ -473,6 +473,16 @@ public struct V2SystemWorkspace: View {
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
+                // v1.22.7: the engine now reports the degraded STATE with the
+                // time the episode opened; older engines omit it.
+                if let since = heartbeat?.esSensorDegradedSince {
+                    HStack(spacing: 4) {
+                        Text(String(localized: "system.sensorDegradedSinceLabel", defaultValue: "Degraded since"))
+                        Text(verbatim: V2TimeFormat.absolute(since))
+                    }
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                }
             }
             Spacer()
         }

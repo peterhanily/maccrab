@@ -2,6 +2,123 @@ import Foundation
 import MacCrabCore
 import os
 
+/// The awaited stages of one lane event, in source order. Each is a shared
+/// actor (or the batched writer) the lane consumer suspends on; cumulative
+/// await nanoseconds per stage let the heartbeat name the limiting stage.
+/// `other` is the per-event remainder (synchronous work plus awaits outside
+/// this list) and is derived at completion, never recorded directly.
+enum EventPipelineStage: Int, CaseIterable, Sendable {
+    case collectorRegistry
+    case enrichmentReservation
+    case enricher
+    case journalBaseAdmission
+    /// Derived work the saturated detection plane ran on the lane itself
+    /// (the `spctl` notarization assessment); zero when it was submitted.
+    case derivedWorkInline
+    case rules
+    case sequences
+    case settlement
+    /// `dispatchReviewedMatches`: alert-sink submits, response actions and
+    /// campaign updates for this event's rule and sequence matches.
+    case matchDispatch
+    case traceGraphHandoff
+    /// Terminal heavy-enrichment publication plus the inline drain of
+    /// deferred results completed during this event.
+    case deferredEnrichmentDrain
+    case other
+
+    var key: String {
+        switch self {
+        case .collectorRegistry: return "collector_registry"
+        case .enrichmentReservation: return "enrichment_reservation"
+        case .enricher: return "enricher"
+        case .journalBaseAdmission: return "journal_base_admission"
+        case .derivedWorkInline: return "derived_work_inline"
+        case .rules: return "rules"
+        case .sequences: return "sequences"
+        case .settlement: return "settlement"
+        case .matchDispatch: return "match_dispatch"
+        case .traceGraphHandoff: return "tracegraph_handoff"
+        case .deferredEnrichmentDrain: return "deferred_enrichment_drain"
+        case .other: return "other"
+        }
+    }
+}
+
+/// Per-event accumulator of awaited nanoseconds by stage. A fixed-size value
+/// with no heap allocation on the hot path; the lane merges it into the
+/// telemetry under the same lock as the event's completion mark.
+struct EventPipelineStageAwaits: Sendable, Equatable {
+    private var collectorRegistry: UInt64 = 0
+    private var enrichmentReservation: UInt64 = 0
+    private var enricher: UInt64 = 0
+    private var journalBaseAdmission: UInt64 = 0
+    private var derivedWorkInline: UInt64 = 0
+    private var rules: UInt64 = 0
+    private var sequences: UInt64 = 0
+    private var settlement: UInt64 = 0
+    private var matchDispatch: UInt64 = 0
+    private var traceGraphHandoff: UInt64 = 0
+    private var deferredEnrichmentDrain: UInt64 = 0
+
+    init() {}
+
+    /// Charge the monotonic time since `startedAt` to one stage: one clock
+    /// read at the stage exit, matching the one the caller took at entry.
+    @inline(__always)
+    mutating func record(_ stage: EventPipelineStage, startedAt: UInt64) {
+        add(stage, nanos: DispatchTime.now().uptimeNanoseconds &- startedAt)
+    }
+
+    mutating func add(_ stage: EventPipelineStage, nanos: UInt64) {
+        switch stage {
+        case .collectorRegistry: Self.addSaturating(&collectorRegistry, nanos)
+        case .enrichmentReservation: Self.addSaturating(&enrichmentReservation, nanos)
+        case .enricher: Self.addSaturating(&enricher, nanos)
+        case .journalBaseAdmission: Self.addSaturating(&journalBaseAdmission, nanos)
+        case .derivedWorkInline: Self.addSaturating(&derivedWorkInline, nanos)
+        case .rules: Self.addSaturating(&rules, nanos)
+        case .sequences: Self.addSaturating(&sequences, nanos)
+        case .settlement: Self.addSaturating(&settlement, nanos)
+        case .matchDispatch: Self.addSaturating(&matchDispatch, nanos)
+        case .traceGraphHandoff: Self.addSaturating(&traceGraphHandoff, nanos)
+        case .deferredEnrichmentDrain: Self.addSaturating(&deferredEnrichmentDrain, nanos)
+        case .other: break
+        }
+    }
+
+    func nanos(for stage: EventPipelineStage) -> UInt64 {
+        switch stage {
+        case .collectorRegistry: return collectorRegistry
+        case .enrichmentReservation: return enrichmentReservation
+        case .enricher: return enricher
+        case .journalBaseAdmission: return journalBaseAdmission
+        case .derivedWorkInline: return derivedWorkInline
+        case .rules: return rules
+        case .sequences: return sequences
+        case .settlement: return settlement
+        case .matchDispatch: return matchDispatch
+        case .traceGraphHandoff: return traceGraphHandoff
+        case .deferredEnrichmentDrain: return deferredEnrichmentDrain
+        case .other: return 0
+        }
+    }
+
+    var awaitedTotal: UInt64 {
+        var total: UInt64 = 0
+        for stage in EventPipelineStage.allCases {
+            Self.addSaturating(&total, nanos(for: stage))
+        }
+        return total
+    }
+
+    @inline(__always)
+    private static func addSaturating(_ value: inout UInt64, _ addend: UInt64) {
+        let (sum, overflow) = value.addingReportingOverflow(addend)
+        value = overflow ? UInt64.max : sum
+    }
+}
+
 /// Lock-bounded telemetry for the merged event pipeline. All hot-path storage
 /// is allocated at initialization: recording an event performs only fixed-array
 /// indexing under the same unfair-lock primitive already used by DaemonState.
@@ -43,6 +160,11 @@ final class EventPipelineTelemetry: @unchecked Sendable {
         /// Sum of the fixed latency buckets. This must equal completed events
         /// for each lane and makes histogram-accounting drift observable.
         let latencySampleCountByLane: [String: UInt64]
+        /// Cumulative awaited nanoseconds per lane and stage, plus `other`
+        /// (whole-event time not spent in a listed await). Summed over stages
+        /// this equals the lane's total processing time, so the limiting
+        /// stage can be named from the heartbeat alone.
+        let stageAwaitNanosByLaneAndStage: [String: [String: UInt64]]
         let upstreamDroppedByLane: [String: UInt64]
         let upstreamTerminatedByLane: [String: UInt64]
         let mergedDroppedByLane: [String: UInt64]
@@ -68,6 +190,8 @@ final class EventPipelineTelemetry: @unchecked Sendable {
         var handoffsInFlightByLane: [UInt64]
         /// Lane-major flattened storage: lane * bucketCount + bucket.
         var latencyBuckets: [UInt64]
+        /// Lane-major flattened storage: lane * stageCount + stage.
+        var stageAwaitNanos: [UInt64]
 
         init(sourceCount: Int, laneCount: Int, bucketCount: Int) {
             offeredBySource = [UInt64](repeating: 0, count: sourceCount)
@@ -100,6 +224,10 @@ final class EventPipelineTelemetry: @unchecked Sendable {
             latencyBuckets = [UInt64](
                 repeating: 0,
                 count: laneCount * bucketCount
+            )
+            stageAwaitNanos = [UInt64](
+                repeating: 0,
+                count: laneCount * EventPipelineStage.allCases.count
             )
         }
     }
@@ -254,7 +382,11 @@ final class EventPipelineTelemetry: @unchecked Sendable {
     }
 
     @inline(__always)
-    func recordCompleted(lane: EventPipelineLane, elapsedNanos: UInt64) {
+    func recordCompleted(
+        lane: EventPipelineLane,
+        elapsedNanos: UInt64,
+        stageAwaits: EventPipelineStageAwaits = EventPipelineStageAwaits()
+    ) {
         let elapsedMicros = elapsedNanos / 1_000
         var bucket = Self.latencyBoundsMicros.count
         for candidate in Self.latencyBoundsMicros.indices
@@ -263,11 +395,23 @@ final class EventPipelineTelemetry: @unchecked Sendable {
             break
         }
         let selectedBucket = bucket
+        let awaited = stageAwaits.awaitedTotal
+        let otherNanos = elapsedNanos > awaited ? elapsedNanos - awaited : 0
+        let stageBase = lane.rawValue * EventPipelineStage.allCases.count
 
         state.withLock { locked in
             Self.incrementSaturating(&locked.completedByLane[lane.rawValue])
             let flatIndex = lane.rawValue * Self.bucketCount + selectedBucket
             Self.incrementSaturating(&locked.latencyBuckets[flatIndex])
+            for stage in EventPipelineStage.allCases {
+                let nanos = stage == .other ? otherNanos : stageAwaits.nanos(for: stage)
+                guard nanos > 0 else { continue }
+                let index = stageBase + stage.rawValue
+                locked.stageAwaitNanos[index] = Self.addSaturating(
+                    locked.stageAwaitNanos[index],
+                    nanos
+                )
+            }
         }
     }
 
@@ -305,6 +449,7 @@ final class EventPipelineTelemetry: @unchecked Sendable {
             var mergedDroppedByLane: [String: UInt64] = [:]
             var mergedTerminatedByLane: [String: UInt64] = [:]
             var collectorCapacityBySource: [String: UInt64] = [:]
+            var stageAwaitNanosByLaneAndStage: [String: [String: UInt64]] = [:]
             var detectionInputDroppedTotal: UInt64 = 0
 
             for source in EventPipelineSource.allCases {
@@ -385,10 +530,18 @@ final class EventPipelineTelemetry: @unchecked Sendable {
                         locked.ruleEvaluationCompletedByLaneAndCategory[ruleIndex]
                 }
 
+                var stageAwaits: [String: UInt64] = [:]
+                for stage in EventPipelineStage.allCases {
+                    stageAwaits[stage.key] = locked.stageAwaitNanos[
+                        laneIndex * EventPipelineStage.allCases.count + stage.rawValue
+                    ]
+                }
+
                 offeredByLane[key] = offered
                 dequeuedByLane[key] = dequeued
                 ruleEvaluationReachedByLaneAndCategory[key] = ruleReachedByCategory
                 ruleEvaluationCompletedByLaneAndCategory[key] = ruleCompletedByCategory
+                stageAwaitNanosByLaneAndStage[key] = stageAwaits
                 completedByLane[key] = completed
                 backlogByLane[key] = offered >= removed ? offered - removed : 0
                 inFlightByLane[key] = dequeued >= completed ? dequeued - completed : 0
@@ -435,6 +588,7 @@ final class EventPipelineTelemetry: @unchecked Sendable {
                 handoffsInFlightByLane: handoffsInFlightByLane,
                 processingP99MicrosByLane: p99ByLane,
                 latencySampleCountByLane: latencySamplesByLane,
+                stageAwaitNanosByLaneAndStage: stageAwaitNanosByLaneAndStage,
                 upstreamDroppedByLane: upstreamDroppedByLane,
                 upstreamTerminatedByLane: upstreamTerminatedByLane,
                 mergedDroppedByLane: mergedDroppedByLane,

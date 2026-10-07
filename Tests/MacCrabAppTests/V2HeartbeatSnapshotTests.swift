@@ -993,6 +993,44 @@ struct V2HeartbeatSnapshotTests {
         }
     }
 
+    // MARK: - Sensor-degraded state (v1.22.7)
+
+    @Test("sensor-degraded since-time and loss fraction decode; absent on older heartbeats → nil")
+    func sensorDegradedStateDecode() {
+        let raw: [String: Any] = [
+            "written_at_unix": 1_790_000_060.0,
+            "es_sensor_degraded": true,
+            "es_sensor_degraded_severity": "high",
+            "es_sensor_degraded_detail": "ES sensor degraded — 3 kernel-dropped",
+            "es_sensor_degraded_since_unix": 1_790_000_030.0,
+            "es_sensor_loss_fraction_tick": 0.2,
+        ]
+        let s = V2HeartbeatSnapshot.decode(raw: raw)
+        #expect(s.esSensorDegraded)
+        #expect(s.esSensorDegradedSince == Date(timeIntervalSince1970: 1_790_000_030))
+        #expect(s.esSensorLossFractionTick == 0.2)
+
+        // Older engines (one-tick edge only) and a closed episode omit the key
+        // → nil, never an epoch-0 "since" in front of the user.
+        let older = V2HeartbeatSnapshot.decode(raw: [
+            "written_at_unix": 1_790_000_060.0,
+            "es_sensor_degraded": false,
+        ])
+        #expect(older.esSensorDegradedSince == nil)
+        #expect(older.esSensorLossFractionTick == nil)
+
+        // An integral since-time (JSONSerialization may hand back an
+        // Int-backed NSNumber) still decodes.
+        let integral = V2HeartbeatSnapshot.decode(raw: [
+            "written_at_unix": 1_790_000_060.0,
+            "es_sensor_degraded": true,
+            "es_sensor_degraded_since_unix": 1_790_000_030,
+            "es_sensor_loss_fraction_tick": 0,
+        ])
+        #expect(integral.esSensorDegradedSince == Date(timeIntervalSince1970: 1_790_000_030))
+        #expect(integral.esSensorLossFractionTick == 0)
+    }
+
     // MARK: - Helpers
 
     private func makeSnapshot(
@@ -1016,6 +1054,8 @@ struct V2HeartbeatSnapshotTests {
             esSensorDegraded: false,
             esSensorDegradedDetail: nil,
             esSensorDegradedSeverity: nil,
+            esSensorDegradedSince: nil,
+            esSensorLossFractionTick: nil,
             llm: nil,
             prevention: nil,
             traceGraphStorageAdmission: nil,

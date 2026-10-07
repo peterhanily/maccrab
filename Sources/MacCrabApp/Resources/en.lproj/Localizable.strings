@@ -1565,6 +1565,7 @@
 "system.sensorDegradedChipHigh" = "Degraded";
 "system.sensorDegradedChipLow" = "Advisory";
 "system.sensorDegradedDefaultDetail" = "A file-event flood is spiking above baseline while the kernel is dropping ES messages, starving process/exec coverage.";
+"system.sensorDegradedSinceLabel" = "Degraded since";
 "system.sensorDegradedTitle" = "Protection degraded — possible telemetry-drop evasion";
 "system.shortcutBackForward" = "Back / Forward";
 "system.shortcutClosePalette" = "Close palette / dismiss toast";

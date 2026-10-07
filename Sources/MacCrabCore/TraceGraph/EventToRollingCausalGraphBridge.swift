@@ -9,9 +9,17 @@
 //
 // Daemon-side, after `EventEnricher` has finished annotating an
 // event but before `RuleEngine` evaluates it. In `MacCrabAgentKit`'s
-// pipeline orchestration the call is one line:
+// pipeline orchestration the lane call is one nonisolated line:
 //
-//     await bridge.process(event)
+//     bridge.offer(event)
+//
+// which hands the event to a bounded queue drained by one service task
+// (`runIngestService`). Since v1.22.7 the lane never awaits the graph:
+// measured on an installed host, the inline `await bridge.process(event)`
+// joined in-flight store writes and recovery-barrier waits (348 waits,
+// 462 s total, max 85.8 s) on the detection lane and evicted lineage
+// events from the merged streams. Overflow of the queue is counted, never
+// silent; a latched store sheds on a nonisolated fast path.
 //
 // The bridge is constructed once at daemon startup with the
 // production `RollingCausalGraph` instance.
@@ -36,11 +44,137 @@
 
 import Foundation
 import CryptoKit
+import os
 import os.log
+
+/// Outcome of one lane hand-off to the bounded TraceGraph ingest queue.
+public enum TraceGraphIngestHandoff: Sendable, Equatable {
+    /// The event has no causal-graph mapping (category or action); it was
+    /// never a graph input and is counted as skipped, not lost.
+    case skippedNonGraph
+    /// The store is latched; the event was shed on the nonisolated fast path.
+    case shedLatched
+    case queued
+    /// Queued, evicting the oldest waiting event (counted as dropped).
+    case queuedEvictingOldest
+    /// Offered after the queue was finished; counted as terminated.
+    case terminated
+}
+
+/// Exact conservation counters for the bounded lane → TraceGraph hand-off.
+///
+/// At a locked snapshot:
+///
+///     handoffs  = skippedNonGraph + latchedShed + offered
+///     offered   = dropped + terminated + dequeued + backlog
+///     dequeued  = completed + inFlight
+///     completed = filtered + rejected + ingested
+///
+/// where `ingested` events are exactly the ones the rolling writer ledgered
+/// (`inputEventsTotal`), so the chain closes against that ledger up to the
+/// service's in-flight event. `dropped` is an eviction from the bounded queue
+/// while the ingest service is stalled behind the store. Dropped, terminated,
+/// latched-shed and rejected events never reached the rolling writer, so they
+/// are deliberately outside its input/committed/failed ledger, which therefore
+/// keeps conserving exactly; their sum is `lossTotal`.
+public struct TraceGraphIngestQueueTelemetry: Sendable, Equatable {
+    public let capacity: Int
+    public let handoffsTotal: UInt64
+    public let skippedNonGraphTotal: UInt64
+    public let latchedShedTotal: UInt64
+    /// Lineage/anchor-capable events admitted past an armed latch (a subset
+    /// of `offeredTotal`), so recovery can be discovered by the event that
+    /// matters rather than only by the periodic probe.
+    public let latchedPassThroughTotal: UInt64
+    public let offeredTotal: UInt64
+    public let droppedTotal: UInt64
+    public let terminatedTotal: UInt64
+    public let dequeuedTotal: UInt64
+    public let completedTotal: UInt64
+    /// Dequeued events the production `EventInsertFilter` discarded before
+    /// ingestion (self-monitoring, pty/null, SQLite scratch): policy, not loss.
+    public let filteredTotal: UInt64
+    /// Dequeued events with no graph mapping on the service side. The lane
+    /// applies the same schema check, so this stays zero unless they drift.
+    public let rejectedTotal: UInt64
+    /// Offers whose yield result is not yet published; the backlog estimate
+    /// conservatively includes them.
+    public let handoffsInFlight: UInt64
+    public let backlog: Int
+    public let inFlight: Int
+    public let admissionLatched: Bool
+    public let admissionProbesTotal: UInt64
+    public let admissionLatchArmsTotal: UInt64
+    /// Engine wall-clock of the most recent dropped, terminated, latched-shed
+    /// or rejected hand-off; nil when the queue has never lost an event.
+    public let lastLossAt: Date?
+
+    /// Graph inputs the lane admitted that never reached the rolling writer.
+    public var lossTotal: UInt64 {
+        [droppedTotal, terminatedTotal, latchedShedTotal, rejectedTotal]
+            .reduce(UInt64(0)) { $0.addingReportingOverflow($1).partialValue }
+    }
+
+    public var conservesHandoffs: Bool {
+        let (partial, overflow1) = skippedNonGraphTotal
+            .addingReportingOverflow(latchedShedTotal)
+        let (sum, overflow2) = partial.addingReportingOverflow(offeredTotal)
+        return !overflow1 && !overflow2 && handoffsTotal == sum
+    }
+
+    public var conservesOffers: Bool {
+        let removed = [droppedTotal, terminatedTotal, dequeuedTotal]
+            .reduce(UInt64(0)) { $0.addingReportingOverflow($1).partialValue }
+        return offeredTotal >= removed
+            && offeredTotal - removed == UInt64(backlog)
+    }
+}
 
 public actor EventToRollingCausalGraphBridge {
 
+    public static let defaultIngestQueueCapacity = 8_192
+
+    private struct IngestQueueCounters {
+        var handoffs: UInt64 = 0
+        var skippedNonGraph: UInt64 = 0
+        var latchedShed: UInt64 = 0
+        var latchedPassThrough: UInt64 = 0
+        var offered: UInt64 = 0
+        var dropped: UInt64 = 0
+        var terminated: UInt64 = 0
+        var dequeued: UInt64 = 0
+        var completed: UInt64 = 0
+        var filtered: UInt64 = 0
+        var rejected: UInt64 = 0
+        var handoffsInFlight: UInt64 = 0
+        var lastLossAt: Date?
+    }
+
+    /// One queued hand-off. `isProbe` marks the single event per retry
+    /// interval that the armed admission latch let through as its write
+    /// attempt; the service makes sure that event really contacts the store.
+    private struct QueuedEvent: Sendable {
+        let event: Event
+        let isProbe: Bool
+    }
+
+    /// Service-side outcome of one dequeued event, for the completed ledger.
+    private enum QueuedOutcome {
+        case filtered
+        case rejected
+        case ingested
+    }
+
     private let rollingGraph: RollingCausalGraph
+    /// Bounded lane hand-off. `.bufferingNewest` keeps the most recent events
+    /// during a stall, so an anchor-bearing event is the one most likely to
+    /// survive; every eviction is counted in `droppedTotal`.
+    public nonisolated let ingestQueueCapacity: Int
+    private nonisolated let ingestQueueContinuation: AsyncStream<QueuedEvent>.Continuation
+    private nonisolated let ingestQueueStream: OSAllocatedUnfairLock<AsyncStream<QueuedEvent>?>
+    private nonisolated let ingestQueueCounters = OSAllocatedUnfairLock(
+        initialState: IngestQueueCounters()
+    )
     private let logger = Logger(subsystem: "com.maccrab.tracegraph", category: "event-bridge")
 
     /// Optional override: if the daemon side starts annotating events
@@ -58,9 +192,206 @@ public actor EventToRollingCausalGraphBridge {
     /// EventStore) so the insert-filter drop counter stays clean.
     private let insertFilter: EventInsertFilter?
 
-    public init(rollingGraph: RollingCausalGraph, insertFilter: EventInsertFilter? = nil) {
+    public init(
+        rollingGraph: RollingCausalGraph,
+        insertFilter: EventInsertFilter? = nil,
+        ingestQueueCapacity: Int = EventToRollingCausalGraphBridge.defaultIngestQueueCapacity
+    ) {
+        precondition(ingestQueueCapacity > 0)
         self.rollingGraph = rollingGraph
         self.insertFilter = insertFilter
+        self.ingestQueueCapacity = ingestQueueCapacity
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: QueuedEvent.self,
+            bufferingPolicy: .bufferingNewest(ingestQueueCapacity)
+        )
+        self.ingestQueueContinuation = continuation
+        self.ingestQueueStream = OSAllocatedUnfairLock(initialState: stream)
+    }
+
+    // MARK: - Bounded lane hand-off
+
+    /// Hand one enriched event to the ingest queue. Nonisolated and
+    /// non-suspending: the lane pays a schema check, one latch read, and one
+    /// bounded yield. It never joins an in-flight store write and never waits
+    /// on storage admission or the recovery barrier.
+    ///
+    /// While the admission latch is armed, ordinary events are shed here
+    /// except one probe per retry interval. Process events and relevant file
+    /// events (credential, persistence, untrusted content) still pass: they
+    /// are the lineage and anchors the graph exists for, their refused-write
+    /// cost is bounded by the rolling writer's batch bound and shed-anchor
+    /// dedup, and the first one after the store recovers commits at once
+    /// instead of waiting for the next probe.
+    @discardableResult
+    public nonisolated func offer(_ event: Event) -> TraceGraphIngestHandoff {
+        guard mapCategory(event.eventCategory) != nil,
+              mapAction(event.eventAction) != nil else {
+            ingestQueueCounters.withLock { locked in
+                Self.incrementSaturating(&locked.handoffs)
+                Self.incrementSaturating(&locked.skippedNonGraph)
+            }
+            return .skippedNonGraph
+        }
+        var isProbe = false
+        var passedLatch = false
+        let latch = rollingGraph.admissionShedLatch
+        if latch.isArmed {
+            if isLatchedPassThrough(event) {
+                passedLatch = true
+            } else if latch.shouldShed() {
+                ingestQueueCounters.withLock { locked in
+                    Self.incrementSaturating(&locked.handoffs)
+                    Self.incrementSaturating(&locked.latchedShed)
+                    locked.lastLossAt = Date()
+                }
+                return .shedLatched
+            } else {
+                // Also reached if the service cleared the latch between the
+                // two reads; that event then costs one forced flush, nothing
+                // more, and is not counted as a probe.
+                isProbe = true
+            }
+        }
+        ingestQueueCounters.withLock { locked in
+            Self.incrementSaturating(&locked.handoffs)
+            Self.incrementSaturating(&locked.offered)
+            if passedLatch { Self.incrementSaturating(&locked.latchedPassThrough) }
+            Self.incrementSaturating(&locked.handoffsInFlight)
+        }
+        let result = ingestQueueContinuation.yield(
+            QueuedEvent(event: event, isProbe: isProbe)
+        )
+        return ingestQueueCounters.withLock { locked in
+            if locked.handoffsInFlight > 0 { locked.handoffsInFlight -= 1 }
+            switch result {
+            case .enqueued:
+                return .queued
+            case .dropped:
+                Self.incrementSaturating(&locked.dropped)
+                locked.lastLossAt = Date()
+                return .queuedEvictingOldest
+            case .terminated:
+                Self.incrementSaturating(&locked.terminated)
+                locked.lastLossAt = Date()
+                return .terminated
+            @unknown default:
+                Self.incrementSaturating(&locked.terminated)
+                locked.lastLossAt = Date()
+                return .terminated
+            }
+        }
+    }
+
+    /// Pure, nonisolated: does this event carry process lineage or an input
+    /// `AnchorDetector` can anchor (credential/persistence/untrusted file, or
+    /// an AI-agent-attributed observation)? Used only while the latch is armed.
+    nonisolated func isLatchedPassThrough(_ event: Event) -> Bool {
+        switch event.eventCategory {
+        case .process:
+            return true
+        case .file:
+            guard let file = event.file else { return false }
+            return TraceGraphFileObservationPolicy.isRelevant(
+                path: file.path,
+                kind: TraceGraphFileObservationPolicy.classify(path: file.path).fileKind,
+                untrustedContent: event.enrichments["untrusted_content"] == "true"
+            )
+        default:
+            return hasAgentAttribution(event.enrichments)
+        }
+    }
+
+    /// Mirrors `makeAgentEnrichment`: a traceparent-correlated or durable
+    /// agent-session id makes the event an agent observation.
+    nonisolated private func hasAgentAttribution(_ enrichments: [String: String]) -> Bool {
+        if enrichments[TraceCorrelator.EnrichmentKey.traceId] != nil { return true }
+        if let sessionId = enrichments["ai_tool_session_id"], !sessionId.isEmpty { return true }
+        return false
+    }
+
+    /// Drain the ingest queue until it is finished. Runs once, on its own
+    /// task, for the daemon's lifetime; materialized traces are handed to
+    /// `onMaterialized` off the detection lane.
+    ///
+    /// Cancellation (the shutdown deadline expired) stops the drain at the
+    /// next element: `AsyncStream` keeps returning buffered elements after its
+    /// task is cancelled, and each would still reach the store. Whatever
+    /// remains is reported as backlog, never processed past the deadline.
+    public nonisolated func runIngestService(
+        onMaterialized: @escaping @Sendable ([Trace], Event) async -> Void
+    ) async {
+        let stream = ingestQueueStream.withLock { locked -> AsyncStream<QueuedEvent>? in
+            defer { locked = nil }
+            return locked
+        }
+        guard let stream else { return }
+        for await queued in stream {
+            if Task.isCancelled { break }
+            ingestQueueCounters.withLock { Self.incrementSaturating(&$0.dequeued) }
+            let (traces, outcome) = await processQueued(queued.event, probe: queued.isProbe)
+            if queued.isProbe, outcome != .ingested {
+                // A filtered or unmappable probe never reached the writer, so
+                // it made no write attempt and cannot have discovered recovery.
+                rollingGraph.admissionShedLatch.reopenProbe()
+            }
+            if !traces.isEmpty {
+                await onMaterialized(traces, queued.event)
+            }
+            ingestQueueCounters.withLock { locked in
+                switch outcome {
+                case .filtered: Self.incrementSaturating(&locked.filtered)
+                case .rejected:
+                    Self.incrementSaturating(&locked.rejected)
+                    locked.lastLossAt = Date()
+                case .ingested: break
+                }
+                Self.incrementSaturating(&locked.completed)
+            }
+        }
+    }
+
+    /// Stop accepting hand-offs. The service drains what is already queued
+    /// and returns; later offers are counted as terminated.
+    public nonisolated func finishIngestQueue() {
+        ingestQueueContinuation.finish()
+    }
+
+    public nonisolated func ingestQueueTelemetry() -> TraceGraphIngestQueueTelemetry {
+        let latch = rollingGraph.admissionShedLatch.snapshot()
+        return ingestQueueCounters.withLock { locked in
+            let removed = [locked.dropped, locked.terminated, locked.dequeued]
+                .reduce(UInt64(0)) { $0.addingReportingOverflow($1).partialValue }
+            let backlog = locked.offered >= removed ? locked.offered - removed : 0
+            let inFlight = locked.dequeued >= locked.completed
+                ? locked.dequeued - locked.completed : 0
+            return TraceGraphIngestQueueTelemetry(
+                capacity: ingestQueueCapacity,
+                handoffsTotal: locked.handoffs,
+                skippedNonGraphTotal: locked.skippedNonGraph,
+                latchedShedTotal: locked.latchedShed,
+                latchedPassThroughTotal: locked.latchedPassThrough,
+                offeredTotal: locked.offered,
+                droppedTotal: locked.dropped,
+                terminatedTotal: locked.terminated,
+                dequeuedTotal: locked.dequeued,
+                completedTotal: locked.completed,
+                filteredTotal: locked.filtered,
+                rejectedTotal: locked.rejected,
+                handoffsInFlight: locked.handoffsInFlight,
+                backlog: Int(clamping: backlog),
+                inFlight: Int(clamping: inFlight),
+                admissionLatched: latch.armed,
+                admissionProbesTotal: latch.probesTotal,
+                admissionLatchArmsTotal: latch.armsTotal,
+                lastLossAt: locked.lastLossAt
+            )
+        }
+    }
+
+    @inline(__always)
+    private static func incrementSaturating(_ value: inout UInt64) {
+        if value < UInt64.max { value += 1 }
     }
 
     /// Convert a v1.9 `Event` into a `NormalizedEventInput` and ingest.
@@ -68,26 +399,37 @@ public actor EventToRollingCausalGraphBridge {
     /// downstream alert sink to surface.
     @discardableResult
     public func process(_ event: Event) async -> [Trace] {
+        await processQueued(event, probe: false).traces
+    }
+
+    /// `process` with the outcome the ingest service ledgers. Every event
+    /// that reaches `rollingGraph.ingest` is `.ingested`: the rolling writer
+    /// counts it exactly once (committed, failed, in flight or pending),
+    /// including an ingest that throws.
+    private func processQueued(
+        _ event: Event,
+        probe: Bool
+    ) async -> (traces: [Trace], outcome: QueuedOutcome) {
         // v1.17.4 (perf): self-gate on the noise filter before doing any
         // graph work. The graph needs none of what defaultFilter drops
         // (self-monitoring, pty/null, SQLite scratch), and ingesting it was
         // the dominant per-event CPU cost.
         if insertFilter?.shouldDrop(event: event) == true {
-            return []
+            return ([], .filtered)
         }
         guard let normalized = normalize(event) else {
-            return []
+            return ([], .rejected)
         }
         do {
-            return try await rollingGraph.ingest(normalized)
+            return (try await rollingGraph.ingest(normalized, probe: probe), .ingested)
         } catch is CausalGraphStorageAdmissionError {
             // Expected fail-closed shedding. SQLiteCausalGraphStore already
             // increments telemetry and logs only block/recovery transitions;
             // a warning here for every source event would defeat that design.
-            return []
+            return ([], .ingested)
         } catch {
             logger.warning("rolling graph ingest failed: \(error.localizedDescription, privacy: .public)")
-            return []
+            return ([], .ingested)
         }
     }
 
@@ -249,7 +591,9 @@ public actor EventToRollingCausalGraphBridge {
 
     // MARK: - Mapping helpers
 
-    private func mapCategory(_ category: EventCategory) -> RollingCausalGraph.NormalizedEventInput.Category? {
+    // nonisolated (pure enum switch) so the lane-side `offer` can reject
+    // non-graph categories before touching the queue.
+    nonisolated private func mapCategory(_ category: EventCategory) -> RollingCausalGraph.NormalizedEventInput.Category? {
         switch category {
         case .process:  return .process
         case .file:     return .file

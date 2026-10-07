@@ -123,6 +123,7 @@ def validate_item_bytes(
         "minimumSystemVersion",
         "pubDate",
         "phasedRolloutInterval",
+        "criticalUpdate",
         "description",
         "enclosure",
     }
@@ -158,6 +159,22 @@ def validate_item_bytes(
     phased = [child for child in item if local_name(child.tag) == "phasedRolloutInterval"]
     if len(phased) > 1 or (phased and not re.fullmatch(r"[1-9][0-9]{0,9}", phased[0].text or "")):
         fail("invalid phasedRolloutInterval")
+
+    # Sparkle 2 top-level critical marker. The optional sparkle:version attribute
+    # names the last version for which this update is critical; users on it or
+    # anything newer see an ordinary update. It carries no text or children.
+    critical = [child for child in item if local_name(child.tag) == "criticalUpdate"]
+    if len(critical) > 1:
+        fail("at most one criticalUpdate element")
+    if critical:
+        element = critical[0]
+        if (element.text or "").strip() or len(element) or [
+            key for key in element.attrib if key != f"{{{SPARKLE_NS}}}version"
+        ]:
+            fail("criticalUpdate must be empty and carry only sparkle:version")
+        below = element.attrib.get(f"{{{SPARKLE_NS}}}version")
+        if below is not None and not VERSION_RE.fullmatch(below):
+            fail("criticalUpdate sparkle:version must be MAJOR.MINOR.PATCH")
 
     attrs = enclosure.attrib
     signature = attrs.get(f"{{{SPARKLE_NS}}}edSignature", "")
@@ -203,12 +220,17 @@ def cmd_generate(args: argparse.Namespace) -> None:
         fail("--length must be a positive decimal")
     if args.phased_interval is not None and not re.fullmatch(r"[1-9][0-9]{0,9}", args.phased_interval):
         fail("--phased-interval must be a positive decimal")
+    if args.critical_below is not None and not VERSION_RE.fullmatch(args.critical_below):
+        fail("--critical-below must be MAJOR.MINOR.PATCH")
 
     notes = read_bounded(args.notes_file, MAX_ITEM_BYTES).decode("utf-8")
     safe_notes = notes.replace("]]>", "]]]]><![CDATA[>")
     phased = ""
     if args.phased_interval is not None:
         phased = f"  <sparkle:phasedRolloutInterval>{args.phased_interval}</sparkle:phasedRolloutInterval>\n"
+    critical = ""
+    if args.critical_below is not None:
+        critical = f'  <sparkle:criticalUpdate sparkle:version="{args.critical_below}"></sparkle:criticalUpdate>\n'
     item = f"""<item>
   <title>MacCrab {args.version}</title>
   <link>https://github.com/peterhanily/maccrab/releases/tag/v{args.version}</link>
@@ -216,7 +238,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
   <sparkle:shortVersionString>{args.version}</sparkle:shortVersionString>
   <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
   <pubDate>{args.pub_date}</pubDate>
-{phased}  <description><![CDATA[
+{phased}{critical}  <description><![CDATA[
 {safe_notes}
 ]]></description>
   <enclosure
@@ -325,6 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--build-number", required=True)
     generate.add_argument("--pub-date", required=True)
     generate.add_argument("--phased-interval")
+    generate.add_argument("--critical-below")
     generate.add_argument("--signature", required=True)
     generate.add_argument("--length", required=True)
     generate.add_argument("--dmg-name", required=True)
