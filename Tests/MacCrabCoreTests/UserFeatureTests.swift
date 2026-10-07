@@ -65,6 +65,24 @@ struct AppPrivacyAuditorTests {
         #expect(concern != nil)
     }
 
+    @Test("Tracking domains match exact entries and subdomains, not lookalike suffixes")
+    func trackingDomainLabelBoundary() async {
+        let auditor = AppPrivacyAuditor()
+        let mb11 = 11 * 1_048_576
+        for domain in ["braze.com", "sdk.fra-01.braze.eu", "securemetrics.apple.com",
+                       "notmetrics.apple.com", "xtelemetry.mozilla.org"] {
+            await auditor.recordConnection(processName: domain, processPath: "/tmp/\(domain)",
+                domain: domain, ip: "1.2.3.4", port: 443, bytesOut: mb11)
+        }
+        let profiles = await auditor.audit()
+        let trackers = profiles.filter { $0.concerns.contains(where: { $0.contains("tracking/analytics") }) }
+        #expect(Set(trackers.map(\.processName)) == ["braze.com", "sdk.fra-01.braze.eu", "securemetrics.apple.com"])
+        // Tracker domains are exempt from the single-domain spike; lookalikes are not.
+        let anomalies = await auditor.checkForAnomalies()
+        let spikes = anomalies.filter { $0.kind == .singleDomainSpike }
+        #expect(Set(spikes.map(\.processName)) == ["notmetrics.apple.com", "xtelemetry.mozilla.org"])
+    }
+
     @Test("Bulk egress anomaly detected above 50 MB threshold")
     func bulkEgressDetected() async {
         let auditor = AppPrivacyAuditor()

@@ -15,6 +15,17 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   after a size pause.
 
 ### Fixed
+- **Five supply-chain rules no longer cite a blog post that is offline.**
+  Their MITRE ATT&CK references are unchanged.
+- **Homebrew upgrade instructions use the tap's full cask name.** Settings,
+  the FAQ, UPGRADE.md and TROUBLESHOOTING.md now say
+  `brew upgrade --cask peterhanily/maccrab/maccrab`, the same form as the
+  install command.
+- **The privacy audit matches tracking domains on whole labels.** A domain
+  that only ends with a listed name is no longer treated as a known tracker,
+  so it no longer skips the single-domain spike alert. The list now names
+  Braze's EU domain, braze.eu, and Apple's securemetrics and supportmetrics
+  hosts, which the looser match used to cover.
 - **`maccrabctl version` links to the project's repository.** It now prints
   https://github.com/peterhanily/maccrab, the repository the Help menu and the
   SARIF export already use, instead of an outdated address.

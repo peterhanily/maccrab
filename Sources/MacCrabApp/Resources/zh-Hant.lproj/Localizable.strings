@@ -579,7 +579,7 @@
 "settings.alerts.help" = "MacCrab 觸發的偵測結果。不受任何事件串流清理影響。";
 "settings.alerts.label" = "警報歷史記錄";
 "settings.appearance" = "外觀";
-"settings.brewInstalled.hint" = "透過 Homebrew 安裝。背景自動更新已關閉；請使用 `brew upgrade --cask maccrab` 升級。上方的手動檢查仍可使用。";
+"settings.brewInstalled.hint" = "透過 Homebrew 安裝。背景自動更新已關閉；請使用 `brew upgrade --cask peterhanily/maccrab/maccrab` 升級。上方的手動檢查仍可使用。";
 "settings.campaigns.help" = "MacCrab 已關聯的多步驟攻擊鏈。";
 "settings.campaigns.label" = "攻擊行動歷史記錄";
 "settings.catalogReopen" = "變更此設定後請重新開啟「目錄」分頁。";

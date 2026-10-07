@@ -144,7 +144,7 @@ you want AI reasoning on an air-gapped box.
 
 ### How do I update MacCrab?
 
-**Homebrew:** `brew upgrade --cask maccrab`. Restart `MacCrab.app` after
+**Homebrew:** `brew upgrade --cask peterhanily/maccrab/maccrab`. Restart `MacCrab.app` after
 the upgrade completes. Within-family upgrades (v1.3.0 → v1.3.5) don't
 require re-approval of the System Extension; major-version upgrades might
 (see [UPGRADE.md](UPGRADE.md)).

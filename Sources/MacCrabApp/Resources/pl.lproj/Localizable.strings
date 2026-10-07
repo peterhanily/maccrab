@@ -579,7 +579,7 @@
 "settings.alerts.help" = "Wykrycia wyzwolone przez MacCrab. Przetrwają każde czyszczenie strumienia zdarzeń.";
 "settings.alerts.label" = "Historia alertów";
 "settings.appearance" = "Wygląd";
-"settings.brewInstalled.hint" = "Zainstalowano przez Homebrew. Automatyczne uaktualnienia w tle są wyłączone; uaktualnij poleceniem `brew upgrade --cask maccrab`. Ręczne sprawdzanie powyżej nadal działa.";
+"settings.brewInstalled.hint" = "Zainstalowano przez Homebrew. Automatyczne uaktualnienia w tle są wyłączone; uaktualnij poleceniem `brew upgrade --cask peterhanily/maccrab/maccrab`. Ręczne sprawdzanie powyżej nadal działa.";
 "settings.campaigns.help" = "Wieloetapowe łańcuchy ataków skorelowane przez MacCrab.";
 "settings.campaigns.label" = "Historia kampanii";
 "settings.catalogReopen" = "Po zmianie tego ustawienia otwórz ponownie kartę Katalog.";

@@ -88,7 +88,7 @@ public actor AppPrivacyAuditor {
 
         // Marketing automation / CRM
         "braze.com",
-        "braze-eu.com",
+        "braze.eu",
         "customer.io",
         "hubspot.com",
         "klaviyo.com",
@@ -135,6 +135,8 @@ public actor AppPrivacyAuditor {
 
         // Apple telemetry
         "metrics.apple.com",
+        "securemetrics.apple.com",
+        "supportmetrics.apple.com",
 
         // Microsoft telemetry
         "self.events.data.microsoft.com",
@@ -151,6 +153,11 @@ public actor AppPrivacyAuditor {
         "firebaseio.com",
         "firebaseinstallations.googleapis.com",
     ]
+
+    /// True when `domain` is a listed tracking domain or a subdomain of one.
+    private static func isTrackingDomain(_ domain: String) -> Bool {
+        trackingDomains.contains(where: { domain == $0 || domain.hasSuffix("." + $0) })
+    }
 
     // MARK: - Public API
 
@@ -203,7 +210,7 @@ public actor AppPrivacyAuditor {
 
             var concerns: [String] = []
             let matchedTrackers = domains.filter { d in
-                Self.trackingDomains.contains(where: { d.domain.hasSuffix($0) })
+                Self.isTrackingDomain(d.domain)
             }
             if !matchedTrackers.isEmpty {
                 concerns.append("Contacts \(matchedTrackers.count) tracking/analytics domain(s): \(matchedTrackers.prefix(3).map(\.domain).joined(separator: ", "))")
@@ -261,7 +268,7 @@ public actor AppPrivacyAuditor {
                 perDomainBytes[key, default: 0] += record.bytesOut
             }
             for (domain, bytes) in perDomainBytes where bytes > singleDomainThresholdBytes {
-                let isKnownTracker = Self.trackingDomains.contains(where: { domain.hasSuffix($0) })
+                let isKnownTracker = Self.isTrackingDomain(domain)
                 if !isKnownTracker {
                     anomalies.append(EgressAnomaly(
                         kind: .singleDomainSpike,
@@ -279,7 +286,7 @@ public actor AppPrivacyAuditor {
                 if let d = record.domain { domainCounts[d, default: 0] += 1 }
             }
             let trackerHits = domainCounts.filter { d, _ in
-                Self.trackingDomains.contains(where: { d.hasSuffix($0) })
+                Self.isTrackingDomain(d)
             }
             let totalTrackerHits = trackerHits.values.reduce(0, +)
             if totalTrackerHits > 50 {

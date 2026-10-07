@@ -161,7 +161,7 @@ non-zero.
 
 ## Homebrew upgrade leaves old state around
 
-**Symptom:** After `brew upgrade --cask maccrab`, you still see a pre-1.3
+**Symptom:** After `brew upgrade --cask peterhanily/maccrab/maccrab`, you still see a pre-1.3
 `maccrabd` LaunchDaemon running, or the dashboard reports an old version.
 
 **Fix:**
