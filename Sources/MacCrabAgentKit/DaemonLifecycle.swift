@@ -132,6 +132,7 @@ actor EventIngestionLifecycle {
     /// on a finished queue and be counted as terminated at shutdown.
     private var graphIngestTask: Task<Void, Never>?
     private var graphIngestFinish: (@Sendable () -> Void)?
+    private var graphIngestUndrained: (@Sendable () -> String)?
     private var shutdownResult: Bool?
     private var shutdownWaiters: [CheckedContinuation<Bool, Never>] = []
 
@@ -173,10 +174,13 @@ actor EventIngestionLifecycle {
     }
 
     /// Register the TraceGraph ingest service. `finish` closes its queue and
-    /// is invoked by `shutdown` after the lane consumers have been joined.
+    /// is invoked by `shutdown` after the lane consumers have been joined;
+    /// `undrained` describes what the queue still holds when that join misses
+    /// its deadline, so abandoned hand-offs are logged rather than silent.
     @discardableResult
     func spawnGraphIngestConsumer(
         finish: @escaping @Sendable () -> Void,
+        undrained: @escaping @Sendable () -> String,
         _ operation: @escaping @Sendable () async -> Void
     ) -> Task<Void, Never>? {
         guard phase == .accepting else {
@@ -188,6 +192,7 @@ actor EventIngestionLifecycle {
         let task = Task { await operation() }
         graphIngestTask = task
         graphIngestFinish = finish
+        graphIngestUndrained = undrained
         return task
     }
 
@@ -235,6 +240,11 @@ actor EventIngestionLifecycle {
                 graphTasks,
                 deadline: max(0, deadline - joinElapsed)
             )
+            if !graphClean, let undrained = graphIngestUndrained {
+                // No shutdown path writes a heartbeat, so the abandoned
+                // hand-offs are only visible here.
+                logger.fault("TraceGraph ingest service did not drain inside the shutdown budget: \(undrained(), privacy: .public)")
+            }
             clean = clean && graphClean
         }
         if !clean {
@@ -249,6 +259,7 @@ actor EventIngestionLifecycle {
         consumerTasks.removeAll(keepingCapacity: false)
         graphIngestTask = nil
         graphIngestFinish = nil
+        graphIngestUndrained = nil
         priorityContinuation = nil
         fileContinuation = nil
         phase = .stopped

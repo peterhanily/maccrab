@@ -101,6 +101,12 @@ struct RecentAnchorDedupCache: Sendable {
             queueHead = 0
         }
     }
+
+    mutating func removeAll() {
+        values.removeAll(keepingCapacity: true)
+        queue.removeAll(keepingCapacity: true)
+        queueHead = 0
+    }
 }
 
 /// Bounds the write-behind window used by the daemon's rolling graph.
@@ -230,6 +236,17 @@ public final class CausalGraphAdmissionShedLatch: @unchecked Sendable {
 
     func clear() {
         state.withLock { $0.retryAt = nil }
+    }
+
+    /// The admitted probe made no write attempt (it was filtered, or had no
+    /// graph mapping on the service side), so it could not discover recovery.
+    /// Reopen the window so the next hand-off probes immediately instead of
+    /// leaving the latch armed for another whole interval.
+    func reopenProbe() {
+        state.withLock { locked in
+            guard locked.retryAt != nil else { return }
+            locked.retryAt = now()
+        }
     }
 
     public var isArmed: Bool {
@@ -796,8 +813,13 @@ public actor RollingCausalGraph {
         anchorDedupKey(anchor) ?? "\(anchor.defaultTitle):\(anchor.anchorEntityId)"
     }
 
+    /// Suppression is conditional on the latch: a committed batch clears the
+    /// latch and empties this cache together, so an anchor refused just
+    /// before a scheduled flush recovered the store is retried by its next
+    /// occurrence instead of waiting out an event-time window.
     private func anchorRecentlyShed(_ anchor: AnchorTrigger, now: Date) -> Bool {
-        recentShedAnchorKeys.contains(anchorShedDedupKey(anchor), at: now)
+        admissionShedLatch.isArmed
+            && recentShedAnchorKeys.contains(anchorShedDedupKey(anchor), at: now)
     }
 
     private func recordShedAnchor(_ anchor: AnchorTrigger, now: Date) {
@@ -807,8 +829,28 @@ public actor RollingCausalGraph {
 
     // MARK: - Ingestion
 
+    /// `probe`: the lane-side admission latch admitted this event as its one
+    /// write attempt for the retry interval. A probe never takes the
+    /// physical-write suppression path, ignores the shed-anchor dedup, and
+    /// always flushes, so every probe is exactly one store contact that can
+    /// discover recovery; an ordinary build-storm file write would otherwise
+    /// return here without touching the store and leave the latch armed.
     @discardableResult
-    public func ingest(_ event: NormalizedEventInput) async throws -> [Trace] {
+    public func ingest(
+        _ event: NormalizedEventInput,
+        probe: Bool = false
+    ) async throws -> [Trace] {
+        // Every call is ledgered exactly once: an event whose row conversion
+        // throws before the writer counted it is recorded as input + failed,
+        // so the bridge's dequeued count reconciles with this ledger.
+        var ledgered = false
+        defer {
+            if !ledgered {
+                inputEventsTotal = Self.saturatingAdd(inputEventsTotal, 1)
+                eventsFailedTotal = Self.saturatingAdd(eventsFailedTotal, 1)
+                lastWriteFailureAt = Date()
+            }
+        }
         let processNode = makeProcessNode(from: event.process, agent: event.agent)
         var processEntity = try processNode.toEntity(source: "rolling_graph")
 
@@ -816,7 +858,7 @@ public actor RollingCausalGraph {
         // and edge but still upsert the same process entity once per event.
         // Suppress that last physical row only when the event carries neither
         // a graph-relevant file nor any independent anchor/lineage evidence.
-        if event.category == .file, let file = event.file {
+        if !probe, event.category == .file, let file = event.file {
             let kind = Self.inferFileKind(path: file.path)
             let processCanAnchor = AnchorDetector.processOnlyAnchor(
                 processNode: processNode,
@@ -833,6 +875,7 @@ public actor RollingCausalGraph {
                 processCanAnchor: processCanAnchor
             ) {
                 deferredProcessContexts.record(processEntity)
+                ledgered = true
                 inputEventsTotal = Self.saturatingAdd(inputEventsTotal, 1)
                 eventsCommittedTotal = Self.saturatingAdd(eventsCommittedTotal, 1)
                 entityObservationsTotal = Self.saturatingAdd(
@@ -1033,6 +1076,7 @@ public actor RollingCausalGraph {
         )
         let anchors = AnchorDetector.classify(anchorContext)
 
+        ledgered = true
         inputEventsTotal = Self.saturatingAdd(inputEventsTotal, 1)
         entityObservationsTotal = Self.saturatingAdd(
             entityObservationsTotal,
@@ -1056,9 +1100,9 @@ public actor RollingCausalGraph {
         // novel anchor must be visible synchronously to TraceMaterializer.
         let hasNovelAnchor = anchors.contains {
             !anchorIsDuplicate($0, now: event.timestamp)
-                && !anchorRecentlyShed($0, now: event.timestamp)
+                && (probe || !anchorRecentlyShed($0, now: event.timestamp))
         }
-        if hasNovelAnchor || shouldFlushPendingBatch {
+        if hasNovelAnchor || shouldFlushPendingBatch || probe {
             do {
                 try await flushPending()
             } catch let error as CausalGraphStorageAdmissionError {
@@ -1083,7 +1127,8 @@ public actor RollingCausalGraph {
         return await materializeAnchors(
             anchors,
             eventId: event.eventId,
-            timestamp: event.timestamp
+            timestamp: event.timestamp,
+            retryShed: probe
         )
     }
 
@@ -1178,6 +1223,7 @@ public actor RollingCausalGraph {
             inFlightStoreWrite = nil
             inFlightFirstEnqueuedAt = nil
             admissionShedLatch.clear()
+            recentShedAnchorKeys.removeAll()
             writeBatchesInFlight -= 1
             eventsInFlight -= batch.eventCount
             writeRowsInFlight -= rowCount
@@ -1270,12 +1316,13 @@ public actor RollingCausalGraph {
     func materializeAnchors(
         _ anchors: [AnchorTrigger],
         eventId: String,
-        timestamp: Date
+        timestamp: Date,
+        retryShed: Bool = false
     ) async -> [Trace] {
         var materialized: [Trace] = []
         for anchor in anchors {
             if anchorIsDuplicate(anchor, now: timestamp) { continue }
-            if anchorRecentlyShed(anchor, now: timestamp) {
+            if !retryShed, anchorRecentlyShed(anchor, now: timestamp) {
                 anchorShedDedupSuppressedTotal = Self.saturatingAdd(
                     anchorShedDedupSuppressedTotal, 1)
                 continue

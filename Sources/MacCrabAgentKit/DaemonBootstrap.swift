@@ -256,7 +256,11 @@ public enum DaemonBootstrap {
         // lifecycle only after both lanes have returned.
         if let bridge = handles.state.causalGraphBridge {
             await handles.state.eventIngestionLifecycle.spawnGraphIngestConsumer(
-                finish: { bridge.finishIngestQueue() }
+                finish: { bridge.finishIngestQueue() },
+                undrained: {
+                    let q = bridge.ingestQueueTelemetry()
+                    return "backlog=\(q.backlog) in_flight=\(q.inFlight) dropped=\(q.droppedTotal) terminated=\(q.terminatedTotal) latched_shed=\(q.latchedShedTotal) rejected=\(q.rejectedTotal)"
+                }
             ) {
                 await EventLoop.serviceTraceGraphIngest(state: handles.state)
             }
