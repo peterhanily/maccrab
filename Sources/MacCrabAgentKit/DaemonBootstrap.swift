@@ -250,6 +250,21 @@ public enum DaemonBootstrap {
         // every emission path flows through), and it was wired the SAME
         // `_sharedAlertCount` instance in DaemonState.init, so the heartbeat
         // read below is unchanged.
+        // v1.22.7: the TraceGraph ingest service drains the bounded hand-off
+        // queue that both lanes feed, so neither lane waits on the graph
+        // store. It starts before the lanes and is finished by the ingestion
+        // lifecycle only after both lanes have returned.
+        if let bridge = handles.state.causalGraphBridge {
+            await handles.state.eventIngestionLifecycle.spawnGraphIngestConsumer(
+                finish: { bridge.finishIngestQueue() },
+                undrained: {
+                    let q = bridge.ingestQueueTelemetry()
+                    return "backlog=\(q.backlog) in_flight=\(q.inFlight) dropped=\(q.droppedTotal) terminated=\(q.terminatedTotal) latched_shed=\(q.latchedShedTotal) rejected=\(q.rejectedTotal)"
+                }
+            ) {
+                await EventLoop.serviceTraceGraphIngest(state: handles.state)
+            }
+        }
         guard let consumers = await handles.state.eventIngestionLifecycle
             .spawnConsumers(
                 priority: {

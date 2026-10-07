@@ -2704,6 +2704,7 @@ def validate_runtime_report(
             "callback_copy_loss",
             "upstream_collector_loss",
             "unclassified_file_queue_loss",
+            "trace_graph_handoff_loss",
         ):
             require_zero(sample_losses.get(loss_name), f"{path}.losses.{loss_name}")
         if prior_offset is None:
@@ -3142,6 +3143,18 @@ def validate_runtime_report(
             or trace.get("mutation_shed") != last_trace_shed - first_trace_shed:
         fail("TraceGraph mutation shed does not reconcile with recorder observations")
     require_zero(trace.get("mutation_shed"), "runtime.measurements.trace_graph.mutation_shed")
+    first_handoff_loss = int_value(
+        object_value(observations[0], "first recorder observation").get("trace_ingest_handoff_loss_total"),
+        "first recorder trace hand-off loss",
+    )
+    last_handoff_loss = int_value(
+        object_value(observations[-1], "last recorder observation").get("trace_ingest_handoff_loss_total"),
+        "last recorder trace hand-off loss",
+    )
+    if last_handoff_loss < first_handoff_loss \
+            or trace.get("handoff_loss") != last_handoff_loss - first_handoff_loss:
+        fail("TraceGraph hand-off loss does not reconcile with recorder observations")
+    require_zero(trace.get("handoff_loss"), "runtime.measurements.trace_graph.handoff_loss")
     require_zero(trace.get("recovery_oscillation_count"), "runtime.measurements.trace_graph.recovery_oscillation_count")
     graph_ingest_shed_delta = int_value(
         object_value(last_sample_boundaries.get("trace-graph-mutation"), "last TraceGraph ingest").get("explicitly_shed"),
@@ -3200,6 +3213,7 @@ def validate_runtime_report(
         "writable_duty_fraction": writable,
         "accepting_mutations_duty_fraction": accepting_duty,
         "mutation_shed": last_trace_shed - first_trace_shed,
+        "handoff_loss": last_handoff_loss - first_handoff_loss,
         "recovery_oscillation_count": trace.get("recovery_oscillation_count"),
         "recovery_mutation_queue_saturated_samples": 0,
         "recovery_mutation_waiter_limit": graph_barrier_rows[0][
@@ -4114,6 +4128,71 @@ def published_conservation_boundary(
     )
 
 
+def trace_graph_handoff_sample(
+    graph: Mapping[str, Any], path: str
+) -> Dict[str, int]:
+    """Read and reconcile the bounded lane -> TraceGraph hand-off queue.
+
+    The queue sits in front of the rolling writer (v1.22.7). An event evicted
+    from it, offered after it finished, shed by the armed admission latch, or
+    unmappable on the service side never entered the writer's
+    ingest_events_* ledger, so that ledger alone cannot see this loss. The
+    producer publishes every counter under one lock, so these identities are
+    exact at a snapshot; the chain into the writer is a lower bound because
+    the heartbeat reads the queue before the writer and the service only
+    advances the writer after completing a dequeue.
+    """
+    keys = (
+        "ingest_queue_handoffs_total",
+        "ingest_queue_skipped_non_graph_total",
+        "ingest_latched_shed_total",
+        "ingest_queue_offered_total",
+        "ingest_queue_dropped_total",
+        "ingest_queue_terminated_total",
+        "ingest_queue_dequeued_total",
+        "ingest_queue_completed_total",
+        "ingest_queue_filtered_total",
+        "ingest_queue_rejected_total",
+        "ingest_queue_backlog",
+        "ingest_queue_in_flight",
+        "ingest_queue_loss_total",
+    )
+    row = {key: heartbeat_counter(graph, key, path) for key in keys}
+    if row["ingest_queue_handoffs_total"] != (
+        row["ingest_queue_skipped_non_graph_total"]
+        + row["ingest_latched_shed_total"]
+        + row["ingest_queue_offered_total"]
+    ):
+        fail(f"{path} TraceGraph hand-off ledger does not conserve handoffs")
+    if row["ingest_queue_offered_total"] != (
+        row["ingest_queue_dropped_total"]
+        + row["ingest_queue_terminated_total"]
+        + row["ingest_queue_dequeued_total"]
+        + row["ingest_queue_backlog"]
+    ):
+        fail(f"{path} TraceGraph hand-off ledger does not conserve offers")
+    if row["ingest_queue_dequeued_total"] != (
+        row["ingest_queue_completed_total"] + row["ingest_queue_in_flight"]
+    ):
+        fail(f"{path} TraceGraph hand-off ledger does not conserve dequeues")
+    if row["ingest_queue_loss_total"] != (
+        row["ingest_queue_dropped_total"]
+        + row["ingest_queue_terminated_total"]
+        + row["ingest_latched_shed_total"]
+        + row["ingest_queue_rejected_total"]
+    ):
+        fail(f"{path} TraceGraph hand-off loss total does not reconcile")
+    ingested = (
+        row["ingest_queue_completed_total"]
+        - row["ingest_queue_filtered_total"]
+        - row["ingest_queue_rejected_total"]
+    )
+    if ingested < 0 or heartbeat_counter(graph, "ingest_events_total", path) < ingested:
+        fail(f"{path} TraceGraph writer ledger saw fewer events than the hand-off queue completed")
+    row["loss_total"] = row["ingest_queue_loss_total"]
+    return row
+
+
 def trace_graph_write_accounting_sample(
     graph: Mapping[str, Any], path: str
 ) -> Dict[str, Any]:
@@ -4815,6 +4894,9 @@ def normalized_runtime_sample(
         in_flight=graph_in_flight, explicitly_shed=graph_failed,
         path="recorder.trace-graph-mutation",
     )
+    graph_handoff = trace_graph_handoff_sample(
+        graph, "heartbeat.tracegraph_storage_admission"
+    )
 
     trace_store = object_value(
         heartbeat.get("traces_storage_admission"),
@@ -4898,6 +4980,7 @@ def normalized_runtime_sample(
             for lane in ("priority", "file")
         },
         "trace_graph_write_accounting": graph_write_accounting,
+        "trace_graph_handoff": graph_handoff,
         "trace_graph_recovery_barrier": graph_recovery_barrier,
         "trace_store_admission": trace_store_admission,
         "alert_storage_admission": alert_storage_admission,
@@ -4915,6 +4998,7 @@ def normalized_runtime_sample(
             ),
             "upstream_collector_loss": upstream_loss,
             "unclassified_file_queue_loss": boundaries["file-ingress"]["explicitly_shed"],
+            "trace_graph_handoff_loss": graph_handoff["loss_total"],
         },
         "llm_quality": llm_runtime_quality_sample(heartbeat),
     }
@@ -5004,6 +5088,14 @@ def sample_from_recorder_observation(raw: Any, path: str) -> Dict[str, Any]:
         f"{path}.trace_shed_mutations_total",
     ) != expected_shed:
         fail(f"{path}.trace_shed_mutations_total does not match the heartbeat")
+    expected_handoff_loss = heartbeat_counter(
+        graph, "ingest_queue_loss_total", f"{path}.heartbeat.tracegraph"
+    )
+    if int_value(
+        observation.get("trace_ingest_handoff_loss_total"),
+        f"{path}.trace_ingest_handoff_loss_total",
+    ) != expected_handoff_loss:
+        fail(f"{path}.trace_ingest_handoff_loss_total does not match the heartbeat")
     budget = object_value(
         heartbeat.get("events_retention_budget"),
         f"{path}.heartbeat.events_retention_budget",
@@ -5664,6 +5756,14 @@ def runtime_readiness_failures(
     )
     if graph_shed:
         fatal.append(f"cumulative TraceGraph shed_mutations_total={graph_shed}")
+    graph_handoff_loss = int_value(
+        observation.get("trace_ingest_handoff_loss_total"),
+        f"{path}.trace_ingest_handoff_loss_total",
+    )
+    if graph_handoff_loss:
+        fatal.append(
+            f"cumulative TraceGraph ingest_queue_loss_total={graph_handoff_loss}"
+        )
     if observation.get("event_budget_fault") is not False:
         fatal.append("event retention budget is degraded or sticky")
 
@@ -6409,6 +6509,9 @@ def build_runtime_report_from_observations(
     trace_shed_delta = int_value(raw_observations[-1].get("trace_shed_mutations_total"), "last trace shed") - int_value(raw_observations[0].get("trace_shed_mutations_total"), "first trace shed")
     if trace_shed_delta < 0:
         fail("TraceGraph shed-mutation counter reset during the qualification epoch")
+    trace_handoff_loss_delta = int_value(raw_observations[-1].get("trace_ingest_handoff_loss_total"), "last trace hand-off loss") - int_value(raw_observations[0].get("trace_ingest_handoff_loss_total"), "first trace hand-off loss")
+    if trace_handoff_loss_delta < 0:
+        fail("TraceGraph hand-off loss counter reset during the qualification epoch")
     graph_accounting_rows = [
         object_value(
             sample.get("trace_graph_write_accounting"),
@@ -6759,6 +6862,7 @@ def build_runtime_report_from_observations(
                 "writable_duty_fraction": trace_writable,
                 "accepting_mutations_duty_fraction": graph_accepting_duty,
                 "mutation_shed": trace_shed_delta,
+                "handoff_loss": trace_handoff_loss_delta,
                 "recovery_oscillation_count": max(0, recovery_transitions - 1),
                 "recovery_mutation_queue_saturated_samples": sum(
                     1 for row in graph_barrier_rows
@@ -8210,6 +8314,9 @@ def capture_runtime_observation(
         ),
         "trace_shed_mutations_total": heartbeat_counter(
             graph, "shed_mutations_total", "heartbeat.tracegraph"
+        ),
+        "trace_ingest_handoff_loss_total": heartbeat_counter(
+            graph, "ingest_queue_loss_total", "heartbeat.tracegraph"
         ),
         "event_budget_fault": budget_state.startswith("degraded_")
             or budget.get("sticky") is True,
@@ -10249,6 +10356,7 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
                 "writable_duty_fraction": 0,
                 "accepting_mutations_duty_fraction": 0,
                 "mutation_shed": 0,
+                "handoff_loss": 0,
                 "recovery_oscillation_count": 0,
                 "recovery_mutation_queue_saturated_samples": 0,
                 "recovery_mutation_waiter_limit":
