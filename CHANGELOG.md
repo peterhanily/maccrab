@@ -197,6 +197,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
     prints.
 
 ### Release tooling
+- **A release can be marked critical for older installs.** `MACCRAB_CRITICAL_BELOW=X`
+  makes `release.sh` write Sparkle 2's `<sparkle:criticalUpdate sparkle:version="X">`
+  into the appcast item, so installs below X see the update immediately and
+  cannot skip it, while newer installs are updated normally. The item validator
+  accepts only that shape, and the release fixtures cover it.
 - **A failed installed-host recording can be retried without moving root-owned
   files by hand.** A second `record-runtime` attempt died with
   `FileExistsError` on the first attempt's readiness directory, and its first
