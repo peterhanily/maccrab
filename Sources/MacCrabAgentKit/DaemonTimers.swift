@@ -4646,6 +4646,7 @@ enum DaemonTimers {
                     "yield_handoffs_in_flight_by_lane": eventPipeline.handoffsInFlightByLane,
                     "processing_p99_us_by_lane": eventPipeline.processingP99MicrosByLane,
                     "latency_sample_count_by_lane": eventPipeline.latencySampleCountByLane,
+                    "stage_await_nanos_by_lane_and_stage": eventPipeline.stageAwaitNanosByLaneAndStage,
                     "upstream_dropped_by_lane": eventPipeline.upstreamDroppedByLane,
                     "upstream_terminated_by_lane": eventPipeline.upstreamTerminatedByLane,
                     "merged_dropped_by_lane": eventPipeline.mergedDroppedByLane,

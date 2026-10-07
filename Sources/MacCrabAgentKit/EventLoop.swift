@@ -611,12 +611,19 @@ enum EventLoop {
                 startTime: event.process.startTime
             )
             let processingStartedNanos = DispatchTime.now().uptimeNanoseconds
+            // v1.22.7: awaited nanoseconds per shared-actor stage, published with
+            // this event's completion mark so the heartbeat can name the
+            // limiting stage. Two monotonic reads per listed stage; the
+            // remainder is attributed to `other` at completion.
+            var stageAwaits = EventPipelineStageAwaits()
+            var stageStartedNanos = processingStartedNanos
             state.eventPipelineTelemetry.recordDequeued(lane: lane)
             defer {
                 let elapsed = DispatchTime.now().uptimeNanoseconds &- processingStartedNanos
                 state.eventPipelineTelemetry.recordCompleted(
                     lane: lane,
-                    elapsedNanos: elapsed
+                    elapsedNanos: elapsed,
+                    stageAwaits: stageAwaits
                 )
             }
             eventCount.increment()
@@ -626,7 +633,9 @@ enum EventLoop {
             // category heuristics miscredited mixed ES/UL/TCC/network traffic.
             // This is event accounting only for NetworkCollector: its separate
             // completed-poll telemetry determines whether polling is progressing.
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             await state.collectorRegistry.recordTick(name: envelope.source.key)
+            stageAwaits.record(.collectorRegistry, startedAt: stageStartedNanos)
 
             // v1.10.0 perf: notify MCPAttributor of process exits so its
             // pid→server cache evicts proactively rather than waiting for
@@ -648,8 +657,11 @@ enum EventLoop {
             // Reserve before enrichment so a pending heavyweight result always
             // has bounded external ownership. Saturation back-pressures this
             // consumer; it never turns into an unreported event eviction.
-            guard let heavyReservation = await state.deferredEnrichmentBuffer
-                .reserveEventSlot() else {
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
+            let reservedEventSlot = await state.deferredEnrichmentBuffer
+                .reserveEventSlot()
+            stageAwaits.record(.enrichmentReservation, startedAt: stageStartedNanos)
+            guard let heavyReservation = reservedEventSlot else {
                 // Reservation admission seals only after ingestion has been
                 // asked to stop. Do not begin unowned enrichment past that
                 // terminal boundary.
@@ -657,7 +669,9 @@ enum EventLoop {
             }
 
             // Enrich the event (lineage, code signing)
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             var enrichedEvent = await state.enricher.enrich(event)
+            stageAwaits.record(.enricher, startedAt: stageStartedNanos)
 
             // YARA enrichment for file events (Phase 3)
             if enrichedEvent.eventCategory == .file {
@@ -1188,12 +1202,14 @@ enum EventLoop {
             // lineage materialization, and direct trace correlation so those
             // fields are immutable in the base rather than terminal overlays.
             let journalBaseEvent = enrichedEvent
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             let journalBoundary = await admitJournalBase(
                 journalBaseEvent,
                 lane: lane,
                 sourceReservation: heavyReservation,
                 state: state
             )
+            stageAwaits.record(.journalBaseAdmission, startedAt: stageStartedNanos)
             let journalAdmission = journalBoundary?.admission
             let retention = await state.deferredEnrichmentBuffer
                 .retainWithOwnership(
@@ -2199,7 +2215,9 @@ enum EventLoop {
             // evaluation for materialized traces runs in `evaluateGraphRules`
             // from the service task, with the same anchor event it had here.
             if let bridge = state.causalGraphBridge {
+                stageStartedNanos = DispatchTime.now().uptimeNanoseconds
                 bridge.offer(enrichedEvent)
+                stageAwaits.record(.traceGraphHandoff, startedAt: stageStartedNanos)
             }
 
             // v1.12.0 — Bayesian-style intent advisory update. Each event
@@ -2481,10 +2499,14 @@ enum EventLoop {
             )
 
             // Layer 1: Single-event Sigma rules
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             var primaryMatches = await state.ruleEngine.evaluate(enrichedEvent)
+            stageAwaits.record(.rules, startedAt: stageStartedNanos)
 
             // Layer 2: Temporal sequence rules (Phase 2)
+            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
+            stageAwaits.record(.sequences, startedAt: stageStartedNanos)
             primaryMatches.append(contentsOf: sequenceMatches)
             state.eventPipelineTelemetry.recordRuleEvaluationCompleted(
                 lane: lane,
@@ -2532,6 +2554,7 @@ enum EventLoop {
                 // terminal receipt here, and AlertSink's later exact evidence
                 // check, establish the durable proof. Any batching change must
                 // preserve those checks and explicitly report unsettled work.
+                stageStartedNanos = DispatchTime.now().uptimeNanoseconds
                 let terminalAdmission = await settleTerminalJournalRevision(
                     enrichedEvent,
                     lane: lane,
@@ -2539,6 +2562,7 @@ enum EventLoop {
                     unchangedFrom: journalBaseEvent,
                     state: state
                 )
+                stageAwaits.record(.settlement, startedAt: stageStartedNanos)
                 enrichedEvent = await EventJournalAdmissionContext
                     .withTerminalRevision(terminalAdmission) {
                         await dispatchReviewedMatches(
