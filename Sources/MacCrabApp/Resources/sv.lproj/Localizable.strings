@@ -1543,6 +1543,7 @@
 "system.sensorDegradedChipHigh" = "Försämrat";
 "system.sensorDegradedChipLow" = "Rådgivande";
 "system.sensorDegradedDefaultDetail" = "En flod av filhändelser överstiger basnivån samtidigt som kärnan tappar ES-meddelanden, vilket försämrar process- och körningstäckningen.";
+"system.sensorDegradedSinceLabel" = "Försämrat sedan";
 "system.sensorDegradedTitle" = "Skyddet är försämrat — möjlig undvikning genom telemetribortfall";
 "system.sequenceContinuityDegradedTitle" = "Sekvenskontinuitet efter omstart är försämrad";
 "system.sequenceContinuityGapChip" = "Avbrott i detekteringskontinuiteten";

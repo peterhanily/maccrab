@@ -120,7 +120,41 @@ actor StorageErrorTracker {
     /// `/Library/Application Support/MacCrab/` so file permissions
     /// match the rest of the managed-state tree: sysext (root)
     /// writes, non-root dashboard reads.
-    private let snapshotPath = "/Library/Application Support/MacCrab/storage_errors.json"
+    private let snapshotPath: String
+
+    /// v1.22.7: snapshot-publish throttle. Before v1.22.7 every recorded
+    /// failure rewrote `storage_errors.json` inline — ~52 writes/s observed
+    /// during a storage write pause — each an unthrottled, non-atomic
+    /// `Data.write(to:)` that the dashboard could read half-written and that
+    /// followed a symlink at the leaf. Publishes are now coalesced to at most
+    /// one per `snapshotWriteMinimumInterval`: the first failure after a quiet
+    /// interval publishes at once, every failure inside the interval only
+    /// marks the snapshot dirty, and one trailing publish armed for the end of
+    /// the interval lands a burst's final counts (the recording that crosses
+    /// the due time publishes on its own clock; a sleeping task backstops a
+    /// burst that simply stops). The bytes are written off the actor by a
+    /// detached task through `SecureFileIO.atomicReplace` (same-directory
+    /// temporary + rename, O_NOFOLLOW at every path component), so a recording
+    /// call never waits on file I/O beyond the counter update.
+    static let snapshotWriteMinimumInterval: TimeInterval = 1.0
+    private var lastSnapshotPublishedAt: Date = .distantPast
+    private var snapshotDirty = false
+    private var trailingPublishArmed = false
+    private var trailingPublishDueAt: Date = .distantFuture
+    /// Invalidates a sleeping trailing publish once something else published.
+    private var trailingPublishGeneration: UInt64 = 0
+    /// Chains the detached writes so an older payload can never land after a
+    /// newer one.
+    private var snapshotWriteTask: Task<Void, Never>?
+    /// Test-observable: snapshots published (each is one atomic file write)
+    /// and recordings folded into a pending publish. Production never reads
+    /// these.
+    internal var snapshotPublishCount: Int = 0
+    internal var snapshotPublishesCoalesced: Int = 0
+
+    init(snapshotPath: String = "/Library/Application Support/MacCrab/storage_errors.json") {
+        self.snapshotPath = snapshotPath
+    }
 
     /// Alert insert error path. v1.12.6 Wave 9D leaves this on the
     /// legacy 60-second throttle — the escalation work targets the
@@ -143,7 +177,7 @@ actor StorageErrorTracker {
             logger.error("Alert insert failed (\(count, privacy: .public) total): \(error.localizedDescription, privacy: .public)")
             lastAlertErrorLog = now
         }
-        writeSnapshot(now: now)
+        scheduleSnapshotPublish(now: now)
     }
 
     func recordEventError(_ error: Error) {
@@ -194,7 +228,7 @@ actor StorageErrorTracker {
             )
         }
 
-        writeSnapshot(now: now)
+        scheduleSnapshotPublish(now: now)
     }
 
     /// Tier 3 surface — read by `DaemonTimers` when assembling the
@@ -244,6 +278,27 @@ actor StorageErrorTracker {
         tier1EmissionCount = 0
         tier2EmissionCount = 0
         tier1EmissionsByKind.removeAll()
+        lastSnapshotPublishedAt = .distantPast
+        snapshotDirty = false
+        trailingPublishArmed = false
+        trailingPublishDueAt = .distantFuture
+        trailingPublishGeneration &+= 1
+        snapshotPublishCount = 0
+        snapshotPublishesCoalesced = 0
+    }
+
+    /// Test-only: run the armed trailing publish now, as if its interval had
+    /// elapsed, and invalidate the sleeping production task.
+    internal func flushTrailingSnapshotForTesting(now: Date) {
+        trailingPublishGeneration &+= 1
+        trailingPublishArmed = false
+        trailingPublishDueAt = .distantFuture
+        if snapshotDirty { publishSnapshot(now: now) }
+    }
+
+    /// Test-only: join the detached file writes so a test can read the file.
+    internal func awaitSnapshotWritesForTesting() async {
+        await snapshotWriteTask?.value
     }
 
     // MARK: - Internal helpers
@@ -431,11 +486,6 @@ actor StorageErrorTracker {
         return window.filter { $0.key >= cutoffHour }.values.reduce(0, +)
     }
 
-    /// Serialize current counters + most-recent error to the snapshot
-    /// path. Best-effort — if the write fails we just miss this one
-    /// update; the next error will try again. Silent failure here is
-    /// acceptable because the error we're tracking is already logged
-    /// to os_log.
     /// Startup hook: rewrite the snapshot from the current (empty-on-boot)
     /// rolling windows. Clears a stale cumulative total left in
     /// storage_errors.json by an older build — the rolling counters otherwise
@@ -443,10 +493,70 @@ actor StorageErrorTracker {
     /// produces, so a million-error file would persist forever. Call once at
     /// daemon start.
     func refreshSnapshot(now: Date = Date()) {
-        writeSnapshot(now: now)
+        scheduleSnapshotPublish(now: now)
     }
 
-    private func writeSnapshot(now: Date) {
+    /// Throttle gate for every recording path (see
+    /// `snapshotWriteMinimumInterval`). Publishes at once after a quiet
+    /// interval; otherwise marks the snapshot dirty and arms one trailing
+    /// publish for the end of the interval.
+    private func scheduleSnapshotPublish(now: Date) {
+        snapshotDirty = true
+        if trailingPublishArmed {
+            // The recording that crosses the due time publishes on the
+            // caller's clock, so a sustained flood lands one snapshot per
+            // interval without waiting on the sleeping backstop; the backstop
+            // then finds its generation stale and does nothing.
+            guard now >= trailingPublishDueAt else {
+                snapshotPublishesCoalesced &+= 1
+                return
+            }
+            trailingPublishArmed = false
+            trailingPublishDueAt = .distantFuture
+            trailingPublishGeneration &+= 1
+            publishSnapshot(now: now)
+            return
+        }
+        let elapsed = now.timeIntervalSince(lastSnapshotPublishedAt)
+        if elapsed >= Self.snapshotWriteMinimumInterval {
+            publishSnapshot(now: now)
+            return
+        }
+        snapshotPublishesCoalesced &+= 1
+        trailingPublishArmed = true
+        trailingPublishGeneration &+= 1
+        let generation = trailingPublishGeneration
+        // A backwards clock step reads as a negative `elapsed`; clamp so the
+        // trailing publish never waits longer than one interval.
+        let delay = min(
+            Self.snapshotWriteMinimumInterval,
+            max(0, Self.snapshotWriteMinimumInterval - elapsed)
+        )
+        let dueAt = now.addingTimeInterval(delay)
+        trailingPublishDueAt = dueAt
+        Task {
+            try? await Task.sleep(for: .seconds(delay))
+            self.publishTrailingSnapshot(generation: generation, now: dueAt)
+        }
+    }
+
+    private func publishTrailingSnapshot(generation: UInt64, now: Date) {
+        guard generation == trailingPublishGeneration else { return }
+        trailingPublishArmed = false
+        trailingPublishDueAt = .distantFuture
+        guard snapshotDirty else { return }
+        publishSnapshot(now: now)
+    }
+
+    /// Serialize current counters + most-recent error and hand the bytes to
+    /// a detached writer. Best-effort — if the write fails we just miss this
+    /// one update; the next publish will try again. Silent failure here is
+    /// acceptable because the error we're tracking is already logged to
+    /// os_log.
+    private func publishSnapshot(now: Date) {
+        snapshotDirty = false
+        lastSnapshotPublishedAt = now
+        snapshotPublishCount &+= 1
         let payload: [String: Any] = [
             // Rolling trailing-24h totals (not boot-cumulative) so a long-past
             // burst ages out of the dashboard + diagnostics.
@@ -461,6 +571,14 @@ actor StorageErrorTracker {
             withJSONObject: payload,
             options: [.prettyPrinted, .sortedKeys]
         ) else { return }
-        try? data.write(to: URL(fileURLWithPath: snapshotPath))
+        let path = snapshotPath
+        let previous = snapshotWriteTask
+        snapshotWriteTask = Task.detached(priority: .utility) {
+            await previous?.value
+            // World-readable like the rest of the managed-state tree: the
+            // non-root dashboard polls this file. A symlink or foreign-owned
+            // file at the path fails closed instead of being followed.
+            try? SecureFileIO.atomicReplace(at: path, data: data, mode: 0o644)
+        }
     }
 }

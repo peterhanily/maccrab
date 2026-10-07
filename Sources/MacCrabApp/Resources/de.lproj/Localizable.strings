@@ -1543,6 +1543,7 @@
 "system.sensorDegradedChipHigh" = "Eingeschränkt";
 "system.sensorDegradedChipLow" = "Hinweis";
 "system.sensorDegradedDefaultDetail" = "Eine Flut von Dateiereignissen liegt deutlich über dem Normalwert, während der Kernel ES-Nachrichten verwirft. Dadurch sinkt die Prozess-/Ausführungsabdeckung.";
+"system.sensorDegradedSinceLabel" = "Eingeschränkt seit";
 "system.sensorDegradedTitle" = "Schutz eingeschränkt — mögliche Umgehung durch Telemetrieverluste";
 "system.sequenceContinuityDegradedTitle" = "Sequenzkontinuität nach Neustart eingeschränkt";
 "system.sequenceContinuityGapChip" = "Lücke in der Erkennungskontinuität";

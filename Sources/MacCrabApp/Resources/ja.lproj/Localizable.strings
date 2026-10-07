@@ -1798,6 +1798,7 @@
 "system.sensorDegradedChipHigh" = "機能低下";
 "system.sensorDegradedChipLow" = "参考情報";
 "system.sensorDegradedDefaultDetail" = "ファイルイベントの急増が通常値を超える一方、カーネルがESメッセージを破棄しており、プロセス／execの検出範囲が不足しています。";
+"system.sensorDegradedSinceLabel" = "低下開始";
 "system.sensorDegradedTitle" = "保護機能が低下しています — テレメトリ欠落を利用した回避の可能性";
 "system.sequenceContinuityDegradedTitle" = "シーケンスの再起動時の継続性が低下しています";
 "system.sequenceContinuityGapChip" = "検出の継続性に欠落があります";
