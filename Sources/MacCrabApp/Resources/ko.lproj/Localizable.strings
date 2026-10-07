@@ -579,7 +579,7 @@
 "settings.alerts.help" = "MacCrab이 발생시킨 탐지 결과입니다. 이벤트 파이어호스 정리와 무관하게 유지됩니다.";
 "settings.alerts.label" = "알림 기록";
 "settings.appearance" = "모양";
-"settings.brewInstalled.hint" = "Homebrew를 통해 설치되었습니다. 백그라운드 자동 업데이트는 꺼져 있으며 `brew upgrade --cask maccrab`으로 업그레이드하세요. 위의 수동 확인은 계속 사용할 수 있습니다.";
+"settings.brewInstalled.hint" = "Homebrew를 통해 설치되었습니다. 백그라운드 자동 업데이트는 꺼져 있으며 `brew upgrade --cask peterhanily/maccrab/maccrab`으로 업그레이드하세요. 위의 수동 확인은 계속 사용할 수 있습니다.";
 "settings.campaigns.help" = "MacCrab이 상관 분석한 다단계 공격 체인입니다.";
 "settings.campaigns.label" = "캠페인 기록";
 "settings.catalogReopen" = "이 설정을 변경한 후 카탈로그 탭을 다시 여세요.";

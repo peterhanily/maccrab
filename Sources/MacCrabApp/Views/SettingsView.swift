@@ -1086,7 +1086,7 @@ struct SettingsView: View {
                         // upgrade from.
                         if MacCrabApp.isBrewInstalled {
                             Text(String(localized: "settings.brewInstalled.hint",
-                                        defaultValue: "Installed via Homebrew. Background auto-update is off; upgrade with `brew upgrade --cask maccrab`. Manual checks above still work."))
+                                        defaultValue: "Installed via Homebrew. Background auto-update is off; upgrade with `brew upgrade --cask peterhanily/maccrab/maccrab`. Manual checks above still work."))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)

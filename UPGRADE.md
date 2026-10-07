@@ -28,7 +28,7 @@ interaction.
 **Homebrew users:**
 
 ```bash
-brew upgrade --cask maccrab
+brew upgrade --cask peterhanily/maccrab/maccrab
 open /Applications/MacCrab.app
 # The app requests activation on launch; approve in System Settings when prompted.
 ```
@@ -89,7 +89,7 @@ Sparkle), the drag-n-drop path works:
    cleanly hands over.)
 
 **Recommended over manual drag:** use *Check for Updates…* from the
-status-bar menu (Sparkle), or `brew upgrade --cask maccrab`. Both
+status-bar menu (Sparkle), or `brew upgrade --cask peterhanily/maccrab/maccrab`. Both
 coordinate quit + replace + relaunch so there's zero visible downtime
 and zero chance of the old sysext lingering alongside the new one.
 
@@ -150,7 +150,7 @@ while the engine is stopped. Keep it until you are satisfied with v1.22.0.
 
 ## Within-family upgrades (v1.3.0 → v1.3.4, etc.)
 
-Standard `brew upgrade --cask maccrab` is sufficient. The sysext bundle
+Standard `brew upgrade --cask peterhanily/maccrab/maccrab` is sufficient. The sysext bundle
 replaces itself via `OSSystemExtensionRequest(.replace)` — no user
 approval required for a same-team-ID upgrade. Your data, config, and
 suppressions carry forward untouched.

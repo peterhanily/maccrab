@@ -579,7 +579,7 @@
 "settings.alerts.help" = "Срабатывания обнаружения MacCrab. Сохраняются при любой очистке потока событий.";
 "settings.alerts.label" = "История оповещений";
 "settings.appearance" = "Оформление";
-"settings.brewInstalled.hint" = "Установлено через Homebrew. Фоновое автообновление отключено; обновляйте командой `brew upgrade --cask maccrab`. Ручные проверки выше по-прежнему работают.";
+"settings.brewInstalled.hint" = "Установлено через Homebrew. Фоновое автообновление отключено; обновляйте командой `brew upgrade --cask peterhanily/maccrab/maccrab`. Ручные проверки выше по-прежнему работают.";
 "settings.campaigns.help" = "Многоэтапные цепочки атак, сопоставленные MacCrab.";
 "settings.campaigns.label" = "История кампаний";
 "settings.catalogReopen" = "После изменения этой настройки заново откройте вкладку «Каталог».";

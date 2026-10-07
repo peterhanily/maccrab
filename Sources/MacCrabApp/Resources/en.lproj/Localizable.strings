@@ -612,7 +612,7 @@
 "settings.alerts.help" = "Detections plus bounded alert-owned event context. The gauge uses the combined alerts.db family cap.";
 "settings.alerts.label" = "Alert history";
 "settings.appearance" = "Appearance";
-"settings.brewInstalled.hint" = "Installed via Homebrew. Background auto-update is off; upgrade with `brew upgrade --cask maccrab`. Manual checks above still work.";
+"settings.brewInstalled.hint" = "Installed via Homebrew. Background auto-update is off; upgrade with `brew upgrade --cask peterhanily/maccrab/maccrab`. Manual checks above still work.";
 "settings.campaigns.help" = "Multi-step attack chains MacCrab has correlated.";
 "settings.campaigns.label" = "Campaign history";
 "settings.catalogReopen" = "Reopen the Catalog tab after changing this setting.";

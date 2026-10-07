@@ -116,6 +116,20 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   storage write pause. It is now published at most once per second with
   coalesced counts, written atomically (temporary file plus rename, symlinks
   refused) off the event path, and the last write of a burst still lands.
+- **Five supply-chain rules no longer cite a blog post that is offline.**
+  Their MITRE ATT&CK references are unchanged.
+- **Homebrew upgrade instructions use the tap's full cask name.** Settings,
+  the FAQ, UPGRADE.md and TROUBLESHOOTING.md now say
+  `brew upgrade --cask peterhanily/maccrab/maccrab`, the same form as the
+  install command.
+- **The privacy audit matches tracking domains on whole labels.** A domain
+  that only ends with a listed name is no longer treated as a known tracker,
+  so it no longer skips the single-domain spike alert. The list now names
+  Braze's EU domain, braze.eu, and Apple's securemetrics and supportmetrics
+  hosts, which the looser match used to cover.
+- **`maccrabctl version` links to the project's repository.** It now prints
+  https://github.com/peterhanily/maccrab, the repository the Help menu and the
+  SARIF export already use, instead of an outdated address.
 - **TraceGraph no longer creates a new trace every time the same unsigned
   binary runs from a temp or download folder.** The "Unsigned binary executed
   from download path" anchor had no deduplication, and its identity included

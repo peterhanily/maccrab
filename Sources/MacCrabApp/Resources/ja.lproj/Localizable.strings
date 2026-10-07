@@ -579,7 +579,7 @@
 "settings.alerts.help" = "MacCrabが発報した検出。イベントファイアホースの削除後も保持されます。";
 "settings.alerts.label" = "アラート履歴";
 "settings.appearance" = "外観";
-"settings.brewInstalled.hint" = "Homebrew経由でインストールされています。バックグラウンド自動アップデートは無効です。`brew upgrade --cask maccrab` でアップグレードしてください。上の手動チェックは引き続き利用できます。";
+"settings.brewInstalled.hint" = "Homebrew経由でインストールされています。バックグラウンド自動アップデートは無効です。`brew upgrade --cask peterhanily/maccrab/maccrab` でアップグレードしてください。上の手動チェックは引き続き利用できます。";
 "settings.campaigns.help" = "MacCrabが相関付けした多段階の攻撃チェーン。";
 "settings.campaigns.label" = "キャンペーン履歴";
 "settings.catalogReopen" = "この設定を変更した後は、カタログタブを開き直してください。";

@@ -579,7 +579,7 @@
 "settings.alerts.help" = "Detekteringar som MacCrab har utlöst. Överlever alla rensningar av händelseflödet.";
 "settings.alerts.label" = "Varningshistorik";
 "settings.appearance" = "Utseende";
-"settings.brewInstalled.hint" = "Installerad via Homebrew. Automatisk bakgrundsuppdatering är av; uppgradera med `brew upgrade --cask maccrab`. Manuella kontroller ovan fungerar fortfarande.";
+"settings.brewInstalled.hint" = "Installerad via Homebrew. Automatisk bakgrundsuppdatering är av; uppgradera med `brew upgrade --cask peterhanily/maccrab/maccrab`. Manuella kontroller ovan fungerar fortfarande.";
 "settings.campaigns.help" = "Flerstegs attackkedjor som MacCrab har korrelerat.";
 "settings.campaigns.label" = "Kampanjhistorik";
 "settings.catalogReopen" = "Öppna fliken Katalog igen efter att du har ändrat denna inställning.";

@@ -10,7 +10,6 @@ date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/
     - https://attack.mitre.org/techniques/T1059/004/
-    - https://blog.phylum.io/axios-npm-supply-chain-compromise-2026/
 tags:
     - attack.execution
     - attack.t1059.004
