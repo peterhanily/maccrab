@@ -15,6 +15,9 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   after a size pause.
 
 ### Fixed
+- **`maccrabctl version` links to the project's repository.** It now prints
+  https://github.com/peterhanily/maccrab, the repository the Help menu and the
+  SARIF export already use, instead of an outdated address.
 - **TraceGraph no longer creates a new trace every time the same unsigned
   binary runs from a temp or download folder.** The "Unsigned binary executed
   from download path" anchor had no deduplication, and its identity included
