@@ -4048,9 +4048,31 @@ enum DaemonTimers {
                     d["write_rows_failed_total"] = Int64(clamping: w.writeRowsFailedTotal)
                     d["write_rows_in_flight"] = w.writeRowsInFlight
                     d["coalesced_noop_rows_total"] = Int64(clamping: w.coalescedNoopRowsTotal)
+                    d["anchor_shed_total"] = Int64(clamping: w.anchorShedTotal)
+                    d["anchor_shed_dedup_suppressed_total"] = Int64(clamping: w.anchorShedDedupSuppressedTotal)
                     d["pending_entity_rows"] = w.pendingEntityRows
                     d["pending_edge_rows"] = w.pendingEdgeRows
                     d["oldest_outstanding_age_seconds"] = w.oldestOutstandingAgeSeconds
+                    // v1.22.7: the bounded lane hand-off queue. Events dropped
+                    // or shed here never reached the rolling writer, so they are
+                    // a separate accounted outcome and the ingest_events_*
+                    // conservation above stays exact.
+                    let q = bridge.ingestQueueTelemetry()
+                    d["ingest_queue_capacity"] = q.capacity
+                    d["ingest_queue_handoffs_total"] = Int64(clamping: q.handoffsTotal)
+                    d["ingest_queue_skipped_non_graph_total"] = Int64(clamping: q.skippedNonGraphTotal)
+                    d["ingest_queue_offered_total"] = Int64(clamping: q.offeredTotal)
+                    d["ingest_queue_dropped_total"] = Int64(clamping: q.droppedTotal)
+                    d["ingest_queue_terminated_total"] = Int64(clamping: q.terminatedTotal)
+                    d["ingest_queue_dequeued_total"] = Int64(clamping: q.dequeuedTotal)
+                    d["ingest_queue_completed_total"] = Int64(clamping: q.completedTotal)
+                    d["ingest_queue_handoffs_in_flight"] = Int64(clamping: q.handoffsInFlight)
+                    d["ingest_queue_backlog"] = q.backlog
+                    d["ingest_queue_in_flight"] = q.inFlight
+                    d["ingest_latched_shed_total"] = Int64(clamping: q.latchedShedTotal)
+                    d["ingest_admission_latched"] = q.admissionLatched
+                    d["ingest_admission_probes_total"] = Int64(clamping: q.admissionProbesTotal)
+                    d["ingest_admission_latch_arms_total"] = Int64(clamping: q.admissionLatchArmsTotal)
                     // Recency is judged here, against the engine clock, so the
                     // app never has to compare a stale file with its own clock.
                     if let failedAt = w.lastWriteFailureAt {

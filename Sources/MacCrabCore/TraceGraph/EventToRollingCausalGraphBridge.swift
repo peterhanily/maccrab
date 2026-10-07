@@ -9,9 +9,17 @@
 //
 // Daemon-side, after `EventEnricher` has finished annotating an
 // event but before `RuleEngine` evaluates it. In `MacCrabAgentKit`'s
-// pipeline orchestration the call is one line:
+// pipeline orchestration the lane call is one nonisolated line:
 //
-//     await bridge.process(event)
+//     bridge.offer(event)
+//
+// which hands the event to a bounded queue drained by one service task
+// (`runIngestService`). Since v1.22.7 the lane never awaits the graph:
+// measured on an installed host, the inline `await bridge.process(event)`
+// joined in-flight store writes and recovery-barrier waits (348 waits,
+// 462 s total, max 85.8 s) on the detection lane and evicted lineage
+// events from the merged streams. Overflow of the queue is counted, never
+// silent; a latched store sheds on a nonisolated fast path.
 //
 // The bridge is constructed once at daemon startup with the
 // production `RollingCausalGraph` instance.
@@ -36,11 +44,95 @@
 
 import Foundation
 import CryptoKit
+import os
 import os.log
+
+/// Outcome of one lane hand-off to the bounded TraceGraph ingest queue.
+public enum TraceGraphIngestHandoff: Sendable, Equatable {
+    /// The event has no causal-graph mapping (category or action); it was
+    /// never a graph input and is counted as skipped, not lost.
+    case skippedNonGraph
+    /// The store is latched; the event was shed on the nonisolated fast path.
+    case shedLatched
+    case queued
+    /// Queued, evicting the oldest waiting event (counted as dropped).
+    case queuedEvictingOldest
+    /// Offered after the queue was finished; counted as terminated.
+    case terminated
+}
+
+/// Exact conservation counters for the bounded lane → TraceGraph hand-off.
+///
+/// At a locked snapshot:
+///
+///     handoffs = skippedNonGraph + latchedShed + offered
+///     offered  = dropped + terminated + dequeued + backlog
+///     dequeued = completed + inFlight
+///
+/// `dropped` is an eviction from the bounded queue while the ingest service is
+/// stalled behind the store. Those events never reached the rolling writer, so
+/// they are deliberately outside its input/committed/failed ledger, which
+/// therefore keeps conserving exactly.
+public struct TraceGraphIngestQueueTelemetry: Sendable, Equatable {
+    public let capacity: Int
+    public let handoffsTotal: UInt64
+    public let skippedNonGraphTotal: UInt64
+    public let latchedShedTotal: UInt64
+    public let offeredTotal: UInt64
+    public let droppedTotal: UInt64
+    public let terminatedTotal: UInt64
+    public let dequeuedTotal: UInt64
+    public let completedTotal: UInt64
+    /// Offers whose yield result is not yet published; the backlog estimate
+    /// conservatively includes them.
+    public let handoffsInFlight: UInt64
+    public let backlog: Int
+    public let inFlight: Int
+    public let admissionLatched: Bool
+    public let admissionProbesTotal: UInt64
+    public let admissionLatchArmsTotal: UInt64
+
+    public var conservesHandoffs: Bool {
+        let (partial, overflow1) = skippedNonGraphTotal
+            .addingReportingOverflow(latchedShedTotal)
+        let (sum, overflow2) = partial.addingReportingOverflow(offeredTotal)
+        return !overflow1 && !overflow2 && handoffsTotal == sum
+    }
+
+    public var conservesOffers: Bool {
+        let removed = [droppedTotal, terminatedTotal, dequeuedTotal]
+            .reduce(UInt64(0)) { $0.addingReportingOverflow($1).partialValue }
+        return offeredTotal >= removed
+            && offeredTotal - removed == UInt64(backlog)
+    }
+}
 
 public actor EventToRollingCausalGraphBridge {
 
+    public static let defaultIngestQueueCapacity = 8_192
+
+    private struct IngestQueueCounters {
+        var handoffs: UInt64 = 0
+        var skippedNonGraph: UInt64 = 0
+        var latchedShed: UInt64 = 0
+        var offered: UInt64 = 0
+        var dropped: UInt64 = 0
+        var terminated: UInt64 = 0
+        var dequeued: UInt64 = 0
+        var completed: UInt64 = 0
+        var handoffsInFlight: UInt64 = 0
+    }
+
     private let rollingGraph: RollingCausalGraph
+    /// Bounded lane hand-off. `.bufferingNewest` keeps the most recent events
+    /// during a stall, so an anchor-bearing event is the one most likely to
+    /// survive; every eviction is counted in `droppedTotal`.
+    public nonisolated let ingestQueueCapacity: Int
+    private nonisolated let ingestQueueContinuation: AsyncStream<Event>.Continuation
+    private nonisolated let ingestQueueStream: OSAllocatedUnfairLock<AsyncStream<Event>?>
+    private nonisolated let ingestQueueCounters = OSAllocatedUnfairLock(
+        initialState: IngestQueueCounters()
+    )
     private let logger = Logger(subsystem: "com.maccrab.tracegraph", category: "event-bridge")
 
     /// Optional override: if the daemon side starts annotating events
@@ -58,9 +150,128 @@ public actor EventToRollingCausalGraphBridge {
     /// EventStore) so the insert-filter drop counter stays clean.
     private let insertFilter: EventInsertFilter?
 
-    public init(rollingGraph: RollingCausalGraph, insertFilter: EventInsertFilter? = nil) {
+    public init(
+        rollingGraph: RollingCausalGraph,
+        insertFilter: EventInsertFilter? = nil,
+        ingestQueueCapacity: Int = EventToRollingCausalGraphBridge.defaultIngestQueueCapacity
+    ) {
+        precondition(ingestQueueCapacity > 0)
         self.rollingGraph = rollingGraph
         self.insertFilter = insertFilter
+        self.ingestQueueCapacity = ingestQueueCapacity
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: Event.self,
+            bufferingPolicy: .bufferingNewest(ingestQueueCapacity)
+        )
+        self.ingestQueueContinuation = continuation
+        self.ingestQueueStream = OSAllocatedUnfairLock(initialState: stream)
+    }
+
+    // MARK: - Bounded lane hand-off
+
+    /// Hand one enriched event to the ingest queue. Nonisolated and
+    /// non-suspending: the lane pays a schema check, one latch read, and one
+    /// bounded yield. It never joins an in-flight store write and never waits
+    /// on storage admission or the recovery barrier.
+    @discardableResult
+    public nonisolated func offer(_ event: Event) -> TraceGraphIngestHandoff {
+        guard mapCategory(event.eventCategory) != nil,
+              mapAction(event.eventAction) != nil else {
+            ingestQueueCounters.withLock { locked in
+                Self.incrementSaturating(&locked.handoffs)
+                Self.incrementSaturating(&locked.skippedNonGraph)
+            }
+            return .skippedNonGraph
+        }
+        if rollingGraph.admissionShedLatch.shouldShed() {
+            ingestQueueCounters.withLock { locked in
+                Self.incrementSaturating(&locked.handoffs)
+                Self.incrementSaturating(&locked.latchedShed)
+            }
+            return .shedLatched
+        }
+        ingestQueueCounters.withLock { locked in
+            Self.incrementSaturating(&locked.handoffs)
+            Self.incrementSaturating(&locked.offered)
+            Self.incrementSaturating(&locked.handoffsInFlight)
+        }
+        let result = ingestQueueContinuation.yield(event)
+        return ingestQueueCounters.withLock { locked in
+            if locked.handoffsInFlight > 0 { locked.handoffsInFlight -= 1 }
+            switch result {
+            case .enqueued:
+                return .queued
+            case .dropped:
+                Self.incrementSaturating(&locked.dropped)
+                return .queuedEvictingOldest
+            case .terminated:
+                Self.incrementSaturating(&locked.terminated)
+                return .terminated
+            @unknown default:
+                Self.incrementSaturating(&locked.terminated)
+                return .terminated
+            }
+        }
+    }
+
+    /// Drain the ingest queue until it is finished. Runs once, on its own
+    /// task, for the daemon's lifetime; materialized traces are handed to
+    /// `onMaterialized` off the detection lane.
+    public nonisolated func runIngestService(
+        onMaterialized: @escaping @Sendable ([Trace], Event) async -> Void
+    ) async {
+        let stream = ingestQueueStream.withLock { locked -> AsyncStream<Event>? in
+            defer { locked = nil }
+            return locked
+        }
+        guard let stream else { return }
+        for await event in stream {
+            ingestQueueCounters.withLock { Self.incrementSaturating(&$0.dequeued) }
+            let traces = await process(event)
+            if !traces.isEmpty {
+                await onMaterialized(traces, event)
+            }
+            ingestQueueCounters.withLock { Self.incrementSaturating(&$0.completed) }
+        }
+    }
+
+    /// Stop accepting hand-offs. The service drains what is already queued
+    /// and returns; later offers are counted as terminated.
+    public nonisolated func finishIngestQueue() {
+        ingestQueueContinuation.finish()
+    }
+
+    public nonisolated func ingestQueueTelemetry() -> TraceGraphIngestQueueTelemetry {
+        let latch = rollingGraph.admissionShedLatch.snapshot()
+        return ingestQueueCounters.withLock { locked in
+            let removed = [locked.dropped, locked.terminated, locked.dequeued]
+                .reduce(UInt64(0)) { $0.addingReportingOverflow($1).partialValue }
+            let backlog = locked.offered >= removed ? locked.offered - removed : 0
+            let inFlight = locked.dequeued >= locked.completed
+                ? locked.dequeued - locked.completed : 0
+            return TraceGraphIngestQueueTelemetry(
+                capacity: ingestQueueCapacity,
+                handoffsTotal: locked.handoffs,
+                skippedNonGraphTotal: locked.skippedNonGraph,
+                latchedShedTotal: locked.latchedShed,
+                offeredTotal: locked.offered,
+                droppedTotal: locked.dropped,
+                terminatedTotal: locked.terminated,
+                dequeuedTotal: locked.dequeued,
+                completedTotal: locked.completed,
+                handoffsInFlight: locked.handoffsInFlight,
+                backlog: Int(clamping: backlog),
+                inFlight: Int(clamping: inFlight),
+                admissionLatched: latch.armed,
+                admissionProbesTotal: latch.probesTotal,
+                admissionLatchArmsTotal: latch.armsTotal
+            )
+        }
+    }
+
+    @inline(__always)
+    private static func incrementSaturating(_ value: inout UInt64) {
+        if value < UInt64.max { value += 1 }
     }
 
     /// Convert a v1.9 `Event` into a `NormalizedEventInput` and ingest.
@@ -249,7 +460,9 @@ public actor EventToRollingCausalGraphBridge {
 
     // MARK: - Mapping helpers
 
-    private func mapCategory(_ category: EventCategory) -> RollingCausalGraph.NormalizedEventInput.Category? {
+    // nonisolated (pure enum switch) so the lane-side `offer` can reject
+    // non-graph categories before touching the queue.
+    nonisolated private func mapCategory(_ category: EventCategory) -> RollingCausalGraph.NormalizedEventInput.Category? {
         switch category {
         case .process:  return .process
         case .file:     return .file

@@ -126,6 +126,12 @@ actor EventIngestionLifecycle {
     private var fileContinuation: AsyncStream<EventPipelineEnvelope>.Continuation?
     private var driverTasks: [Task<Void, Never>] = []
     private var consumerTasks: [Task<Void, Never>] = []
+    /// The TraceGraph ingest service drains the bounded hand-off queue both
+    /// lane consumers feed. It is joined in a second phase: its queue is
+    /// finished only after both lanes have returned, so no hand-off can land
+    /// on a finished queue and be counted as terminated at shutdown.
+    private var graphIngestTask: Task<Void, Never>?
+    private var graphIngestFinish: (@Sendable () -> Void)?
     private var shutdownResult: Bool?
     private var shutdownWaiters: [CheckedContinuation<Bool, Never>] = []
 
@@ -166,6 +172,25 @@ actor EventIngestionLifecycle {
         return task
     }
 
+    /// Register the TraceGraph ingest service. `finish` closes its queue and
+    /// is invoked by `shutdown` after the lane consumers have been joined.
+    @discardableResult
+    func spawnGraphIngestConsumer(
+        finish: @escaping @Sendable () -> Void,
+        _ operation: @escaping @Sendable () async -> Void
+    ) -> Task<Void, Never>? {
+        guard phase == .accepting else {
+            // Nothing will drain a queue registered after admission closed.
+            finish()
+            return nil
+        }
+        guard graphIngestTask == nil else { return nil }
+        let task = Task { await operation() }
+        graphIngestTask = task
+        graphIngestFinish = finish
+        return task
+    }
+
     func spawnConsumers(
         priority: @escaping @Sendable () async -> Void,
         file: @escaping @Sendable () async -> Void
@@ -192,20 +217,38 @@ actor EventIngestionLifecycle {
         fileContinuation?.finish()
 
         let tracked = driverTasks + consumerTasks
-        let clean = await BoundedTaskJoin.waitForAll(
+        let joinStartedNanos = DispatchTime.now().uptimeNanoseconds
+        var clean = await BoundedTaskJoin.waitForAll(
             tracked,
             deadline: max(0, deadline)
         )
+        // Both lanes have returned (or timed out), so no further hand-off can
+        // land. Finish the graph queue and drain its admitted prefix inside
+        // the remaining budget.
+        graphIngestFinish?()
+        let graphTasks = graphIngestTask.map { [$0] } ?? []
+        if !graphTasks.isEmpty {
+            let joinElapsed = Double(
+                DispatchTime.now().uptimeNanoseconds &- joinStartedNanos
+            ) / 1_000_000_000
+            let graphClean = await BoundedTaskJoin.waitForAll(
+                graphTasks,
+                deadline: max(0, deadline - joinElapsed)
+            )
+            clean = clean && graphClean
+        }
         if !clean {
             // The admitted prefix did not drain in time. Stop further mutation
             // before the process-level hard deadline; the caller will surface
             // that its final checkpoint is only best effort.
-            for task in consumerTasks { task.cancel() }
-            _ = await BoundedTaskJoin.waitForAll(tracked, deadline: 0.25)
+            for task in consumerTasks + graphTasks { task.cancel() }
+            _ = await BoundedTaskJoin.waitForAll(tracked + graphTasks, deadline: 0.25)
         }
 
         driverTasks.removeAll(keepingCapacity: false)
         consumerTasks.removeAll(keepingCapacity: false)
+        graphIngestTask = nil
+        graphIngestFinish = nil
         priorityContinuation = nil
         fileContinuation = nil
         phase = .stopped

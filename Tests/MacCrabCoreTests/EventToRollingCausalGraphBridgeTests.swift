@@ -289,9 +289,11 @@ struct EventToRollingCausalGraphBridgeTests {
         #expect(status.recoveryMutationMaxWaitNanoseconds > 0)
         #expect(status.shedMutationsTotal == 0)
 
-        // The production event loop awaits the bridge inline; the short
-        // recovery handoff therefore applies backpressure instead of creating
-        // an unowned task plane that could silently lose this batch upstream.
+        // v1.22.7: the production event loop no longer awaits the bridge
+        // inline. It hands the event to the bounded ingest queue; the short
+        // recovery handoff is paid by the lifecycle-owned ingest service, and
+        // any upstream loss is an exact, counted queue eviction rather than
+        // a silent drop by an unowned task plane.
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -301,8 +303,15 @@ struct EventToRollingCausalGraphBridgeTests {
                 "Sources/MacCrabAgentKit/EventLoop.swift"),
             encoding: .utf8
         )
-        #expect(eventLoop.contains(
-            "let materialized = await bridge.process(enrichedEvent)"))
+        #expect(!eventLoop.contains("await bridge.process(enrichedEvent)"))
+        #expect(eventLoop.contains("bridge.offer(enrichedEvent)"))
+        let bootstrap = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/DaemonBootstrap.swift"),
+            encoding: .utf8
+        )
+        #expect(bootstrap.contains("spawnGraphIngestConsumer("),
+                "the ingest service must be owned by the ingestion lifecycle")
         await store.close()
     }
 
