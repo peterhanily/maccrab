@@ -1281,6 +1281,7 @@ struct V2RaveCatalogBrowserView: View {
         }
         return RavePluginIcon(
             pluginID: e.id,
+            signerPublicKeySHA256: e.signerPublicKeySHA256,
             size: size,
             builtInStyle: isBuiltin(e)
                 ? .init(tint: colorFor(category: e.category), symbol: symbol, monogram: monogram(e.id))

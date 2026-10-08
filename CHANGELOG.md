@@ -38,7 +38,9 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - **The Forensics plugin catalog uses the Rave store's icons.** Each store
   plugin's card and detail panel shows the same Mac-style artwork as
-  rave.maccrab.com instead of a coloured banner with a symbol. Built-in
+  rave.maccrab.com instead of a coloured banner with a symbol, but only when
+  the signed catalog names MacCrab's first-party publisher key as the
+  plugin's signer, so no other publisher's entry can wear that art. Built-in
   scanners keep their symbols inside the same rounded, lit icon shape, and a
   plugin without artwork gets the store's crab icon. The artwork ships inside
   the app as one 81 KB image, so the catalog still shows only signed content

@@ -10,6 +10,7 @@
 import CryptoKit
 import Foundation
 import ImageIO
+import MacCrabForensics
 import Testing
 @testable import MacCrabApp
 
@@ -85,6 +86,16 @@ struct RavePluginIconTests {
         #expect(RavePluginIconAtlas.image(forPluginID: "com.maccrab.forensics.tcc-lite") == nil)
         #expect(RavePluginIconAtlas.image(forPluginID: "com.example.community.plugin") == nil)
         #expect(RavePluginIconAtlas.tile(named: RavePluginIconAtlas.fallbackName) != nil)
+    }
+
+    @Test("Store art needs the first-party publisher key as the signed signer")
+    func artworkRequiresFirstPartySigner() {
+        let id = Self.storePlugins[0]
+        let firstParty = FirstPartyTrustRoot.publisherKeyFingerprint
+        #expect(RavePluginIconAtlas.artwork(forPluginID: id, signerPublicKeySHA256: firstParty) != nil)
+        #expect(RavePluginIconAtlas.artwork(forPluginID: id, signerPublicKeySHA256: firstParty.uppercased()) != nil)
+        #expect(RavePluginIconAtlas.artwork(forPluginID: id, signerPublicKeySHA256: String(repeating: "a", count: 64)) == nil)
+        #expect(RavePluginIconAtlas.artwork(forPluginID: id, signerPublicKeySHA256: "") == nil)
     }
 
     private static func alphaChannel(_ image: CGImage) throws -> [UInt8] {

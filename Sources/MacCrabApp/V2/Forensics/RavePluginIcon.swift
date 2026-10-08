@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import MacCrabForensics
 import SwiftUI
 
 /// The Rave store's plugin artwork, shipped inside the app so the catalog
@@ -79,6 +80,16 @@ enum RavePluginIconAtlas {
 
     static func image(forPluginID id: String) -> NSImage? { tile(named: id) }
 
+    /// Store artwork for a catalog entry, only when the signed catalog names the
+    /// first-party publisher key as its signer. An entry from any other
+    /// publisher gets the crab even if it reuses a first-party id, so it can
+    /// never wear first-party art.
+    static func artwork(forPluginID id: String, signerPublicKeySHA256 signer: String) -> NSImage? {
+        guard FirstPartyTrustRoot.isConfigured,
+              signer.lowercased() == FirstPartyTrustRoot.publisherKeyFingerprint.lowercased() else { return nil }
+        return image(forPluginID: id)
+    }
+
     static func tile(named name: String) -> NSImage? {
         if let hit = tiles[name] { return hit }
         guard let index = order.firstIndex(of: name), let atlas else { return nil }
@@ -92,10 +103,10 @@ enum RavePluginIconAtlas {
     }
 }
 
-/// A catalog entry's icon in the Rave store's style. A store plugin shows its
-/// artwork; a built-in scanner gets the same squircle drawn around its symbol;
-/// any other plugin gets the store's crab. Decorative, because the entry's
-/// name always sits beside it.
+/// A catalog entry's icon in the Rave store's style. A first-party store plugin
+/// shows its artwork; a built-in scanner gets the same squircle drawn around
+/// its symbol; any other plugin gets the store's crab. Decorative, because the
+/// entry's name always sits beside it.
 struct RavePluginIcon: View {
     struct BuiltInStyle {
         let tint: Color
@@ -105,13 +116,16 @@ struct RavePluginIcon: View {
     }
 
     let pluginID: String
+    /// The signed catalog's `signer_public_key_sha256`; empty for built-ins.
+    let signerPublicKeySHA256: String
     let size: CGFloat
     /// Non-nil for a built-in scanner, which has no store artwork.
     let builtInStyle: BuiltInStyle?
 
     var body: some View {
         Group {
-            if let art = RavePluginIconAtlas.image(forPluginID: pluginID) {
+            if let art = RavePluginIconAtlas.artwork(forPluginID: pluginID,
+                                                     signerPublicKeySHA256: signerPublicKeySHA256) {
                 Image(nsImage: art).resizable().interpolation(.high)
             } else if let style = builtInStyle {
                 RaveSquircle(style: style, size: size)
