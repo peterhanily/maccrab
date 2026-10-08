@@ -762,6 +762,7 @@
 "inspector.cves" = "CVE's";
 "inspector.description" = "Beschrijving";
 "inspector.detectionRule" = "Detectieregel";
+"inspector.explainWithMaccrabctl" = "Uitleggen met maccrabctl";
 "inspector.identity" = "Identiteit";
 "inspector.logic" = "Logica";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "Klik voor uitleg en hoe op te lossen";
 "overview.storeTitle" = "Plugincatalogus";
 "overview.storeBrowse" = "Bladeren →";
-"overview.storeBrowsePrompt" = "Blader door ondertekende forensische plugins uit de catalogus. Installaties worden volledig sandboxed uitgevoerd.";
+"overview.storeBrowsePrompt" = "Blader door ondertekende forensische plugins uit de catalogus.";
 "raveStore.thirdPartyCatalog.title" = "Ondertekende catalogus van derden";
 "raveStore.thirdPartyCatalog.body" = "Er zijn momenteel geen plugins van derden vermeld. De ingebouwde scanners hieronder worden meegeleverd met MacCrab en draaien nu op deze Mac — geen installatie nodig.";
 
@@ -1650,6 +1651,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Deze onderdrukking verwijderen — de regel wordt bij de volgende overeenkomst weer geactiveerd";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Afgehandelde en onderdrukte waarschuwingen uit de recente bewaarperiode. Klik met rechts op een rij om onderdrukking op te heffen of te verwijderen, of gebruik de knoppen in het infovenster.";
 "ui.V2AlertsWorkspace.restore" = "Herstellen";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Voer deze opdracht uit in Terminal om te zien waarom deze waarschuwing is geactiveerd:";
 "ui.V2AlertsWorkspace.suggested.actions" = "Voorgestelde acties:";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Onderdrukte campagnes (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Tactieken:";
@@ -1736,7 +1738,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Dreigingsinformatiefeeds";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Twee onderdelen: **Gedetecteerde beveiligingstools** (andere macOS-beveiligingssoftware die MacCrab op deze machine heeft waargenomen — Objective-See-suite, Little Snitch, commerciële EDR enz.) en **Geconfigureerde uitvoerbestemmingen** (waarschuwingsbestemmingen in `daemon_config.json` / `notifications.json` — Splunk, Slack, S3 enz.). De status geeft ‘geconfigureerd’, ‘actief’ of ‘geïnstalleerd’ aan.";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "Een trace is de causale keten van proces-, bestand-, netwerk-, persistentie-, AI-agent- en TCC-entiteiten die betrokken zijn bij een gebeurtenis met hoge ernst. De daemon verankert een trace wanneer AnchorDetector een gebeurtenis onderzoekswaardig vindt (loaderuitvoering, persistentieschrijfactie, toegang tot inloggegevens enz.) en volgt daarna alle geraakte entiteiten in dezelfde afstammingslijn. Klik op een knooppunt voor volledige identiteit en rol; sleep om te herschikken; wissel de indeling via de werkbalk; klik met rechts voor kopiëren of openen in Gebeurtenissen.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Agent Traces zijn W3C TRACEPARENT-spans die MacCrab via de lokale OTLP-ontvanger ontvangt van AI-programmeertools (Claude Code, Cursor, Codex, Continue, Windsurf). Elke rij is één trace, oftewel één afstammingslijn van modelaanroepen. Uitvouwen toont spantijden, toolaanroepen en causale-graafgebeurtenissen tijdens de span. Leeg totdat u de ontvanger hieronder inschakelt en een OTel-uitzendende tool deze gebruikt.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Agent Traces zijn W3C TRACEPARENT-spans die MacCrab via de lokale OTLP-ontvanger ontvangt van AI-programmeertools (Claude Code, Cursor, Codex, Continue, Windsurf). Elke rij is één trace; bij selectie worden de spans weergegeven met tijden, nesting per bovenliggende span en opgeschoonde attributen. Leeg totdat u de ontvanger hieronder inschakelt en een OTel-uitzendende tool deze gebruikt.";
 "ui.V2InvestigationWorkspace.anchor" = "anker";
 "ui.V2InvestigationWorkspace.clear" = "Wissen";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Alle knooppuntfilters wissen";

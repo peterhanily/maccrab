@@ -762,6 +762,7 @@
 "inspector.cves" = "CVEs";
 "inspector.description" = "Descripción";
 "inspector.detectionRule" = "Regla de detección";
+"inspector.explainWithMaccrabctl" = "Explicar con maccrabctl";
 "inspector.identity" = "Identidad";
 "inspector.logic" = "Lógica";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "Haga clic para ver qué significa y cómo abordarlo";
 "overview.storeTitle" = "Tienda de plugins";
 "overview.storeBrowse" = "Examinar →";
-"overview.storeBrowsePrompt" = "Explore plugins forenses firmados desde el catálogo. Los instalados se ejecutan completamente en la zona de aislamiento.";
+"overview.storeBrowsePrompt" = "Explore plugins forenses firmados desde el catálogo.";
 "raveStore.thirdPartyCatalog.title" = "Catálogo de terceros firmado";
 "raveStore.thirdPartyCatalog.body" = "Actualmente no hay plugins de terceros listados. Los escáneres integrados a continuación se incluyen en MacCrab y se ejecutan en este Mac ahora — no se necesita instalación.";
 
@@ -1650,6 +1651,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Eliminar esta supresión; la regla volverá a activarse la próxima vez que coincida";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Alertas resueltas y suprimidas dentro del periodo reciente de retención. Haz clic derecho en una fila para quitar la supresión o eliminarla, o usa los botones del inspector.";
 "ui.V2AlertsWorkspace.restore" = "Restaurar";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Ejecuta este comando en Terminal para ver por qué se generó esta alerta:";
 "ui.V2AlertsWorkspace.suggested.actions" = "Acciones sugeridas:";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Campañas suprimidas (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Tácticas:";
@@ -1736,7 +1738,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Fuentes de inteligencia de amenazas";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Dos vistas: **Herramientas de seguridad detectadas** (otro software de seguridad para macOS observado por MacCrab en este equipo: la suite Objective-See, Little Snitch, EDR comerciales, etc.) y **Destinos de salida configurados** (destinos de alertas definidos en `daemon_config.json` / `notifications.json`: Splunk, Slack, S3, etc.). El estado refleja «configurado», «en ejecución» o «instalado».";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "Una traza es la cadena causal de entidades de procesos, archivos, red, persistencia, agentes de IA y TCC que participan en un evento de gravedad alta. El daemon establece el ancla de una traza cuando AnchorDetector determina que un evento merece investigación (ejecución de un cargador, escritura de persistencia, acceso a archivos de credenciales, etc.) e incorpora las entidades posteriores del mismo linaje. Haz clic en un nodo para ver su identidad y función; arrastra para reorganizar; cambia el diseño desde la barra de herramientas; haz clic derecho para copiar o abrir en Eventos.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Las Trazas de agentes son spans W3C TRACEPARENT que MacCrab recibe por su receptor OTLP de loopback desde herramientas de programación con IA (Claude Code, Cursor, Codex, Continue, Windsurf). Cada fila representa una traza, es decir, un linaje de llamadas al modelo; al expandirla, se muestran los tiempos de los spans, las llamadas a herramientas y los eventos del grafo causal ocurridos durante el span. Estará vacío hasta que habilites el receptor abajo y una herramienta que emita OTel lo utilice.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Las Trazas de agentes son spans W3C TRACEPARENT que MacCrab recibe por su receptor OTLP de loopback desde herramientas de programación con IA (Claude Code, Cursor, Codex, Continue, Windsurf). Cada fila representa una traza; al seleccionarla se listan sus spans con tiempos, anidamiento por padre y atributos saneados. Estará vacío hasta que habilites el receptor abajo y una herramienta que emita OTel lo utilice.";
 "ui.V2InvestigationWorkspace.anchor" = "ancla";
 "ui.V2InvestigationWorkspace.clear" = "Borrar";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Borrar todos los filtros de nodos";

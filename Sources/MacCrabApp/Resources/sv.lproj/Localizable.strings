@@ -762,6 +762,7 @@
 "inspector.cves" = "CVE:er";
 "inspector.description" = "Beskrivning";
 "inspector.detectionRule" = "Detekteringsregel";
+"inspector.explainWithMaccrabctl" = "Förklara med maccrabctl";
 "inspector.identity" = "Identitet";
 "inspector.logic" = "Logik";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "Klicka för att se vad detta betyder och hur du åtgärdar det";
 "overview.storeTitle" = "Pluginkatalog";
 "overview.storeBrowse" = "Bläddra →";
-"overview.storeBrowsePrompt" = "Bläddra signerade forensikplugins från katalogen. Installationer körs helt sandlådade.";
+"overview.storeBrowsePrompt" = "Bläddra bland signerade forensikplugins i katalogen.";
 "raveStore.thirdPartyCatalog.title" = "Signerad tredjepartskatalog";
 "raveStore.thirdPartyCatalog.body" = "Ingen tredjepartsplugins är för närvarande listade. De inbyggda skannrarna nedan levereras tillsammans med MacCrab och körs på denna Mac nu — ingen installation behövs.";
 
@@ -1650,6 +1651,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Ta bort undertryckningen — regeln utlöses igen vid nästa träff";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Åtgärdade och undertryckta varningar från den senaste lagringsperioden. Högerklicka på en rad för att häva undertryckning eller radera, eller använd granskarens knappar.";
 "ui.V2AlertsWorkspace.restore" = "Återställ";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Kör det här kommandot i Terminal för att se varför den här varningen utlöstes:";
 "ui.V2AlertsWorkspace.suggested.actions" = "Föreslagna åtgärder:";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Undertryckta kampanjer (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Taktiker:";
@@ -1736,7 +1738,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Hotinformationsflöden";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Två delar: **Upptäckta säkerhetsverktyg** (annan macOS-säkerhetsprogramvara som MacCrab observerat på datorn — Objective-See-sviten, Little Snitch, kommersiell EDR m.m.) och **Konfigurerade utdatamål** (varningsmål i `daemon_config.json` / `notifications.json` — Splunk, Slack, S3 m.m.). Status visar ”konfigurerad”, ”körs” eller ”installerad”.";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "Ett spår är orsakskedjan av process-, fil-, nätverks-, beständighets-, AI-agent- och TCC-entiteter som deltar i en händelse med hög allvarlighetsgrad. Bakgrundsprocessen förankrar ett spår när AnchorDetector bedömer en händelse som värd att undersöka (loaderkörning, beständighetsskrivning, åtkomst till autentiseringsfiler m.m.) och följer sedan alla berörda entiteter i samma härstamning. Klicka på en nod för fullständig identitet och roll; dra för att ordna om; byt layout i verktygsfältet; högerklicka för att kopiera eller öppna i Händelser.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Agent Traces är W3C TRACEPARENT-spann som MacCrab tar emot via sin lokala OTLP-mottagare från AI-kodningsverktyg (Claude Code, Cursor, Codex, Continue, Windsurf). Varje rad är ett spår, alltså en modellanropslinje. Expandera för att visa spanntider, verktygsanrop och orsaksgrafhändelser under spannet. Tomt tills du aktiverar mottagaren nedan och ett OTel-sändande verktyg använder den.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Agent Traces är W3C TRACEPARENT-spann som MacCrab tar emot via sin lokala OTLP-mottagare från AI-kodningsverktyg (Claude Code, Cursor, Codex, Continue, Windsurf). Varje rad är ett spår; välj det för att lista dess spann med tider, nästling efter förälder och sanerade attribut. Tomt tills du aktiverar mottagaren nedan och ett OTel-sändande verktyg använder den.";
 "ui.V2InvestigationWorkspace.anchor" = "ankare";
 "ui.V2InvestigationWorkspace.clear" = "Rensa";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Rensa alla nodfilter";

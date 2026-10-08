@@ -24,7 +24,7 @@ enum StoreNews {
             StoreNewsItem(
                 id: "store-catalog",
                 title: "Signed plugin catalog",
-                summary: "Browse the signed forensic-plugin catalog. Installs run fully sandboxed on this Mac.",
+                summary: "Browse the signed forensic-plugin catalog.",
                 badge: nil),
             StoreNewsItem(
                 id: "whats-new",
