@@ -9,7 +9,7 @@
 //   - Signer pin  (signer_public_key_sha256) — the O1b publisher-key pin.
 //   - Version floor — RaveCatalogClient.checkVersionFloor (shared policy).
 //   - Revocation  — RaveRevocationList.entriesRevoking (id + version).
-//   - Maturity    — status ("pre-release" vs official).
+//   - Maturity    — status ("pre-release", or anything but "active").
 //
 // Honesty model (storefront-honesty, S4-X2):
 //   * The dashboard NEVER fakes an install. A live "Install" pill only appears
@@ -44,6 +44,11 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
         /// No pill — a pre-release / coming-soon entry. Shows its status, not
         /// a live Install pill (storefront honesty).
         case preRelease
+        /// No pill — the signed index does not mark the entry "active"
+        /// (archived, unreachable, revoked, or no status at all). The store
+        /// does not list these; this keeps a maccrab:// link or an update
+        /// button from offering one either.
+        case notOffered
         /// No pill — the running build doesn't meet the entry's version floor,
         /// or the floor is malformed. Carries the fail-closed reason.
         case versionFloorBlocked(reason: String)
@@ -98,6 +103,9 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
             return "Operator-signed binary required — this entry has no published signed release."
         case .preRelease:
             return "Pre-release — not available for one-click install."
+        case .notOffered:
+            return String(localized: "raveStore.notOffered.reason",
+                          defaultValue: "The signed catalog does not currently offer this plugin.")
         case .versionFloorBlocked(let reason):
             return reason
         case .revoked(let reason):
@@ -121,9 +129,9 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
     /// describing the refusal when the floor blocks install.
     ///
     /// Precedence (first match wins): revoked → floor-blocked → pre-release →
-    /// awaiting-signed-binary (no pin on official) → installable. Revocation is
-    /// checked first because a revoked plugin must never look installable even
-    /// if every other gate passes.
+    /// not offered (status not "active") → awaiting-signed-binary (no pin on
+    /// official) → installable. Revocation is checked first because a revoked
+    /// plugin must never look installable even if every other gate passes.
     public static func compute(
         entry: RaveCatalogEntry,
         revocations: RaveRevocationList?,
@@ -197,6 +205,18 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
             return RaveCatalogEntryState(
                 entry: entry,
                 installability: .preRelease,
+                isRevoked: false,
+                revocationReason: nil
+            )
+        }
+
+        // 3b. Only an entry the signed index marks "active" is offered, the
+        //     same rule as the store's RaveCatalogClient.offeredEntries. An
+        //     entry without a status decodes to "" and stops here (fail closed).
+        if entry.status != "active" {
+            return RaveCatalogEntryState(
+                entry: entry,
+                installability: .notOffered,
                 isRevoked: false,
                 revocationReason: nil
             )

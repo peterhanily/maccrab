@@ -6,7 +6,7 @@
 //
 // Layout:
 //   - Hero header with catalog source + refresh
-//   - Left sidebar: All / Featured / Categories
+//   - Left sidebar: All plugins / Categories
 //   - Center grid: plugin cards with icon + name + tags
 //   - Right detail panel when a card is selected: description,
 //     install command
@@ -35,7 +35,6 @@ struct V2RaveCatalogBrowserView: View {
     @State private var baseURL: String = ""
     @State private var selectedID: String? = nil
     @State private var selectedCategory: String? = nil  // nil = All
-    @State private var showFeaturedOnly = false
     @State private var usingOfficial: Bool = true
     /// S4-X2: the verified install path. Selecting Install presents the SAME
     /// consent sheet the maccrab://install handler drives (resolve-from-pinned-
@@ -126,40 +125,31 @@ struct V2RaveCatalogBrowserView: View {
 
     private var visibleEntries: [RaveCatalogEntry] {
         let filtered = displayEntries.filter { e in
-            if showFeaturedOnly, e.trustTier != "first-party" { return false }
             if let cat = selectedCategory, e.category != cat { return false }
-            if !matchesSearch(e) { return false }
+            if !RaveStoreListing.matches(e, query: searchText, isBuiltin: isBuiltin(e)) { return false }
             return true
         }
         return sortEntries(filtered)
-    }
-
-    private func matchesSearch(_ e: RaveCatalogEntry) -> Bool {
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return true }
-        let hay = ([friendlyName(e.id), e.id, e.category ?? ""] + e.tags)
-            .joined(separator: " ").lowercased()
-        return hay.contains(q)
     }
 
     private func sortEntries(_ list: [RaveCatalogEntry]) -> [RaveCatalogEntry] {
         switch sortMode {
         case .name:
             return list.sorted {
-                friendlyName($0.id).localizedCaseInsensitiveCompare(friendlyName($1.id)) == .orderedAscending
+                listingName($0).localizedCaseInsensitiveCompare(listingName($1)) == .orderedAscending
             }
         case .category:
             return list.sorted {
                 let ca = $0.category ?? "~", cb = $1.category ?? "~"
                 if ca != cb { return ca < cb }
-                return friendlyName($0.id).localizedCaseInsensitiveCompare(friendlyName($1.id)) == .orderedAscending
+                return listingName($0).localizedCaseInsensitiveCompare(listingName($1)) == .orderedAscending
             }
         case .firstPartyFirst:
             return list.sorted {
                 let fa = $0.trustTier == "first-party" ? 0 : 1
                 let fb = $1.trustTier == "first-party" ? 0 : 1
                 if fa != fb { return fa < fb }
-                return friendlyName($0.id).localizedCaseInsensitiveCompare(friendlyName($1.id)) == .orderedAscending
+                return listingName($0).localizedCaseInsensitiveCompare(listingName($1)) == .orderedAscending
             }
         }
     }
@@ -507,19 +497,11 @@ struct V2RaveCatalogBrowserView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
             sidebarHeader("Browse")
-            sidebarRow("All scanners",
+            sidebarRow(String(localized: "raveStore.sidebar.allPlugins", defaultValue: "All plugins"),
                        icon: "square.grid.2x2",
-                       isSelected: selectedCategory == nil && !showFeaturedOnly,
+                       isSelected: selectedCategory == nil,
                        count: displayEntries.count) {
                 selectedCategory = nil
-                showFeaturedOnly = false
-            }
-            sidebarRow("Featured (first-party)",
-                       icon: "sparkles",
-                       isSelected: showFeaturedOnly,
-                       count: displayEntries.filter { $0.trustTier == "first-party" }.count) {
-                showFeaturedOnly.toggle()
-                if showFeaturedOnly { selectedCategory = nil }
             }
             if !categories.isEmpty {
                 sidebarHeader("Categories").padding(.top, 16)
@@ -529,7 +511,6 @@ struct V2RaveCatalogBrowserView: View {
                                isSelected: selectedCategory == cat,
                                count: displayEntries.filter { $0.category == cat }.count) {
                         selectedCategory = (selectedCategory == cat) ? nil : cat
-                        showFeaturedOnly = false
                     }
                 }
             }
@@ -655,7 +636,7 @@ struct V2RaveCatalogBrowserView: View {
                 pluginIcon(e, size: 56)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text(friendlyName(e.id))
+                        Text(listingName(e))
                             .scaledSystem(13, weight: .semibold)
                             .lineLimit(1)
                         // Built-ins wear the dedicated "Built-in" status badge, not
@@ -726,7 +707,7 @@ struct V2RaveCatalogBrowserView: View {
                 pluginIcon(e, size: 80)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(friendlyName(e.id))
+                    Text(listingName(e))
                         .font(.headline)
                     HStack(spacing: 6) {
                         if !isBuiltin(e) { trustBadge(e.trustTier) }
@@ -740,7 +721,7 @@ struct V2RaveCatalogBrowserView: View {
                 }
 
                 Divider()
-                detailSection(String(localized: "raveDetail.whatItDoes", defaultValue: "What it does"), body: longDescription(e))
+                detailSection(String(localized: "raveDetail.whatItDoes", defaultValue: "What it does"), body: whatItDoes(e))
                 recentOutputSection(e)
                 if let f = PluginFactsLookup.facts(forPluginID: e.id) {
                     Divider()
@@ -1083,6 +1064,7 @@ struct V2RaveCatalogBrowserView: View {
         case .installable:            return "Install"
         case .awaitingSignedBinary:   return "Operator-signed binary required"
         case .preRelease:             return "Pre-release"
+        case .notOffered:             return String(localized: "raveStore.notOffered", defaultValue: "Not offered")
         case .versionFloorBlocked:    return "Unavailable on this MacCrab"
         case .revoked:                return "Revoked"
         case .impersonation:          return "Impersonation — refused"
@@ -1095,6 +1077,7 @@ struct V2RaveCatalogBrowserView: View {
         case .installable:            return "checkmark.shield"
         case .awaitingSignedBinary:   return "hourglass"
         case .preRelease:             return "clock.badge"
+        case .notOffered:             return "nosign"
         case .versionFloorBlocked:    return "exclamationmark.triangle"
         case .revoked:                return "xmark.octagon"
         case .impersonation:          return "exclamationmark.shield"
@@ -1108,12 +1091,18 @@ struct V2RaveCatalogBrowserView: View {
         switch st.installability {
         case .installable:
             if st.isSignerPinned {
-                badge("Pinned", icon: "checkmark.shield.fill", color: .green)
+                badge(String(localized: "raveStore.trust.keyEndorsed.short", defaultValue: "Key endorsed"),
+                      icon: "checkmark.shield.fill", color: .green)
+                    .help(String(localized: "raveStore.trust.keyEndorsed",
+                                 defaultValue: "Publisher key endorsed by the signed catalog"))
             }
         case .awaitingSignedBinary:
             badge("Unavailable", icon: "hourglass", color: .secondary)
         case .preRelease:
             badge("Pre-release", icon: "clock.badge", color: .orange)
+        case .notOffered:
+            badge(String(localized: "raveStore.notOffered", defaultValue: "Not offered"),
+                  icon: "nosign", color: .secondary)
         case .versionFloorBlocked:
             badge("Needs newer MacCrab", icon: "exclamationmark.triangle.fill", color: .orange)
         case .revoked:
@@ -1171,7 +1160,11 @@ struct V2RaveCatalogBrowserView: View {
                 Image(systemName: st.isSignerPinned ? "checkmark.shield.fill" : "shield.slash")
                     .scaledSystem(10)
                     .foregroundStyle(st.isSignerPinned ? Color.green : Color.secondary)
-                Text(st.isSignerPinned ? "Publisher key pinned" : "Publisher key not yet pinned")
+                Text(st.isSignerPinned
+                     ? String(localized: "raveStore.trust.keyEndorsed",
+                              defaultValue: "Publisher key endorsed by the signed catalog")
+                     : String(localized: "raveStore.trust.noKeyEndorsed",
+                              defaultValue: "No publisher key endorsed by the signed catalog"))
                     .scaledSystem(11)
             }
             if let reason = st.disabledReason {
@@ -1208,8 +1201,16 @@ struct V2RaveCatalogBrowserView: View {
             .cornerRadius(3)
     }
 
-    private func friendlyName(_ id: String) -> String {
-        ScannerDisplay.name(forPluginID: id)
+    /// The signed `display_name` for a catalog entry, the local name for a
+    /// built-in row (see RaveStoreListing).
+    private func listingName(_ e: RaveCatalogEntry) -> String {
+        RaveStoreListing.name(e, isBuiltin: isBuiltin(e))
+    }
+
+    /// "What it does": the signed `short_description` for a catalog entry,
+    /// else the local description.
+    private func whatItDoes(_ e: RaveCatalogEntry) -> String {
+        RaveStoreListing.signedDescription(e, isBuiltin: isBuiltin(e)) ?? longDescription(e)
     }
 
     private func longDescription(_ e: RaveCatalogEntry) -> String {
@@ -1220,9 +1221,9 @@ struct V2RaveCatalogBrowserView: View {
             return f.purpose
         }
         if isBuiltin(e) {
-            return "\(friendlyName(e.id)) — a \(e.category ?? "scanner") that ships inside MacCrab. Run it on this Mac from here."
+            return "\(listingName(e)) — a \(e.category ?? "scanner") that ships inside MacCrab. Run it on this Mac from here."
         }
-        return "\(friendlyName(e.id)) — \(e.category ?? "scanner") published via the rave catalog. Install it to add it to this Mac's scanner registry; from there it'll appear in any kit that references its id."
+        return "\(listingName(e)) — \(e.category ?? "scanner") published via the rave catalog. Install it to add it to this Mac's scanner registry; from there it'll appear in any kit that references its id."
     }
 
     private func monogram(_ id: String) -> String {

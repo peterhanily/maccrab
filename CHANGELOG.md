@@ -50,6 +50,13 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   now head the sheet. The publisher key is shown as its full 64-character
   SHA-256 hash instead of the first 16 characters, along with the fingerprint
   of the catalog key built into MacCrab, and each has a Copy button.
+- **The plugin catalog shows each plugin's signed name and description.**
+  Cards, the detail panel, search and sorting use the name the signed catalog
+  gives each plugin instead of a name MacCrab made up from its id, and "What
+  it does" shows the plugin's signed one-line description, which search now
+  covers too. Built-in scanners keep their own names. The sidebar's "All
+  scanners" is now "All plugins", and "Featured (first-party)" is gone: it
+  listed the same plugins as All.
 - **Signal events no longer flood the priority detection lane.** No detection
   consumed `NOTIFY_SIGNAL` events, yet a build storm delivered about four
   thousand of them a second into the lane shared with exec, fork and exit.
@@ -131,6 +138,17 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   opened it.** Installing from the plugin catalog or the Forensics scans view
   now shows "Install plugin". Only a maccrab:// install link shows "Install
   from MacCrab link".
+- **The plugin catalog no longer says a publisher key is "pinned".** MacCrab
+  does not pin the key itself; the signed catalog names the key each plugin
+  must be signed with. The badge now reads "Key endorsed", and the detail
+  panel says "Publisher key endorsed by the signed catalog".
+- **A plugin the catalog does not offer can no longer be installed from a
+  link or an Update button.** The catalog lists only plugins the signed
+  catalog marks as active, but a maccrab:// install link or the Update button
+  in the Forensics scans view could still offer one that was archived,
+  unreachable or had no status at all. Both now show it as not offered. An
+  entry without a status counts as not offered instead of being assumed
+  official.
 - **A build storm can no longer make the kernel drop Endpoint Security
   messages.** The ES callback used to decode paths and run the OPEN admission
   policy on the kernel dequeue thread. Every path-dependent drop decision now

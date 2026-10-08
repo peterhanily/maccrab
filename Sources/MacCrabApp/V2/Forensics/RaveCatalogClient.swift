@@ -37,12 +37,20 @@ public struct RaveCatalogEntry: Identifiable, Hashable, Sendable {
     /// endorsed by the signed catalog. Empty when the catalog entry omits it
     /// (pre-ceremony catalogs / pre-release entries).
     public let signerPublicKeySHA256: String
-    /// Entry maturity ("pre-release" vs official). Surfaced so the dashboard
-    /// can badge pre-release entries and explain the unpinned-install caveat.
+    /// The signed index's `status` ("active", "pre-release", "archived", ...).
+    /// Only "active" entries are offered for install. Empty when the entry
+    /// omits it, so a malformed entry is never offered (fail closed).
     public let status: String
     public let category: String?
     public let tags: [String]
     public let minMaccrabVersion: String?
+    /// Further signed index fields (`kind`, `privacy_class`,
+    /// `requires_encrypted_scan`, `runtime`). nil when the entry omits them, so
+    /// an older or newer index still parses.
+    public var kind: String? = nil
+    public var privacyClass: String? = nil
+    public var requiresEncryptedScan: Bool? = nil
+    public var runtime: String? = nil
 }
 
 public enum RaveCatalogError: Error, CustomStringConvertible {
@@ -470,10 +478,14 @@ public actor RaveCatalogClient {
                 trustTier: (raw["trust_tier"] as? String) ?? "unverified",
                 signerIdentity: (raw["signer_identity"] as? String) ?? "",
                 signerPublicKeySHA256: (raw["signer_public_key_sha256"] as? String)?.lowercased() ?? "",
-                status: (raw["status"] as? String) ?? "official",
+                status: (raw["status"] as? String) ?? "",
                 category: metadata["category"] as? String,
                 tags: (metadata["tags"] as? [String]) ?? [],
-                minMaccrabVersion: metadata["min_maccrab_version"] as? String
+                minMaccrabVersion: metadata["min_maccrab_version"] as? String,
+                kind: raw["kind"] as? String,
+                privacyClass: raw["privacy_class"] as? String,
+                requiresEncryptedScan: raw["requires_encrypted_scan"] as? Bool,
+                runtime: raw["runtime"] as? String
             ))
         }
         return entries.sorted { $0.id < $1.id }
@@ -484,8 +496,9 @@ public actor RaveCatalogClient {
     /// website's go-live filter (maccrab-rave site/build.sh). Pre-release /
     /// placeholder / official-but-not-active / not-yet-signed entries are NOT
     /// offered (the browser shows its verified-empty pane when none are active).
-    /// This is a display filter ONLY — it does not touch any signature / serial /
-    /// installability trust gate; the install path fail-closes on its own.
+    /// This is a display filter ONLY — it does not touch any signature / serial
+    /// trust gate. RaveCatalogEntryState.compute applies the same "active" rule
+    /// to every install path (store, Forensics scans update, maccrab:// link).
     ///
     /// Pure + nonisolated so the SwiftUI view's `offeredEntries` computed var and
     /// the unit tests share one definition.

@@ -927,10 +927,12 @@ struct V2ForensicsScansView: View {
         // current_version per id (best-effort; empty when offline so no badges
         // show). The update itself reuses the Catalog tab's verified consent
         // flow. Runs AFTER loading clears so a hanging fetch can't block the list.
+        // Only entries the catalog offers (status "active") count, as in the store.
         if !visible.isEmpty {
             do {
                 var av: [String: String] = [:]
-                for e in try await RaveCatalogClient().fetchEntries() { av[e.id] = e.currentVersion }
+                let offered = RaveCatalogClient.offeredEntries(try await RaveCatalogClient().fetchEntries())
+                for e in offered { av[e.id] = e.currentVersion }
                 availableVersions = av
             } catch {
                 availableVersions = [:]
