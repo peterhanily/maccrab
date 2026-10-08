@@ -35,7 +35,10 @@ evidence before changing distribution. Keep them intact for diagnosis.
 Phased rollout (`sparkle:phasedRolloutInterval`, on by default for non-critical
 releases — see `scripts/generate-appcast-entry.sh`) is what buys you time here:
 a staggered rollout means only a fraction of users have the bad build when you
-catch it, so halting distribution actually limits the blast radius.
+catch it, so halting distribution actually limits the blast radius. Installs
+older than 1.22.0 are the exception: every item the release generator writes
+is critical for them (`CRITICAL_UPDATE_FLOOR` in `scripts/_appcast_xml.py`), so
+Sparkle offers it to them at once, outside the phased rollout.
 
 ## The three surfaces that advertise a release
 

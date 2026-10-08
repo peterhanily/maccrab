@@ -763,7 +763,7 @@ struct V2OverviewWorkspace: View {
     /// user into the signed catalog.
     private var storeStatusText: String {
         String(localized: "overview.storeBrowsePrompt",
-               defaultValue: "Browse signed forensic plugins from the catalog. Installs run fully sandboxed.")
+               defaultValue: "Browse signed forensic plugins from the catalog.")
     }
 
     private func forensicsStat(_ value: String, _ label: String) -> some View {

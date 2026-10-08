@@ -762,6 +762,7 @@
 "inspector.cves" = "CVEs";
 "inspector.description" = "Descrição";
 "inspector.detectionRule" = "Regra de detecção";
+"inspector.explainWithMaccrabctl" = "Explicar com o maccrabctl";
 "inspector.identity" = "Identidade";
 "inspector.logic" = "Lógica";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "Clique para entender e saber como resolver";
 "overview.storeTitle" = "Loja de plugins";
 "overview.storeBrowse" = "Procurar →";
-"overview.storeBrowsePrompt" = "Procure plugins forenses assinados no catálogo. As instalações rodam totalmente isoladas.";
+"overview.storeBrowsePrompt" = "Procure plugins forenses assinados no catálogo.";
 "raveStore.thirdPartyCatalog.title" = "Catálogo de terceiros assinado";
 "raveStore.thirdPartyCatalog.body" = "Nenhum plugin de terceiros listado no momento. Os scanners integrados abaixo vêm dentro do MacCrab e rodam neste Mac agora — nenhuma instalação necessária.";
 
@@ -1650,6 +1651,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Remover esta supressão — a regra será acionada na próxima correspondência";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Alertas resolvidos e suprimidos na janela recente de retenção. Clique com o botão direito em uma linha para remover a supressão ou excluir, ou use os botões do inspetor.";
 "ui.V2AlertsWorkspace.restore" = "Restaurar";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Execute este comando no Terminal para ver por que este alerta foi acionado:";
 "ui.V2AlertsWorkspace.suggested.actions" = "Ações sugeridas:";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Campanhas suprimidas (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Táticas:";
@@ -1736,7 +1738,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Feeds de inteligência de ameaças";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Duas visualizações: **Ferramentas de segurança detectadas** (outros softwares de segurança macOS observados pelo MacCrab neste computador — pacote Objective-See, Little Snitch, EDR comercial etc.) e **Destinos de saída configurados** (destinos de alertas definidos em `daemon_config.json` / `notifications.json` — Splunk, Slack, S3 etc.). O estado indica ‘configurado’, ‘em execução’ ou ‘instalado’.";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "Um rastro é a cadeia causal de entidades de processo, arquivo, rede, persistência, agente de IA e TCC que participam de um evento de gravidade alta. O daemon ancora um rastro quando o AnchorDetector considera que um evento merece investigação (execução de carregador, gravação de persistência, acesso a arquivo de credenciais etc.) e incorpora as entidades subsequentes da mesma linhagem. Clique em um nó para ver identidade e função completas; arraste para reorganizar; altere o layout pela barra de ferramentas; clique com o botão direito para copiar ou abrir em Eventos.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Rastros de agentes são spans W3C TRACEPARENT que o MacCrab recebe pelo receptor OTLP de loopback de ferramentas de programação com IA (Claude Code, Cursor, Codex, Continue, Windsurf). Cada linha é um rastro, ou seja, uma linhagem de chamadas ao modelo; expandi-la mostra os tempos dos spans, chamadas de ferramentas e eventos do grafo causal ocorridos durante o span. Fica vazio até você habilitar o receptor abaixo e uma ferramenta que emite OTel utilizá-lo.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Rastros de agentes são spans W3C TRACEPARENT que o MacCrab recebe pelo receptor OTLP de loopback de ferramentas de programação com IA (Claude Code, Cursor, Codex, Continue, Windsurf). Cada linha é um rastro; selecioná-la lista seus spans com tempos, aninhamento por pai e atributos sanitizados. Fica vazio até você habilitar o receptor abaixo e uma ferramenta que emite OTel utilizá-lo.";
 "ui.V2InvestigationWorkspace.anchor" = "âncora";
 "ui.V2InvestigationWorkspace.clear" = "Limpar";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Limpar todos os filtros de nós";

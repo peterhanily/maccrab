@@ -762,6 +762,7 @@
 "inspector.cves" = "CVE";
 "inspector.description" = "Descrizione";
 "inspector.detectionRule" = "Regola di rilevamento";
+"inspector.explainWithMaccrabctl" = "Spiega con maccrabctl";
 "inspector.identity" = "Identità";
 "inspector.logic" = "Logica";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "Clicca per capire il significato e come affrontarlo";
 "overview.storeTitle" = "Archivio plugin";
 "overview.storeBrowse" = "Sfoglia →";
-"overview.storeBrowsePrompt" = "Sfoglia plugin forense firmati dal catalogo. Gli install vengono eseguiti completamente in sandbox.";
+"overview.storeBrowsePrompt" = "Sfoglia i plugin forensi firmati dal catalogo.";
 "raveStore.thirdPartyCatalog.title" = "Catalogo di terze parti firmato";
 "raveStore.thirdPartyCatalog.body" = "Nessun plugin di terze parti è attualmente elencato. Gli scanner integrati qui sotto sono forniti all'interno di MacCrab e vengono eseguiti su questo Mac ora — nessuna installazione necessaria.";
 
@@ -1650,6 +1651,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Rimuovi questa soppressione — la regola scatterà alla prossima corrispondenza";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Avvisi risolti e soppressi nel periodo recente di conservazione. Fai clic destro su una riga per annullare la soppressione o eliminare l’avviso, oppure usa i pulsanti dell’ispettore.";
 "ui.V2AlertsWorkspace.restore" = "Ripristina";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Esegui questo comando in Terminale per vedere perché è scattato questo avviso:";
 "ui.V2AlertsWorkspace.suggested.actions" = "Azioni suggerite:";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Campagne soppresse (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Tattiche:";
@@ -1736,7 +1738,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Feed di intelligence sulle minacce";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Due viste: **Strumenti di sicurezza rilevati** (altro software di sicurezza macOS osservato da MacCrab su questo computer — suite Objective-See, Little Snitch, EDR commerciali ecc.) e **Destinazioni di output configurate** (destinazioni degli avvisi definite in `daemon_config.json` / `notifications.json` — Splunk, Slack, S3 ecc.). Lo stato indica «configurato», «in esecuzione» o «installato».";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "Una traccia è la catena causale di entità di processo, file, rete, persistenza, agenti IA e TCC coinvolte in un evento ad alta gravità. Il daemon ancora una traccia quando AnchorDetector ritiene che un evento meriti indagine (esecuzione di un loader, scrittura di persistenza, accesso a file di credenziali ecc.) e incorpora le entità successive della stessa discendenza. Fai clic su un nodo per identità e ruolo completi; trascina per riordinare; cambia disposizione dalla barra degli strumenti; fai clic destro per copiare o aprire in Eventi.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Le Tracce agenti sono span W3C TRACEPARENT che MacCrab acquisisce dal ricevitore OTLP di loopback tramite strumenti di programmazione IA (Claude Code, Cursor, Codex, Continue, Windsurf). Ogni riga è una traccia, ossia una discendenza di chiamate al modello; espandendola si vedono tempi degli span, chiamate agli strumenti ed eventi del grafo causale avvenuti durante lo span. Rimane vuoto finché non abiliti il ricevitore qui sotto e uno strumento che emette OTel non lo usa.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Le Tracce agenti sono span W3C TRACEPARENT che MacCrab acquisisce dal ricevitore OTLP di loopback tramite strumenti di programmazione IA (Claude Code, Cursor, Codex, Continue, Windsurf). Ogni riga è una traccia; selezionandola si vedono i suoi span con tempi, annidamento per genitore e attributi sanitizzati. Rimane vuoto finché non abiliti il ricevitore qui sotto e uno strumento che emette OTel non lo usa.";
 "ui.V2InvestigationWorkspace.anchor" = "ancora";
 "ui.V2InvestigationWorkspace.clear" = "Cancella";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Cancella tutti i filtri dei nodi";

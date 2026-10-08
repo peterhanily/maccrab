@@ -762,6 +762,7 @@
 "inspector.cves" = "CVEs";
 "inspector.description" = "Beschreibung";
 "inspector.detectionRule" = "Erkennungsregel";
+"inspector.explainWithMaccrabctl" = "Mit maccrabctl erklären";
 "inspector.identity" = "Identität";
 "inspector.logic" = "Logik";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "Klicken für Erklärung und Abhilfe";
 "overview.storeTitle" = "Plugin-Store";
 "overview.storeBrowse" = "Durchsuchen →";
-"overview.storeBrowsePrompt" = "Durchsuchen Sie signierte forensische Plugins aus dem Katalog. Installationen laufen vollständig isoliert.";
+"overview.storeBrowsePrompt" = "Durchsuchen Sie signierte forensische Plugins aus dem Katalog.";
 "raveStore.thirdPartyCatalog.title" = "Signierter Drittanbieter-Katalog";
 "raveStore.thirdPartyCatalog.body" = "Derzeit sind keine Drittanbieter-Plugins aufgelistet. Die unten aufgeführten integrierten Scanner sind in MacCrab enthalten und laufen bereits auf diesem Mac — keine Installation erforderlich.";
 
@@ -1650,6 +1651,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Diese Unterdrückung entfernen — die Regel löst beim nächsten Treffer wieder aus";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Erledigte und unterdrückte Warnungen aus dem aktuellen Aufbewahrungszeitraum. Rechtsklick auf eine Zeile zum Aufheben der Unterdrückung oder Löschen; alternativ die Inspektorschaltflächen verwenden.";
 "ui.V2AlertsWorkspace.restore" = "Wiederherstellen";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Führen Sie diesen Befehl im Terminal aus, um zu sehen, warum diese Warnung ausgelöst wurde:";
 "ui.V2AlertsWorkspace.suggested.actions" = "Vorgeschlagene Aktionen:";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Unterdrückte Kampagnen (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Taktiken:";
@@ -1736,7 +1738,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Bedrohungsinformationsfeeds";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Zwei Bereiche: **Erkannte Sicherheitswerkzeuge** (andere von MacCrab auf diesem Mac beobachtete Sicherheitssoftware — Objective-See-Suite, Little Snitch, kommerzielle EDR usw.) und **Konfigurierte Ausgabeziele** (Warnungsziele in `daemon_config.json` / `notifications.json` — Splunk, Slack, S3 usw.). Status zeigt „konfiguriert“, „läuft“ oder „installiert“.";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "Ein Trace ist die Kausalkette von Prozess-, Datei-, Netzwerk-, Persistenz-, KI-Agenten- und TCC-Objekten, die an einem Ereignis mit hohem Schweregrad beteiligt sind. Der Daemon verankert einen Trace, wenn AnchorDetector ein Ereignis als untersuchungswürdig einstuft (Loader-Ausführung, Persistenzänderung, Zugriff auf Zugangsdaten usw.), und erfasst anschließend alle berührten Objekte derselben Abstammungslinie. Knoten anklicken für vollständige Identität und Rolle; zum Umordnen ziehen; Layout in der Symbolleiste wechseln; Rechtsklick zum Kopieren oder Öffnen in Ereignissen.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Agent Traces sind W3C-TRACEPARENT-Spans, die MacCrab über seinen lokalen OTLP-Empfänger von KI-Programmierwerkzeugen empfängt (Claude Code, Cursor, Codex, Continue, Windsurf). Jede Zeile ist ein Trace, also eine Modellaufruf-Abstammungslinie. Aufklappen zeigt Span-Zeiten, Werkzeugaufrufe und Kausalgraph-Ereignisse während des Spans. Leer, bis Sie unten den Empfänger aktivieren und ein OTel-sendendes Werkzeug damit arbeitet.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Agent Traces sind W3C-TRACEPARENT-Spans, die MacCrab über seinen lokalen OTLP-Empfänger von KI-Programmierwerkzeugen empfängt (Claude Code, Cursor, Codex, Continue, Windsurf). Jede Zeile ist ein Trace; bei Auswahl werden seine Spans mit Zeiten, Verschachtelung nach Eltern-Span und bereinigten Attributen aufgelistet. Leer, bis Sie unten den Empfänger aktivieren und ein OTel-sendendes Werkzeug damit arbeitet.";
 "ui.V2InvestigationWorkspace.anchor" = "Anker";
 "ui.V2InvestigationWorkspace.clear" = "Löschen";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Alle Knotenfilter löschen";

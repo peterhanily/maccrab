@@ -135,15 +135,23 @@ extension MacCrabCtl {
             print("\(pad("id", 36))  \(pad("severity", 10))  \(pad("conf", 7))  \(pad("status", 12))  title")
             print(String(repeating: "─", count: 80))
             for trace in traces {
-                let severity = severityFromString(trace.severity)
-                let coloredSev = severity?.coloredLabel ?? trace.severity
                 let confStr = String(format: "%.2f", trace.confidence)
-                print("\(pad(trace.id, 36))  \(pad(coloredSev, 10))  \(pad(confStr, 7))  \(pad(trace.status, 12))  \(trace.title)")
+                print("\(pad(trace.id, 36))  \(traceListSeverityCell(trace.severity))  \(pad(confStr, 7))  \(pad(trace.status, 12))  \(trace.title)")
             }
         } catch {
             print("Query failed: \(error.localizedDescription)")
         }
         await store.close()
+    }
+
+    /// The `trace list` severity column. A known severity prints its whole
+    /// `coloredLabel`, which is already ten columns wide and, on a terminal,
+    /// ends with its own color reset. It must not go through `pad`, which
+    /// counts the color codes as columns, so it would cut the label to five
+    /// characters and drop the reset.
+    static func traceListSeverityCell(_ severity: String, terminal: Bool = isTerminal) -> String {
+        guard let known = severityFromString(severity) else { return pad(severity, 10) }
+        return known.coloredLabel(terminal: terminal)
     }
 
     // MARK: - trace show

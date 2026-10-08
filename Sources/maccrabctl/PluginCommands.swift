@@ -123,14 +123,15 @@ func printPluginUsage() {
       revoke <key-hex>                Revoke a publisher key (preempts trust).
       trust-list                      Show trusted + revoked publisher keys.
       run <plugin-id> --case <id>     Invoke a built-in or installed plugin
-                                      against a case (Tier-B plugins run sandboxed).
+                                      against a case (only third-party plugins
+                                      run sandboxed).
 
     Authoring (contributor SDK):
       keygen [--out <dir>]            Generate an Ed25519 plugin-signing keypair
                                       (signing.key + signing.key.pub). Keep the
                                       private key OFFLINE.
       sign <bundle-dir> [--key <k>]   Sign a bundle (manifest + binary) in place.
-      test <bundle-dir>               Run the bundle LOCALLY under the real
+      test <bundle-dir>               Run a third-party bundle LOCALLY in the real
                                       sandbox and show its containment + outcome.
 
     Renamed in v1.17 (deprecated aliases, still supported):

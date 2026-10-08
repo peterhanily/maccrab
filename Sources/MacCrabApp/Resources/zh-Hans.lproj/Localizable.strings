@@ -762,6 +762,7 @@
 "inspector.cves" = "CVE";
 "inspector.description" = "描述";
 "inspector.detectionRule" = "检测规则";
+"inspector.explainWithMaccrabctl" = "使用 maccrabctl 解释";
 "inspector.identity" = "身份";
 "inspector.logic" = "逻辑";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "点击查看含义及解决方案";
 "overview.storeTitle" = "插件商店";
 "overview.storeBrowse" = "浏览 →";
-"overview.storeBrowsePrompt" = "浏览来自目录的已签名取证插件。安装运行于完整沙盒环境。";
+"overview.storeBrowsePrompt" = "浏览来自目录的已签名取证插件。";
 "raveStore.thirdPartyCatalog.title" = "已签名的第三方目录";
 "raveStore.thirdPartyCatalog.body" = "目前未列出任何第三方插件。下方内置扫描器已集成在MacCrab中，此刻已在您的Mac上运行 — 无需安装。";
 
@@ -973,6 +974,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "移除此抑制；下次匹配时规则将再次触发";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "近期保留时段内已解决和已抑制的告警。右键点击行可解除抑制或删除，也可使用检查器按钮。";
 "ui.V2AlertsWorkspace.restore" = "恢复";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "要查看此告警触发的原因，请在终端中运行此命令：";
 "ui.V2AlertsWorkspace.suggested.actions" = "建议操作：";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "已抑制的活动（%lld）";
 "ui.V2AlertsWorkspace.tactics" = "战术：";
@@ -1059,7 +1061,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "威胁情报源";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "这里分为两部分：**检测到的安全工具**（MacCrab 在此 Mac 上观察到的其他 macOS 安全软件，例如 Objective-See 工具集、Little Snitch、商业 EDR 等）和**已配置的输出目标**（在 `daemon_config.json` / `notifications.json` 中设置的警报目标，例如 Splunk、Slack、S3 等）。状态表示“已配置”、“正在运行”或“已安装”。";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "追踪是参与高严重性事件的进程、文件、网络、持久化、AI 代理和 TCC 实体组成的因果链。当 AnchorDetector 判断事件值得调查（例如加载器执行、持久化写入、凭据文件访问）时，守护进程会创建追踪锚点，并持续纳入同一谱系中涉及的实体。点击节点可查看完整标识和角色；拖动可重新排列；工具栏可切换布局；右键菜单提供复制和在事件中打开等操作。";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "代理追踪是 MacCrab 通过回环 OTLP 接收器从 AI 编程工具（Claude Code、Cursor、Codex、Continue、Windsurf）接收的 W3C TRACEPARENT 跨度。每行代表一条追踪，即一次模型调用谱系；展开可查看跨度时间、工具调用，以及跨度期间触发的因果图事件。启用下方接收器并运行向其发送 OTel 数据的工具后，此处才会出现内容。";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "代理追踪是 MacCrab 通过回环 OTLP 接收器从 AI 编程工具（Claude Code、Cursor、Codex、Continue、Windsurf）接收的 W3C TRACEPARENT 跨度。每行代表一条追踪；选中后会列出其跨度及各自的时间、父级嵌套和已净化的属性。启用下方接收器并运行向其发送 OTel 数据的工具后，此处才会出现内容。";
 "ui.V2InvestigationWorkspace.anchor" = "锚点";
 "ui.V2InvestigationWorkspace.clear" = "清除";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "清除所有节点筛选器";

@@ -33,7 +33,7 @@ struct SequenceConditionTreeTests {
             filename: "notarized_dropper_pattern.json", stepIDs: ["drop_binary"]
         ),
         "e1f2a3b4-0023-4000-b000-000000000023": .init(
-            filename: "supply_chain_full_kill_chain.json", stepIDs: ["persist"]
+            filename: "supply_chain_full_kill_chain.json", stepIDs: ["package_install", "persist"]
         ),
         "e1f2a3b4-0021-4000-b000-000000000021": .init(
             filename: "pip_install_to_credential_harvest.json", stepIDs: ["cred_access"]
@@ -186,7 +186,7 @@ struct SequenceConditionTreeTests {
         return await engine.evaluate(event).contains { $0.ruleId == ruleID }
     }
 
-    @Test("compiler emits and SequenceEngine decodes all eight affected corpus trees")
+    @Test("compiler emits and SequenceEngine decodes all nine affected corpus trees")
     func corpusTreesSurviveCompilerAndDecoder() async throws {
         try ensureRulesCompiled()
 
@@ -208,7 +208,7 @@ struct SequenceConditionTreeTests {
                     "compiler lost/reassigned a tree in \(expected.filename)")
             emittedTreeCount += emittedStepIDs.count
         }
-        #expect(emittedTreeCount == 8)
+        #expect(emittedTreeCount == 9)
 
         let engine = SequenceEngine(lineage: ProcessLineage())
         _ = try await engine.loadRules(from: compiledSequenceDir)
@@ -227,10 +227,10 @@ struct SequenceConditionTreeTests {
                     "decoder lost/reassigned a tree for \(ruleID)")
             decodedTreeCount += decodedStepIDs.count
         }
-        #expect(decodedTreeCount == 8)
+        #expect(decodedTreeCount == 9)
     }
 
-    @Test("all eight decoded corpus trees execute their authored branch semantics")
+    @Test("all nine decoded corpus trees execute their authored branch semantics")
     func affectedCorpusTreesExecuteExactly() async throws {
         try ensureRulesCompiled()
         let loader = SequenceEngine(lineage: ProcessLineage())
@@ -284,6 +284,28 @@ struct SequenceConditionTreeTests {
         ))), ".pth alone must not satisfy the site-packages+.pth branch")
         #expect(try await isolatedStepFires(supplyPersist, event: fileEvent(
             "/tmp/site-packages/hook.pth", action: .create
+        )))
+
+        let supplyInstall = try step("e1f2a3b4-0023-4000-b000-000000000023", "package_install")
+        #expect(try await isolatedStepFires(supplyInstall, event: processEvent(
+            executable: "/usr/local/bin/node",
+            commandLine: "node /usr/local/bin/npm install left-pad"
+        )), "npm runs as node with the npm CLI path in its arguments")
+        #expect(try await isolatedStepFires(supplyInstall, event: processEvent(
+            executable: "/usr/local/bin/node",
+            commandLine: "node /usr/local/lib/node_modules/npm/bin/npm-cli.js install left-pad"
+        )))
+        #expect(!(try await isolatedStepFires(supplyInstall, event: processEvent(
+            executable: "/usr/local/bin/node", commandLine: "node /private/tmp/app/server.js"
+        ))), "node alone must not satisfy the node+npm-CLI branch")
+        #expect(!(try await isolatedStepFires(supplyInstall, event: processEvent(
+            executable: "/usr/local/bin/node", commandLine: "node install.js"
+        ))), "install alone must not satisfy either branch")
+        #expect(try await isolatedStepFires(supplyInstall, event: processEvent(
+            executable: "/usr/bin/pip3", commandLine: "pip3 install requests"
+        )))
+        #expect(try await isolatedStepFires(supplyInstall, event: processEvent(
+            executable: "/usr/bin/gem", commandLine: "gem install rails"
         )))
 
         let pipCredential = try step("e1f2a3b4-0021-4000-b000-000000000021", "cred_access")

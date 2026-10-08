@@ -805,6 +805,7 @@
 "inspector.d3fend" = "D3FEND defenses";
 "inspector.description" = "Description";
 "inspector.detectionRule" = "Detection rule";
+"inspector.explainWithMaccrabctl" = "Explain with maccrabctl";
 "inspector.identity" = "Identity";
 "inspector.logic" = "Logic";
 "inspector.mitre" = "MITRE";
@@ -868,7 +869,7 @@
 "overview.factorExpandHint" = "Click for what this means and how to address it";
 "overview.storeTitle" = "Plugin store";
 "overview.storeBrowse" = "Browse →";
-"overview.storeBrowsePrompt" = "Browse signed forensic plugins from the catalog. Installs run fully sandboxed.";
+"overview.storeBrowsePrompt" = "Browse signed forensic plugins from the catalog.";
 "raveStore.thirdPartyCatalog.title" = "Signed third-party catalog";
 "raveStore.thirdPartyCatalog.body" = "No third-party plugins are currently listed. The built-in scanners below ship inside MacCrab and run on this Mac now — no install needed.";
 
@@ -1695,6 +1696,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Remove this suppression — the rule will fire again the next time it matches";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Resolved + suppressed alerts from the recent retention window. Right-click a row for Unsuppress and Delete actions, or use the inspector buttons.";
 "ui.V2AlertsWorkspace.restore" = "Restore";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Run this in Terminal to see why this alert fired:";
 "ui.V2AlertsWorkspace.suggested.actions" = "Suggested actions:";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Suppressed campaigns (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Tactics:";
@@ -1781,7 +1783,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Threat intel feeds";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Two surfaces: **Detected security tools** (other macOS security software MacCrab observed on this machine — Objective-See suite, Little Snitch, commercial EDR, etc.) and **Configured output sinks** (alert destinations you wired into `daemon_config.json` / `notifications.json` — Splunk, Slack, S3, etc.). Status reflects 'configured' / 'running' / 'installed'.";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "A trace is the causal chain of process / file / network / persistence / AI-agent / TCC entities that participate in a high-severity event. The daemon anchors a trace when AnchorDetector decides an event is investigation-worthy (loader exec, persistence write, credential file access, etc.) and rolls forward every entity touched in the same lineage. Click any node for full identity + role; drag to rearrange; switch layout from the toolbar; right-click for copy / open-in-events shortcuts.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Agent Traces are W3C TRACEPARENT spans MacCrab ingested over its loopback OTLP receiver from AI coding tools (Claude Code, Cursor, Codex, Continue, Windsurf). Each row is one trace = one model-call lineage; expanding shows span timing + tool calls + the causal-graph events that fired during the span. Empty until you enable the receiver below and an OTel-emitting tool runs against it.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Agent Traces are W3C TRACEPARENT spans MacCrab ingested over its loopback OTLP receiver from AI coding tools (Claude Code, Cursor, Codex, Continue, Windsurf). Each row is one trace; selecting it lists its spans with timing, parent nesting and sanitised attributes. Empty until you enable the receiver below and an OTel-emitting tool runs against it.";
 "ui.V2InvestigationWorkspace.anchor" = "anchor";
 "ui.V2InvestigationWorkspace.clear" = "Clear";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Clear all node filters";
