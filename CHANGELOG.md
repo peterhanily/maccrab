@@ -36,6 +36,13 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   after a size pause.
 
 ### Changed
+- **The Forensics plugin catalog uses the Rave store's icons.** Each store
+  plugin's card and detail panel shows the same Mac-style artwork as
+  rave.maccrab.com instead of a coloured banner with a symbol. Built-in
+  scanners keep their symbols inside the same rounded, lit icon shape, and a
+  plugin without artwork gets the store's crab icon. The artwork ships inside
+  the app as one 81 KB image, so the catalog still shows only signed content
+  and makes no extra network requests.
 - **Signal events no longer flood the priority detection lane.** No detection
   consumed `NOTIFY_SIGNAL` events, yet a build storm delivered about four
   thousand of them a second into the lane shared with exec, fork and exit.

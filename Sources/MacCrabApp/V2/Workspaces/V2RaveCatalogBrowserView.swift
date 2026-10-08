@@ -652,16 +652,7 @@ struct V2RaveCatalogBrowserView: View {
             selectedID = e.id
         } label: {
             VStack(alignment: .leading, spacing: 10) {
-                ZStack {
-                    Rectangle()
-                        .fill(LinearGradient(
-                            colors: [colorFor(category: e.category), colorFor(category: e.category).opacity(0.6)],
-                            startPoint: .topLeading, endPoint: .bottomTrailing
-                        ))
-                        .frame(height: 80)
-                    thumbnailGlyph(e, size: 32)
-                }
-                .cornerRadius(6)
+                pluginIcon(e, size: 56)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(friendlyName(e.id))
@@ -686,6 +677,7 @@ struct V2RaveCatalogBrowserView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
             .background(Color(NSColor.controlBackgroundColor))
             .overlay(
@@ -731,16 +723,7 @@ struct V2RaveCatalogBrowserView: View {
     private func detailContent(_ e: RaveCatalogEntry) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                ZStack {
-                    Rectangle()
-                        .fill(LinearGradient(
-                            colors: [colorFor(category: e.category), colorFor(category: e.category).opacity(0.6)],
-                            startPoint: .topLeading, endPoint: .bottomTrailing
-                        ))
-                        .frame(height: 120)
-                    thumbnailGlyph(e, size: 48)
-                }
-                .cornerRadius(8)
+                pluginIcon(e, size: 80)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(friendlyName(e.id))
@@ -1287,24 +1270,22 @@ struct V2RaveCatalogBrowserView: View {
         }
     }
 
-    /// Card / detail thumbnail glyph: a per-category / per-scanner SF Symbol when
-    /// one is sensible, else the 2-letter monogram fallback. Gradient background
-    /// is applied by the caller's ZStack.
-    @ViewBuilder
-    private func thumbnailGlyph(_ e: RaveCatalogEntry, size: CGFloat) -> some View {
-        // Guard against a symbol name unavailable on the running OS (it would
-        // render blank): fall back to the monogram if the system symbol is
-        // absent. NSImage(systemSymbolName:) is nil for an unknown symbol.
-        if let symbol = thumbnailSymbol(for: e),
-           NSImage(systemSymbolName: symbol, accessibilityDescription: nil) != nil {
-            Image(systemName: symbol)
-                .scaledSystem(size, weight: .bold)
-                .foregroundStyle(.white)
-        } else {
-            Text(monogram(e.id))
-                .scaledSystem(size, weight: .bold, design: .rounded)
-                .foregroundStyle(.white)
+    /// A catalog entry's icon in the Rave store's style (see `RavePluginIcon`).
+    /// A built-in scanner's squircle carries its per-scanner or per-category SF
+    /// Symbol, or the 2-letter monogram when the running OS lacks the symbol
+    /// (NSImage(systemSymbolName:) is nil for an unknown symbol, which would
+    /// otherwise render blank).
+    private func pluginIcon(_ e: RaveCatalogEntry, size: CGFloat) -> some View {
+        let symbol = thumbnailSymbol(for: e).flatMap {
+            NSImage(systemSymbolName: $0, accessibilityDescription: nil) != nil ? $0 : nil
         }
+        return RavePluginIcon(
+            pluginID: e.id,
+            size: size,
+            builtInStyle: isBuiltin(e)
+                ? .init(tint: colorFor(category: e.category), symbol: symbol, monogram: monogram(e.id))
+                : nil
+        )
     }
 
     /// Per-scanner thumbnail symbols, keyed by plugin id. Chosen to read at a
