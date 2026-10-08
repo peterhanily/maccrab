@@ -17,7 +17,8 @@ RELEASE_NOTES_MD=""
 IMMEDIATE="${MACCRAB_APPCAST_IMMEDIATE:-0}"
 PHASED_INTERVAL="${MACCRAB_PHASED_ROLLOUT_INTERVAL:-86400}"
 # Sparkle 2 critical marker: users below this version cannot skip the update
-# and see it at once. Empty means an ordinary update.
+# and see it at once. Empty keeps the generator's CRITICAL_UPDATE_FLOOR
+# (scripts/_appcast_xml.py); a value may raise that floor, never lower it.
 CRITICAL_BELOW="${MACCRAB_CRITICAL_BELOW:-}"
 
 usage() {
