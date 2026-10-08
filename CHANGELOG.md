@@ -45,6 +45,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   plugin without artwork gets the store's crab icon. The artwork ships inside
   the app as one 81 KB image, so the catalog still shows only signed content
   and makes no extra network requests.
+- **The plugin install sheet shows what you are installing and its full
+  keys.** The plugin's name and one-line description from the signed catalog
+  now head the sheet. The publisher key is shown as its full 64-character
+  SHA-256 hash instead of the first 16 characters, along with the fingerprint
+  of the catalog key built into MacCrab, and each has a Copy button.
 - **Signal events no longer flood the priority detection lane.** No detection
   consumed `NOTIFY_SIGNAL` events, yet a build storm delivered about four
   thousand of them a second into the lane shared with exec, fork and exit.
@@ -115,6 +120,17 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - **The MCP plugin tools no longer call every plugin a third-party scanner.**
   The tools that list, verify, search for, install, uninstall and check
   updates for plugins now simply say "plugin".
+- **The plugin install sheet says how MacCrab's own plugins run.** It used to
+  open with how third-party plugins are sandboxed, which applies to none of
+  the plugins the store offers today. For a MacCrab plugin it now says that
+  the plugin runs without a sandbox and with MacCrab's own access, including
+  Full Disk Access if you granted it to MacCrab, and that MacCrab does not
+  block its network use. The sandbox explanation is shown only for plugins
+  from other publishers.
+- **The install sheet no longer says "Install from MacCrab link" when no link
+  opened it.** Installing from the plugin catalog or the Forensics scans view
+  now shows "Install plugin". Only a maccrab:// install link shows "Install
+  from MacCrab link".
 - **A build storm can no longer make the kernel drop Endpoint Security
   messages.** The ES callback used to decode paths and run the OPEN admission
   policy on the kernel dequeue thread. Every path-dependent drop decision now

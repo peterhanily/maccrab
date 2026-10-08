@@ -21,6 +21,9 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
     public let kind: RaveInstallLink.Kind
     public let id: String
     public let displayName: String
+    /// The signed catalog's `short_description`, shown under the name. nil
+    /// when the entry omits it.
+    public let shortDescription: String?
     public let resolvedVersion: String
     /// sha256 hex of the publisher's signing key, as endorsed by the catalog
     /// (the O1b pin). Empty when the catalog entry omits it.
@@ -54,6 +57,7 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
         kind: RaveInstallLink.Kind,
         id: String,
         displayName: String,
+        shortDescription: String? = nil,
         resolvedVersion: String,
         signerPublicKeySHA256: String,
         signerIdentity: String,
@@ -69,6 +73,7 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
         self.kind = kind
         self.id = id
         self.displayName = displayName
+        self.shortDescription = shortDescription
         self.resolvedVersion = resolvedVersion
         self.signerPublicKeySHA256 = signerPublicKeySHA256
         self.signerIdentity = signerIdentity
@@ -198,6 +203,7 @@ public struct RaveInstallConsentResolver: Sendable {
             kind: link.kind,
             id: entry.id,
             displayName: entry.displayName,
+            shortDescription: entry.shortDescription,
             resolvedVersion: entry.currentVersion,
             signerPublicKeySHA256: entry.signerPublicKeySHA256,
             signerIdentity: entry.signerIdentity,

@@ -25,6 +25,10 @@ public struct RaveCatalogEntry: Identifiable, Hashable, Sendable {
     /// confusable-name guard (a non-first-party name confusably close to a
     /// first-party one is flagged as impersonation).
     public let displayName: String
+    /// The signed catalog's one-line `short_description`, shown under the name
+    /// in the install consent sheet. nil when the entry omits it, so an older
+    /// or newer index still parses.
+    public var shortDescription: String? = nil
     public let currentVersion: String
     public let channel: String      // "official" / "contrib"
     public let trustTier: String    // "first-party" / "verified-community" / "unverified"
@@ -219,7 +223,7 @@ public actor RaveCatalogClient {
             // now is a pre-serial catalog being replayed. Reject the regression.
             throw RaveCatalogError.catalogSerialMissing(lastAccepted: lastAccepted)
         }
-        return try parseCatalog(data: data)
+        return try Self.parseCatalog(data: data)
     }
 
     /// O2 — fetch + Ed25519-verify the signed revocation list, enforce the
@@ -399,16 +403,7 @@ public actor RaveCatalogClient {
             return key
         }
         // Bundle key — shipped via Sources/MacCrabApp/Resources/rave-keys/catalog.pub
-        let candidates: [URL?] = [
-            Bundle.main.url(forResource: "catalog", withExtension: "pub"),
-            Bundle.main.resourceURL?
-                .appendingPathComponent("MacCrab_MacCrabApp.bundle")
-                .appendingPathComponent("catalog.pub"),
-            Bundle.main.resourceURL?
-                .appendingPathComponent("rave-keys")
-                .appendingPathComponent("catalog.pub"),
-        ]
-        for url in candidates.compactMap({ $0 }) {
+        for url in Self.bundledKeyFileURLs(name: "catalog", ext: "pub") {
             guard let data = try? Data(contentsOf: url), data.count == 32 else { continue }
             if let key = try? Curve25519.Signing.PublicKey(rawRepresentation: data) {
                 return key
@@ -417,7 +412,47 @@ public actor RaveCatalogClient {
         throw RaveCatalogError.noCatalogKey
     }
 
-    private func parseCatalog(data: Data) throws -> [RaveCatalogEntry] {
+    /// Where a file from Resources/rave-keys/ can be in a built app, in lookup
+    /// order: the main bundle's own resources, SwiftPM's MacCrab_MacCrabApp.bundle
+    /// inside them (the shipped layout: `.process` flattens rave-keys/ into it),
+    /// then a rave-keys/ folder. The catalog key and its fingerprint are read
+    /// through this one list so they come from the same place. Bundle.module is
+    /// not used: its accessor calls fatalError in the shipped app layout.
+    nonisolated static func bundledKeyFileURLs(name: String, ext: String, in bundle: Bundle = .main) -> [URL] {
+        let file = "\(name).\(ext)"
+        let candidates: [URL?] = [
+            bundle.url(forResource: name, withExtension: ext),
+            bundle.resourceURL?
+                .appendingPathComponent("MacCrab_MacCrabApp.bundle")
+                .appendingPathComponent(file),
+            bundle.resourceURL?
+                .appendingPathComponent("rave-keys")
+                .appendingPathComponent(file),
+        ]
+        return candidates.compactMap { $0 }
+    }
+
+    /// The SHA-256 fingerprint of the bundled catalog signing key, as shipped
+    /// beside it in rave-keys/catalog.fingerprint, for the install consent sheet.
+    /// nil when no bundled copy is found.
+    nonisolated static func bundledCatalogKeyFingerprint() -> String? {
+        catalogKeyFingerprint(searching: bundledKeyFileURLs(name: "catalog", ext: "fingerprint"))
+    }
+
+    /// The first candidate file that holds exactly 64 hex characters (surrounding
+    /// whitespace allowed), lowercased; nil when none does.
+    nonisolated static func catalogKeyFingerprint(searching candidates: [URL]) -> String? {
+        for url in candidates {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let hex = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if hex.count == 64, hex.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) {
+                return hex
+            }
+        }
+        return nil
+    }
+
+    nonisolated static func parseCatalog(data: Data) throws -> [RaveCatalogEntry] {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let plugins = json["plugins"] as? [String: [String: Any]] else {
             throw RaveCatalogError.parseFailed(reason: "missing top-level plugins map")
@@ -429,6 +464,7 @@ public actor RaveCatalogClient {
             entries.append(RaveCatalogEntry(
                 id: id,
                 displayName: (raw["display_name"] as? String) ?? id,
+                shortDescription: raw["short_description"] as? String,
                 currentVersion: current,
                 channel: (raw["channel"] as? String) ?? "official",
                 trustTier: (raw["trust_tier"] as? String) ?? "unverified",

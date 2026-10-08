@@ -192,9 +192,12 @@ struct MacCrabApp: App {
                     }
                 }
                 .sheet(item: $pendingInstallLink) { link in
-                    RaveInstallConsentSheet(link: link) {
-                        pendingInstallLink = nil
-                    }
+                    // The only caller that sets openedFromLink: the title says
+                    // "Install from MacCrab link" for this path alone.
+                    RaveInstallConsentSheet(
+                        link: link,
+                        onClose: { pendingInstallLink = nil },
+                        openedFromLink: true)
                 }
                 .confirmationDialog(
                     String(
