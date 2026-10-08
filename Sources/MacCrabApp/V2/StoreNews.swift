@@ -24,7 +24,8 @@ enum StoreNews {
             StoreNewsItem(
                 id: "store-catalog",
                 title: "Signed plugin catalog",
-                summary: "Browse the signed forensic-plugin catalog. Installs run fully sandboxed on this Mac.",
+                summary: String(localized: "overview.storeBrowsePrompt",
+                                 defaultValue: "Browse signed forensic plugins from the catalog. MacCrab's own plugins run with MacCrab's access; plugins from other publishers run sandboxed."),
                 badge: nil),
             StoreNewsItem(
                 id: "whats-new",

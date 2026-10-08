@@ -824,7 +824,7 @@
 "overview.factorExpandHint" = "クリックすると意味と対処方法が表示されます";
 "overview.storeTitle" = "プラグインストア";
 "overview.storeBrowse" = "参照 →";
-"overview.storeBrowsePrompt" = "カタログから署名済みのフォレンジックプラグインを参照します。インストールは完全にサンドボックス化されて実行されます。";
+"overview.storeBrowsePrompt" = "カタログから署名済みのフォレンジックプラグインを参照します。MacCrab製のプラグインはMacCrabのアクセス権で実行され、他の発行元のプラグインはサンドボックス内で実行されます。";
 "raveStore.thirdPartyCatalog.title" = "署名済みサードパーティカタログ";
 "raveStore.thirdPartyCatalog.body" = "現在リストされているサードパーティプラグインはありません。以下の組み込みスキャナーはMacCrab内に付属しており、このMacで実行されます — インストール不要です。";
 

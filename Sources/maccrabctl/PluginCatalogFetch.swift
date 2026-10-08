@@ -56,7 +56,7 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .noCatalogPublicKey:
-            return "No rave catalog public key configured. Set MACCRAB_RAVE_CATALOG_PUB_PATH or rebuild with a bundled key."
+            return "No rave catalog public key found. maccrabctl verifies the catalog with the key bundled in /Applications/MacCrab.app; install MacCrab in /Applications, or reinstall it if the key is missing. Debug builds also accept MACCRAB_RAVE_CATALOG_PUB_PATH, or the repository's key when run from the repository root."
         case .catalogPublicKeyInvalid(let reason):
             return "Rave catalog public key invalid: \(reason)"
         case .httpFetchFailed(let url, let status):

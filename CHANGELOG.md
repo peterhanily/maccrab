@@ -100,6 +100,21 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   being judged, and a held tick with no loss says so.
 
 ### Fixed
+- **The Overview no longer says plugin installs run fully sandboxed.** That
+  was not true: MacCrab's own plugins run with MacCrab's access, not in a
+  sandbox. The plugin store line on the Overview and the store news under it
+  now say that MacCrab's own plugins run with MacCrab's access and plugins
+  from other publishers run sandboxed, in all 14 languages. The
+  `maccrabctl plugin` help for `run` says the same.
+- **`maccrabctl plugin` explains a missing catalog key correctly.** When
+  `install`, `update`, `check-updates` or `search` could not find the
+  catalog key, the error told everyone to set
+  `MACCRAB_RAVE_CATALOG_PUB_PATH`, which release builds ignore. It now says
+  the key comes from MacCrab in /Applications and that the variable works
+  only in debug builds.
+- **The MCP plugin tools no longer call every plugin a third-party scanner.**
+  The tools that list, verify, search for, install, uninstall and check
+  updates for plugins now simply say "plugin".
 - **A build storm can no longer make the kernel drop Endpoint Security
   messages.** The ES callback used to decode paths and run the OPEN admission
   policy on the kernel dequeue thread. Every path-dependent drop decision now

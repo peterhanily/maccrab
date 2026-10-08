@@ -824,7 +824,7 @@
 "overview.factorExpandHint" = "Klik voor uitleg en hoe op te lossen";
 "overview.storeTitle" = "Plugincatalogus";
 "overview.storeBrowse" = "Bladeren →";
-"overview.storeBrowsePrompt" = "Blader door ondertekende forensische plugins uit de catalogus. Installaties worden volledig sandboxed uitgevoerd.";
+"overview.storeBrowsePrompt" = "Blader door ondertekende forensische plug-ins uit de catalogus. Eigen plug-ins van MacCrab draaien met MacCrabs eigen toegang; plug-ins van andere uitgevers draaien in een sandbox.";
 "raveStore.thirdPartyCatalog.title" = "Ondertekende catalogus van derden";
 "raveStore.thirdPartyCatalog.body" = "Er zijn momenteel geen plugins van derden vermeld. De ingebouwde scanners hieronder worden meegeleverd met MacCrab en draaien nu op deze Mac — geen installatie nodig.";
 

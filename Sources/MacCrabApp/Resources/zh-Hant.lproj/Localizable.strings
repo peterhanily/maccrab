@@ -824,7 +824,7 @@
 "overview.factorExpandHint" = "點按以查看意義及解決方式";
 "overview.storeTitle" = "外掛模組市集";
 "overview.storeBrowse" = "瀏覽 →";
-"overview.storeBrowsePrompt" = "瀏覽來自目錄的已簽署鑑識外掛模組。安裝會在完全沙盒環境中執行。";
+"overview.storeBrowsePrompt" = "瀏覽目錄中的已簽署鑑識外掛模組。MacCrab 自家的外掛模組使用 MacCrab 的存取權限執行；其他發佈者的外掛模組在沙箱中執行。";
 "raveStore.thirdPartyCatalog.title" = "已簽署的第三方目錄";
 "raveStore.thirdPartyCatalog.body" = "目前未列出第三方外掛模組。下方的內建掃描器內建於 MacCrab 內，現在就在此 Mac 上執行——無需安裝。";
 

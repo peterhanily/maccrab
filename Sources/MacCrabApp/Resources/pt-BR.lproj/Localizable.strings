@@ -824,7 +824,7 @@
 "overview.factorExpandHint" = "Clique para entender e saber como resolver";
 "overview.storeTitle" = "Loja de plugins";
 "overview.storeBrowse" = "Procurar →";
-"overview.storeBrowsePrompt" = "Procure plugins forenses assinados no catálogo. As instalações rodam totalmente isoladas.";
+"overview.storeBrowsePrompt" = "Explore os plugins forenses assinados do catálogo. Os plugins do próprio MacCrab são executados com o acesso do MacCrab; os de outros editores são executados em sandbox.";
 "raveStore.thirdPartyCatalog.title" = "Catálogo de terceiros assinado";
 "raveStore.thirdPartyCatalog.body" = "Nenhum plugin de terceiros listado no momento. Os scanners integrados abaixo vêm dentro do MacCrab e rodam neste Mac agora — nenhuma instalação necessária.";
 

@@ -824,7 +824,7 @@
 "overview.factorExpandHint" = "Kliknij, aby zobaczyć wyjaśnienie i opcje naprawy";
 "overview.storeTitle" = "Sklep wtyczek";
 "overview.storeBrowse" = "Przeglądaj →";
-"overview.storeBrowsePrompt" = "Przeglądaj podpisane wtyczki forensyki z katalogu. Instalacje działają w pełni piaskownicy.";
+"overview.storeBrowsePrompt" = "Przeglądaj podpisane wtyczki forensyczne z katalogu. Własne wtyczki MacCrab działają z uprawnieniami MacCrab; wtyczki innych wydawców działają w piaskownicy.";
 "raveStore.thirdPartyCatalog.title" = "Podpisany katalog wtyczek trzecich";
 "raveStore.thirdPartyCatalog.body" = "Brak wtyczek trzecich w katalogu. Wbudowane skanery poniżej są dostarczane z MacCrab i uruchamiają się na tym Macu teraz — nie jest wymagana instalacja.";
 

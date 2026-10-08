@@ -824,7 +824,7 @@
 "overview.factorExpandHint" = "Klicka för att se vad detta betyder och hur du åtgärdar det";
 "overview.storeTitle" = "Pluginkatalog";
 "overview.storeBrowse" = "Bläddra →";
-"overview.storeBrowsePrompt" = "Bläddra signerade forensikplugins från katalogen. Installationer körs helt sandlådade.";
+"overview.storeBrowsePrompt" = "Bläddra bland signerade forensikplugins i katalogen. MacCrabs egna plugins körs med MacCrabs åtkomst; plugins från andra utgivare körs i en sandbox.";
 "raveStore.thirdPartyCatalog.title" = "Signerad tredjepartskatalog";
 "raveStore.thirdPartyCatalog.body" = "Ingen tredjepartsplugins är för närvarande listade. De inbyggda skannrarna nedan levereras tillsammans med MacCrab och körs på denna Mac nu — ingen installation behövs.";
 

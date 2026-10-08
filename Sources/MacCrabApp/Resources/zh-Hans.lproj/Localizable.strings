@@ -824,7 +824,7 @@
 "overview.factorExpandHint" = "点击查看含义及解决方案";
 "overview.storeTitle" = "插件商店";
 "overview.storeBrowse" = "浏览 →";
-"overview.storeBrowsePrompt" = "浏览来自目录的已签名取证插件。安装运行于完整沙盒环境。";
+"overview.storeBrowsePrompt" = "浏览目录中的已签名取证插件。MacCrab 自己的插件使用 MacCrab 的访问权限运行；其他发布者的插件在沙箱中运行。";
 "raveStore.thirdPartyCatalog.title" = "已签名的第三方目录";
 "raveStore.thirdPartyCatalog.body" = "目前未列出任何第三方插件。下方内置扫描器已集成在MacCrab中，此刻已在您的Mac上运行 — 无需安装。";
 

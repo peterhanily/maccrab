@@ -123,7 +123,9 @@ func printPluginUsage() {
       revoke <key-hex>                Revoke a publisher key (preempts trust).
       trust-list                      Show trusted + revoked publisher keys.
       run <plugin-id> --case <id>     Invoke a built-in or installed plugin
-                                      against a case (Tier-B plugins run sandboxed).
+                                      against a case. First-party plugins run
+                                      with MacCrab's access; plugins from other
+                                      publishers run sandboxed.
 
     Authoring (contributor SDK):
       keygen [--out <dir>]            Generate an Ed25519 plugin-signing keypair
