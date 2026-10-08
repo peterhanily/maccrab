@@ -35,11 +35,21 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
     public let versionFloorRefusal: String?
     /// True iff the catalog source is the official production one.
     public let officialSource: Bool
-    /// C-B: first-party means the maccrab-maintainer-reviewed-and-signed tier
-    /// served from the OFFICIAL catalog. Anything else — a community/unverified
-    /// trust tier, or any unofficial source — extends trust to a publisher
-    /// MacCrab did not author, and requires explicit operator acknowledgement.
+    /// C-B: the catalog's claim — the maccrab-maintainer-reviewed-and-signed
+    /// tier served from the OFFICIAL catalog. The runtime never reads the tier,
+    /// so how the plugin runs, and whether the sheet asks for acknowledgement,
+    /// follow `runsInFirstPartyLane` instead.
     public let isFirstParty: Bool
+    /// True when the runtime would run this plugin unsandboxed, in the
+    /// first-party lane: the same FirstPartyExecutionGate rule, keyed on the
+    /// publisher key the catalog endorses matching the compiled-in first-party
+    /// anchor (official source, no catalog-key override). Anything else runs
+    /// sandboxed, extends trust to a publisher MacCrab did not sign for, and
+    /// requires explicit operator acknowledgement.
+    public let runsInFirstPartyLane: Bool
+    /// SHA-256 (hex) of the catalog signing key that verified this catalog.
+    /// nil when it is unknown.
+    public let catalogKeySHA256: String?
     /// C-E: freshness of the client's revocation data at consent time. When
     /// stale/never, "not revoked" may be out of date and the sheet warns.
     public let revocationFreshness: RaveRevocationFreshness
@@ -66,6 +76,8 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
         versionFloorRefusal: String?,
         officialSource: Bool,
         isFirstParty: Bool,
+        runsInFirstPartyLane: Bool,
+        catalogKeySHA256: String? = nil,
         revocationFreshness: RaveRevocationFreshness,
         isInstallable: Bool,
         installBlockReason: String?
@@ -82,6 +94,8 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
         self.versionFloorRefusal = versionFloorRefusal
         self.officialSource = officialSource
         self.isFirstParty = isFirstParty
+        self.runsInFirstPartyLane = runsInFirstPartyLane
+        self.catalogKeySHA256 = catalogKeySHA256
         self.revocationFreshness = revocationFreshness
         self.isInstallable = isInstallable
         self.installBlockReason = installBlockReason
@@ -95,9 +109,11 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
     /// on top of this in the sheet, not a property of the resolved facts.)
     public var canConfirm: Bool { isInstallable }
 
-    /// C-B: a non-first-party (or unofficial-source) plugin requires the
-    /// operator to explicitly acknowledge the elevated trust before confirming.
-    public var requiresThirdPartyConsent: Bool { !isFirstParty }
+    /// C-B: a plugin the runtime would not run in the first-party lane (another
+    /// publisher's key, an unofficial source, or a first-party tier whose key
+    /// is not the first-party anchor) requires the operator to explicitly
+    /// acknowledge the elevated trust before confirming.
+    public var requiresThirdPartyConsent: Bool { !runsInFirstPartyLane }
 
     /// C-E: human-facing staleness warning, or nil when revocation data is fresh.
     public var revocationStalenessWarning: String? {
@@ -155,6 +171,7 @@ public struct RaveInstallConsentResolver: Sendable {
         } catch {
             throw RaveInstallConsentError.catalog("\(error)")
         }
+        let catalogKey = await client.verifiedCatalogKeySHA256
         guard let entry = entries.first(where: { $0.id == link.id }) else {
             throw RaveInstallConsentError.notInCatalog(id: link.id)
         }
@@ -174,6 +191,9 @@ public struct RaveInstallConsentResolver: Sendable {
         // official catalog source — a first-party tier served from an unofficial
         // mirror does not earn the default-trusted posture.
         let isFirstParty = (entry.trustTier == "first-party") && official
+        let firstPartyLane = Self.runsInFirstPartyLane(
+            entry, officialSource: official,
+            catalogOverrideActive: TierBCollectorExecutor.catalogContextFromEnv().catalogOverrideActive)
 
         // C-E: fetch + reconcile the revocation list (best-effort — a failed fetch
         // while offline yields nil and keeps the prior state), then read the
@@ -212,9 +232,30 @@ public struct RaveInstallConsentResolver: Sendable {
             versionFloorRefusal: floorRefusal,
             officialSource: official,
             isFirstParty: isFirstParty,
+            runsInFirstPartyLane: firstPartyLane,
+            catalogKeySHA256: catalogKey,
             revocationFreshness: freshness,
             isInstallable: state.showsInstallPill,
             installBlockReason: state.disabledReason
         )
+    }
+
+    /// Whether the runtime would run this entry's plugin unsandboxed, by the
+    /// runtime's own rule (FirstPartyExecutionGate): the publisher key the
+    /// signed catalog endorses must be the compiled-in first-party anchor, on
+    /// the official source, with no catalog-key override. The install path
+    /// refuses a bundle whose key differs from that endorsement, so this is the
+    /// key the installed bundle will carry. trust_tier is deliberately not an
+    /// input, exactly as at runtime.
+    static func runsInFirstPartyLane(
+        _ entry: RaveCatalogEntry, officialSource: Bool, catalogOverrideActive: Bool
+    ) -> Bool {
+        FirstPartyExecutionGate.evaluate(
+            bundleSigningKeyPubSHA256: entry.signerPublicKeySHA256,
+            expectedPublisherFingerprint: FirstPartyTrustRoot.publisherKeyFingerprint,
+            anchorConfigured: FirstPartyTrustRoot.isConfigured,
+            catalogOverrideActive: catalogOverrideActive,
+            officialSource: officialSource
+        ).isAllowed
     }
 }

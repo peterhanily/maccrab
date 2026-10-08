@@ -1364,7 +1364,7 @@
 "raveStore.empty.openSite" = "Open rave.maccrab.com";
 "raveStore.empty.title" = "Signed plugin catalog";
 "raveStore.header.title" = "Plugin catalog";
-"raveStore.install.hint" = "Opens the verified install path: signer-pin + version-floor checks, then your explicit confirmation.";
+"raveStore.install.hint" = "Opens the verified install path: publisher key and minimum version checks, then your explicit confirmation.";
 "raveStore.install.section" = "Install";
 "raveStore.installed.upToDate" = "Installed v%@ · up to date";
 "raveStore.installed.updateAvailable" = "Installed v%@ · update available";

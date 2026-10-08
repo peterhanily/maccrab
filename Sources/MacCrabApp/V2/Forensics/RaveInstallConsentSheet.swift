@@ -55,19 +55,16 @@ struct RaveInstallConsentSheet: View {
         }
     }
 
-    /// The paragraphs of "How this plugin runs", in display order. A first-party
-    /// plugin is told what applies to it: MacCrab's own access, Full Disk Access
-    /// if granted, network not blocked. The sandbox text is only for plugins from
-    /// other publishers, which never get the first-party line.
+    /// The paragraphs of "How this plugin runs", in display order. A plugin the
+    /// runtime would run in the first-party lane is told what applies to it:
+    /// MacCrab's own access, Full Disk Access if granted, network not blocked.
+    /// Every other plugin gets the sandbox text and never the first-party line,
+    /// even when the catalog's trust tier says first-party.
     enum RunDisclosure: Equatable { case firstParty, thirdParty }
 
-    static func runDisclosures(isFirstParty: Bool) -> [RunDisclosure] {
-        isFirstParty ? [.firstParty] : [.thirdParty]
+    static func runDisclosures(runsInFirstPartyLane: Bool) -> [RunDisclosure] {
+        runsInFirstPartyLane ? [.firstParty] : [.thirdParty]
     }
-
-    /// SHA-256 of the bundled catalog signing key, read once from the shipped
-    /// rave-keys/catalog.fingerprint.
-    private static let catalogKeyFingerprint = RaveCatalogClient.bundledCatalogKeyFingerprint()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -282,7 +279,7 @@ struct RaveInstallConsentSheet: View {
             }
             keyHashBlock(String(localized: "rave.consent.publisherKey", defaultValue: "Publisher key (SHA-256)"),
                          hex: f.signerPublicKeySHA256)
-            if let catalogKey = Self.catalogKeyFingerprint {
+            if let catalogKey = f.catalogKeySHA256 {
                 keyHashBlock(String(localized: "rave.consent.catalogKey", defaultValue: "Catalog key (SHA-256)"),
                              hex: catalogKey)
             }
@@ -311,8 +308,11 @@ struct RaveInstallConsentSheet: View {
 
             // C-B: first-party affirmation — only when a real signed, installable
             // binary exists; otherwise downgrade (storefront honesty: never claim
-            // "reviewed & signed" for a pre-release/awaiting-binary entry).
-            if f.isFirstParty {
+            // "reviewed & signed" for a pre-release/awaiting-binary entry). The
+            // tier alone is not enough: the endorsed key must also be the one the
+            // runtime treats as first-party, or the sheet would affirm a plugin
+            // it then asks the operator to acknowledge as third-party.
+            if f.isFirstParty && f.runsInFirstPartyLane {
                 if f.isInstallable {
                     Label(String(localized: "rave.consent.firstParty.verified", defaultValue: "Verified by MacCrab — reviewed & signed by the maintainer."),
                           systemImage: "checkmark.seal.fill")
@@ -347,13 +347,15 @@ struct RaveInstallConsentSheet: View {
                 .cornerRadius(6)
             }
 
-            // C-D: honest capability/enforcement disclosure reflecting the
-            // sandboxed third-party lane (deny-default; brokered reads).
+            // C-D: how the plugin will run, by the runtime's own lane rule: the
+            // first-party line (unsandboxed, MacCrab's access) for a plugin signed
+            // with MacCrab's first-party key, the sandbox text (deny-default;
+            // brokered reads) for every other publisher.
             VStack(alignment: .leading, spacing: 4) {
                 Label(String(localized: "rave.consent.howItRuns.title", defaultValue: "How this plugin runs"),
                       systemImage: "shield.lefthalf.filled")
                     .font(.caption.weight(.semibold))
-                ForEach(Self.runDisclosures(isFirstParty: f.isFirstParty), id: \.self) { part in
+                ForEach(Self.runDisclosures(runsInFirstPartyLane: f.runsInFirstPartyLane), id: \.self) { part in
                     switch part {
                     case .firstParty:
                         Text(String(localized: "rave.consent.howItRuns.firstParty", defaultValue: "This is a MacCrab plugin, so it runs without a sandbox and with MacCrab's own access, including Full Disk Access if you granted it to MacCrab. MacCrab does not block its network use."))
@@ -421,13 +423,13 @@ struct RaveInstallConsentSheet: View {
         .padding(.vertical, 8)
     }
 
-    private func row(_ label: String, _ value: String, mono: Bool = false) -> some View {
+    private func row(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
                 .font(.caption).foregroundStyle(.tertiary)
                 .frame(width: 90, alignment: .leading)
             Text(value)
-                .font(mono ? .system(.caption, design: .monospaced) : .caption)
+                .font(.caption)
                 .textSelection(.enabled)
             Spacer()
         }

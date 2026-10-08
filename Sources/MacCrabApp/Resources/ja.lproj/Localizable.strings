@@ -1540,7 +1540,7 @@
 "raveStore.empty.openSite" = "rave.maccrab.comを開く";
 "raveStore.empty.title" = "署名付きプラグインカタログ";
 "raveStore.header.title" = "プラグインカタログ";
-"raveStore.install.hint" = "署名者の固定と最低バージョンを検証してから、明示的な確認を求めるインストール手順を開きます。";
+"raveStore.install.hint" = "発行元の鍵と最低バージョンを検証してから、明示的な確認を求めるインストール手順を開きます。";
 "raveStore.install.section" = "インストール";
 "raveStore.installed.upToDate" = "v%@をインストール済み・最新";
 "raveStore.installed.updateAvailable" = "v%@をインストール済み・更新あり";

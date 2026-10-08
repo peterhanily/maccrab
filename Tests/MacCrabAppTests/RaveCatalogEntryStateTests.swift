@@ -138,6 +138,25 @@ struct RaveCatalogEntryStateTests {
         }
     }
 
+    @Test("an entry the catalog does not offer says so even when the version floor also fails")
+    func notOfferedBeatsFloor() {
+        // A newer MacCrab would not make these installable, so the floor
+        // refusal ("needs newer MacCrab") must not be what the user sees.
+        for status in ["", "archived", "unreachable_extended"] {
+            let st = RaveCatalogEntryState.compute(
+                entry: Self.entry(status: status, minVersion: "9.9.9"),
+                revocations: nil, floorCheck: Self.floorBlocked
+            )
+            #expect(st.installability == .notOffered, "status '\(status)'")
+            #expect(!st.showsInstallPill)
+        }
+        let pre = RaveCatalogEntryState.compute(
+            entry: Self.entry(status: "pre-release", minVersion: "9.9.9"),
+            revocations: nil, floorCheck: Self.floorBlocked
+        )
+        #expect(pre.installability == .preRelease)
+    }
+
     @Test("a revocation still wins over a not-offered status")
     func revocationBeatsNotOffered() {
         let list = Self.revocationList([

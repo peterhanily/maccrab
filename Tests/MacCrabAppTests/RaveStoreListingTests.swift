@@ -117,6 +117,23 @@ struct RaveStoreListingTests {
         #expect(st.disabledReason?.isEmpty == false)
     }
 
+    @Test("the Forensics scans view still counts an entry the catalog stops offering as from the store, without an Update")
+    func scansViewKeepsStoreProvenanceForNonActiveEntries() throws {
+        let json = """
+        {"plugins": {
+          "com.example.active": {"current_version": "2.0.0", "status": "active"},
+          "com.example.archived": {"current_version": "2.0.0", "status": "archived"},
+          "com.example.unreachable": {"current_version": "2.0.0", "status": "unreachable_temporary"},
+          "com.example.no-status": {"current_version": "2.0.0"}
+        }}
+        """
+        let index = V2ForensicsScansView.catalogIndex(
+            try RaveCatalogClient.parseCatalog(data: Data(json.utf8)))
+        #expect(index.ids == ["com.example.active", "com.example.archived",
+                              "com.example.unreachable", "com.example.no-status"])
+        #expect(index.offeredVersions == ["com.example.active": "2.0.0"])
+    }
+
     // MARK: - Names
 
     @Test("a catalog entry is named by its signed display_name, not the local name table")

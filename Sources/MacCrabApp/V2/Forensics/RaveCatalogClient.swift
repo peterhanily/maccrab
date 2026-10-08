@@ -98,6 +98,12 @@ public actor RaveCatalogClient {
     /// <app-support>/MacCrab/rave_trust_state.json; overridable for tests.
     private let trustState: RaveTrustStateStore
 
+    /// SHA-256 (lowercase hex) of the key that verified the last catalog
+    /// `fetchEntries()` returned, for the install consent sheet. nil until a
+    /// catalog has verified. A DEBUG build with a catalog-key override records
+    /// the override key here, not the bundled one.
+    public private(set) var verifiedCatalogKeySHA256: String?
+
     public init(trustState: RaveTrustStateStore? = nil) {
         if let s = trustState {
             self.trustState = s
@@ -231,7 +237,9 @@ public actor RaveCatalogClient {
             // now is a pre-serial catalog being replayed. Reject the regression.
             throw RaveCatalogError.catalogSerialMissing(lastAccepted: lastAccepted)
         }
-        return try Self.parseCatalog(data: data)
+        let entries = try Self.parseCatalog(data: data)
+        verifiedCatalogKeySHA256 = Self.keyFingerprint(key)
+        return entries
     }
 
     /// O2 — fetch + Ed25519-verify the signed revocation list, enforce the
@@ -423,9 +431,8 @@ public actor RaveCatalogClient {
     /// Where a file from Resources/rave-keys/ can be in a built app, in lookup
     /// order: the main bundle's own resources, SwiftPM's MacCrab_MacCrabApp.bundle
     /// inside them (the shipped layout: `.process` flattens rave-keys/ into it),
-    /// then a rave-keys/ folder. The catalog key and its fingerprint are read
-    /// through this one list so they come from the same place. Bundle.module is
-    /// not used: its accessor calls fatalError in the shipped app layout.
+    /// then a rave-keys/ folder. Bundle.module is not used: its accessor calls
+    /// fatalError in the shipped app layout.
     nonisolated static func bundledKeyFileURLs(name: String, ext: String, in bundle: Bundle = .main) -> [URL] {
         let file = "\(name).\(ext)"
         let candidates: [URL?] = [
@@ -440,24 +447,10 @@ public actor RaveCatalogClient {
         return candidates.compactMap { $0 }
     }
 
-    /// The SHA-256 fingerprint of the bundled catalog signing key, as shipped
-    /// beside it in rave-keys/catalog.fingerprint, for the install consent sheet.
-    /// nil when no bundled copy is found.
-    nonisolated static func bundledCatalogKeyFingerprint() -> String? {
-        catalogKeyFingerprint(searching: bundledKeyFileURLs(name: "catalog", ext: "fingerprint"))
-    }
-
-    /// The first candidate file that holds exactly 64 hex characters (surrounding
-    /// whitespace allowed), lowercased; nil when none does.
-    nonisolated static func catalogKeyFingerprint(searching candidates: [URL]) -> String? {
-        for url in candidates {
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            let hex = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if hex.count == 64, hex.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) {
-                return hex
-            }
-        }
-        return nil
+    /// SHA-256 (lowercase hex) of a catalog signing key's raw 32 bytes, the same
+    /// form rave-keys/catalog.fingerprint is shipped in.
+    nonisolated static func keyFingerprint(_ key: Curve25519.Signing.PublicKey) -> String {
+        SHA256.hash(data: key.rawRepresentation).map { String(format: "%02x", $0) }.joined()
     }
 
     nonisolated static func parseCatalog(data: Data) throws -> [RaveCatalogEntry] {
@@ -498,7 +491,9 @@ public actor RaveCatalogClient {
     /// offered (the browser shows its verified-empty pane when none are active).
     /// This is a display filter ONLY — it does not touch any signature / serial
     /// trust gate. RaveCatalogEntryState.compute applies the same "active" rule
-    /// to every install path (store, Forensics scans update, maccrab:// link).
+    /// to every install path in the app (store, Forensics scans update,
+    /// maccrab:// link). `maccrabctl plugin install` / `update` and the MCP
+    /// install tools, which run maccrabctl, do not apply it yet.
     ///
     /// Pure + nonisolated so the SwiftUI view's `offeredEntries` computed var and
     /// the unit tests share one definition.

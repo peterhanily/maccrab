@@ -9,6 +9,7 @@
 
 import Testing
 import Foundation
+@testable import MacCrabApp
 
 @Suite("Plugin sandbox claim stays true")
 struct PluginSandboxClaimTests {
@@ -60,31 +61,59 @@ struct PluginSandboxClaimTests {
     ]
 
     /// Phrases that claim every plugin is sandboxed. Matched case-insensitively
-    /// in every Swift file under Sources/, comments included.
+    /// in every scanned text file under Sources/, comments included.
     static let forbiddenSourcePhrases = [
         "fully sandboxed",
         "Tier-B plugins run sandboxed",
     ]
 
-    @Test("no Swift source under Sources/ claims plugins run fully sandboxed")
+    /// The text files under Sources/ that the scan reads: code, every string
+    /// table, docs and JSON resources. Vendored C and binary resources are
+    /// skipped.
+    static let scannedExtensions: Set<String> = ["swift", "strings", "stringsdict", "md", "json"]
+
+    @Test("no text file under Sources/ claims plugins run fully sandboxed, in any language")
     func sourcesMakeNoBlanketSandboxClaim() throws {
         let root = Self.packageRoot().appendingPathComponent("Sources")
         let walker = try #require(FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: nil))
-        var scanned = 0
+        var scanned: [String: Int] = [:]
         var hits: [String] = []
-        for url in walker.compactMap({ $0 as? URL }) where url.pathExtension == "swift" {
-            scanned += 1
+        for url in walker.compactMap({ $0 as? URL })
+        where Self.scannedExtensions.contains(url.pathExtension) {
+            scanned[url.pathExtension, default: 0] += 1
             let src = try String(contentsOf: url, encoding: .utf8)
+            // A string table is checked for the old translated wording under
+            // every key, not just the Overview prompt.
+            let isTable = url.pathExtension == "strings" || url.pathExtension == "stringsdict"
+            let phrases = Self.forbiddenSourcePhrases + (isTable ? Self.oldSandboxWording : [])
             for (i, line) in src.components(separatedBy: "\n").enumerated() {
-                for phrase in Self.forbiddenSourcePhrases
+                for phrase in phrases
                 where line.range(of: phrase, options: .caseInsensitive) != nil {
-                    hits.append("\(url.lastPathComponent):\(i + 1): \(phrase)")
+                    let name = url.deletingLastPathComponent().lastPathComponent + "/" + url.lastPathComponent
+                    hits.append("\(name):\(i + 1): \(phrase)")
                 }
             }
         }
-        #expect(scanned > 100, "expected to scan the whole Sources/ tree, scanned \(scanned) files")
+        #expect(scanned["swift", default: 0] > 100,
+                "expected to scan the whole Sources/ tree, scanned \(scanned)")
+        #expect(scanned["strings"] == Self.locales.count, "scanned \(scanned)")
+        #expect(scanned["stringsdict"] == Self.locales.count, "scanned \(scanned)")
+        #expect(scanned["md", default: 0] > 0, "scanned \(scanned)")
         #expect(hits.isEmpty, "blanket sandbox claim found:\n\(hits.joined(separator: "\n"))")
+    }
+
+    @Test("the Overview store news does not repeat the store line under it")
+    func storeNewsDoesNotRepeatStorePrompt() {
+        let news = StoreNews.bundled(appVersion: "0.0.0")
+        #expect(!news.isEmpty)
+        #expect(!news.contains { $0.id == "store-catalog" })
+        #expect(!news.contains { $0.summary.contains("Browse signed forensic plugins") })
+        for item in news {
+            for phrase in Self.forbiddenSourcePhrases {
+                #expect(item.summary.range(of: phrase, options: .caseInsensitive) == nil)
+            }
+        }
     }
 
     @Test("overview.storeBrowsePrompt drops the old sandbox claim in all 14 locales")
@@ -112,6 +141,10 @@ struct PluginSandboxClaimTests {
 
             #expect(!oldValues.contains(value),
                     "\(locale).lproj still ships the old store prompt: \(value)")
+            if locale == "en" {
+                #expect(value.contains("MacCrab's own plugins run with MacCrab's access"),
+                        "the English prompt must name the first-party case: \(value)")
+            }
             for wording in Self.oldSandboxWording {
                 #expect(value.range(of: wording, options: .caseInsensitive) == nil,
                         "\(locale).lproj store prompt still says “\(wording)”: \(value)")

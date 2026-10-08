@@ -1540,7 +1540,7 @@
 "raveStore.empty.openSite" = "開啟 rave.maccrab.com";
 "raveStore.empty.title" = "簽署外掛目錄";
 "raveStore.header.title" = "外掛目錄";
-"raveStore.install.hint" = "開啟經過驗證的安裝流程：檢查固定簽署者及最低版本，然後要求您的明確確認。";
+"raveStore.install.hint" = "開啟經過驗證的安裝流程：檢查發佈者金鑰及最低版本，然後要求您的明確確認。";
 "raveStore.install.section" = "安裝";
 "raveStore.installed.upToDate" = "已安裝 v%@ · 已是最新";
 "raveStore.installed.updateAvailable" = "已安裝 v%@ · 有可用更新";

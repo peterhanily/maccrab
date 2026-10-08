@@ -1285,7 +1285,7 @@
 "raveStore.empty.openSite" = "Открыть rave.maccrab.com";
 "raveStore.empty.title" = "Подписанный каталог плагинов";
 "raveStore.header.title" = "Каталог плагинов";
-"raveStore.install.hint" = "Открывает проверенную процедуру установки: проверка ключа подписанта и минимальной версии, затем ваше явное подтверждение.";
+"raveStore.install.hint" = "Открывает проверенную процедуру установки: проверка ключа издателя и минимальной версии, затем ваше явное подтверждение.";
 "raveStore.install.section" = "Установка";
 "raveStore.installed.upToDate" = "Установлена v%@ · последняя версия";
 "raveStore.installed.updateAvailable" = "Установлена v%@ · доступно обновление";

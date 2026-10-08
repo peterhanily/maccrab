@@ -1540,7 +1540,7 @@
 "raveStore.empty.openSite" = "打开 rave.maccrab.com";
 "raveStore.empty.title" = "签名插件目录";
 "raveStore.header.title" = "插件目录";
-"raveStore.install.hint" = "打开经过验证的安装流程：检查固定签名者及最低版本，然后请求您的明确确认。";
+"raveStore.install.hint" = "打开经过验证的安装流程：检查发布者密钥及最低版本，然后请求您的明确确认。";
 "raveStore.install.section" = "安装";
 "raveStore.installed.upToDate" = "已安装 v%@ · 已是最新";
 "raveStore.installed.updateAvailable" = "已安装 v%@ · 有可用更新";

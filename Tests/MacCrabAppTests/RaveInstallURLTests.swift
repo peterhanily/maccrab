@@ -95,7 +95,7 @@ struct RaveInstallURLTests {
             resolvedVersion: "1.0.0", signerPublicKeySHA256: "",
             signerIdentity: "maccrab-rave:first-party", trustTier: "first-party",
             declaredMinVersion: "1.17.0", versionFloorRefusal: nil, officialSource: true,
-            isFirstParty: true, revocationFreshness: .fresh(age: 0),
+            isFirstParty: true, runsInFirstPartyLane: true, revocationFreshness: .fresh(age: 0),
             isInstallable: true, installBlockReason: nil
         )
         #expect(ok.canConfirm)
@@ -108,7 +108,7 @@ struct RaveInstallURLTests {
             signerIdentity: "", trustTier: "unverified",
             declaredMinVersion: "9.9.9",
             versionFloorRefusal: "requires MacCrab 9.9.9 or newer", officialSource: true,
-            isFirstParty: false, revocationFreshness: .fresh(age: 0),
+            isFirstParty: false, runsInFirstPartyLane: false, revocationFreshness: .fresh(age: 0),
             isInstallable: false, installBlockReason: "requires MacCrab 9.9.9 or newer"
         )
         #expect(!blocked.canConfirm)
@@ -120,6 +120,7 @@ struct RaveInstallURLTests {
         trustTier: String = "first-party",
         officialSource: Bool = true,
         isFirstParty: Bool = true,
+        runsInFirstPartyLane: Bool? = nil,
         freshness: RaveRevocationFreshness = .fresh(age: 0),
         isInstallable: Bool = true
     ) -> RaveInstallConsentFacts {
@@ -127,7 +128,8 @@ struct RaveInstallURLTests {
             kind: .plugin, id: "com.maccrab.x", displayName: "x",
             resolvedVersion: "1.0.0", signerPublicKeySHA256: "", signerIdentity: "m",
             trustTier: trustTier, declaredMinVersion: nil, versionFloorRefusal: nil,
-            officialSource: officialSource, isFirstParty: isFirstParty, revocationFreshness: freshness,
+            officialSource: officialSource, isFirstParty: isFirstParty,
+            runsInFirstPartyLane: runsInFirstPartyLane ?? isFirstParty, revocationFreshness: freshness,
             isInstallable: isInstallable, installBlockReason: isInstallable ? nil : "operator-signed binary required")
     }
 
@@ -143,6 +145,12 @@ struct RaveInstallURLTests {
     func thirdPartyConsentPosture() {
         #expect(!Self.facts(isFirstParty: true).requiresThirdPartyConsent)
         #expect(Self.facts(trustTier: "unverified", isFirstParty: false).requiresThirdPartyConsent)
+    }
+
+    @Test("C-B: a first-party tier whose key the runtime would not run as first-party still needs acknowledgement")
+    func firstPartyTierOutsideFirstPartyLaneNeedsAcknowledgement() {
+        let f = Self.facts(isFirstParty: true, runsInFirstPartyLane: false)
+        #expect(f.requiresThirdPartyConsent)
     }
 
     @Test("C-E: staleness warning surfaces only for stale/never revocation data")

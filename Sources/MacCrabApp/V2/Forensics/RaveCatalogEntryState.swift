@@ -128,10 +128,13 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
     /// `RaveCatalogClient.checkVersionFloor`. It throws a `RaveCatalogError`
     /// describing the refusal when the floor blocks install.
     ///
-    /// Precedence (first match wins): revoked → floor-blocked → pre-release →
-    /// not offered (status not "active") → awaiting-signed-binary (no pin on
-    /// official) → installable. Revocation is checked first because a revoked
-    /// plugin must never look installable even if every other gate passes.
+    /// Precedence (first match wins): impersonation → revoked → pre-release →
+    /// not offered (status not "active") → floor-blocked →
+    /// awaiting-signed-binary (no pin on official) → installable. Revocation is
+    /// checked first because a revoked plugin must never look installable even
+    /// if every other gate passes. The status checks come before the floor so
+    /// an entry the catalog does not offer never says a newer MacCrab would
+    /// make it installable.
     public static func compute(
         entry: RaveCatalogEntry,
         revocations: RaveRevocationList?,
@@ -181,7 +184,33 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
             }
         }
 
-        // 2. Version floor (fail-closed; reason surfaced for display).
+        // 2. Pre-release maturity — show status, not a live pill. Checked
+        //    before the version floor: updating MacCrab would not make a
+        //    pre-release entry installable, so "needs newer MacCrab" would
+        //    mislead.
+        if entry.status == "pre-release" {
+            return RaveCatalogEntryState(
+                entry: entry,
+                installability: .preRelease,
+                isRevoked: false,
+                revocationReason: nil
+            )
+        }
+
+        // 2b. Only an entry the signed index marks "active" is offered, the
+        //     same rule as the store's RaveCatalogClient.offeredEntries. An
+        //     entry without a status decodes to "" and stops here (fail closed).
+        //     Also before the floor, for the same reason.
+        if entry.status != "active" {
+            return RaveCatalogEntryState(
+                entry: entry,
+                installability: .notOffered,
+                isRevoked: false,
+                revocationReason: nil
+            )
+        }
+
+        // 3. Version floor (fail-closed; reason surfaced for display).
         do {
             try floorCheck(entry)
         } catch let e as RaveCatalogError {
@@ -195,28 +224,6 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
             return RaveCatalogEntryState(
                 entry: entry,
                 installability: .versionFloorBlocked(reason: "\(error)"),
-                isRevoked: false,
-                revocationReason: nil
-            )
-        }
-
-        // 3. Pre-release maturity — show status, not a live pill.
-        if entry.status == "pre-release" {
-            return RaveCatalogEntryState(
-                entry: entry,
-                installability: .preRelease,
-                isRevoked: false,
-                revocationReason: nil
-            )
-        }
-
-        // 3b. Only an entry the signed index marks "active" is offered, the
-        //     same rule as the store's RaveCatalogClient.offeredEntries. An
-        //     entry without a status decodes to "" and stops here (fail closed).
-        if entry.status != "active" {
-            return RaveCatalogEntryState(
-                entry: entry,
-                installability: .notOffered,
                 isRevoked: false,
                 revocationReason: nil
             )

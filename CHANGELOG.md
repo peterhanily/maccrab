@@ -49,14 +49,13 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   keys.** The plugin's name and one-line description from the signed catalog
   now head the sheet. The publisher key is shown as its full 64-character
   SHA-256 hash instead of the first 16 characters, along with the fingerprint
-  of the catalog key built into MacCrab, and each has a Copy button.
+  of the key MacCrab verified the catalog with, and each has a Copy button.
 - **The plugin catalog shows each plugin's signed name and description.**
   Cards, the detail panel, search and sorting use the name the signed catalog
   gives each plugin instead of a name MacCrab made up from its id, and "What
   it does" shows the plugin's signed one-line description, which search now
-  covers too. Built-in scanners keep their own names. The sidebar's "All
-  scanners" is now "All plugins", and "Featured (first-party)" is gone: it
-  listed the same plugins as All.
+  covers too. The sidebar's "All scanners" is now "All plugins", and
+  "Featured (first-party)" is gone: it listed the same plugins as All.
 - **Signal events no longer flood the priority detection lane.** No detection
   consumed `NOTIFY_SIGNAL` events, yet a build storm delivered about four
   thousand of them a second into the lane shared with exec, fork and exit.
@@ -114,10 +113,16 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - **The Overview no longer says plugin installs run fully sandboxed.** That
   was not true: MacCrab's own plugins run with MacCrab's access, not in a
-  sandbox. The plugin store line on the Overview and the store news under it
-  now say that MacCrab's own plugins run with MacCrab's access and plugins
-  from other publishers run sandboxed, in all 14 languages. The
-  `maccrabctl plugin` help for `run` says the same.
+  sandbox. The plugin store line on the Overview now says that MacCrab's own
+  plugins run with MacCrab's access and plugins from other publishers run
+  sandboxed, in all 14 languages, and the store news item under it that
+  repeated the old claim is gone.
+- **`maccrabctl plugin` describes how plugins run correctly.** The help for
+  `run` now says that MacCrab's own plugins run unsandboxed with the access
+  of the terminal you run it from, and plugins from other publishers run
+  sandboxed. The help for `test` no longer says every bundle runs in the
+  sandbox. With nothing installed, `maccrabctl plugin` now says "No plugins
+  installed." instead of calling them third-party plugins.
 - **`maccrabctl plugin` explains a missing catalog key correctly.** When
   `install`, `update`, `check-updates` or `search` could not find the
   catalog key, the error told everyone to set
@@ -133,20 +138,24 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   the plugin runs without a sandbox and with MacCrab's own access, including
   Full Disk Access if you granted it to MacCrab, and that MacCrab does not
   block its network use. The sandbox explanation is shown only for plugins
-  from other publishers.
+  from other publishers. Whether a plugin counts as MacCrab's is decided the
+  same way as when MacCrab runs it: by whether the catalog names MacCrab's own
+  publisher key, not by the catalog's trust label.
 - **The install sheet no longer says "Install from MacCrab link" when no link
-  opened it.** Installing from the plugin catalog or the Forensics scans view
-  now shows "Install plugin". Only a maccrab:// install link shows "Install
-  from MacCrab link".
-- **The plugin catalog no longer says a publisher key is "pinned".** MacCrab
-  does not pin the key itself; the signed catalog names the key each plugin
-  must be signed with. The badge now reads "Key endorsed", and the detail
-  panel says "Publisher key endorsed by the signed catalog".
+  opened it.** Installing from the plugin catalog now shows "Install
+  plugin". Only a maccrab:// install link shows "Install from MacCrab link".
+- **The plugin catalog's "Pinned" badge now reads "Key endorsed".** It means
+  the signed catalog names the publisher key the plugin must be signed with,
+  and the detail panel says "Publisher key endorsed by the signed catalog".
+  The panel's install note now says the install checks the publisher key and
+  the minimum MacCrab version, instead of "signer-pin + version-floor
+  checks", in all 14 languages.
 - **A plugin the catalog does not offer can no longer be installed from a
   link or an Update button.** The catalog lists only plugins the signed
   catalog marks as active, but a maccrab:// install link or the Update button
   in the Forensics scans view could still offer one that was archived,
-  unreachable or had no status at all. Both now show it as not offered. An
+  unreachable or had no status at all. A maccrab:// link now says the catalog
+  does not offer it, and the Update button no longer appears for it. An
   entry without a status counts as not offered instead of being assumed
   official.
 - **A build storm can no longer make the kernel drop Endpoint Security

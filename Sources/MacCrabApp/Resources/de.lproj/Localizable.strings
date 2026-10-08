@@ -1285,7 +1285,7 @@
 "raveStore.empty.openSite" = "rave.maccrab.com öffnen";
 "raveStore.empty.title" = "Signierter Plugin-Katalog";
 "raveStore.header.title" = "Plugin-Katalog";
-"raveStore.install.hint" = "Öffnet den überprüften Installationsablauf: Signiererbindung und Mindestversion werden geprüft, anschließend ist Ihre ausdrückliche Bestätigung erforderlich.";
+"raveStore.install.hint" = "Öffnet den überprüften Installationsablauf: Herausgeberschlüssel und Mindestversion werden geprüft, anschließend ist Ihre ausdrückliche Bestätigung erforderlich.";
 "raveStore.install.section" = "Installieren";
 "raveStore.installed.upToDate" = "v%@ installiert · aktuell";
 "raveStore.installed.updateAvailable" = "v%@ installiert · Update verfügbar";

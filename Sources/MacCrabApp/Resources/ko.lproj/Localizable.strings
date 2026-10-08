@@ -1540,7 +1540,7 @@
 "raveStore.empty.openSite" = "rave.maccrab.com 열기";
 "raveStore.empty.title" = "서명된 플러그인 카탈로그";
 "raveStore.header.title" = "플러그인 카탈로그";
-"raveStore.install.hint" = "서명자 고정 및 최소 버전을 검증한 후 명시적 확인을 요청하는 설치 절차를 엽니다.";
+"raveStore.install.hint" = "게시자 키와 최소 버전을 검증한 후 명시적 확인을 요청하는 설치 절차를 엽니다.";
 "raveStore.install.section" = "설치";
 "raveStore.installed.upToDate" = "v%@ 설치됨 · 최신 상태";
 "raveStore.installed.updateAvailable" = "v%@ 설치됨 · 업데이트 있음";

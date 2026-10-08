@@ -924,7 +924,7 @@ struct V2RaveCatalogBrowserView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                Text(String(localized: "raveStore.install.hint", defaultValue: "Opens the verified install path: signer-pin + version-floor checks, then your explicit confirmation."))
+                Text(String(localized: "raveStore.install.hint", defaultValue: "Opens the verified install path: publisher key and minimum version checks, then your explicit confirmation."))
                     .scaledSystem(10)
                     .foregroundStyle(.tertiary)
             } else {

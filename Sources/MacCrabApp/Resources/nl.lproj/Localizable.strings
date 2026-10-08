@@ -1284,7 +1284,7 @@
 "raveStore.empty.openSite" = "rave.maccrab.com openen";
 "raveStore.empty.title" = "Ondertekende plug-incatalogus";
 "raveStore.header.title" = "Plug-incatalogus";
-"raveStore.install.hint" = "Opent de geverifieerde installatieroute: controle van vaste ondertekenaar en minimumversie, gevolgd door uw expliciete bevestiging.";
+"raveStore.install.hint" = "Opent de geverifieerde installatieroute: controle van de uitgeverssleutel en minimumversie, gevolgd door uw expliciete bevestiging.";
 "raveStore.install.section" = "Installeren";
 "raveStore.installed.upToDate" = "v%@ geïnstalleerd · up-to-date";
 "raveStore.installed.updateAvailable" = "v%@ geïnstalleerd · update beschikbaar";

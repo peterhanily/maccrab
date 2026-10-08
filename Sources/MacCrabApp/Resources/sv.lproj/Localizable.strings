@@ -1285,7 +1285,7 @@
 "raveStore.empty.openSite" = "Öppna rave.maccrab.com";
 "raveStore.empty.title" = "Signerad katalog över insticksprogram";
 "raveStore.header.title" = "Katalog över insticksprogram";
-"raveStore.install.hint" = "Öppnar det verifierade installationsflödet: kontroller av fast signerare och lägsta version, sedan ditt uttryckliga godkännande.";
+"raveStore.install.hint" = "Öppnar det verifierade installationsflödet: kontroller av utgivarnyckel och lägsta version, sedan ditt uttryckliga godkännande.";
 "raveStore.install.section" = "Installera";
 "raveStore.installed.upToDate" = "v%@ installerad · aktuell";
 "raveStore.installed.updateAvailable" = "v%@ installerad · uppdatering tillgänglig";

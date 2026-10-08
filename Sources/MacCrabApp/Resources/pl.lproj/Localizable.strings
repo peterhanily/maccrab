@@ -1284,7 +1284,7 @@
 "raveStore.empty.openSite" = "Otwórz rave.maccrab.com";
 "raveStore.empty.title" = "Podpisany katalog wtyczek";
 "raveStore.header.title" = "Katalog wtyczek";
-"raveStore.install.hint" = "Otwiera zweryfikowaną instalację: sprawdzenie klucza podpisującego i minimalnej wersji, a następnie Twoje wyraźne potwierdzenie.";
+"raveStore.install.hint" = "Otwiera zweryfikowaną instalację: sprawdzenie klucza wydawcy i minimalnej wersji, a następnie Twoje wyraźne potwierdzenie.";
 "raveStore.install.section" = "Instalacja";
 "raveStore.installed.upToDate" = "Zainstalowano v%@ · aktualna wersja";
 "raveStore.installed.updateAvailable" = "Zainstalowano v%@ · dostępna aktualizacja";

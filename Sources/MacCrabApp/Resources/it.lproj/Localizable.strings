@@ -1283,7 +1283,7 @@
 "raveStore.empty.openSite" = "Apri rave.maccrab.com";
 "raveStore.empty.title" = "Catalogo dei plugin firmato";
 "raveStore.header.title" = "Catalogo dei plugin";
-"raveStore.install.hint" = "Apre la procedura di installazione verificata: controlli dell’identità fissata del firmatario e della versione minima, poi la tua conferma esplicita.";
+"raveStore.install.hint" = "Apre la procedura di installazione verificata: controlli della chiave dell’editore e della versione minima, poi la tua conferma esplicita.";
 "raveStore.install.section" = "Installa";
 "raveStore.installed.upToDate" = "Installata v%@ · aggiornata";
 "raveStore.installed.updateAvailable" = "Installata v%@ · aggiornamento disponibile";

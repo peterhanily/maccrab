@@ -124,7 +124,9 @@ func printPluginUsage() {
       trust-list                      Show trusted + revoked publisher keys.
       run <plugin-id> --case <id>     Invoke a built-in or installed plugin
                                       against a case. First-party plugins run
-                                      with MacCrab's access; plugins from other
+                                      unsandboxed with maccrabctl's own access
+                                      (the privacy permissions of the terminal
+                                      you run it from); plugins from other
                                       publishers run sandboxed.
 
     Authoring (contributor SDK):
@@ -132,8 +134,10 @@ func printPluginUsage() {
                                       (signing.key + signing.key.pub). Keep the
                                       private key OFFLINE.
       sign <bundle-dir> [--key <k>]   Sign a bundle (manifest + binary) in place.
-      test <bundle-dir>               Run the bundle LOCALLY under the real
-                                      sandbox and show its containment + outcome.
+      test <bundle-dir>               Run the bundle locally through the same
+                                      lanes as `run` (sandboxed unless signed
+                                      with MacCrab's first-party key) and show
+                                      its containment + outcome.
 
     Renamed in v1.17 (deprecated aliases, still supported):
       installed-list  → list --filter installed
@@ -201,7 +205,7 @@ private func pluginList(args: [String] = []) async {
                 : PluginVisibility.filterInstalled(rawInstalled, builtinIDs: builtinIDs, trustedKeyHexes: trustedKeys)
             if installed.isEmpty {
                 if filter == "installed" {
-                    print("No third-party plugins installed.")
+                    print("No plugins installed.")
                 }
                 // Don't double-print under filter=all if there are none
             } else {
@@ -425,7 +429,7 @@ private func pluginCheckUpdates(args: [String]) async throws {
     }
     let updatable = rows.filter { $0.updateAvailable }
     if installed.isEmpty {
-        print("No third-party plugins installed.")
+        print("No plugins installed.")
         return
     }
     if updatable.isEmpty {
@@ -777,7 +781,8 @@ private func pluginTest(args: [String]) async throws {
     guard let bundle = args.first(where: { !$0.hasPrefix("--") }) else {
         throw CaseCommandError.usage("Usage: maccrabctl plugin test <bundle-dir>")
     }
-    // Run the plugin LOCALLY under the real sandbox so the author SEES containment.
+    // Run the plugin locally through the same lanes as `run` (sandboxed unless
+    // it is signed with the first-party key) so the author SEES containment.
     // The dev trampoline (`swift build`) is ad-hoc-signed; allow it for THIS run
     // via an explicit value (not a process-global env var that could leak).
     let manifest = try TierBManifest.load(fromBundlePath: bundle)
@@ -998,7 +1003,7 @@ private func pluginInstalledList() async throws {
     let installer = PluginInstaller()
     let plugins = try await installer.list()
     guard !plugins.isEmpty else {
-        print("No third-party plugins installed.")
+        print("No plugins installed.")
         print("  (Plugins root: \(installer.pluginsRootPath))")
         return
     }
