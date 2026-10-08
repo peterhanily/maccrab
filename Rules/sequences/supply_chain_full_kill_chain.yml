@@ -3,9 +3,10 @@ id: e1f2a3b4-0023-4000-b000-000000000023
 # v1.21.5: promoted to stable — ran enabled on every install v1.19→v1.21.4 (sequences bypassed the rule profile until v1.21.5) within the measured FP release gate; must-fire kill-chain completion class.
 status: stable
 description: >
-    Detects the complete supply chain attack kill chain: a package manager installs
-    something, which drops persistence (LaunchAgent/cron/.pth), then harvests
-    credentials and exfiltrates them. Covers npm, pip, and gem attack patterns.
+    Detects a supply chain attack chain: a package-manager install, then
+    persistence (a LaunchAgent or LaunchDaemon, cron, a .pth file or a shell
+    profile) and a network connection to a public address, both from the
+    install's descendants.
 author: MacCrab Community
 date: 2026/03/31
 references:
@@ -40,7 +41,16 @@ steps:
                   - '/cargo'
               CommandLine|contains:
                   - 'install'
-          condition: selection
+          # npm is a Node script, so `npm install` execs as the node binary
+          # with the npm CLI path in its arguments, e.g.
+          # `node /opt/homebrew/bin/npm install <pkg>`. Requiring that path
+          # plus the install verb keeps other node processes from matching.
+          selection_npm_node:
+              Image|endswith: '/node'
+              CommandLine|contains:
+                  - '/npm install'
+                  - '/npm-cli.js install'
+          condition: selection or selection_npm_node
 
     - id: persist
       logsource:
