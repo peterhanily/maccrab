@@ -16,21 +16,25 @@ enum ANSIColor: String {
     case bold = "\u{001B}[1m"
     case reset = "\u{001B}[0m"
 
-    static func wrap(_ text: String, _ color: ANSIColor) -> String {
-        guard isTerminal else { return text }
+    static func wrap(_ text: String, _ color: ANSIColor, terminal: Bool = isTerminal) -> String {
+        guard terminal else { return text }
         return "\(color.rawValue)\(text)\(ANSIColor.reset.rawValue)"
     }
 }
 
 extension Severity {
     /// Colored severity label for CLI output.
-    var coloredLabel: String {
+    var coloredLabel: String { coloredLabel(terminal: isTerminal) }
+
+    /// The label padded to ten columns, wrapped in its color and a reset
+    /// only when `terminal` is true.
+    func coloredLabel(terminal: Bool) -> String {
         switch self {
-        case .critical:      return ANSIColor.wrap("[CRITICAL]", .red)
-        case .high:          return ANSIColor.wrap("[HIGH]    ", .orange)
-        case .medium:        return ANSIColor.wrap("[MEDIUM]  ", .yellow)
-        case .low:           return ANSIColor.wrap("[LOW]     ", .blue)
-        case .informational: return ANSIColor.wrap("[INFO]    ", .gray)
+        case .critical:      return ANSIColor.wrap("[CRITICAL]", .red, terminal: terminal)
+        case .high:          return ANSIColor.wrap("[HIGH]    ", .orange, terminal: terminal)
+        case .medium:        return ANSIColor.wrap("[MEDIUM]  ", .yellow, terminal: terminal)
+        case .low:           return ANSIColor.wrap("[LOW]     ", .blue, terminal: terminal)
+        case .informational: return ANSIColor.wrap("[INFO]    ", .gray, terminal: terminal)
         }
     }
 }
