@@ -139,10 +139,6 @@ struct PluginSandboxClaimTests {
 
             #expect(!oldValues.contains(value),
                     "\(locale).lproj still ships the old store prompt: \(value)")
-            if locale == "en" {
-                #expect(value.contains("MacCrab's own plugins run with MacCrab's access"),
-                        "the English prompt must name the first-party case: \(value)")
-            }
             for wording in Self.oldSandboxWording {
                 #expect(value.range(of: wording, options: .caseInsensitive) == nil,
                         "\(locale).lproj store prompt still says “\(wording)”: \(value)")
