@@ -15564,7 +15564,8 @@ public actor EventStore {
     public func expireJournalBlocks(
         retainedThrough now: Date = Date(),
         maximumBlocks: Int = 256,
-        pinnedEntry: JournalExpiryPinnedEntryBehavior = .deferUntilNextPass
+        pinnedEntry: JournalExpiryPinnedEntryBehavior = .deferUntilNextPass,
+        maximumBlocksPerTransaction: Int = 1
     ) throws -> Int {
         guard !isReadOnly, maximumBlocks > 0 else { return 0 }
         let cutoff = now.timeIntervalSince1970
@@ -15715,26 +15716,19 @@ public actor EventStore {
 
         var expiredEvents = 0
         var committedSinceCheckpoint = 0
+        // Startup and existing callers retain one-block commit boundaries.
+        // Runtime opts into a small group without changing the per-turn or
+        // per-checkpoint block limits, retention cutoff, or storage reserve.
+        var transactionBlockLimit = max(1, min(maximumBlocksPerTransaction, 4))
 
-        func expireCandidate(
+        func mutateCandidate(
             _ candidate: (index: Int, summary: VerifiedJournalSummary),
+            admittedEstimate: Int64?,
             retryableAdmissionStage: inout Bool
         ) throws {
-            retryableAdmissionStage = true
             let summary = candidate.summary
             let blockID = summary.blockID
             let reserve = storageTransactionReserveBytes
-            // Take the writer lock before reading any mutable overlay or
-            // projection state. The exact transaction estimate is derived
-            // below from that locked snapshot and admitted before the first
-            // DML. Charging the whole 32-MiB reserve here would deadlock the
-            // retention operation immediately after any normal append used a
-            // portion of that deliberately reserved headroom.
-            try beginSerializedWrite(
-                estimatedBytes: 0,
-                maintenance: true
-            )
-            retryableAdmissionStage = false
             do {
                 let exact = try loadExactJournalBlock(blockID: blockID)
                 var aggregates: [AggregateKey: Int64] = [:]
@@ -15918,18 +15912,28 @@ public actor EventStore {
                             reserveBytes: reserve
                         )
                 }
-                // This is the authoritative, race-free capacity decision. All
-                // reads feeding `estimate` occurred after BEGIN IMMEDIATE and
-                // no page has been mutated yet.
-                retryableAdmissionStage = true
-                try requireCurrentFamilyCapacityUnderWriterLock(
-                    estimatedBytes: estimate,
-                    maintenance: true
-                )
-                retryableAdmissionStage = false
-                if committedSinceCheckpoint > 0,
-                   try !journalExpiryCanCoalesce(estimatedBytes: estimate) {
-                    throw CoalescingBoundary.checkpointRequired
+                if let admittedEstimate {
+                    // A group was admitted in full before its first DML.
+                    // Never re-admit incrementally after earlier candidates
+                    // have already dirtied this transaction's pages.
+                    guard estimate <= admittedEstimate else {
+                        throw EventStoreError.storageNotReady(
+                            "journal expiry exact mutation exceeds its admitted group estimate"
+                        )
+                    }
+                } else {
+                    // The default singleton path retains its exact admission
+                    // estimate and its existing recovery allowance.
+                    retryableAdmissionStage = true
+                    try requireCurrentFamilyCapacityUnderWriterLock(
+                        estimatedBytes: estimate,
+                        maintenance: true
+                    )
+                    retryableAdmissionStage = false
+                    if committedSinceCheckpoint > 0,
+                       try !journalExpiryCanCoalesce(estimatedBytes: estimate) {
+                        throw CoalescingBoundary.checkpointRequired
+                    }
                 }
                 let aggregate = try prepare(
                     """
@@ -16084,38 +16088,147 @@ public actor EventStore {
                         "journal expiry retention selector changed before commit"
                     )
                 }
-                try execute("COMMIT")
-                expiredEvents += summary.eventCount
-                committedSinceCheckpoint += 1
-                addJournalBlockTombstone(blockID)
-                journalExpirySummaryCursor = candidate.index + 1
-                journalVerifiedBlocks = max(0, journalVerifiedBlocks - 1)
-                if let generation = journalIndexTopologyGeneration {
-                    journalIndexTopologyGeneration = generation + 1
-                    journalIndexedBlockCount = max(
-                        0,
-                        journalIndexedBlockCount - 1
+            }
+        }
+
+        func publishCommittedCandidate(
+            _ candidate: (index: Int, summary: VerifiedJournalSummary)
+        ) {
+            expiredEvents += candidate.summary.eventCount
+            committedSinceCheckpoint += 1
+            addJournalBlockTombstone(candidate.summary.blockID)
+            journalExpirySummaryCursor = candidate.index + 1
+            journalVerifiedBlocks = max(0, journalVerifiedBlocks - 1)
+            if let generation = journalIndexTopologyGeneration {
+                journalIndexTopologyGeneration = generation + 1
+                journalIndexedBlockCount = max(
+                    0,
+                    journalIndexedBlockCount - 1
+                )
+            } else {
+                // An uncertain cache state is never patched locally.
+                journalIndexLoaded = false
+            }
+        }
+
+        func expireCandidates(
+            startingAt offset: Int,
+            maximum: Int,
+            attemptedBlockCount: inout Int,
+            retryableAdmissionStage: inout Bool
+        ) throws -> Int {
+            retryableAdmissionStage = true
+            // Derive all admission inputs under the writer lock. Taking the
+            // whole reserve here would unnecessarily refuse retention after a
+            // normal append used part of its protected recovery headroom.
+            try beginSerializedWrite(estimatedBytes: 0, maintenance: true)
+            retryableAdmissionStage = false
+            var commitAttempted = false
+            do {
+                var estimates: [Int64] = []
+                var groupEstimate: Int64 = 0
+                if maximum > 1 {
+                    estimates.reserveCapacity(maximum)
+                    for candidate in eligible[offset..<offset + maximum] {
+                        let summary = candidate.summary
+                        let selector = try prepare(
+                            "SELECT event_count, retained_until FROM event_journal_blocks WHERE block_id = ?1"
+                        )
+                        sqlite3_bind_int64(selector, 1, summary.blockID)
+                        let selectorMatches = sqlite3_step(selector) == SQLITE_ROW
+                            && sqlite3_column_int64(selector, 0) == Int64(summary.eventCount)
+                            && sqlite3_column_double(selector, 1) <= cutoff
+                            && sqlite3_step(selector) == SQLITE_DONE
+                        sqlite3_finalize(selector)
+                        guard selectorMatches else {
+                            throw EventStoreError.decodingFailed(
+                                "journal expiry group selector changed under writer lock"
+                            )
+                        }
+                        // Preplanning holds only scalar metadata. Exact block
+                        // graphs and their J/S leases remain one-block-at-a-
+                        // time inside mutateCandidate below.
+                        let usage = try journalOverlayUsage(
+                            blockID: summary.blockID,
+                            eventCount: summary.eventCount
+                        )
+                        let estimate = try journalExpiryWorstCaseTransactionEstimate(
+                            blockID: summary.blockID,
+                            eventCount: summary.eventCount,
+                            overlayCascadePayloadBytes: usage.cascadePayloadBytes
+                        )
+                        let combined = SQLitePersistentStoreAdmission.saturatingAdd(
+                            groupEstimate, estimate
+                        )
+                        guard combined <= storageTransactionReserveBytes else { break }
+                        estimates.append(estimate)
+                        groupEstimate = combined
+                    }
+                }
+
+                let count = max(1, estimates.count)
+                attemptedBlockCount = count
+                if count > 1 {
+                    retryableAdmissionStage = true
+                    try requireCurrentFamilyCapacityUnderWriterLock(
+                        estimatedBytes: groupEstimate,
+                        maintenance: true
                     )
-                } else {
-                    // An uncertain cache state is never patched locally.
-                    journalIndexLoaded = false
+                    retryableAdmissionStage = false
+                    if committedSinceCheckpoint > 0,
+                       try !journalExpiryCanCoalesce(estimatedBytes: groupEstimate) {
+                        throw CoalescingBoundary.checkpointRequired
+                    }
+                }
+                for index in 0..<count {
+                    try mutateCandidate(
+                        eligible[offset + index],
+                        admittedEstimate: count > 1 ? estimates[index] : nil,
+                        retryableAdmissionStage: &retryableAdmissionStage
+                    )
+                }
+                commitAttempted = true
+                try execute("COMMIT")
+                // No cursor, tombstone, or topology cache may describe a
+                // candidate whose enclosing group has not committed.
+                for index in 0..<count {
+                    publishCommittedCandidate(eligible[offset + index])
                 }
                 projectionOwnedUpperBoundBytes = nil
                 journalExpiryPostCommitHookForTesting?()
+                return count
             } catch {
+                if commitAttempted {
+                    // A failed COMMIT is not proof of a durable outcome. The
+                    // next call must reconstruct its selector/cache from SQL.
+                    journalIndexLoaded = false
+                    journalIndexTopologyGeneration = nil
+                    journalExpirySummaryCursor = 0
+                    journalExpirySummaryCutoff = nil
+                    projectionOwnedUpperBoundBytes = nil
+                }
                 try rollbackJournalExpiryTransaction()
                 throw error
             }
         }
-        for candidate in eligible {
+        var candidateOffset = 0
+        while candidateOffset < eligible.count {
             var retriedAfterCheckpoint = false
             while true {
                 var retryableAdmissionStage = false
+                var attemptedBlockCount = 1
                 do {
-                    try expireCandidate(
-                        candidate,
+                    let count = try expireCandidates(
+                        startingAt: candidateOffset,
+                        maximum: min(
+                            transactionBlockLimit,
+                            eligible.count - candidateOffset,
+                            Self.journalExpiryCheckpointBlockLimit - committedSinceCheckpoint
+                        ),
+                        attemptedBlockCount: &attemptedBlockCount,
                         retryableAdmissionStage: &retryableAdmissionStage
                     )
+                    candidateOffset += count
                 } catch {
                     // Capacity retries are permitted only before DML and only
                     // after earlier blocks made progress. A checked rollback is
@@ -16124,6 +16237,22 @@ public actor EventStore {
                     let needsBoundary = error is CoalescingBoundary
                         || (retryableAdmissionStage
                             && Self.isJournalExpiryCapacityRefusal(error))
+                    let recordOwnershipUnavailable: Bool
+                    if let storeError = error as? EventStoreError,
+                       case .memoryLeaseUnavailable = storeError {
+                        recordOwnershipUnavailable = true
+                    } else {
+                        recordOwnershipUnavailable = false
+                    }
+                    if attemptedBlockCount > 1,
+                       needsBoundary || recordOwnershipUnavailable {
+                        // Grouping is optional. Under pressure keep the
+                        // original one-block progress path for this quantum;
+                        // never raise caps or repeatedly replay a partly
+                        // decoded group while ownership is scarce.
+                        transactionBlockLimit = 1
+                        continue
+                    }
                     guard needsBoundary, committedSinceCheckpoint > 0,
                           !retriedAfterCheckpoint else { throw error }
                     let boundary = try journalExpiryCheckpointBoundary()

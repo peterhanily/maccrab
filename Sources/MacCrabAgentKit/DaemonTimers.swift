@@ -1749,6 +1749,9 @@ enum DaemonTimers {
     /// small blocks. The timer immediately yields and continues bounded turns
     /// until the store itself proves no eligible block remains.
     static let journalExpiryMaximumBlocksPerQuantum = 64
+    /// Runtime-only transaction coalescing. Startup retains singleton expiry;
+    /// the store may reduce this further to fit existing admission headroom.
+    static let journalExpiryMaximumBlocksPerTransaction = 4
     /// How long a pass may wait out committed record ownership with no quantum
     /// making progress before it gives the cadence back.
     static let journalExpiryConsecutiveBackpressureBudgetSeconds: TimeInterval = 30
@@ -2909,7 +2912,9 @@ enum DaemonTimers {
                                 retainedThrough: retainedThrough,
                                 maximumBlocks:
                                     journalExpiryMaximumBlocksPerQuantum,
-                                pinnedEntry: .conserveCurrentCutoff
+                                pinnedEntry: .conserveCurrentCutoff,
+                                maximumBlocksPerTransaction:
+                                    journalExpiryMaximumBlocksPerTransaction
                             )
                     } catch let error as EventStoreError {
                         await state.eventStore.endSizeCapPrune()
