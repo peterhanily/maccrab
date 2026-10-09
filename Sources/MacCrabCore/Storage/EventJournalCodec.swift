@@ -796,6 +796,9 @@ private struct StreamingFrameParser<Record: Decodable & Sendable> {
                         "record decode state is unavailable"
                     )
                 }
+                // Transfer ownership before mutation so each input chunk
+                // does not copy the entire partially assembled record.
+                record = nil
                 current.withUnsafeMutableBytes { destination in
                     guard let target = destination.baseAddress,
                           let input = source.baseAddress else { return }
