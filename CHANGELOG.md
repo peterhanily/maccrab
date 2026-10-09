@@ -379,6 +379,12 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
     prints.
 
 ### Release tooling
+- **The app no longer ships every localization twice.** SwiftPM also places
+  the 14 language folders inside the app's resource bundle, where nothing
+  reads them; the app uses the top-level copies. The release build now removes
+  the nested copies after checking that each is identical to its top-level
+  twin, which makes the installed app about 2 MB smaller and keeps it inside
+  the fixed installed-size budget.
 - **A deterministic ES ingress storm benchmark.** `ESIngressStormBenchmarkTests`
   runs an in-process storm covering the callback before and after, the
   byte-level protected-OPEN classification cost and parity, the hand-off cost,

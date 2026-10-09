@@ -840,6 +840,38 @@ stage_assemble() {
         if [ -d "$SPM_APP_BUNDLE" ]; then
             cp -R "$SPM_APP_BUNDLE" "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle"
             echo "    ✓ Bundled MacCrab_MacCrabApp resource bundle ($arch) → Resources/"
+            # v1.22.6: SwiftPM also puts the 14 .lproj inside this bundle, but
+            # nothing reads them there: String(localized:) resolves through
+            # Bundle.main, which uses the top-level copies made above, and the
+            # app never opens Bundle.module. Every small file costs a whole
+            # allocation block, so the duplicate set cost about 2 MiB of the
+            # installed-footprint budget below. Remove it only after proving
+            # that each nested copy is byte-identical to its top-level twin
+            # (SwiftPM lowercases zh-Hans and pt-BR, so names match ignoring case).
+            nested_lproj_count=0
+            for nested in "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle"/*.lproj; do
+                [ -d "$nested" ] || continue
+                nested_name=$(/usr/bin/basename "$nested" | /usr/bin/tr '[:upper:]' '[:lower:]')
+                twin=""
+                for top in "$APP/Contents/Resources"/*.lproj; do
+                    if [ "$(/usr/bin/basename "$top" | /usr/bin/tr '[:upper:]' '[:lower:]')" = "$nested_name" ]; then
+                        twin="$top"
+                    fi
+                done
+                if [ -z "$twin" ] || ! /usr/bin/diff -r "$nested" "$twin" >/dev/null; then
+                    echo "ERROR: $(/usr/bin/basename "$nested") in MacCrab_MacCrabApp.bundle has no identical top-level copy; refusing to remove it" >&2
+                    exit 1
+                fi
+                nested_lproj_count=$((nested_lproj_count + 1))
+            done
+            if [ "$nested_lproj_count" -ne 14 ]; then
+                echo "ERROR: expected 14 nested .lproj in MacCrab_MacCrabApp.bundle, found $nested_lproj_count" >&2
+                exit 1
+            fi
+            for nested in "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle"/*.lproj; do
+                /bin/rm -rf "$nested"
+            done
+            echo "    ✓ Removed $nested_lproj_count duplicate .lproj from MacCrab_MacCrabApp.bundle (identical to Resources/*.lproj)"
             break
         fi
     done
