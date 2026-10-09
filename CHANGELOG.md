@@ -36,6 +36,16 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   after a size pause.
 
 ### Changed
+- **Runtime journal expiry groups small transactions within the existing
+  storage reserve.** Up to four expired blocks share a commit, reducing
+  repeated WAL page writes while preserving atomic rollups and deletion.
+  Startup keeps one-block transactions, pressure falls back to that path,
+  and checkpoints remain bounded by 64 blocks. Retention and size limits
+  are unchanged.
+- **Streaming journal decoding avoids copying the whole record for each
+  input chunk.** The decoder transfers ownership of its partially filled
+  buffer before mutation; framing, canonical hashes and decoded values
+  are unchanged.
 - **The Forensics plugin catalog uses the Rave store's icons.** Each store
   plugin's card and detail panel shows the same Mac-style artwork as
   rave.maccrab.com instead of a coloured banner with a symbol, but only when
