@@ -244,6 +244,27 @@ if [ "$RESUME_PUBLISH" = "1" ] && [ "$RESPIN" = "1" ]; then
     echo "ERROR: --resume-publish publishes the existing tag; --respin replaces it. Choose one." >&2
     exit 2
 fi
+# MACCRAB_CRITICAL_BELOW is used at Step 6, after the GitHub release is public.
+# The appcast generator there refuses a value below its CRITICAL_UPDATE_FLOOR,
+# and the release then ships without an appcast item. Check the value against
+# that floor here, before anything is built or published.
+APPCAST_CRITICAL_FLOOR=$(/usr/bin/python3 -I -B -c \
+    'import runpy, sys; print(runpy.run_path(sys.argv[1])["CRITICAL_UPDATE_FLOOR"])' \
+    "$SCRIPT_DIR/_appcast_xml.py")
+if [ -n "${MACCRAB_CRITICAL_BELOW:-}" ]; then
+    if ! [[ "$MACCRAB_CRITICAL_BELOW" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "ERROR: MACCRAB_CRITICAL_BELOW must be MAJOR.MINOR.PATCH" >&2
+        exit 2
+    fi
+    if ! /usr/bin/python3 -I -c \
+            'import sys; below, floor = ([int(n) for n in v.split(".")] for v in sys.argv[1:]); sys.exit(below < floor)' \
+            "$MACCRAB_CRITICAL_BELOW" "$APPCAST_CRITICAL_FLOOR"; then
+        echo "ERROR: MACCRAB_CRITICAL_BELOW=$MACCRAB_CRITICAL_BELOW is below the appcast critical floor $APPCAST_CRITICAL_FLOOR" >&2
+        echo "       (CRITICAL_UPDATE_FLOOR in scripts/_appcast_xml.py). It may raise that floor, never lower it." >&2
+        echo "       Nothing was built, tagged or pushed." >&2
+        exit 2
+    fi
+fi
 
 # Free space comes first in every phase that runs clean CI. ci-local.sh checks
 # it too, but only after the remote preflight, the pre-release check, the audit
@@ -1934,16 +1955,18 @@ else
         echo "  ✗ MACCRAB_APPCAST_IMMEDIATE must be 0 or 1" >&2
         exit 2
     fi
-    # MACCRAB_CRITICAL_BELOW=X marks the item critical for installs below X:
-    # Sparkle shows it at once and does not let those users skip it.
+    # Every item is critical for installs below the generator's
+    # CRITICAL_UPDATE_FLOOR, or below MACCRAB_CRITICAL_BELOW=X when set (checked
+    # against that floor before the build): Sparkle shows it at once and does
+    # not let those users skip it.
     if [ -n "${MACCRAB_CRITICAL_BELOW:-}" ]; then
         if ! printf '%s' "${MACCRAB_CRITICAL_BELOW}" | /usr/bin/grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "  ✗ MACCRAB_CRITICAL_BELOW must be MAJOR.MINOR.PATCH" >&2
             exit 2
         fi
         APPCAST_ROLLOUT_ARGS+=(--critical-below "${MACCRAB_CRITICAL_BELOW}")
-        echo "  Appcast item marked CRITICAL for installs below ${MACCRAB_CRITICAL_BELOW}"
     fi
+    echo "  Appcast item marked CRITICAL for installs below ${MACCRAB_CRITICAL_BELOW:-$APPCAST_CRITICAL_FLOOR}"
     # The generator gets no GitHub/notary credentials. Its only executable
     # dependencies are the checked SwiftPM tools and fixed Apple utilities.
     if /usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR=/private/tmp LC_ALL=C LANG=C \

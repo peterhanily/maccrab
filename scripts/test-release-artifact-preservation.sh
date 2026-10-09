@@ -15,6 +15,9 @@ unset MACCRAB_RELEASE_EXPECTED_DMG MACCRAB_RELEASE_EXPECTED_SHA256 \
       MACCRAB_RELEASE_EXPECTED_COMMIT MACCRAB_RELEASE_EXPECTED_TAG_OBJECT \
       MACCRAB_RELEASE_EXPECTED_HOOK_BLOB MACCRAB_RELEASE_SOURCE_COMMIT \
       MACCRAB_RELEASE_SOURCE_TREE MACCRAB_RELEASE_METADATA_TREE
+# release.sh's clean CI runs this probe with its caller's environment, which
+# may raise MACCRAB_CRITICAL_BELOW. Cases below set it deliberately.
+unset MACCRAB_CRITICAL_BELOW
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -1292,6 +1295,8 @@ make_release_fixture() {
     cp "$SCRIPT_DIR/release-env.sh" "$fixture/scripts/release-env.sh"
     cp "$SCRIPT_DIR/_release_env.py" "$fixture/scripts/_release_env.py"
     cp "$SCRIPT_DIR/export-release-source.py" "$fixture/scripts/export-release-source.py"
+    # release.sh reads the appcast critical floor from the real generator module.
+    cp "$SCRIPT_DIR/_appcast_xml.py" "$fixture/scripts/_appcast_xml.py"
 
     # All files that can influence the mocked artifact are committed to a real,
     # disposable repository. The git shim delegates object/index/worktree
@@ -1978,6 +1983,28 @@ run_release_control "$space_first" MACCRAB_TEST_CI_PREFLIGHT_FAIL_FROM=1
 assert_retained_ci_transcript "$space_first" 0
 echo "PASS: release.sh checks clean-CI free space before any other step"
 
+# A MACCRAB_CRITICAL_BELOW below the appcast generator's floor is refused next
+# to the argument checks, before the free-space check and any remote, CI,
+# build or publish step. The comparison is numeric: 1.9.0 is below the 1.22.0
+# floor although it sorts above it as text, and 1.100.0 is above it although
+# it sorts below.
+critical_floor="$TEST_ROOT/release-critical-floor-preflight"
+make_release_fixture "$critical_floor" accepted 1
+run_release_control "$critical_floor" MACCRAB_CRITICAL_BELOW=1.9.0
+[ "$release_control_status" -eq 2 ] \
+    && grep -Fq 'MACCRAB_CRITICAL_BELOW=1.9.0 is below the appcast critical floor 1.22.0' "$critical_floor/output.log" \
+    || { tail -30 "$critical_floor/output.log" >&2; fail "a MACCRAB_CRITICAL_BELOW below the appcast floor was not refused"; }
+[ ! -e "$critical_floor/.fixture-ci-preflight.log" ] && ! grep -q 'Remote preflight' "$critical_floor/output.log" \
+    && [ ! -e "$critical_floor/ci.log" ] && [ ! -s "$critical_floor/build.log" ] \
+    && [ ! -s "$critical_floor/gh.log" ] && [ ! -s "$critical_floor/publish.log" ] \
+    || fail "a MACCRAB_CRITICAL_BELOW below the appcast floor was refused only after other steps"
+run_release_control "$critical_floor" MACCRAB_CRITICAL_BELOW=1.100.0 MACCRAB_TEST_CI_PREFLIGHT_FAIL_FROM=1
+[ "$release_control_status" -eq 1 ] \
+    && grep -q "not enough free disk for this release's clean local CI" "$critical_floor/output.log" \
+    && ! grep -q 'MACCRAB_CRITICAL_BELOW' "$critical_floor/output.log" \
+    || { tail -30 "$critical_floor/output.log" >&2; fail "a MACCRAB_CRITICAL_BELOW above the appcast floor was refused"; }
+echo "PASS: release.sh refuses a MACCRAB_CRITICAL_BELOW below the appcast floor before any other step"
+
 # Once phase 1 has built its candidate and removed the private export, it
 # forecasts phase 2's clean CI and warns, without changing its own outcome.
 space_forecast="$TEST_ROOT/release-phase-two-space-forecast"
@@ -2450,6 +2477,8 @@ release_ok_build_workspace=$(/usr/bin/head -1 "$release_ok/build-pwd.log")
     || fail "successful release leaked its private tracked-only build export"
 grep -q 'MacCrab v9.9.11 Released!' "$release_ok/output.log" \
     || fail "release.sh omitted the success banner after the mocked upload"
+grep -Fqx '  Appcast item marked CRITICAL for installs below 1.22.0' "$release_ok/output.log" \
+    || fail "Step 6 did not log the appcast generator's default critical floor"
 for expected_publish in appcast-generate appcast-publish release-json cask; do
     if ! grep -q "^${expected_publish}$" "$release_ok/publish.log"; then
         tail -80 "$release_ok/output.log" >&2

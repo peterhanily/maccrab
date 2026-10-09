@@ -762,6 +762,7 @@
 "inspector.cves" = "CVE";
 "inspector.description" = "Description";
 "inspector.detectionRule" = "Règle de détection";
+"inspector.explainWithMaccrabctl" = "Expliquer avec maccrabctl";
 "inspector.identity" = "Identité";
 "inspector.logic" = "Logique";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "Cliquez pour comprendre et comment y remédier";
 "overview.storeTitle" = "Catalogue de plugins";
 "overview.storeBrowse" = "Parcourir →";
-"overview.storeBrowsePrompt" = "Parcourez les plugins forensiques signés du catalogue. Les plugins internes de MacCrab s’exécutent avec les accès de MacCrab ; ceux d’autres éditeurs s’exécutent en bac à sable.";
+"overview.storeBrowsePrompt" = "Parcourez les plugins forensiques signés du catalogue.";
 "raveStore.thirdPartyCatalog.title" = "Catalogue tiers signé";
 "raveStore.thirdPartyCatalog.body" = "Aucun plugin tiers n'est actuellement répertorié. Les scanners intégrés ci-dessous sont inclus dans MacCrab et s'exécutent sur ce Mac maintenant — aucune installation requise.";
 
@@ -1661,6 +1662,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Lever cette exclusion — la règle se déclenchera à la prochaine correspondance";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Alertes résolues et masquées dans la période récente de conservation. Faites un clic droit sur une ligne pour rétablir ou supprimer une alerte, ou utilisez les boutons de l’inspecteur.";
 "ui.V2AlertsWorkspace.restore" = "Restaurer";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Exécutez cette commande dans Terminal pour savoir pourquoi cette alerte s’est déclenchée :";
 "ui.V2AlertsWorkspace.suggested.actions" = "Actions suggérées :";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Campagnes masquées (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Tactiques :";
@@ -1747,7 +1749,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Flux de renseignement sur les menaces";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Deux vues : **Outils de sécurité détectés** (autres logiciels de sécurité macOS observés sur cet ordinateur par MacCrab — suite Objective-See, Little Snitch, EDR commerciaux, etc.) et **Destinations de sortie configurées** (destinations d’alertes définies dans `daemon_config.json` / `notifications.json` — Splunk, Slack, S3, etc.). L’état indique « configuré », « en cours d’exécution » ou « installé ».";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "Une trace est la chaîne causale des entités de processus, fichiers, réseau, persistance, agents d’IA et TCC participant à un événement de gravité élevée. Le daemon ancre une trace lorsque AnchorDetector juge un événement digne d’investigation (exécution d’un chargeur, écriture de persistance, accès à un fichier d’identifiants, etc.), puis incorpore les entités touchées dans la même lignée. Cliquez sur un nœud pour voir son identité et son rôle ; faites-le glisser pour réorganiser ; changez la disposition dans la barre d’outils ; faites un clic droit pour copier ou ouvrir dans Événements.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Les Traces d’agents sont des spans W3C TRACEPARENT que MacCrab reçoit via son récepteur OTLP de loopback depuis des outils de programmation assistée par IA (Claude Code, Cursor, Codex, Continue, Windsurf). Chaque ligne est une trace, soit une lignée d’appels au modèle ; son développement affiche les durées des spans, les appels d’outils et les événements du graphe causal survenus pendant le span. La liste reste vide tant que vous n’activez pas le récepteur ci-dessous et qu’un outil émettant de l’OTel ne l’utilise pas.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Les Traces d’agents sont des spans W3C TRACEPARENT que MacCrab reçoit via son récepteur OTLP de loopback depuis des outils de programmation assistée par IA (Claude Code, Cursor, Codex, Continue, Windsurf). Chaque ligne est une trace ; la sélectionner affiche ses spans avec leurs durées, leur imbrication selon le parent et leurs attributs assainis. La liste reste vide tant que vous n’activez pas le récepteur ci-dessous et qu’un outil émettant de l’OTel ne l’utilise pas.";
 "ui.V2InvestigationWorkspace.anchor" = "ancre";
 "ui.V2InvestigationWorkspace.clear" = "Effacer";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Effacer tous les filtres de nœuds";

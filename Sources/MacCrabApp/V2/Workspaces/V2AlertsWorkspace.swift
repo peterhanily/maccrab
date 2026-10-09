@@ -438,7 +438,7 @@ struct V2AlertsWorkspace: View {
         } else {
             lines.append("Review the process, path, and parent above to decide whether this activity is expected on this Mac.")
         }
-        lines.append("Use “Investigate in Events” to see what happened around the time it fired, and open the full causal trace with the CLI command in Trace context below.")
+        lines.append("Use “Investigate in Events” to see what happened around the time it fired, and run the maccrabctl command below to see why it fired.")
         lines.append("If it’s expected, suppress the alert so it stops recurring. If it isn’t, isolate the process and preserve evidence before acting.")
         return lines.joined(separator: "\n\n")
     }
@@ -1233,13 +1233,13 @@ struct V2AlertsWorkspace: View {
             V2InspectorSection(String(localized: "inspector.surroundingEvents2Min", defaultValue: "Surrounding events (±2 min)")) {
                 SurroundingEventsView(alert: alert, appState: appState)
             }
-            V2InspectorSection(String(localized: "inspector.traceContext", defaultValue: "Trace context")) {
+            V2InspectorSection(String(localized: "inspector.explainWithMaccrabctl", defaultValue: "Explain with maccrabctl")) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(String(localized: "ui.V2AlertsWorkspace.inspect.this.alert.s.full.causal.trace", defaultValue: "Inspect this alert's full causal trace via the CLI:"))
+                    Text(String(localized: "ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why", defaultValue: "Run this in Terminal to see why this alert fired:"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                     HStack(spacing: 6) {
-                        Text(verbatim: "maccrabctl trace from-alert \(alert.id)")
+                        Text(verbatim: "maccrabctl why \(alert.id)")
                             .font(V2Theme.mono())
                             .foregroundStyle(V2Theme.primaryText)
                             .textSelection(.enabled)
@@ -1248,7 +1248,7 @@ struct V2AlertsWorkspace: View {
                         Spacer()
                         V2ActionButton(String(localized: "ui.V2AlertsWorkspace.copy", defaultValue: "Copy"), icon: "doc.on.doc", style: .ghost) {
                             NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString("maccrabctl trace from-alert \(alert.id)", forType: .string)
+                            NSPasteboard.general.setString("maccrabctl why \(alert.id)", forType: .string)
                             state.showToast(V2Toast(kind: .success, title: "Command copied", detail: nil))
                         }
                     }

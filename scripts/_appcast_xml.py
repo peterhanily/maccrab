@@ -20,6 +20,11 @@ BUILD_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[1-9][0-9]*\Z")
 HISTORICAL_BUILD_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?(?:\.[0-9]+)?\Z")
 PUBDATE_RE = re.compile(r"[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} \+0000\Z")
 
+# Installs older than 1.22.0 should always be offered the newest release as
+# critical. Every generated item carries this floor; --critical-below may raise
+# it for one release but never lower it.
+CRITICAL_UPDATE_FLOOR = "1.22.0"
+
 
 def fail(message: str) -> "None":
     raise ValueError(message)
@@ -220,17 +225,17 @@ def cmd_generate(args: argparse.Namespace) -> None:
         fail("--length must be a positive decimal")
     if args.phased_interval is not None and not re.fullmatch(r"[1-9][0-9]{0,9}", args.phased_interval):
         fail("--phased-interval must be a positive decimal")
-    if args.critical_below is not None and not VERSION_RE.fullmatch(args.critical_below):
+    if not VERSION_RE.fullmatch(args.critical_below):
         fail("--critical-below must be MAJOR.MINOR.PATCH")
+    if build_sort_key(args.critical_below) < build_sort_key(CRITICAL_UPDATE_FLOOR):
+        fail(f"--critical-below must not be lower than {CRITICAL_UPDATE_FLOOR}")
 
     notes = read_bounded(args.notes_file, MAX_ITEM_BYTES).decode("utf-8")
     safe_notes = notes.replace("]]>", "]]]]><![CDATA[>")
     phased = ""
     if args.phased_interval is not None:
         phased = f"  <sparkle:phasedRolloutInterval>{args.phased_interval}</sparkle:phasedRolloutInterval>\n"
-    critical = ""
-    if args.critical_below is not None:
-        critical = f'  <sparkle:criticalUpdate sparkle:version="{args.critical_below}"></sparkle:criticalUpdate>\n'
+    critical = f'  <sparkle:criticalUpdate sparkle:version="{args.critical_below}"></sparkle:criticalUpdate>\n'
     item = f"""<item>
   <title>MacCrab {args.version}</title>
   <link>https://github.com/peterhanily/maccrab/releases/tag/v{args.version}</link>
@@ -347,7 +352,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--build-number", required=True)
     generate.add_argument("--pub-date", required=True)
     generate.add_argument("--phased-interval")
-    generate.add_argument("--critical-below")
+    generate.add_argument("--critical-below", default=CRITICAL_UPDATE_FLOOR)
     generate.add_argument("--signature", required=True)
     generate.add_argument("--length", required=True)
     generate.add_argument("--dmg-name", required=True)

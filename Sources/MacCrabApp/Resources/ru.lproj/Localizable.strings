@@ -762,6 +762,7 @@
 "inspector.cves" = "CVE";
 "inspector.description" = "Описание";
 "inspector.detectionRule" = "Правило обнаружения";
+"inspector.explainWithMaccrabctl" = "Объяснить с помощью maccrabctl";
 "inspector.identity" = "Идентификация";
 "inspector.logic" = "Логика";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "Нажмите, чтобы узнать, что это значит и как это исправить";
 "overview.storeTitle" = "Магазин плагинов";
 "overview.storeBrowse" = "Обзор →";
-"overview.storeBrowsePrompt" = "Просмотрите подписанные криминалистические плагины в каталоге. Собственные плагины MacCrab работают с правами MacCrab; плагины других издателей работают в песочнице.";
+"overview.storeBrowsePrompt" = "Просмотрите подписанные криминалистические плагины в каталоге.";
 "raveStore.thirdPartyCatalog.title" = "Подписанный каталог сторонних разработчиков";
 "raveStore.thirdPartyCatalog.body" = "На данный момент плагины сторонних разработчиков не опубликованы. Встроенные сканеры ниже включены в MacCrab и запускаются на этом Mac — не требуется установка.";
 
@@ -1661,6 +1662,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Удалить это подавление — правило снова сработает при следующем совпадении";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Закрытые и подавленные оповещения из недавнего интервала хранения. Щёлкните строку правой кнопкой, чтобы снять подавление или удалить, либо используйте кнопки инспектора.";
 "ui.V2AlertsWorkspace.restore" = "Восстановить";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Выполните эту команду в Терминале, чтобы узнать, почему сработало это оповещение:";
 "ui.V2AlertsWorkspace.suggested.actions" = "Предлагаемые действия:";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Подавленные кампании (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Тактики:";
@@ -1747,7 +1749,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Источники сведений об угрозах";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Два вида сведений: **Обнаруженные средства защиты** — другое защитное ПО macOS, замеченное на этом устройстве (Objective-See, Little Snitch, коммерческие EDR и др.); **Настроенные получатели** — адресаты оповещений из `daemon_config.json` / `notifications.json` (Splunk, Slack, S3 и др.). Состояние отражает настройку, работу или установку.";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "Трасса — причинная цепочка процессов, файлов, сетевых объектов, закрепления в системе, агентов ИИ и объектов TCC, участвующих в событии высокой серьёзности. Демон создаёт опорную точку, когда AnchorDetector выбирает событие для расследования (запуск загрузчика, запись для закрепления, доступ к файлу учётных данных и др.), и добавляет затронутые объекты той же линии происхождения. Нажмите узел для сведений и роли; перетащите для перестановки; выберите раскладку на панели инструментов; правая кнопка открывает копирование и переход к событиям.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Трассы агента — спаны W3C TRACEPARENT, полученные MacCrab через локальный приёмник OTLP от инструментов программирования с ИИ (Claude Code, Cursor, Codex, Continue, Windsurf). Каждая строка — одна трасса, линия вызова модели. При раскрытии видны длительность спанов, вызовы инструментов и события причинного графа за этот интервал. Список пуст, пока вы не включите приёмник ниже и инструмент с поддержкой OTel не начнёт передавать ему данные.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Трассы агента — спаны W3C TRACEPARENT, полученные MacCrab через локальный приёмник OTLP от инструментов программирования с ИИ (Claude Code, Cursor, Codex, Continue, Windsurf). Каждая строка — одна трасса; при выборе отображается список её спанов с длительностью, вложенностью по родителю и санитизированными атрибутами. Список пуст, пока вы не включите приёмник ниже и инструмент с поддержкой OTel не начнёт передавать ему данные.";
 "ui.V2InvestigationWorkspace.anchor" = "опорная точка";
 "ui.V2InvestigationWorkspace.clear" = "Очистить";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Сбросить все фильтры узлов";

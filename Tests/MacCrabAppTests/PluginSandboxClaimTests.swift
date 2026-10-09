@@ -103,12 +103,10 @@ struct PluginSandboxClaimTests {
         #expect(hits.isEmpty, "blanket sandbox claim found:\n\(hits.joined(separator: "\n"))")
     }
 
-    @Test("the Overview store news does not repeat the store line under it")
-    func storeNewsDoesNotRepeatStorePrompt() {
+    @Test("the Overview store news makes no sandbox claim")
+    func storeNewsMakesNoSandboxClaim() {
         let news = StoreNews.bundled(appVersion: "0.0.0")
         #expect(!news.isEmpty)
-        #expect(!news.contains { $0.id == "store-catalog" })
-        #expect(!news.contains { $0.summary.contains("Browse signed forensic plugins") })
         for item in news {
             for phrase in Self.forbiddenSourcePhrases {
                 #expect(item.summary.range(of: phrase, options: .caseInsensitive) == nil)

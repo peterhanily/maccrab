@@ -22,6 +22,11 @@ enum StoreNews {
     static func bundled(appVersion: String) -> [StoreNewsItem] {
         [
             StoreNewsItem(
+                id: "store-catalog",
+                title: "Signed plugin catalog",
+                summary: "Browse the signed forensic-plugin catalog.",
+                badge: nil),
+            StoreNewsItem(
                 id: "whats-new",
                 title: "What\u{2019}s new in \(appVersion)",
                 summary: "Privacy-by-default enrichment (all network feeds off until you opt in), a richer forensics platform, and tighter detection tuning.",

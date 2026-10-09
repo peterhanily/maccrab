@@ -111,12 +111,34 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   being judged, and a held tick with no loss says so.
 
 ### Fixed
-- **The Overview no longer says plugin installs run fully sandboxed.** That
-  was not true: MacCrab's own plugins run with MacCrab's access, not in a
-  sandbox. The plugin store line on the Overview now says that MacCrab's own
-  plugins run with MacCrab's access and plugins from other publishers run
-  sandboxed, in all 14 languages, and the store news item under it that
-  repeated the old claim is gone.
+- **The alert inspector suggests a command that exists.** It showed
+  `maccrabctl trace from-alert <id>`, which maccrabctl does not have. The
+  section is now "Explain with maccrabctl" and shows `maccrabctl why <id>`.
+- **`maccrabctl why` explains sequence, graph and dashboard-authored rules.**
+  It searched only the top level of compiled_rules, so for a sequence or graph
+  rule's alert, including the kill-chain alerts, it asked whether the engine
+  was running and exited. It now looks in user_rules first, where the
+  dashboard's rules and overrides live, then in compiled_rules with its
+  sequences and graph folders. It prints a sequence rule's window, trigger and
+  steps, and a graph rule's nodes and edges. When no rule file has the alert's
+  id, it says so. Its help no longer claims it marks matched clauses, and it
+  says where alert IDs are shown.
+- **The Agent Traces explainer describes what the tab shows.** It said
+  expanding a trace showed tool calls and the causal-graph events that fired
+  during the span. Selecting a trace lists its spans with timing, parent
+  nesting and sanitised attributes.
+- **The Overview no longer says catalog installs run fully sandboxed.**
+  First-party plugins run without a sandbox profile; only third-party plugins
+  run in the deny-default sandbox. The Overview and the store's news card now
+  match that.
+- **`maccrabctl trace list` shows whole severity labels on a terminal.** It
+  cut colored labels to five characters and never reset the color. Piped
+  output is unchanged.
+- **The full supply-chain kill-chain rule starts on npm installs.** npm runs
+  as node, so the install step never matched `npm install`. It now also
+  matches node running the npm CLI with the install verb. The rule's
+  description now lists what its steps match, without a credential-harvesting
+  step it never had.
 - **`maccrabctl plugin` describes how plugins run correctly.** The help for
   `run` now says that MacCrab's own plugins run unsandboxed with the access
   of the terminal you run it from, and plugins from other publishers run
@@ -391,11 +413,14 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   the worker reserve for the write family and protected opens, lane routing by
   admission class, the coalesce-decision cost and a paced zero-lineage-loss
   run, printing BENCH-prefixed numbers in the test log.
-- **A release can be marked critical for older installs.** `MACCRAB_CRITICAL_BELOW=X`
-  makes `release.sh` write Sparkle 2's `<sparkle:criticalUpdate sparkle:version="X">`
-  into the appcast item, so installs below X see the update immediately and
-  cannot skip it, while newer installs are updated normally. The item validator
-  accepts only that shape, and the release fixtures cover it.
+- **Every release is critical for installs older than 1.22.0.** The appcast
+  generator writes Sparkle 2's `<sparkle:criticalUpdate sparkle:version="1.22.0">`
+  into each item, so those installs see the update immediately, outside the
+  phased rollout, and cannot skip it, while newer installs are updated
+  normally. `MACCRAB_CRITICAL_BELOW=X` raises the floor for one release, and
+  `release.sh` refuses a lower value before it builds anything. The item
+  validator rejects a marker that carries text, children, another attribute or
+  a malformed version, and the release fixtures cover it.
 - **A failed installed-host recording can be retried without moving root-owned
   files by hand.** A second `record-runtime` attempt died with
   `FileExistsError` on the first attempt's readiness directory, and its first

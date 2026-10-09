@@ -763,7 +763,7 @@ struct V2OverviewWorkspace: View {
     /// user into the signed catalog.
     private var storeStatusText: String {
         String(localized: "overview.storeBrowsePrompt",
-               defaultValue: "Browse signed forensic plugins from the catalog. MacCrab's own plugins run with MacCrab's access; plugins from other publishers run sandboxed.")
+               defaultValue: "Browse signed forensic plugins from the catalog.")
     }
 
     private func forensicsStat(_ value: String, _ label: String) -> some View {

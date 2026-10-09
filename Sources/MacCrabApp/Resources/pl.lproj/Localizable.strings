@@ -762,6 +762,7 @@
 "inspector.cves" = "CVE";
 "inspector.description" = "Opis";
 "inspector.detectionRule" = "Reguła wykrywania";
+"inspector.explainWithMaccrabctl" = "Wyjaśnij za pomocą maccrabctl";
 "inspector.identity" = "Tożsamość";
 "inspector.logic" = "Logika";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "Kliknij, aby zobaczyć wyjaśnienie i opcje naprawy";
 "overview.storeTitle" = "Sklep wtyczek";
 "overview.storeBrowse" = "Przeglądaj →";
-"overview.storeBrowsePrompt" = "Przeglądaj podpisane wtyczki forensyczne z katalogu. Własne wtyczki MacCrab działają z uprawnieniami MacCrab; wtyczki innych wydawców działają w piaskownicy.";
+"overview.storeBrowsePrompt" = "Przeglądaj podpisane wtyczki do analizy śledczej w katalogu.";
 "raveStore.thirdPartyCatalog.title" = "Podpisany katalog wtyczek trzecich";
 "raveStore.thirdPartyCatalog.body" = "Brak wtyczek trzecich w katalogu. Wbudowane skanery poniżej są dostarczane z MacCrab i uruchamiają się na tym Macu teraz — nie jest wymagana instalacja.";
 
@@ -1661,6 +1662,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "Usuń to wyciszenie — reguła zadziała ponownie przy następnym dopasowaniu";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "Rozwiązane i wyciszone alerty z ostatniego okresu przechowywania. Kliknij wiersz prawym przyciskiem, aby cofnąć wyciszenie lub usunąć, albo użyj przycisków inspektora.";
 "ui.V2AlertsWorkspace.restore" = "Przywróć";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "Uruchom to polecenie w Terminalu, aby zobaczyć, dlaczego wywołano ten alert:";
 "ui.V2AlertsWorkspace.suggested.actions" = "Sugerowane działania:";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "Wyciszone kampanie (%lld)";
 "ui.V2AlertsWorkspace.tactics" = "Taktyki:";
@@ -1747,7 +1749,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "Źródła informacji o zagrożeniach";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "Dwie grupy: **Wykryte narzędzia bezpieczeństwa** — inne oprogramowanie ochronne macOS zaobserwowane na tym urządzeniu (Objective-See, Little Snitch, komercyjne EDR itd.); **Skonfigurowani odbiorcy** — miejsca docelowe alertów z `daemon_config.json` / `notifications.json` (Splunk, Slack, S3 itd.). Stan odzwierciedla konfigurację, działanie lub instalację.";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "Ślad to łańcuch przyczynowy procesów, plików, sieci, mechanizmów trwałości, agentów AI i obiektów TCC uczestniczących w zdarzeniu o wysokiej ważności. Demon zakotwicza ślad, gdy AnchorDetector wybierze zdarzenie do zbadania (uruchomienie programu ładującego, zapis mechanizmu trwałości, dostęp do pliku poświadczeń itd.), i dodaje obiekty z tej samej linii pochodzenia. Kliknij węzeł po pełną tożsamość i rolę; przeciągnij, by zmienić położenie; wybierz układ na pasku narzędzi; prawy przycisk udostępnia kopiowanie i otwieranie w Zdarzeniach.";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Ślady agenta to spany W3C TRACEPARENT przyjęte przez lokalny odbiornik OTLP MacCrab od narzędzi programistycznych AI (Claude Code, Cursor, Codex, Continue, Windsurf). Jeden wiersz to jeden ślad, czyli linia pochodzenia wywołania modelu. Rozwinięcie pokazuje czasy spanów, wywołania narzędzi i zdarzenia grafu przyczynowego z tego okresu. Lista pozostaje pusta, dopóki nie włączysz odbiornika poniżej i narzędzie z obsługą OTel nie zacznie wysyłać do niego danych.";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "Ślady agenta to spany W3C TRACEPARENT przyjęte przez lokalny odbiornik OTLP MacCrab od narzędzi programistycznych AI (Claude Code, Cursor, Codex, Continue, Windsurf). Jeden wiersz to jeden ślad; po jego wybraniu wyświetla się lista spanów z czasami, zagnieżdżeniem według rodzica i atrybutami po sanityzacji. Lista pozostaje pusta, dopóki nie włączysz odbiornika poniżej i narzędzie z obsługą OTel nie zacznie wysyłać do niego danych.";
 "ui.V2InvestigationWorkspace.anchor" = "kotwica";
 "ui.V2InvestigationWorkspace.clear" = "Wyczyść";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "Wyczyść wszystkie filtry węzłów";

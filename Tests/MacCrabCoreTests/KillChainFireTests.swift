@@ -184,6 +184,19 @@ struct KillChainFireTests {
             file("/Users/t/Library/LaunchAgents/sc.plist", at: 1),
             net(at: 2),
         ]))
+        // npm is a Node script: a real `npm install` execs as node with the
+        // npm CLI path in its arguments.
+        #expect(try await fires("e1f2a3b4-0023-4000-b000-000000000023", [
+            proc("/usr/local/bin/node", cmd: "node /usr/local/bin/npm install evil", at: 0),
+            file("/Users/t/Library/LaunchAgents/sc.plist", at: 1),
+            net(at: 2),
+        ]))
+        // Any other node process must not start the chain.
+        #expect(!(try await fires("e1f2a3b4-0023-4000-b000-000000000023", [
+            proc("/usr/local/bin/node", cmd: "node /Users/t/app/server.js", at: 0),
+            file("/Users/t/Library/LaunchAgents/sc.plist", at: 1),
+            net(at: 2),
+        ])))
     }
 
     @Test("worm_self_propagation_signal fires: pkg-mgr descendant → cred read → registry egress")

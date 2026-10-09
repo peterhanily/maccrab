@@ -762,6 +762,7 @@
 "inspector.cves" = "CVE";
 "inspector.description" = "説明";
 "inspector.detectionRule" = "検出ルール";
+"inspector.explainWithMaccrabctl" = "maccrabctlで説明";
 "inspector.identity" = "識別情報";
 "inspector.logic" = "ロジック";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "クリックすると意味と対処方法が表示されます";
 "overview.storeTitle" = "プラグインストア";
 "overview.storeBrowse" = "参照 →";
-"overview.storeBrowsePrompt" = "カタログから署名済みのフォレンジックプラグインを参照します。MacCrab製のプラグインはMacCrabのアクセス権で実行され、他の発行元のプラグインはサンドボックス内で実行されます。";
+"overview.storeBrowsePrompt" = "カタログから署名済みのフォレンジックプラグインを参照します。";
 "raveStore.thirdPartyCatalog.title" = "署名済みサードパーティカタログ";
 "raveStore.thirdPartyCatalog.body" = "現在リストされているサードパーティプラグインはありません。以下の組み込みスキャナーはMacCrab内に付属しており、このMacで実行されます — インストール不要です。";
 
@@ -973,6 +974,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "この抑制を解除します。次に条件が一致するとルールが再び発火します";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "直近の保持期間内にある解決済み・抑制済みアラートです。行を右クリックして抑制解除や削除を行うか、インスペクタのボタンを使用してください。";
 "ui.V2AlertsWorkspace.restore" = "復元";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "このアラートが発生した理由を確認するには、ターミナルで次のコマンドを実行してください：";
 "ui.V2AlertsWorkspace.suggested.actions" = "推奨アクション：";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "抑制されたキャンペーン（%lld件）";
 "ui.V2AlertsWorkspace.tactics" = "戦術：";
@@ -1059,7 +1061,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "脅威インテリジェンスフィード";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "2つの表示があります。**検出されたセキュリティツール**は、MacCrabがこのMacで観測した他のmacOSセキュリティソフトウェア（Objective-See製品群、Little Snitch、商用EDRなど）です。**設定済みの出力先**は、`daemon_config.json`／`notifications.json`で設定したアラート送信先（Splunk、Slack、S3など）です。状態は「設定済み」「実行中」「インストール済み」を示します。";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "トレースは、重要度の高いイベントに関与するプロセス、ファイル、ネットワーク、永続化、AIエージェント、TCCの各エンティティの因果関係を表す連鎖です。AnchorDetectorが調査に値すると判断したイベント（ローダー実行、永続化書き込み、認証情報ファイルへのアクセスなど）をdaemonがトレースの起点とし、同じ系統で関与したエンティティを順次追加します。ノードをクリックすると識別情報と役割の全体を確認できます。ドラッグで配置を変え、ツールバーでレイアウトを切り替え、右クリックでコピーやイベント表示を行えます。";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "エージェントトレースは、MacCrabがループバックOTLPレシーバーを通じてAIコーディングツール（Claude Code、Cursor、Codex、Continue、Windsurf）から受信したW3C TRACEPARENTスパンです。各行は1つのトレース、つまりモデル呼び出しの系統を表します。展開すると、スパンの時間、ツール呼び出し、そのスパン中に発生した因果グラフのイベントを確認できます。下のレシーバーを有効にし、OTelを送信するツールが接続するまで空のままです。";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "エージェントトレースは、MacCrabがループバックOTLPレシーバーを通じてAIコーディングツール（Claude Code、Cursor、Codex、Continue、Windsurf）から受信したW3C TRACEPARENTスパンです。各行は1つのトレースを表します。選択すると、そのスパンが時間、親子の階層、サニタイズ済みの属性とともに一覧表示されます。下のレシーバーを有効にし、OTelを送信するツールが接続するまで空のままです。";
 "ui.V2InvestigationWorkspace.anchor" = "起点";
 "ui.V2InvestigationWorkspace.clear" = "解除";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "すべてのノードフィルターを解除";

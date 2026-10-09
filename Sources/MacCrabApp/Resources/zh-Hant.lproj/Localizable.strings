@@ -762,6 +762,7 @@
 "inspector.cves" = "CVEs";
 "inspector.description" = "說明";
 "inspector.detectionRule" = "偵測規則";
+"inspector.explainWithMaccrabctl" = "使用 maccrabctl 解釋";
 "inspector.identity" = "身分";
 "inspector.logic" = "邏輯";
 "inspector.mitre" = "MITRE";
@@ -824,7 +825,7 @@
 "overview.factorExpandHint" = "點按以查看意義及解決方式";
 "overview.storeTitle" = "外掛模組市集";
 "overview.storeBrowse" = "瀏覽 →";
-"overview.storeBrowsePrompt" = "瀏覽目錄中的已簽署鑑識外掛模組。MacCrab 自家的外掛模組使用 MacCrab 的存取權限執行；其他發佈者的外掛模組在沙箱中執行。";
+"overview.storeBrowsePrompt" = "瀏覽來自目錄的已簽署鑑識外掛模組。";
 "raveStore.thirdPartyCatalog.title" = "已簽署的第三方目錄";
 "raveStore.thirdPartyCatalog.body" = "目前未列出第三方外掛模組。下方的內建掃描器內建於 MacCrab 內，現在就在此 Mac 上執行——無需安裝。";
 
@@ -973,6 +974,7 @@
 "ui.V2AlertsWorkspace.remove.this.suppression.the.rule.will.fire" = "移除此抑制；下次符合時規則將再次觸發";
 "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention" = "近期保留時段內已解決與已抑制的警示。以右鍵按一下資料列可解除抑制或刪除，也可使用檢查器按鈕。";
 "ui.V2AlertsWorkspace.restore" = "還原";
+"ui.V2AlertsWorkspace.run.this.in.terminal.to.see.why" = "若要查看此警示觸發的原因，請在終端機執行此指令：";
 "ui.V2AlertsWorkspace.suggested.actions" = "建議動作：";
 "ui.V2AlertsWorkspace.suppressed.campaigns" = "已抑制的活動（%lld）";
 "ui.V2AlertsWorkspace.tactics" = "戰術：";
@@ -1059,7 +1061,7 @@
 "ui.V2IntelligenceWorkspace.threat.intel.feeds" = "威脅情報來源";
 "ui.V2IntelligenceWorkspace.two.surfaces.detected.security.tools.other.macos" = "此處分為兩部分：**偵測到的安全工具**（MacCrab 在此 Mac 上觀察到的其他 macOS 安全軟體，例如 Objective-See 工具集、Little Snitch、商用 EDR 等）與**已設定的輸出目的地**（在 `daemon_config.json` / `notifications.json` 中設定的警報目的地，例如 Splunk、Slack、S3 等）。狀態表示「已設定」、「執行中」或「已安裝」。";
 "ui.V2InvestigationWorkspace.a.trace.is.the.causal.chain.of" = "追蹤是參與高嚴重性事件的程序、檔案、網路、持續性、AI 代理與 TCC 實體組成的因果鏈。當 AnchorDetector 判斷事件值得調查（例如載入器執行、持續性寫入、憑證檔案存取）時，背景程式會建立追蹤錨點，並持續納入同一譜系中涉及的實體。按一下節點可查看完整識別資訊與角色；拖移可重新排列；工具列可切換配置；右鍵選單提供複製及在事件中開啟等操作。";
-"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "代理追蹤是 MacCrab 透過回送 OTLP 接收器從 AI 程式設計工具（Claude Code、Cursor、Codex、Continue、Windsurf）接收的 W3C TRACEPARENT 跨距。每列代表一條追蹤，即一次模型呼叫譜系；展開可查看跨距時間、工具呼叫，以及跨距期間觸發的因果圖事件。啟用下方接收器並執行向其傳送 OTel 資料的工具後，此處才會顯示內容。";
+"ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab" = "代理追蹤是 MacCrab 透過回送 OTLP 接收器從 AI 程式設計工具（Claude Code、Cursor、Codex、Continue、Windsurf）接收的 W3C TRACEPARENT 跨距。每列代表一條追蹤；選取後會列出其跨距及各自的時間、父層巢狀結構和已淨化的屬性。啟用下方接收器並執行向其傳送 OTel 資料的工具後，此處才會顯示內容。";
 "ui.V2InvestigationWorkspace.anchor" = "錨點";
 "ui.V2InvestigationWorkspace.clear" = "清除";
 "ui.V2InvestigationWorkspace.clear.all.node.filters" = "清除所有節點篩選條件";

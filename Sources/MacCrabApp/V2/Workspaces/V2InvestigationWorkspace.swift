@@ -2107,7 +2107,7 @@ struct V2InvestigationWorkspace: View {
                 Text(String(localized: "ui.V2InvestigationWorkspace.what.appears.here", defaultValue: "What appears here?"))
                     .font(V2Theme.sectionTitle())
                     .foregroundStyle(V2Theme.primaryText)
-                Text(String(localized: "ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab", defaultValue: "Agent Traces are W3C TRACEPARENT spans MacCrab ingested over its loopback OTLP receiver from AI coding tools (Claude Code, Cursor, Codex, Continue, Windsurf). Each row is one trace = one model-call lineage; expanding shows span timing + tool calls + the causal-graph events that fired during the span. Empty until you enable the receiver below and an OTel-emitting tool runs against it."))
+                Text(String(localized: "ui.V2InvestigationWorkspace.agent.traces.are.w3c.traceparent.spans.maccrab", defaultValue: "Agent Traces are W3C TRACEPARENT spans MacCrab ingested over its loopback OTLP receiver from AI coding tools (Claude Code, Cursor, Codex, Continue, Windsurf). Each row is one trace; selecting it lists its spans with timing, parent nesting and sanitised attributes. Empty until you enable the receiver below and an OTel-emitting tool runs against it."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
