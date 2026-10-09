@@ -807,7 +807,7 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     // ===================================================================
-    // Forensics plugins — third-party scanners installed by the
+    // Forensics plugins installed by the
     // operator. The on-the-wire MCP names use the customer-shaped
     // `forensics.*` namespace; the legacy `tierb.*` names from
     // v1.16 are kept as silent aliases through v1.18 so existing
@@ -815,7 +815,7 @@ let tools: [[String: Any]] = [
     // ===================================================================
     [
         "name": "forensics_list_installed_plugins",
-        "description": "List installed third-party scanners with their verification status. Returns plugins_root, trusted_key_count, revoked_key_count, verified + failed buckets. Verified plugins include manifest version + publisher key prefix; failed plugins include reason (e.g. revoked key).",
+        "description": "List installed plugins with their verification status. Returns plugins_root, trusted_key_count, revoked_key_count, verified + failed buckets. Verified plugins include manifest version + publisher key prefix; failed plugins include reason (e.g. revoked key).",
         "inputSchema": [
             "type": "object",
             "properties": [:] as [String: Any],
@@ -823,7 +823,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "forensics_verify_installed_plugins",
-        "description": "Force re-verification of every installed third-party scanner against the current trust + revocation lists. Same payload as forensics_list_installed_plugins but bypasses the bootstrap cache.",
+        "description": "Force re-verification of every installed plugin against the current trust + revocation lists. Same payload as forensics_list_installed_plugins but bypasses the bootstrap cache.",
         "inputSchema": [
             "type": "object",
             "properties": [:] as [String: Any],
@@ -831,7 +831,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "forensics_check_plugin_updates",
-        "description": "Non-mutating catalog lookup. For each installed third-party scanner, report installed_version, the catalog's available_version, whether an update_available, and pin state (is_pinned / pinned_to). It may fetch the signed rave catalog over the network and therefore requires the human-enabled 'config' capability. Returns {plugins:[...], count}.",
+        "description": "Non-mutating catalog lookup. For each installed plugin, report installed_version, the catalog's available_version, whether an update_available, and pin state (is_pinned / pinned_to). It may fetch the signed rave catalog over the network and therefore requires the human-enabled 'config' capability. Returns {plugins:[...], count}.",
         "inputSchema": [
             "type": "object",
             "properties": [:] as [String: Any],
@@ -869,7 +869,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "forensics_search_catalog",
-        "description": "Non-mutating catalog lookup. Search the signed rave plugin catalog for INSTALLABLE third-party scanners (Ed25519-verified before listing), like `maccrabctl plugin search`. It may fetch the catalog over the network and therefore requires the human-enabled 'config' capability. Returns matches; an empty query lists the catalog.",
+        "description": "Non-mutating catalog lookup. Search the signed rave plugin catalog for INSTALLABLE plugins (Ed25519-verified before listing), like `maccrabctl plugin search`. It may fetch the catalog over the network and therefore requires the human-enabled 'config' capability. Returns matches; an empty query lists the catalog.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -879,7 +879,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "forensics_install_plugin",
-        "description": "Install a third-party scanner from the signed catalog by id, via the FULL verified install path (Ed25519 catalog+entry verify, artifact sha-pin, signer-key pin, anti-rollback, revocation check). Requires the 'response' capability AND confirm:true. Audit-logged. (Local sideload stays CLI-only by design.)",
+        "description": "Install a plugin from the signed catalog by id, via the FULL verified install path (Ed25519 catalog+entry verify, artifact sha-pin, signer-key pin, anti-rollback, revocation check). Requires the 'response' capability AND confirm:true. Audit-logged. (Local sideload stays CLI-only by design.)",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -891,7 +891,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "forensics_uninstall_plugin",
-        "description": "Remove an installed third-party scanner from this Mac, like `maccrabctl plugin uninstall`. Requires the 'response' capability AND confirm:true. Audit-logged.",
+        "description": "Remove an installed plugin from this Mac, like `maccrabctl plugin uninstall`. Requires the 'response' capability AND confirm:true. Audit-logged.",
         "inputSchema": [
             "type": "object",
             "properties": [

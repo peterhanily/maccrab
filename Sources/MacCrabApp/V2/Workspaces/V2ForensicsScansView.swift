@@ -62,8 +62,12 @@ struct V2ForensicsScansView: View {
     // Update surfacing (v1.19.3): catalog current_version per installed id, so a
     // newer version shows an "Update" pill here, not only in the Catalog tab. The
     // update itself reuses the Catalog's verified consent flow (RaveInstallConsentSheet
-    // → bundled maccrabctl install --force). Empty when offline / catalog unreachable.
+    // → bundled maccrabctl install --force). Only entries the catalog offers
+    // (status "active"). Empty when offline / catalog unreachable.
     @State private var availableVersions: [String: String] = [:]
+    // Every id the verified catalog lists, whatever its status: the Store
+    // provenance check. Empty when offline / catalog unreachable.
+    @State private var catalogIDs: Set<String> = []
     @State private var installLink: RaveInstallLink? = nil
     @State private var pendingIsUpdate = false
     @State private var pendingInstalledVersion: String? = nil
@@ -527,7 +531,7 @@ struct V2ForensicsScansView: View {
             .appendingPathComponent("plugin_receipts")
         let receiptProv = PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
         if receiptProv == .store { return .store }
-        if availableVersions[p.pluginID] != nil { return .store }  // in the signed catalog
+        if catalogIDs.contains(p.pluginID) { return .store }  // in the signed catalog
         return receiptProv  // .thirdParty (sideloaded)
     }
 
@@ -927,17 +931,32 @@ struct V2ForensicsScansView: View {
         // current_version per id (best-effort; empty when offline so no badges
         // show). The update itself reuses the Catalog tab's verified consent
         // flow. Runs AFTER loading clears so a hanging fetch can't block the list.
+        // Only entries the catalog offers (status "active") get an Update, as in
+        // the store; any listed entry still counts for Store provenance.
         if !visible.isEmpty {
             do {
-                var av: [String: String] = [:]
-                for e in try await RaveCatalogClient().fetchEntries() { av[e.id] = e.currentVersion }
-                availableVersions = av
+                let index = Self.catalogIndex(try await RaveCatalogClient().fetchEntries())
+                catalogIDs = index.ids
+                availableVersions = index.offeredVersions
             } catch {
+                catalogIDs = []
                 availableVersions = [:]
             }
         } else {
+            catalogIDs = []
             availableVersions = [:]
         }
+    }
+
+    /// From the verified catalog: every id it lists, for the Store provenance
+    /// check, and the current version of each entry it offers (status
+    /// "active"), for the Update badge and action. An archived, unreachable or
+    /// revoked entry still shows that a plugin came from the store, but is
+    /// never offered as an update.
+    static func catalogIndex(_ entries: [RaveCatalogEntry]) -> (ids: Set<String>, offeredVersions: [String: String]) {
+        var versions: [String: String] = [:]
+        for e in RaveCatalogClient.offeredEntries(entries) { versions[e.id] = e.currentVersion }
+        return (Set(entries.map(\.id)), versions)
     }
 
     /// Load the local scan archive (the "Recently run" list). Extracted so the

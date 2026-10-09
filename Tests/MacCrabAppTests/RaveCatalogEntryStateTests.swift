@@ -9,6 +9,8 @@
 //     artifact hash is still a placeholder — so NO pill ("operator-signed
 //     binary required").
 //   - pre-release entries show status, not a live pill.
+//   - an entry the signed index does not mark "active" (including one with no
+//     status at all) is not offered, the same rule as the store's list.
 //   - version-floor-blocked / revoked entries show their reason, not a pill.
 //   - Revocation takes precedence over everything else.
 //
@@ -33,7 +35,7 @@ struct RaveCatalogEntryStateTests {
         channel: String = "official",
         trustTier: String = "first-party",
         signerPin: String = pin,
-        status: String = "official",
+        status: String = "active",
         minVersion: String? = nil
     ) -> RaveCatalogEntry {
         RaveCatalogEntry(
@@ -120,6 +122,53 @@ struct RaveCatalogEntryStateTests {
         #expect(st.disabledReason?.contains("Pre-release") == true)
     }
 
+    // MARK: - Not offered (status other than "active")
+
+    @Test("every status but exact \"active\" → not offered, no pill, even when pinned + floor-pass")
+    func nonActiveStatusNotOffered() {
+        // "" is what parseCatalog yields for an entry without a status.
+        for status in ["", "official", "archived", "unreachable_temporary",
+                       "unreachable_extended", "revoked", "ACTIVE", " active"] {
+            let st = RaveCatalogEntryState.compute(
+                entry: Self.entry(status: status), revocations: nil, floorCheck: Self.floorOK
+            )
+            #expect(st.installability == .notOffered, "status '\(status)' must not be offered")
+            #expect(!st.showsInstallPill)
+            #expect(st.disabledReason?.isEmpty == false)
+        }
+    }
+
+    @Test("an entry the catalog does not offer says so even when the version floor also fails")
+    func notOfferedBeatsFloor() {
+        // A newer MacCrab would not make these installable, so the floor
+        // refusal ("needs newer MacCrab") must not be what the user sees.
+        for status in ["", "archived", "unreachable_extended"] {
+            let st = RaveCatalogEntryState.compute(
+                entry: Self.entry(status: status, minVersion: "9.9.9"),
+                revocations: nil, floorCheck: Self.floorBlocked
+            )
+            #expect(st.installability == .notOffered, "status '\(status)'")
+            #expect(!st.showsInstallPill)
+        }
+        let pre = RaveCatalogEntryState.compute(
+            entry: Self.entry(status: "pre-release", minVersion: "9.9.9"),
+            revocations: nil, floorCheck: Self.floorBlocked
+        )
+        #expect(pre.installability == .preRelease)
+    }
+
+    @Test("a revocation still wins over a not-offered status")
+    func revocationBeatsNotOffered() {
+        let list = Self.revocationList([
+            Self.rev(id: "com.maccrab.hosts-collector", scope: .allVersions)
+        ])
+        let st = RaveCatalogEntryState.compute(
+            entry: Self.entry(status: ""), revocations: list, floorCheck: Self.floorOK
+        )
+        #expect(st.isRevoked)
+        #expect(!st.showsInstallPill)
+    }
+
     // MARK: - Version floor (fail-closed, reason surfaced)
 
     @Test("version-floor refusal → blocked, no pill, reason carried")
@@ -183,7 +232,7 @@ struct RaveCatalogEntryStateTests {
     @Test("the no-pill cases all withhold the live pill (no install can be faked)")
     func noFakeInstall() {
         let cases: [RaveCatalogEntryState.Installability] = [
-            .awaitingSignedBinary, .preRelease,
+            .awaitingSignedBinary, .preRelease, .notOffered,
             .versionFloorBlocked(reason: "x"), .revoked(reason: "x"),
         ]
         for inst in cases {

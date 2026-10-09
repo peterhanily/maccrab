@@ -25,6 +25,10 @@ public struct RaveCatalogEntry: Identifiable, Hashable, Sendable {
     /// confusable-name guard (a non-first-party name confusably close to a
     /// first-party one is flagged as impersonation).
     public let displayName: String
+    /// The signed catalog's one-line `short_description`, shown under the name
+    /// in the install consent sheet. nil when the entry omits it, so an older
+    /// or newer index still parses.
+    public var shortDescription: String? = nil
     public let currentVersion: String
     public let channel: String      // "official" / "contrib"
     public let trustTier: String    // "first-party" / "verified-community" / "unverified"
@@ -33,12 +37,20 @@ public struct RaveCatalogEntry: Identifiable, Hashable, Sendable {
     /// endorsed by the signed catalog. Empty when the catalog entry omits it
     /// (pre-ceremony catalogs / pre-release entries).
     public let signerPublicKeySHA256: String
-    /// Entry maturity ("pre-release" vs official). Surfaced so the dashboard
-    /// can badge pre-release entries and explain the unpinned-install caveat.
+    /// The signed index's `status` ("active", "pre-release", "archived", ...).
+    /// Only "active" entries are offered for install. Empty when the entry
+    /// omits it, so a malformed entry is never offered (fail closed).
     public let status: String
     public let category: String?
     public let tags: [String]
     public let minMaccrabVersion: String?
+    /// Further signed index fields (`kind`, `privacy_class`,
+    /// `requires_encrypted_scan`, `runtime`). nil when the entry omits them, so
+    /// an older or newer index still parses.
+    public var kind: String? = nil
+    public var privacyClass: String? = nil
+    public var requiresEncryptedScan: Bool? = nil
+    public var runtime: String? = nil
 }
 
 public enum RaveCatalogError: Error, CustomStringConvertible {
@@ -85,6 +97,12 @@ public actor RaveCatalogClient {
     /// S2-AR anti-rollback high-water-mark store. Default location is
     /// <app-support>/MacCrab/rave_trust_state.json; overridable for tests.
     private let trustState: RaveTrustStateStore
+
+    /// SHA-256 (lowercase hex) of the key that verified the last catalog
+    /// `fetchEntries()` returned, for the install consent sheet. nil until a
+    /// catalog has verified. A DEBUG build with a catalog-key override records
+    /// the override key here, not the bundled one.
+    public private(set) var verifiedCatalogKeySHA256: String?
 
     public init(trustState: RaveTrustStateStore? = nil) {
         if let s = trustState {
@@ -219,7 +237,9 @@ public actor RaveCatalogClient {
             // now is a pre-serial catalog being replayed. Reject the regression.
             throw RaveCatalogError.catalogSerialMissing(lastAccepted: lastAccepted)
         }
-        return try parseCatalog(data: data)
+        let entries = try Self.parseCatalog(data: data)
+        verifiedCatalogKeySHA256 = Self.keyFingerprint(key)
+        return entries
     }
 
     /// O2 — fetch + Ed25519-verify the signed revocation list, enforce the
@@ -399,16 +419,7 @@ public actor RaveCatalogClient {
             return key
         }
         // Bundle key — shipped via Sources/MacCrabApp/Resources/rave-keys/catalog.pub
-        let candidates: [URL?] = [
-            Bundle.main.url(forResource: "catalog", withExtension: "pub"),
-            Bundle.main.resourceURL?
-                .appendingPathComponent("MacCrab_MacCrabApp.bundle")
-                .appendingPathComponent("catalog.pub"),
-            Bundle.main.resourceURL?
-                .appendingPathComponent("rave-keys")
-                .appendingPathComponent("catalog.pub"),
-        ]
-        for url in candidates.compactMap({ $0 }) {
+        for url in Self.bundledKeyFileURLs(name: "catalog", ext: "pub") {
             guard let data = try? Data(contentsOf: url), data.count == 32 else { continue }
             if let key = try? Curve25519.Signing.PublicKey(rawRepresentation: data) {
                 return key
@@ -417,7 +428,32 @@ public actor RaveCatalogClient {
         throw RaveCatalogError.noCatalogKey
     }
 
-    private func parseCatalog(data: Data) throws -> [RaveCatalogEntry] {
+    /// Where a file from Resources/rave-keys/ can be in a built app, in lookup
+    /// order: the main bundle's own resources, SwiftPM's MacCrab_MacCrabApp.bundle
+    /// inside them (the shipped layout: `.process` flattens rave-keys/ into it),
+    /// then a rave-keys/ folder. Bundle.module is not used: its accessor calls
+    /// fatalError in the shipped app layout.
+    nonisolated static func bundledKeyFileURLs(name: String, ext: String, in bundle: Bundle = .main) -> [URL] {
+        let file = "\(name).\(ext)"
+        let candidates: [URL?] = [
+            bundle.url(forResource: name, withExtension: ext),
+            bundle.resourceURL?
+                .appendingPathComponent("MacCrab_MacCrabApp.bundle")
+                .appendingPathComponent(file),
+            bundle.resourceURL?
+                .appendingPathComponent("rave-keys")
+                .appendingPathComponent(file),
+        ]
+        return candidates.compactMap { $0 }
+    }
+
+    /// SHA-256 (lowercase hex) of a catalog signing key's raw 32 bytes, the same
+    /// form rave-keys/catalog.fingerprint is shipped in.
+    nonisolated static func keyFingerprint(_ key: Curve25519.Signing.PublicKey) -> String {
+        SHA256.hash(data: key.rawRepresentation).map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated static func parseCatalog(data: Data) throws -> [RaveCatalogEntry] {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let plugins = json["plugins"] as? [String: [String: Any]] else {
             throw RaveCatalogError.parseFailed(reason: "missing top-level plugins map")
@@ -429,15 +465,20 @@ public actor RaveCatalogClient {
             entries.append(RaveCatalogEntry(
                 id: id,
                 displayName: (raw["display_name"] as? String) ?? id,
+                shortDescription: raw["short_description"] as? String,
                 currentVersion: current,
                 channel: (raw["channel"] as? String) ?? "official",
                 trustTier: (raw["trust_tier"] as? String) ?? "unverified",
                 signerIdentity: (raw["signer_identity"] as? String) ?? "",
                 signerPublicKeySHA256: (raw["signer_public_key_sha256"] as? String)?.lowercased() ?? "",
-                status: (raw["status"] as? String) ?? "official",
+                status: (raw["status"] as? String) ?? "",
                 category: metadata["category"] as? String,
                 tags: (metadata["tags"] as? [String]) ?? [],
-                minMaccrabVersion: metadata["min_maccrab_version"] as? String
+                minMaccrabVersion: metadata["min_maccrab_version"] as? String,
+                kind: raw["kind"] as? String,
+                privacyClass: raw["privacy_class"] as? String,
+                requiresEncryptedScan: raw["requires_encrypted_scan"] as? Bool,
+                runtime: raw["runtime"] as? String
             ))
         }
         return entries.sorted { $0.id < $1.id }
@@ -448,8 +489,11 @@ public actor RaveCatalogClient {
     /// website's go-live filter (maccrab-rave site/build.sh). Pre-release /
     /// placeholder / official-but-not-active / not-yet-signed entries are NOT
     /// offered (the browser shows its verified-empty pane when none are active).
-    /// This is a display filter ONLY — it does not touch any signature / serial /
-    /// installability trust gate; the install path fail-closes on its own.
+    /// This is a display filter ONLY — it does not touch any signature / serial
+    /// trust gate. RaveCatalogEntryState.compute applies the same "active" rule
+    /// to every install path in the app (store, Forensics scans update,
+    /// maccrab:// link). `maccrabctl plugin install` / `update` and the MCP
+    /// install tools, which run maccrabctl, do not apply it yet.
     ///
     /// Pure + nonisolated so the SwiftUI view's `offeredEntries` computed var and
     /// the unit tests share one definition.
