@@ -270,7 +270,9 @@ CONTAINMENT_RUNS = (
 )
 RUNTIME_WORKLOAD_EXECUTORS = (
     "scripts/runtime-qualification-workload.sh",
+    "scripts/runtime-workload-directories.py",
     "scripts/test-otlp-curl.sh",
+    "scripts/otlp-smoke.py",
 )
 RUNTIME_RECORDER_SCHEMA = "com.maccrab.installed-host-recorder.v2"
 RUNTIME_OBSERVATION_SCHEMA = "com.maccrab.installed-host-observation.v1"
@@ -1854,6 +1856,80 @@ def send_live_rule_reload_probe(*, target_pid: int, offset: int) -> Dict[str, An
     }
 
 
+def workload_otlp_identity(output: str) -> Tuple[str, str]:
+    """Read exactly one emitted/accepted identity, never a latest-row heuristic."""
+    identities = re.findall(
+        r"^OTLP_IDENTITY: trace_id=([0-9a-f]{32}) span_id=([0-9a-f]{16}) secret_test=0$",
+        output, re.MULTILINE,
+    )
+    accepted = re.findall(
+        r"^OTLP_ACCEPTED: trace_id=([0-9a-f]{32}) span_id=([0-9a-f]{16}) persistence_proven=false$",
+        output, re.MULTILINE,
+    )
+    if len(identities) != 1 or accepted != identities or any(int(value, 16) == 0 for value in identities[0]):
+        fail("workload lacks one exact emitted-and-accepted OTLP span identity")
+    return identities[0]
+
+
+def validate_workload_otlp_persistence(row: Mapping[str, Any]) -> None:
+    output = string_value(row.get("output"), "workload complete output")
+    if sha256_bytes(output.encode("utf-8")) != row.get("output_sha256"):
+        fail("workload complete output does not match its digest")
+    trace_id, span_id = workload_otlp_identity(output)
+    proof = object_value(row.get("otlp_persistence"), "workload.otlp_persistence")
+    if set(proof) != {"trace_id", "span_id", "matched_rows", "persistence_proven",
+                      "sanitizer_verified", "database", "observed_at"}:
+        fail("exact OTLP persistence proof inventory is incomplete or unknown")
+    if proof.get("trace_id") != trace_id or proof.get("span_id") != span_id:
+        fail("OTLP persistence proof does not match the emitted exact trace/span")
+    if int_value(proof.get("matched_rows"), "OTLP matched_rows") != 1:
+        fail("OTLP persistence proof must match exactly one row")
+    require_true(proof.get("persistence_proven"), "OTLP persistence_proven")
+    if bool_value(proof.get("sanitizer_verified"), "OTLP sanitizer_verified"):
+        fail("ordinary workload must not claim unperformed attribute sanitization verification")
+    if parse_time(proof.get("observed_at"), "OTLP proof observed_at") < parse_time(row.get("completed_at"), "workload.completed_at"):
+        fail("OTLP persistence proof predates workload completion")
+    database = object_value(proof.get("database"), "OTLP database")
+    if set(database) != {"path", "owner_uid", "mode", "device", "inode", "read_only", "no_follow"}:
+        fail("OTLP database identity inventory is incomplete or unknown")
+    path = pathlib.Path(string_value(database.get("path"), "OTLP database path"))
+    if not path.is_absolute() or path.name != "traces.db":
+        fail("OTLP proof must identify an absolute traces.db path")
+    if int_value(database.get("owner_uid"), "OTLP database owner") != 0:
+        fail("installed OTLP persistence proof requires a root-owned database")
+    if int_value(database.get("mode"), "OTLP database mode") & 0o077:
+        fail("installed OTLP database must remain private")
+    int_value(database.get("device"), "OTLP database device", minimum=1)
+    int_value(database.get("inode"), "OTLP database inode", minimum=1)
+    require_true(database.get("read_only"), "OTLP database read_only")
+    require_true(database.get("no_follow"), "OTLP database no_follow")
+
+
+def record_workload_otlp_persistence(
+    root: pathlib.Path, data_dirs: Sequence[pathlib.Path], output: str,
+) -> Dict[str, Any]:
+    trace_id, span_id = workload_otlp_identity(output)
+    paths = [directory / "traces.db" for directory in data_dirs
+             if (directory / "traces.db").exists() or (directory / "traces.db").is_symlink()]
+    if len(paths) != 1:
+        fail("exact OTLP persistence proof requires one unambiguous traces.db")
+    command = [sys.executable, "-I", "-B", str(root / "scripts/otlp-smoke.py"),
+               "--verify-only", "--trace-id", trace_id, "--span-id", span_id,
+               "--database", str(paths[0])]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False,
+                                   timeout=10, cwd=root)
+    except (OSError, subprocess.TimeoutExpired):
+        fail("exact OTLP persistence query failed or exceeded its deadline")
+    if completed.returncode != 0:
+        fail("exact OTLP persistence query failed; no persistence claim accepted")
+    try:
+        proof = object_value(json.loads(completed.stdout), "OTLP query output")
+    except json.JSONDecodeError:
+        fail("exact OTLP query did not return structured evidence")
+    return {**proof, "observed_at": utc_now()}
+
+
 def validate_recorder_probe_evidence(
     raw: Any, *, source_root: pathlib.Path,
     expected_preinstall_clean_ci: Mapping[str, Any],
@@ -1973,6 +2049,7 @@ def validate_recorder_probe_evidence(
                 )
                 if row.get("sequence_path_isolation") != expected_isolation:
                     fail("workload stable-sequence path isolation does not reconcile")
+                validate_workload_otlp_persistence(row)
         if name == "rule_reload_log":
             if "output" not in row:
                 fail("live rule-reload evidence must embed the complete log transcript")
@@ -9423,6 +9500,10 @@ def live_runtime_recording(
             "drain_offset_seconds": BURST_DRAIN_OFFSET_SECONDS,
             "sequence_path_isolation": workload_isolation,
             "alert_investigation": workload_alert_proof,
+            "output": workload_stdout + workload_stderr,
+            "otlp_persistence": record_workload_otlp_persistence(
+                root, data_dirs, workload_stdout + workload_stderr,
+            ),
         },
         "disk_diagnostic_log": disk_log,
         "storage_convergence_log": vacuum_log,

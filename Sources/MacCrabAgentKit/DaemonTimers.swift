@@ -2005,11 +2005,11 @@ enum DaemonTimers {
             repeating: .milliseconds(100),
             leeway: .milliseconds(25)
         )
-        deferredEnrichmentTimer.setEventHandler {
-            timerLifecycle.submit(label: "deferred-enrichment-drain") {
+        deferredEnrichmentTimer.setEventHandler(handler:
+            DeferredEnrichmentQuietTimer.makeEventHandler(lifecycle: timerLifecycle) {
                 await DeferredEnrichmentDispatcher.drainAvailable(state: state)
             }
-        }
+        )
         deferredEnrichmentTimer.resume()
         @Sendable func liveEventsFamilyCapMiB() -> Int {
             let transition = state.legacyEvidenceTransitionBudget.snapshot()
@@ -3272,13 +3272,14 @@ enum DaemonTimers {
             // ~1 GB of NSConcreteData into long-running daemons.
             autoreleasepool {
                 let sysextHasFDA = probeSysextFDA()
-                let nowUnix = Date().timeIntervalSince1970
+                let heartbeatClock = engineIdentity.heartbeatClockSample()
+                let nowUnix = heartbeatClock.writtenAtUnix
                 let uptime = Int(Date().timeIntervalSince(startTime))
                 let payload: [String: Any] = [
                     "written_at_unix": nowUnix,
                     "engine_pid": engineIdentity.pid,
                     "engine_started_at_unix": engineIdentity.startedAtUnix,
-                    "engine_uptime_seconds": engineIdentity.uptimeSeconds,
+                    "engine_uptime_seconds": heartbeatClock.engineUptimeSeconds,
                     "engine_version": engineIdentity.version,
                     "engine_build": engineIdentity.build,
                     "uptime_seconds": uptime,
@@ -3357,7 +3358,8 @@ enum DaemonTimers {
             // (where Unix perms + TCC both apply).
             let sysextHasFDA = probeSysextFDA()
 
-            let nowUnix = Date().timeIntervalSince1970
+            let collectionClock = engineIdentity.heartbeatClockSample()
+            let nowUnix = collectionClock.writtenAtUnix
             let uptime = Int(Date().timeIntervalSince(startTime))
             let events = eventCount()
             let alerts = alertCount()
@@ -4899,11 +4901,14 @@ enum DaemonTimers {
                 ] as [String: Any]
             }
 
+            // Collection-start clocks stay paired throughout assembly. Final
+            // publication time/latency is added after every awaited snapshot.
             var payload: [String: Any] = [
-                "written_at_unix": nowUnix,
+                "written_at_unix": collectionClock.writtenAtUnix,
+                "heartbeat_collection_started_at_unix": collectionClock.writtenAtUnix,
                 "engine_pid": engineIdentity.pid,
                 "engine_started_at_unix": engineIdentity.startedAtUnix,
-                "engine_uptime_seconds": engineIdentity.uptimeSeconds,
+                "engine_uptime_seconds": collectionClock.engineUptimeSeconds,
                 "engine_version": engineIdentity.version,
                 "engine_build": engineIdentity.build,
                 "llm": llmHealthDict,
@@ -5335,6 +5340,14 @@ enum DaemonTimers {
                         // is unreadable for some reason; next tick will retry.
                     }
                 }
+            }
+            // No actor hops follow this paired sample before heartbeat output.
+            // Include late receiver-health/metrics work in collection latency.
+            // Existing readers must still see the age of collection, not a
+            // freshly stamped wall time hiding stale sensor/counter snapshots.
+            let heartbeatClock = engineIdentity.heartbeatClockSample()
+            for (key, value) in heartbeatClock.completedCollectionFields(since: collectionClock) {
+                payload[key] = value
             }
             guard let data = autoreleasepool(invoking: { () -> Data? in
                 try? JSONSerialization.data(

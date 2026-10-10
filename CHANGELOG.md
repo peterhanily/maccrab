@@ -6,6 +6,13 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [1.22.6] — 2026-10-09
 
 ### Added
+- **Diagnostic coverage checks actual storage bindings and quiet-timer callbacks.**
+  Regression fixtures cover reopen without policy writes, failed saves without
+  reloads, and late enrichment completion replayed once without another event.
+- **Rich heartbeats expose collection latency separately from publication time.**
+  Wall time and engine uptime are sampled together at collection start; a
+  separate publication timestamp includes delayed health reads without making
+  their old data appear fresh.
 - **The heartbeat separates intentional sensor filtering from loss.** New keys
   `es_intentionally_filtered_on_worker_by_type` and
   `es_coalesced_on_worker_by_type` count the worker-stage policy rejects and
@@ -36,6 +43,15 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   after a size pause.
 
 ### Changed
+- **Security posture distinguishes unknown from healthy.** Missing screen-lock
+  preferences and unverified XProtect definition currency no longer receive
+  healthy credit. Engine readiness uses fresh matching heartbeat identity and
+  native-sensor health, not merely a running process name.
+- **Runtime audit checks bind to their own fixtures.** Workload cleanup requires
+  a successfully created directory identity; telemetry verification uses exact
+  emitted span IDs, bounded requests and read-only queries. Encrypted attributes
+  cannot be mistaken for proof of redaction. Journal recovery checks exact
+  retained identities, and async test gates have bounded cancellation paths.
 - **Sequence pending-step admission avoids repeated whole-bucket copies and
   accounting scans.** Unique appends update their admission ledger and cached
   checkpoint weight directly. Duplicate checks, pressure retirement, ordering

@@ -50,6 +50,25 @@ struct JournalIndexTearTests {
         return dir
     }
 
+    private func assertExactRetainedEvents(
+        _ store: EventStore,
+        expected: [Event],
+        search: EventSearchSnapshot
+    ) async throws {
+        // FTS is deliberately a sparse projection. A successful search is the
+        // index-refresh trigger, not proof that every retained event survived.
+        let expectedIDs = Set(expected.map(\.id))
+        let searchIDs = search.events.map(\.id)
+        #expect(!searchIDs.isEmpty)
+        #expect(Set(searchIDs).count == searchIDs.count)
+        #expect(Set(searchIDs).isSubset(of: expectedIDs))
+        let exact = try await store.exactEventsSnapshot(since: .distantPast, limit: 200)
+        #expect(exact.isComplete)
+        #expect(exact.events.count == expected.count)
+        #expect(Set(exact.events.map(\.id)) == expectedIDs)
+        #expect(try await store.count() == expected.count)
+    }
+
     @Test("A torn rebuild recovers on retry instead of wedging the reader")
     func tornRebuildRecovers() async throws {
         // Coverage honesty: this exercises the INVALIDATION-ON-THROW contract
@@ -66,12 +85,19 @@ struct JournalIndexTearTests {
         let dir = try makeDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
+        let expected = (0..<60).map(makeEvent)
         do {
-            let writer = try EventStore(directory: dir.path)
-            for i in 0..<60 { try await writer.insert(event: makeEvent(i)) }
+            let writer = try EventStore(
+                directory: dir.path,
+                liveMemoryBudget: .isolatedProductionEquivalentForTesting()
+            )
+            for event in expected { try await writer.insert(event: event) }
         }
 
-        let reader = try EventStore(directory: dir.path)
+        let reader = try EventStore(
+            directory: dir.path,
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()
+        )
         await reader.setJournalRebuildFailAfterPartialForTesting(true)
 
         var firstThrew = false
@@ -84,7 +110,7 @@ struct JournalIndexTearTests {
 
         // The retry must succeed — not throw duplicate-UUID from stranded state.
         let result = try await reader.searchSnapshot(text: "tear", limit: 100)
-        #expect(result.events.count >= 1, "the reader did not recover after a torn rebuild")
+        try await assertExactRetainedEvents(reader, expected: expected, search: result)
     }
 
     @Test("Appends after a rebuild refresh cleanly across the bounded scan")
@@ -92,14 +118,18 @@ struct JournalIndexTearTests {
         let dir = try makeDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let store = try EventStore(directory: dir.path)
-        for i in 0..<40 { try await store.insert(event: makeEvent(i)) }
+        let store = try EventStore(
+            directory: dir.path,
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()
+        )
+        let expected = (0..<90).map(makeEvent)
+        for event in expected.prefix(40) { try await store.insert(event: event) }
         // Warm the index.
         _ = try await store.searchSnapshot(text: "tear", limit: 10)
         // Append more, then read again: the append-only refresh must not
         // re-insert existing UUIDs.
-        for i in 40..<90 { try await store.insert(event: makeEvent(i)) }
+        for event in expected.dropFirst(40) { try await store.insert(event: event) }
         let result = try await store.searchSnapshot(text: "tear", limit: 200)
-        #expect(result.events.count >= 1)
+        try await assertExactRetainedEvents(store, expected: expected, search: result)
     }
 }

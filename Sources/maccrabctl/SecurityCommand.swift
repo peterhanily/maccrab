@@ -29,6 +29,7 @@ extension MacCrabCtl {
                 switch factor.status {
                 case "pass": icon = "✓"
                 case "warn": icon = "⚠"
+                case "unknown": icon = "?"
                 default:     icon = "✗"
                 }
                 let scoreStr = "[\(factor.score)/\(factor.maxScore)]"

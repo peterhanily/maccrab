@@ -812,7 +812,6 @@ struct RootWholeFileReadBoundaryTests {
             "MacCrabCore/Detection/BuiltinRuleSettings.swift": ["data": 1],
             "MacCrabCore/Detection/ProcessTreeAnalyzer.swift": ["data": 1],
             "MacCrabCore/Detection/RuleEngine.swift": ["data": 1],
-            "MacCrabCore/Detection/SecurityScorer.swift": ["nsDictionary": 1],
             "MacCrabCore/Detection/UEBAEngine.swift": ["data": 1],
             "MacCrabCore/Enrichment/ThreatIntelFeed.swift": ["data": 2, "string": 1],
             "MacCrabCore/Enrichment/TyposquatDatabase.swift": ["data": 1],

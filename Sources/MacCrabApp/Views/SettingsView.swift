@@ -1910,9 +1910,17 @@ struct SettingsView: View {
     /// A binding setter is user intent; an AppStorage notification or view
     /// appearance is not. Never publish a whole stale UI snapshot as policy.
     private func storageBinding(_ field: SettingsStorageField, _ value: Binding<Int>) -> Binding<Int> {
-        Binding(get: { value.wrappedValue }, set: { newValue in
-            syncStorageOverrides(field: field, value: newValue)
-        })
+        storageSession.binding(
+            field, display: value, displayedEnvelopeMiB: { eventsMaxSizeMB },
+            onSave: showStorageSaveResult
+        )
+    }
+
+    private var storageSession: SettingsStorageSession {
+        SettingsStorageSession(
+            preferences: .standard, url: SettingsStorageEdits.overridesURL,
+            queueReload: { V2DaemonControl.reloadDetectionRules() }
+        )
     }
 
     private func hydrateStorageOverrides() {
@@ -1925,8 +1933,7 @@ struct SettingsView: View {
             return Int(exactly: bytes / 1_048_576)
         }
         do {
-            try SettingsStorageEdits.hydrate(
-                preferences: .standard, at: SettingsStorageEdits.overridesURL,
+            try storageSession.appear(
                 inheritedEnvelopeMiB: mib(budget?.eventsLegacyEnvelopeBytes),
                 inheritedEvidenceMiB: mib(budget?.evidenceMaxBytes)
             )
@@ -1938,13 +1945,9 @@ struct SettingsView: View {
 
     /// Save only the explicit edit and any required evidence-budget clamp.
     /// Successful queueing is deliberately not described as engine application.
-    private func syncStorageOverrides(field: SettingsStorageField, value: Int) {
-        do {
-            let result = try SettingsStorageEdits.save(
-                field: field, value: value, displayedEnvelopeMiB: eventsMaxSizeMB,
-                preferences: .standard, at: SettingsStorageEdits.overridesURL,
-                queueReload: { V2DaemonControl.reloadDetectionRules() }
-            )
+    private func showStorageSaveResult(_ outcome: Result<SettingsStorageEdits.SaveResult, Error>) {
+        switch outcome {
+        case .success(let result):
             storageSettingsStatusIsError = false
             switch result {
             case .reloadQueued:
@@ -1952,7 +1955,7 @@ struct SettingsView: View {
             case .savedAwaitingReload:
                 storageSettingsStatus = String(localized: "settings.storageReloadNotQueued", defaultValue: "Saved, but no reload was queued. The settings will be read on the next engine start or successful reload.")
             }
-        } catch {
+        case .failure:
             storageSettingsStatus = String(localized: "settings.storageSaveFailed", defaultValue: "Storage settings could not be saved. Existing overrides were not replaced and no reload was requested.")
             storageSettingsStatusIsError = true
         }

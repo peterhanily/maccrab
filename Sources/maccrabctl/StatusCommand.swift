@@ -261,6 +261,10 @@ extension MacCrabCtl {
         let scoreStr = "\(scoreResult.totalScore)/100"
         let gradeIndicator = scoreResult.totalScore >= 80 ? "✓" : scoreResult.totalScore >= 60 ? "⚠" : "✗"
         print("Security Score:  \(grade) (\(scoreStr))  \(gradeIndicator)")
+        let unknownFactors = scoreResult.factors.filter { $0.status == "unknown" }
+        if !unknownFactors.isEmpty {
+            print("                 ? \(unknownFactors.count) check(s) unknown; no healthy credit awarded (run: maccrabctl security)")
+        }
         let failedFactors = scoreResult.factors.filter { $0.status == "fail" }
         if !failedFactors.isEmpty {
             for factor in failedFactors.prefix(3) {

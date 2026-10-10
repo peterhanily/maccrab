@@ -12,13 +12,15 @@ struct DaemonProcessIdentity: Sendable, Equatable {
     let startedAtUnix: Double
     let version: String
     let build: String
-    private let startedAtUptime = Foundation.ProcessInfo.processInfo.systemUptime
+    private let startedAtUptime: TimeInterval
 
-    init(pid: Int, startedAtUnix: Double, version: String, build: String) {
+    init(pid: Int, startedAtUnix: Double, version: String, build: String,
+         startedAtUptime: TimeInterval = Foundation.ProcessInfo.processInfo.systemUptime) {
         self.pid = pid
         self.startedAtUnix = startedAtUnix
         self.version = version
         self.build = build
+        self.startedAtUptime = startedAtUptime
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -28,6 +30,21 @@ struct DaemonProcessIdentity: Sendable, Equatable {
 
     var uptimeSeconds: TimeInterval {
         max(0, Foundation.ProcessInfo.processInfo.systemUptime - startedAtUptime)
+    }
+
+    /// Read the two clocks together, without actor hops between them. Keep the
+    /// returned values immutable while serializing a heartbeat; reading uptime
+    /// after awaited snapshots would otherwise include their variable latency.
+    func heartbeatClockSample(
+        wallTime: () -> TimeInterval = { Date().timeIntervalSince1970 },
+        monotonicTime: () -> TimeInterval = { Foundation.ProcessInfo.processInfo.systemUptime }
+    ) -> DaemonHeartbeatClockSample {
+        let wall = wallTime()
+        let monotonic = monotonicTime()
+        return DaemonHeartbeatClockSample(
+            writtenAtUnix: wall, systemUptime: monotonic,
+            engineUptimeSeconds: max(0, monotonic - startedAtUptime)
+        )
     }
 
     var telemetryIdentity: EngineTelemetryIdentity {
@@ -41,6 +58,29 @@ struct DaemonProcessIdentity: Sendable, Equatable {
         build: (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
             .flatMap { $0.isEmpty ? nil : $0 } ?? "unknown"
     )
+}
+
+struct DaemonHeartbeatClockSample: Sendable, Equatable {
+    let writtenAtUnix: TimeInterval
+    let systemUptime: TimeInterval
+    let engineUptimeSeconds: TimeInterval
+
+    func elapsed(since earlier: Self) -> TimeInterval {
+        max(0, systemUptime - earlier.systemUptime)
+    }
+
+    /// Existing readers age rich data using written_at_unix. Preserve its
+    /// collection-start meaning: a slow collection must not become fresh merely
+    /// because it was just published. Both clocks belong to that same instant.
+    func completedCollectionFields(since start: Self) -> [String: Double] {
+        [
+            "written_at_unix": start.writtenAtUnix,
+            "engine_uptime_seconds": start.engineUptimeSeconds,
+            "heartbeat_collection_started_at_unix": start.writtenAtUnix,
+            "heartbeat_published_at_unix": writtenAtUnix,
+            "heartbeat_collection_duration_seconds": elapsed(since: start),
+        ]
+    }
 }
 
 /// OS-notification toggle records contain only two scalar fields. This is an

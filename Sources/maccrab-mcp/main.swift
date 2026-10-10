@@ -2973,7 +2973,8 @@ func handleGetSecurityScore() async -> Any {
     ]
 
     for factor in score.factors {
-        let icon = factor.status == "pass" ? "PASS" : (factor.status == "warn" ? "WARN" : "FAIL")
+        let icon = factor.status == "pass" ? "PASS"
+            : (factor.status == "warn" ? "WARN" : (factor.status == "unknown" ? "UNKNOWN" : "FAIL"))
         lines.append("[\(icon)] \(factor.name): \(factor.score)/\(factor.maxScore) — \(factor.detail)")
     }
 

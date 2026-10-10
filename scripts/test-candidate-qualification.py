@@ -821,6 +821,8 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
     workload_output = (
         f"IDENTITY: run_id={workload_run_id} "
         f"alert_executable={workload_alert_path} bulk_path={workload_bulk_path}\n"
+        f"OTLP_IDENTITY: trace_id={'d' * 32} span_id={'e' * 16} secret_test=0\n"
+        f"OTLP_ACCEPTED: trace_id={'d' * 32} span_id={'e' * 16} persistence_proven=false\n"
         f"PASS: fixed workload completed run_id={workload_run_id} "
         f"iterations={qualification.FIXED_WORKLOAD_ITERATIONS} "
         "otlp_spans=1 alert_triggers=1 sequence_probes=1\n"
@@ -863,6 +865,15 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                     ROOT, workload_bulk_path
                 ),
             "alert_investigation": workload_proof,
+            "output": workload_output,
+            "otlp_persistence": {
+                "trace_id": "d" * 32, "span_id": "e" * 16, "matched_rows": 1,
+                "persistence_proven": True, "sanitizer_verified": False,
+                "observed_at": iso(901),
+                "database": {"path": "/Library/Application Support/MacCrab/traces.db",
+                             "owner_uid": 0, "mode": 0o600, "device": 1, "inode": 1,
+                             "read_only": True, "no_follow": True},
+            },
         },
         "disk_diagnostic_log": probe(["/usr/bin/log", "show", "disk"]),
         "storage_convergence_log": probe(["/usr/bin/log", "show", "storage"]),

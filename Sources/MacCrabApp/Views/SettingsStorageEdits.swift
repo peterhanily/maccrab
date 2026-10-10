@@ -1,6 +1,7 @@
 import Foundation
 import CoreFoundation
 import MacCrabCore
+import SwiftUI
 
 /// Only a control's explicit setter may create a storage override. Loading a
 /// view or migrating its local preferences must not acquire policy ownership.
@@ -196,5 +197,38 @@ enum SettingsStorageEdits {
             preferences: preferences, inheritedEnvelopeMiB: displayedEnvelopeMiB
         )
         return queueReload() ? .reloadQueued : .savedAwaitingReload
+    }
+}
+
+/// The production Settings lifecycle seam: appearance and explicit bindings
+/// share the same persistence/reload dependencies. Tests can observe those real
+/// dependencies without launching an engine or writing the user's preferences.
+struct SettingsStorageSession {
+    let preferences: UserDefaults
+    let url: URL
+    var persist: (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }
+    let queueReload: () -> Bool
+
+    func appear(inheritedEnvelopeMiB: Int? = nil, inheritedEvidenceMiB: Int? = nil) throws {
+        try SettingsStorageEdits.hydrate(
+            preferences: preferences, at: url,
+            inheritedEnvelopeMiB: inheritedEnvelopeMiB,
+            inheritedEvidenceMiB: inheritedEvidenceMiB
+        )
+    }
+
+    func binding(
+        _ field: SettingsStorageField, display: Binding<Int>,
+        displayedEnvelopeMiB: @escaping () -> Int,
+        onSave: @escaping (Result<SettingsStorageEdits.SaveResult, Error>) -> Void
+    ) -> Binding<Int> {
+        Binding(get: { display.wrappedValue }, set: { value in
+            onSave(Result {
+                try SettingsStorageEdits.save(
+                    field: field, value: value, displayedEnvelopeMiB: displayedEnvelopeMiB(),
+                    preferences: preferences, at: url, persist: persist, queueReload: queueReload
+                )
+            })
+        })
     }
 }

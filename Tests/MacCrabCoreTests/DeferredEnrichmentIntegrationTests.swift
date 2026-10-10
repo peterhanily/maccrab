@@ -3,9 +3,68 @@ import Testing
 @testable import MacCrabCore
 @testable import MacCrabAgentKit
 
+private actor QuietDrainReplayProbe {
+    private(set) var eventIDs: [UUID] = []
+    private(set) var userNames: [String] = []
+
+    func record(_ batch: DeferredEnrichmentReplayBatch) {
+        eventIDs.append(batch.event.id)
+        userNames.append(batch.event.process.userName)
+        #expect(batch.terminal)
+    }
+}
+
 @Suite("Deferred heavy-enrichment integration")
 struct DeferredEnrichmentIntegrationTests {
     private static let started = Date(timeIntervalSince1970: 1_750_000_000)
+    private enum FixtureWaitError: Error { case deadlineExceeded }
+
+    private func waitForCondition(_ predicate: () async -> Bool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(30))
+        while !(await predicate()) {
+            try Task.checkCancellation()
+            guard clock.now < deadline else { throw FixtureWaitError.deadlineExceeded }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    private func waitForBuffer(
+        _ buffer: DeferredEnrichmentBuffer,
+        predicate: (DeferredEnrichmentBufferSnapshot) -> Bool
+    ) async throws -> DeferredEnrichmentBufferSnapshot {
+        try await waitForCondition { predicate(await buffer.snapshot()) }
+        return await buffer.snapshot()
+    }
+
+    /// Wait on the actual actor condition, not a fixed number of executor
+    /// yields. The watchdog seals this private fixture if a regression never
+    /// returns the reservation; every exit also releases any queued waiter.
+    private func withWaitingReservation(
+        _ buffer: DeferredEnrichmentBuffer,
+        operation: (Task<DeferredEnrichmentReservation?, Never>) async throws -> Void
+    ) async throws {
+        let waiting = Task { await buffer.reserveEventSlot() }
+        let watchdog = Task {
+            do { try await Task.sleep(for: .seconds(30)) }
+            catch { return }
+            Issue.record("private reservation fixture did not finish before its hang deadline")
+            await buffer.seal()
+        }
+        do {
+            try await operation(waiting)
+        } catch {
+            watchdog.cancel()
+            waiting.cancel()
+            await buffer.seal()
+            _ = await waiting.value
+            throw error
+        }
+        watchdog.cancel()
+        waiting.cancel()
+        await buffer.seal()
+        _ = await waiting.value
+    }
 
     private func isolatedMemoryBudget() -> EventPipelineLiveMemoryBudget {
         EventPipelineLiveMemoryBudget(
@@ -359,67 +418,65 @@ struct DeferredEnrichmentIntegrationTests {
         #expect((await buffer.markReady(first)).isEmpty)
         #expect((await buffer.markReady(second)).isEmpty)
 
-        let waiting = Task { await buffer.reserveEventSlot() }
-        for _ in 0..<100 {
-            if (await buffer.snapshot()).waitingReservations == 1 { break }
-            await Task.yield()
-        }
-        #expect((await buffer.snapshot()).waitingReservations == 1)
+        try await withWaitingReservation(buffer) { waiting in
+            let waitingSnapshot = try await waitForBuffer(buffer) { $0.waitingReservations == 1 }
+            #expect(waitingSnapshot.waitingReservations == 1)
 
-        // Both terminal patches violate their component/value contract. Their
-        // values must never attach, but each accepted offer must still close
-        // the matching pending component and return its retained slot.
-        let batches = await transfer([
-            patch(
-                event: first,
-                component: .userName,
-                value: .environment(["UNTRUSTED": "1"])
-            ),
-            patch(
-                event: second,
-                component: .environment,
-                value: .userName("untrusted")
-            ),
-        ], to: buffer)
-        #expect(batches.count == 2)
-        for batch in batches {
-            #expect(batch.terminal)
-            #expect(batch.completedComponents.isEmpty)
-            #expect(!DeferredEventEnrichment.hasPendingCoverage(in: batch.event))
-            if batch.event.id == first.id {
-                #expect(DeferredEventEnrichment.coverageState(
-                    for: .userName,
-                    in: batch.event
-                ) == .unavailable)
-                #expect(batch.event.process.userName.isEmpty)
-            } else if batch.event.id == second.id {
-                #expect(DeferredEventEnrichment.coverageState(
-                    for: .environment,
-                    in: batch.event
-                ) == .unavailable)
-                #expect(batch.event.process.envVars == nil)
-            } else {
-                Issue.record("unexpected replay event identity")
+            // Both terminal patches violate their component/value contract. Their
+            // values must never attach, but each accepted offer must still close
+            // the matching pending component and return its retained slot.
+            let batches = await transfer([
+                patch(
+                    event: first,
+                    component: .userName,
+                    value: .environment(["UNTRUSTED": "1"])
+                ),
+                patch(
+                    event: second,
+                    component: .environment,
+                    value: .userName("untrusted")
+                ),
+            ], to: buffer)
+            #expect(batches.count == 2)
+            for batch in batches {
+                #expect(batch.terminal)
+                #expect(batch.completedComponents.isEmpty)
+                #expect(!DeferredEventEnrichment.hasPendingCoverage(in: batch.event))
+                if batch.event.id == first.id {
+                    #expect(DeferredEventEnrichment.coverageState(
+                        for: .userName,
+                        in: batch.event
+                    ) == .unavailable)
+                    #expect(batch.event.process.userName.isEmpty)
+                } else if batch.event.id == second.id {
+                    #expect(DeferredEventEnrichment.coverageState(
+                        for: .environment,
+                        in: batch.event
+                    ) == .unavailable)
+                    #expect(batch.event.process.envVars == nil)
+                } else {
+                    Issue.record("unexpected replay event identity")
+                }
+                await buffer.completeTerminalReplay(eventID: batch.event.id)
             }
-            await buffer.completeTerminalReplay(eventID: batch.event.id)
-        }
 
-        let thirdReservation = try #require(await waiting.value)
-        #expect(await buffer.retain(
-            event(pending: []),
-            using: thirdReservation
-        ) == false)
-        await buffer.seal()
-        let snapshot = await buffer.snapshot()
-        #expect(snapshot.identityRejectedPatchesTotal == 2)
-        #expect(snapshot.retainedEvents == 0)
-        #expect(snapshot.waitingReservations == 0)
-        #expect(snapshot.reservationConserved)
-        #expect(snapshot.slotsConserved)
-        #expect(snapshot.eventsConserved)
-        #expect(snapshot.patchesConserved)
-        #expect(snapshot.patchBytesConserved)
-        #expect(snapshot.cleanlyDrained)
+            let thirdReservation = try #require(await waiting.value)
+            #expect(await buffer.retain(
+                event(pending: []),
+                using: thirdReservation
+            ) == false)
+            await buffer.seal()
+            let snapshot = await buffer.snapshot()
+            #expect(snapshot.identityRejectedPatchesTotal == 2)
+            #expect(snapshot.retainedEvents == 0)
+            #expect(snapshot.waitingReservations == 0)
+            #expect(snapshot.reservationConserved)
+            #expect(snapshot.slotsConserved)
+            #expect(snapshot.eventsConserved)
+            #expect(snapshot.patchesConserved)
+            #expect(snapshot.patchBytesConserved)
+            #expect(snapshot.cleanlyDrained)
+        }
     }
 
     @Test("plane shutdown terminalizes then buffer drains the accepted prefix")
@@ -568,47 +625,44 @@ struct DeferredEnrichmentIntegrationTests {
         ))
         _ = await buffer.markReady(first)
 
-        let waiting = Task { await buffer.reserveEventSlot() }
-        for _ in 0..<100 {
-            if (await buffer.snapshot()).waitingReservations == 1 { break }
-            await Task.yield()
+        try await withWaitingReservation(buffer) { waiting in
+            var snapshot = try await waitForBuffer(buffer) { $0.waitingReservations == 1 }
+            #expect(snapshot.retainedEvents == 1)
+            #expect(snapshot.waitingReservations == 1)
+            #expect(snapshot.retainedRawEventBytes == charge)
+            #expect(snapshot.retainedRawEventBytesHighWatermark == charge)
+            #expect(snapshot.retainedRawEventBytes <= snapshot.rawEventByteCapacity)
+            #expect(snapshot.withinCapacity)
+            #expect(snapshot.rawEventBytesConserved)
+
+            let batches = await transfer([
+                patch(
+                    event: first,
+                    component: .userName,
+                    value: .userName("operator")
+                ),
+            ], to: buffer)
+            let batch = try #require(batches.first)
+            #expect(batches.count == 1 && batch.terminal)
+            snapshot = await buffer.snapshot()
+            #expect(snapshot.retainedRawEventBytes == charge,
+                    "dispatch handoff must remain inside the byte ledger")
+            await buffer.completeTerminalReplay(eventID: first.id)
+
+            let secondReservation = try #require(await waiting.value)
+            #expect(await buffer.retain(
+                event(pending: []),
+                using: secondReservation
+            ) == false)
+            await buffer.seal()
+            snapshot = await buffer.snapshot()
+            #expect(snapshot.cleanlyDrained)
+            #expect(snapshot.reservationConserved)
+            #expect(snapshot.slotsConserved)
+            #expect(snapshot.eventsConserved)
+            #expect(snapshot.rawEventBytesConserved)
+            #expect(snapshot.withinCapacity)
         }
-        var snapshot = await buffer.snapshot()
-        #expect(snapshot.retainedEvents == 1)
-        #expect(snapshot.waitingReservations == 1)
-        #expect(snapshot.retainedRawEventBytes == charge)
-        #expect(snapshot.retainedRawEventBytesHighWatermark == charge)
-        #expect(snapshot.retainedRawEventBytes <= snapshot.rawEventByteCapacity)
-        #expect(snapshot.withinCapacity)
-        #expect(snapshot.rawEventBytesConserved)
-
-        let batches = await transfer([
-            patch(
-                event: first,
-                component: .userName,
-                value: .userName("operator")
-            ),
-        ], to: buffer)
-        let batch = try #require(batches.first)
-        #expect(batches.count == 1 && batch.terminal)
-        snapshot = await buffer.snapshot()
-        #expect(snapshot.retainedRawEventBytes == charge,
-                "dispatch handoff must remain inside the byte ledger")
-        await buffer.completeTerminalReplay(eventID: first.id)
-
-        let secondReservation = try #require(await waiting.value)
-        #expect(await buffer.retain(
-            event(pending: []),
-            using: secondReservation
-        ) == false)
-        await buffer.seal()
-        snapshot = await buffer.snapshot()
-        #expect(snapshot.cleanlyDrained)
-        #expect(snapshot.reservationConserved)
-        #expect(snapshot.slotsConserved)
-        #expect(snapshot.eventsConserved)
-        #expect(snapshot.rawEventBytesConserved)
-        #expect(snapshot.withinCapacity)
     }
 
     @Test("patch byte ownership backpressures a 512-result drain without loss")
@@ -684,6 +738,90 @@ struct DeferredEnrichmentIntegrationTests {
         #expect(snapshot.cleanlyDrained)
     }
 
+    @Test("production quiet-timer callback replays a post-hint completion exactly once")
+    func quietTimerCallbackReplaysAfterFalseHint() async throws {
+        let budget = isolatedMemoryBudget()
+        let plane = HeavyEnrichmentPlane(configuration: .init(
+            maximumConcurrentWorkers: 1, maximumQueuedWorkItems: 1,
+            maximumOutstandingResults: 2, cacheCapacity: 0,
+            operationTimeoutSeconds: 86_400
+        ), liveMemoryBudget: budget)
+        let buffer = DeferredEnrichmentBuffer(
+            eventCapacity: 1, patchCapacity: 1, liveMemoryBudget: budget
+        )
+        let gate = HeavyEnrichmentTestGate()
+        let lifecycle = DaemonTimerLifecycle(coalesceByLabel: true)
+        let replay = QuietDrainReplayProbe()
+        let original = event(pending: [.userName])
+        // Explicit ticks execute the exact callback installed by DaemonTimers.
+        // This does not assert DispatchSource timing or a 100-ms latency SLA.
+        let tick = DeferredEnrichmentQuietTimer.makeEventHandler(lifecycle: lifecycle) {
+            let claim = await buffer.claimDrainCapacity(limit: 1)
+            let patches = await plane.drainDeferredResults(limit: claim)
+            let batches = await buffer.acceptDrained(patches)
+            for batch in batches {
+                await replay.record(batch)
+                await buffer.completeTerminalReplay(eventID: batch.event.id)
+            }
+        }
+        func cleanup() async {
+            await gate.release()
+            _ = await lifecycle.shutdown(deadline: 1)
+            await buffer.seal()
+            _ = await plane.shutdown(deadlineSeconds: 1)
+            _ = await plane.drainDeferredResults(limit: 2)
+        }
+        do {
+            let reservation = try #require(await buffer.reserveEventSlot())
+            #expect(await buffer.retain(original, using: reservation))
+            #expect((await buffer.markReady(original)).isEmpty)
+            let offer = await plane.offer(
+                component: .userName, binding: HeavyEnrichmentBinding(event: original),
+                cacheResult: false
+            ) {
+                await gate.runIgnoringCancellation()
+                return .userName("quiet-worker")
+            }
+            guard case .pending = offer else {
+                Issue.record("gated quiet-drain fixture was not accepted")
+                await cleanup()
+                return
+            }
+            try await gate.waitUntilEntered()
+            #expect(!plane.hasDeferredResults)
+            tick()
+            try await waitForCondition { lifecycle.snapshot().completedHandlers == 1 }
+            #expect(await replay.eventIDs.isEmpty)
+
+            // Finish AFTER the false event-boundary hint and first empty tick.
+            // No subsequent event is submitted; only the periodic callback runs.
+            await gate.release()
+            try await waitForCondition { (await plane.snapshot()).deferredResults == 1 }
+            tick()
+            try await waitForCondition { lifecycle.snapshot().completedHandlers == 2 }
+            #expect(await replay.eventIDs == [original.id])
+            #expect(await replay.userNames == ["quiet-worker"])
+            #expect(!plane.hasDeferredResults)
+
+            tick()
+            try await waitForCondition { lifecycle.snapshot().completedHandlers == 3 }
+            #expect(await replay.eventIDs == [original.id], "a later tick must not replay twice")
+            let snapshot = await buffer.snapshot()
+            #expect(snapshot.cleanlyDrained && snapshot.eventsConserved && snapshot.patchesConserved)
+            #expect(await lifecycle.shutdown(deadline: 1))
+            tick()
+            let closed = lifecycle.snapshot()
+            #expect(closed.acceptedHandlers == 3 && closed.completedHandlers == 3)
+            #expect(closed.closedRejectedHandlers == 1 && closed.inFlightHandlers == 0)
+            #expect(closed.conservesAcceptedHandlers && closed.conservesOfferedHandlers)
+            #expect(await replay.eventIDs == [original.id])
+        } catch {
+            await cleanup()
+            throw error
+        }
+        await cleanup()
+    }
+
     @Test("quiet timer, initial-order gate, and shutdown drain stay wired")
     func lifecycleSourceGuards() throws {
         let root = URL(fileURLWithPath: #filePath)
@@ -701,9 +839,13 @@ struct DeferredEnrichmentIntegrationTests {
         let dispatcher = try String(contentsOf: root.appendingPathComponent(
             "Sources/MacCrabAgentKit/DeferredEnrichmentDispatcher.swift"
         ))
+        let quietTimer = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabAgentKit/DeferredEnrichmentQuietTimer.swift"
+        ))
 
         #expect(timers.contains("repeating: .milliseconds(100)"))
-        #expect(timers.contains("label: \"deferred-enrichment-drain\""))
+        #expect(timers.contains("DeferredEnrichmentQuietTimer.makeEventHandler("))
+        #expect(quietTimer.contains("label: \"deferred-enrichment-drain\""))
         #expect(timers.contains("timerLifecycle.register(timer)"))
         #expect(loop.contains("await dispatchReviewedMatches("))
         #expect(loop.contains(

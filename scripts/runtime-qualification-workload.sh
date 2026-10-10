@@ -1,5 +1,6 @@
 #!/bin/bash
-# Fixed benign burst used by the installed-host qualification recorder.
+# Fixed bounded burst used by the installed-host qualification recorder.
+# The synthetic alert can invoke configured response actions; see below.
 set -euo pipefail
 
 RUN_ID=""
@@ -50,32 +51,40 @@ done
 ALERT_DIR="/private/tmp/maccrab-runtime-alert.$RUN_ID"
 ALERT_EXECUTABLE="$ALERT_DIR/maccrab-qualification-alert"
 BULK_DIR="/Users/Shared/MacCrabQualificationRuntime-$RUN_ID"
-
-cleanup_tree() {
-    local target="$1"
-    if [[ -d "$target" && ! -L "$target" ]]; then
-        /usr/bin/find "$target" -depth -delete
-    fi
-}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DIRECTORY_HELPER="$SCRIPT_DIR/runtime-workload-directories.py"
+ALERT_DIRECTORY_ID=""
+BULK_DIRECTORY_ID=""
 
 cleanup() {
-    cleanup_tree "$ALERT_DIR"
-    if [[ "$ALERT_ONLY" -eq 0 ]]; then
-        cleanup_tree "$BULK_DIR"
+    local status=$?
+    if [[ -n "$ALERT_DIRECTORY_ID" ]]; then
+        /usr/bin/python3 -B "$DIRECTORY_HELPER" remove "$ALERT_DIR" "$ALERT_DIRECTORY_ID" || status=1
     fi
+    if [[ -n "$BULK_DIRECTORY_ID" ]]; then
+        /usr/bin/python3 -B "$DIRECTORY_HELPER" remove "$BULK_DIR" "$BULK_DIRECTORY_ID" || status=1
+    fi
+    return "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Both paths are run-unique and must not pre-exist. The file-pressure tree is
 # deliberately outside /tmp: stable sequence rules use temporary paths as
 # later-stage payload predicates, so a broad temporary burst would test a
 # different semantic and can exhaust pending sequence state.
-/bin/mkdir -m 0700 "$ALERT_DIR"
+ALERT_DIRECTORY_ID=$(/usr/bin/python3 -B "$DIRECTORY_HELPER" create "$ALERT_DIR")
 if [[ "$ALERT_ONLY" -eq 0 ]]; then
-    /bin/mkdir -m 0700 "$BULK_DIR"
+    BULK_DIRECTORY_ID=$(/usr/bin/python3 -B "$DIRECTORY_HELPER" create "$BULK_DIR")
 fi
 
-# Generate one harmless HIGH alert without opening a socket. Alert
+# Generate one synthetic alert without opening a socket. The matched rule is
+# CRITICAL, not merely HIGH: configured response rules, notifications, external
+# integrations and AI investigations can run. Use only an approved qualification
+# environment whose response policy has been reviewed; this is not passive or
+# consequence-free runtime testing. Alert
 # deduplication is keyed by rule ID plus executable path for one hour, so a
 # byte-for-byte copy of Apple's echo at this unique path cannot be suppressed
 # by an earlier qualification run.
@@ -113,8 +122,9 @@ fi
 
 # Exercise the actual loopback OTLP receiver. HTTP acceptance is not treated
 # as persistence proof: the root-owned recorder separately requires the live
-# TraceStore offered/completed ledger to advance during this same window.
-/bin/bash scripts/test-otlp-curl.sh --receiver-only
+# TraceStore offered/completed ledger to advance during this same window, and
+# verifies the emitted exact trace/span IDs separately. No attributes are printed.
+/bin/bash "$SCRIPT_DIR/test-otlp-curl.sh" --receiver-only
 
 # One bounded, non-networking stable-sequence probe. The reverse-shell sequence
 # admits this shell as an early step, then its ten-second window expires without

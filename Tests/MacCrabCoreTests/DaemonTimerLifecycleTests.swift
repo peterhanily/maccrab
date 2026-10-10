@@ -362,7 +362,15 @@ struct DaemonTimerLifecycleTests {
             #expect(source.contains("label: \"\(label)\""))
         }
         #expect(timers.contains(
-            "timerLifecycle.submit(label: \"deferred-enrichment-drain\")"
+            "DeferredEnrichmentQuietTimer.makeEventHandler(lifecycle: timerLifecycle)"
+        ))
+        let quietTimer = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/DeferredEnrichmentQuietTimer.swift"
+            ), encoding: .utf8
+        )
+        #expect(quietTimer.contains(
+            "lifecycle.submit(label: \"deferred-enrichment-drain\", operation: drain)"
         ))
     }
 }

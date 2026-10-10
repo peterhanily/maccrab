@@ -7,29 +7,60 @@ import Foundation
 import Testing
 @testable import MacCrabCore
 
-private actor HeavyEnrichmentTestGate {
+actor HeavyEnrichmentTestGate {
+    enum WaitError: Error { case entryDeadlineExceeded }
+    private struct EntryWaiter {
+        let continuation: CheckedContinuation<Void, any Error>
+        let deadline: Task<Void, Never>
+    }
     private var entered = false
     private var released = false
-    private var enterWaiters: [CheckedContinuation<Void, Never>] = []
+    private var enterWaiters: [UUID: EntryWaiter] = [:]
     private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
 
     func runIgnoringCancellation() async {
         entered = true
         let waiting = enterWaiters
         enterWaiters.removeAll()
-        for waiter in waiting { waiter.resume() }
+        for waiter in waiting.values {
+            waiter.deadline.cancel()
+            waiter.continuation.resume()
+        }
         guard !released else { return }
         await withCheckedContinuation { continuation in
             releaseWaiters.append(continuation)
         }
     }
 
-    func waitUntilEntered() async {
-        guard !entered else { return }
-        await withCheckedContinuation { continuation in
-            enterWaiters.append(continuation)
+    func waitUntilEntered(timeout: Duration = .seconds(30)) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            guard !entered else { return }
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                let deadline = Task { [weak self] in
+                    do { try await Task.sleep(for: max(.zero, timeout)) }
+                    catch { return }
+                    await self?.finishEntryWaiter(id, error: WaitError.entryDeadlineExceeded)
+                }
+                enterWaiters[id] = EntryWaiter(continuation: continuation, deadline: deadline)
+            }
+        } onCancel: {
+            Task { await self.finishEntryWaiter(id, error: CancellationError()) }
         }
     }
+
+    private func finishEntryWaiter(_ id: UUID, error: any Error) {
+        guard let waiter = enterWaiters.removeValue(forKey: id) else { return }
+        waiter.deadline.cancel()
+        waiter.continuation.resume(throwing: error)
+    }
+
+    func entryWaiterCount() -> Int { enterWaiters.count }
 
     func release() {
         released = true
@@ -113,9 +144,10 @@ struct HeavyEnrichmentPlaneTests {
             .addingReportingOverflow(interval)
         let deadline = addition.overflow ? UInt64.max : addition.partialValue
         var latest = await plane.snapshot()
-        while !predicate(latest),
+        while !predicate(latest), !Task.isCancelled,
               DispatchTime.now().uptimeNanoseconds < deadline {
-            try? await Task.sleep(nanoseconds: 5_000_000)
+            do { try await Task.sleep(nanoseconds: 5_000_000) }
+            catch { break }
             latest = await plane.snapshot()
         }
         if !predicate(latest) {
@@ -132,6 +164,49 @@ struct HeavyEnrichmentPlaneTests {
             )
         }
         return latest
+    }
+
+    private static func awaitWorkerEntry(
+        _ gate: HeavyEnrichmentTestGate, plane: HeavyEnrichmentPlane
+    ) async -> Bool {
+        do {
+            try await gate.waitUntilEntered()
+            return true
+        } catch {
+            Issue.record("worker did not enter its test gate: \(error)")
+            // Even a failed setup must release deliberately uncooperative work
+            // and stop its timeout owner before returning from the test.
+            await gate.release()
+            _ = await plane.shutdown(deadlineSeconds: 1)
+            _ = await plane.drainDeferredResults(limit: 512)
+            return false
+        }
+    }
+
+    @Test("a missing worker fails its entry gate instead of hanging the suite")
+    func workerEntryGateDeadline() async {
+        let gate = HeavyEnrichmentTestGate()
+        do {
+            try await gate.waitUntilEntered(timeout: .zero)
+            Issue.record("a worker that never entered must reach the gate deadline")
+        } catch HeavyEnrichmentTestGate.WaitError.entryDeadlineExceeded {
+            #expect(await gate.entryWaiterCount() == 0)
+        } catch { Issue.record("unexpected gate error: \(error)") }
+        await gate.release()
+    }
+
+    @Test("entry-gate cancellation removes its continuation without a worker")
+    func workerEntryGateCancellation() async {
+        let gate = HeavyEnrichmentTestGate()
+        let waiter = Task { try await gate.waitUntilEntered(timeout: .seconds(30)) }
+        waiter.cancel()
+        do {
+            try await waiter.value
+            Issue.record("a cancelled entry wait must throw")
+        } catch is CancellationError {
+            #expect(await gate.entryWaiterCount() == 0)
+        } catch { Issue.record("unexpected gate error: \(error)") }
+        await gate.release()
     }
 
     @Test("Deferred availability follows exact bounded and byte-limited drains")
@@ -191,11 +266,11 @@ struct HeavyEnrichmentPlaneTests {
             _ = await plane.shutdown()
             return
         }
-        await gate.waitUntilEntered()
+        guard await Self.awaitWorkerEntry(gate, plane: plane) else { return }
         #expect(!plane.hasDeferredResults)
         // Deterministically place completion AFTER the event boundary's false
-        // read. No subsequent input is required: the quiet timer's existing
-        // unconditional drain is separately pinned by lifecycleSourceGuards.
+        // read. This checks the plane handoff; the actual timer callback and
+        // exactly-once replay are exercised by the integration suite.
         await gate.release()
         let completed = await Self.waitForSnapshot(plane) { $0.deferredResults == 1 }
         #expect(completed.requestsConserved)
@@ -252,7 +327,7 @@ struct HeavyEnrichmentPlaneTests {
             _ = await plane.shutdown()
             return
         }
-        await gate.waitUntilEntered()
+        guard await Self.awaitWorkerEntry(gate, plane: plane) else { return }
         let timedOut = await Self.waitForSnapshot(plane) {
             $0.timedOutRequestsTotal == 1
         }
@@ -271,6 +346,9 @@ struct HeavyEnrichmentPlaneTests {
         ) { .userName("second") }
         guard case .pending = second else {
             Issue.record("second operation should be queued")
+            await gate.release()
+            _ = await plane.shutdown()
+            _ = await plane.drainDeferredResults(limit: 8)
             return
         }
         let third = await plane.offer(
@@ -337,7 +415,7 @@ struct HeavyEnrichmentPlaneTests {
             _ = await plane.shutdown()
             return
         }
-        await gate.waitUntilEntered()
+        guard await Self.awaitWorkerEntry(gate, plane: plane) else { return }
         let coalesced = await plane.offer(component: .userName, binding: second) {
             await counter.increment()
             return .userName("wrong-worker")
@@ -402,7 +480,7 @@ struct HeavyEnrichmentPlaneTests {
                 count: declaredMaximum - 8_192
             ))
         }
-        await gate.waitUntilEntered()
+        guard await Self.awaitWorkerEntry(gate, plane: plane) else { return }
         _ = await plane.offer(
             component: .userName,
             binding: HeavyEnrichmentBinding(event: Self.event(uid: 502))

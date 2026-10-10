@@ -31,7 +31,7 @@ public actor SecurityScorer {
         public let category: String  // "system", "runtime", "hygiene"
         public let score: Int        // Points earned
         public let maxScore: Int     // Points possible
-        public let status: String    // "pass", "warn", "fail"
+        public let status: String    // "pass", "warn", "fail", "unknown"
         public let detail: String
     }
 
@@ -75,9 +75,13 @@ public actor SecurityScorer {
         factors.append(Factor(name: "Automatic Updates", category: "system", score: updatesEnabled ? 4 : 0, maxScore: 4, status: updatesEnabled ? "pass" : "warn", detail: updatesEnabled ? "Auto-updates enabled" : "Auto-updates may be disabled"))
 
         // Screen lock? (4 points)
-        let screenLock = checkScreenLock()
-        factors.append(Factor(name: "Screen Lock", category: "system", score: screenLock ? 4 : 0, maxScore: 4, status: screenLock ? "pass" : "warn", detail: screenLock ? "Screen lock configured" : "No screen lock timeout detected"))
-        if !screenLock { recommendations.append("Set screen lock: System Settings → Lock Screen → Require password after 5 minutes") }
+        let screenLock = Self.screenLockFactor(rawPreference: runProbe(
+            "/usr/bin/defaults", ["read", "com.apple.screensaver", "askForPassword"]
+        ))
+        factors.append(screenLock)
+        if screenLock.status != "pass" {
+            recommendations.append("Verify screen lock in System Settings → Lock Screen → Require password after screen saver or display sleep")
+        }
 
         // Remote login disabled? (4 points)
         let sshDisabled = !checkSSHEnabled()
@@ -126,16 +130,26 @@ public actor SecurityScorer {
             factors.append(Factor(name: "Active Alerts", category: "runtime", score: 5, maxScore: 10, status: "warn", detail: "Alert history unavailable — could not read alert store"))
         }
 
-        // ES/eslogger active? (7 points)
-        let esActive = isProcessRunning("eslogger") || isProcessRunning("maccrabd") || isProcessRunning("com.maccrab.agent")
-        factors.append(Factor(name: "MacCrab Daemon", category: "runtime", score: esActive ? 7 : 0, maxScore: 7, status: esActive ? "pass" : "fail", detail: esActive ? "Detection engine active" : "MacCrab detection engine not running"))
-        if !esActive { recommendations.append("Approve MacCrab's System Extension (System → Health → Reactivate System Extension in MacCrab.app) or start the dev daemon") }
+        // A process name is not readiness or native sensor coverage. Read only
+        // bounded engine telemetry: no database opening, permission change,
+        // daemon launch, or process-name fallback is part of this assessment.
+        let engine = Self.engineReadinessFactor(
+            directories: ["/Library/Application Support/MacCrab"] + realHomes.map {
+                $0.appending("Library/Application Support/MacCrab")
+            },
+            now: Date()
+        )
+        factors.append(engine)
+        if engine.status != "pass" {
+            recommendations.append("Review MacCrab System → Health for current engine readiness and native sensor coverage")
+        }
 
         // === Hygiene (25 points max) ===
 
-        // XProtect definitions current? (8 points)
-        let xprotectCurrent = checkXProtectCurrent()
-        factors.append(Factor(name: "XProtect Definitions", category: "hygiene", score: xprotectCurrent ? 8 : 2, maxScore: 8, status: xprotectCurrent ? "pass" : "warn", detail: xprotectCurrent ? "XProtect definitions up to date" : "XProtect may need updating"))
+        // Installation is observable locally; definition currency is not.
+        // Keep the existing factor/denominator, but never award healthy credit
+        // for an unverified update state or perform a network lookup here.
+        factors.append(Self.xprotectFactor(installed: Self.xprotectInstalled()))
 
         // No auth plugins? (5 points)
         let noAuthPlugins = !FileManager.default.fileExists(atPath: "/Library/Security/SecurityAgentPlugins") || (try? FileManager.default.contentsOfDirectory(atPath: "/Library/Security/SecurityAgentPlugins"))?.isEmpty ?? true
@@ -237,7 +251,7 @@ public actor SecurityScorer {
             maximumOutputBytes: 1 * 1_024 * 1_024,
             mergeStandardErrorIntoOutput: captureStderr
         ), !result.timedOut, !result.outputLimitExceeded,
-           result.terminationStatus != nil else { return "" }
+           result.terminationStatus == 0 else { return "" }
         return String(data: result.output, encoding: .utf8) ?? ""
     }
 
@@ -263,34 +277,115 @@ public actor SecurityScorer {
             .trimmingCharacters(in: .whitespacesAndNewlines) == "1"
     }
 
-    private nonisolated func checkScreenLock() -> Bool {
-        // `askForPassword` is frequently ABSENT on modern macOS (the setting
-        // moved; `defaults read` then errors → empty output). Absent ≠ disabled,
-        // so don't false-warn: only a present "0" is a genuine fail.
-        let raw = runProbe("/usr/bin/defaults", ["read", "com.apple.screensaver", "askForPassword"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if raw.isEmpty { return true }   // key unreadable/absent → treat as unknown, don't penalize
-        return raw == "1"
+    /// Pure assessment helpers keep missing/unsupported observations distinct
+    /// from an observed disabled control, and permit deterministic fixtures.
+    nonisolated static func screenLockFactor(rawPreference: String?) -> Factor {
+        let raw = rawPreference?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch raw {
+        case "1":
+            return Factor(name: "Screen Lock", category: "system", score: 4, maxScore: 4,
+                          status: "pass", detail: "Screen-lock password preference enabled; delay not assessed")
+        case "0":
+            return Factor(name: "Screen Lock", category: "system", score: 0, maxScore: 4,
+                          status: "warn", detail: "Screen-lock password preference is disabled")
+        default:
+            return Factor(name: "Screen Lock", category: "system", score: 0, maxScore: 4,
+                          status: "unknown", detail: "Screen-lock preference unavailable or unsupported; effective setting is unknown")
+        }
     }
 
     private nonisolated func checkSSHEnabled() -> Bool {
         isProcessRunning("sshd")
     }
 
-    private nonisolated func checkXProtectCurrent() -> Bool {
-        // XProtect is Apple-managed (silent background updates via XProtect
-        // Remediator / config-data), so a present bundle with a readable Version
-        // IS current. The old mtime + 30-day cliff false-warned on any Mac that
-        // simply hadn't received a (infrequent) update in a month.
-        let meta = "/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.meta.plist"
-        if let dict = NSDictionary(contentsOfFile: meta),
-           let v = dict["Version"], !"\(v)".isEmpty {
-            return true
+    private nonisolated static func xprotectInstalled() -> Bool? {
+        var unavailable = false
+        for path in [
+            "/Library/Apple/System/Library/CoreServices/XProtect.bundle",
+            "/Library/Apple/System/Library/CoreServices/XProtect.app",
+        ] {
+            var metadata = stat()
+            if lstat(path, &metadata) == 0 {
+                if (metadata.st_mode & S_IFMT) == S_IFDIR { return true }
+                unavailable = true
+            } else if errno != ENOENT {
+                unavailable = true
+            }
         }
-        // Fallback: the bundle/app exists at all → managed by Apple.
-        let fm = FileManager.default
-        return fm.fileExists(atPath: "/Library/Apple/System/Library/CoreServices/XProtect.bundle")
-            || fm.fileExists(atPath: "/Library/Apple/System/Library/CoreServices/XProtect.app")
+        return unavailable ? nil : false
+    }
+
+    nonisolated static func xprotectFactor(installed: Bool?) -> Factor {
+        let detail: String
+        switch installed {
+        case .some(true): detail = "XProtect installation found; definition currency is not verified"
+        case .some(false): detail = "XProtect installation not found at known paths; protection status is unknown"
+        case .none: detail = "XProtect installation could not be inspected; definition currency is unknown"
+        }
+        return Factor(name: "XProtect Definitions", category: "hygiene", score: 0, maxScore: 8,
+                      status: "unknown", detail: detail)
+    }
+
+    /// System telemetry has precedence. A stale, unreadable, or malformed
+    /// system heartbeat cannot fall through to a healthy unrelated dev store.
+    /// Injected readers make this path testable without probing the live host.
+    nonisolated static func engineReadinessFactor(
+        directories: [String], now: Date,
+        read: @Sendable (String, Int) throws -> Data? = {
+            try RuntimeConfigurationFiles.readControlData(at: $0, maximumBytes: $1)
+        }
+    ) -> Factor {
+        for directory in directories {
+            do {
+                guard let lite = try read(directory + "/heartbeat.json", 64 * 1024) else { continue }
+                let rich = try read(directory + "/heartbeat_rich.json", 4 * 1024 * 1024)
+                return engineReadinessFactor(lite: lite, rich: rich, now: now)
+            } catch {
+                return engineFactor(status: "unknown", detail: "Engine readiness telemetry is unreadable; protection readiness is unknown")
+            }
+        }
+        return engineFactor(status: "unknown", detail: "Engine readiness telemetry is unavailable; a process name alone is not protection readiness")
+    }
+
+    nonisolated static func engineReadinessFactor(lite: Data, rich: Data?, now: Date) -> Factor {
+        guard let liveness = (try? JSONSerialization.jsonObject(with: lite)) as? [String: Any],
+              let identity = EngineTelemetryIdentity(heartbeat: liveness),
+              !identity.version.isEmpty, !identity.build.isEmpty,
+              let written = liveness["written_at_unix"] as? Double,
+              written.isFinite, identity.startedAtUnix <= written,
+              now.timeIntervalSince1970.isFinite,
+              now.timeIntervalSince1970 - written >= 0,
+              now.timeIntervalSince1970 - written <= 120 else {
+            return engineFactor(status: "unknown", detail: "Engine liveness telemetry is stale, invalid, or missing identity; readiness is unknown")
+        }
+        guard let phase = liveness["boot_phase"] as? String, !phase.isEmpty else {
+            return engineFactor(status: "unknown", detail: "Engine boot readiness was not reported")
+        }
+        guard phase == "ready" else {
+            return engineFactor(status: "warn", detail: "Engine has not reported ready; startup or recovery may still be in progress")
+        }
+        guard let rich,
+              let health = try? JSONDecoder().decode(HeartbeatSnapshot.self, from: rich),
+              let object = (try? JSONSerialization.jsonObject(with: rich)) as? [String: Any],
+              EngineTelemetryIdentity(heartbeat: object) == identity,
+              let richWritten = health.writtenAtUnix,
+              identity.startedAtUnix <= richWritten,
+              !health.isStale(now: now.timeIntervalSince1970, maxAge: 120),
+              let mode = object["es_mode"] as? String, !mode.isEmpty,
+              let degraded = health.esSensorDegraded,
+              let splitDegraded = health.esClientSplitDegraded,
+              let hasFDA = health.sysextHasFDA else {
+            return engineFactor(status: "unknown", detail: "Fresh matching native-sensor telemetry is incomplete or unavailable; coverage is unknown")
+        }
+        guard mode == "native client", !degraded, !splitDegraded, hasFDA else {
+            return engineFactor(status: "warn", detail: "Engine reports degraded or unavailable native sensor coverage")
+        }
+        return engineFactor(status: "pass", detail: "Engine reports ready with fresh matching native-sensor telemetry; detection efficacy is not assessed")
+    }
+
+    private nonisolated static func engineFactor(status: String, detail: String) -> Factor {
+        Factor(name: "MacCrab Daemon", category: "runtime", score: status == "pass" ? 7 : 0,
+               maxScore: 7, status: status, detail: detail)
     }
 
     private nonisolated func checkSSHKeySecurity(homes: [RealUserHome]) -> Bool? {

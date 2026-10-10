@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SwiftUI
 @testable import MacCrabApp
 
 @Suite("Storage settings explicit edits")
@@ -378,5 +379,89 @@ struct StorageSettingsEditTests {
         #expect(view.contains("migrateLegacyStorageKeys()\n                        hydrateStorageOverrides()"))
         #expect(view.contains("eventsHotTierMinutes = SettingsStorageEdits.displayMinutes(fromLegacyHours: legacyHours)"))
         #expect(!view.contains("legacyHours * 60"))
+        #expect(view.contains("storageSession.binding("))
+        #expect(view.contains("try storageSession.appear("))
+    }
+
+    @Test("production appearance and binding lifecycle writes only for an explicit edit")
+    func productionBindingLifecycle() throws {
+        let fixture = try Fixture()
+        try fixture.write(["storage": ["eventsMaxSizeMB": 2000, "futureKnob": 7]])
+        let before = try Data(contentsOf: fixture.url)
+        var writes = 0
+        var saves: [SettingsStorageEdits.SaveResult] = []
+        var failures = 0
+        func session() -> SettingsStorageSession {
+            SettingsStorageSession(
+                preferences: fixture.preferences, url: fixture.url,
+                persist: { data, url in writes += 1; try data.write(to: url, options: .atomic) },
+                queueReload: { fixture.reloads += 1; return true }
+            )
+        }
+        let first = session()
+        try first.appear(inheritedEnvelopeMiB: 476)
+        let display = Binding<Int>(
+            get: { fixture.preferences.integer(forKey: "storage.eventsMaxSizeMB") },
+            set: { fixture.preferences.set($0, forKey: "storage.eventsMaxSizeMB") }
+        )
+        let binding = first.binding(.eventsMaxSizeMB, display: display,
+            displayedEnvelopeMiB: { display.wrappedValue }, onSave: { result in
+                switch result {
+                case .success(let value): saves.append(value)
+                case .failure: failures += 1
+                }
+            })
+        #expect(binding.wrappedValue == 2000)
+        // Simulate local display notifications, then reopening the same policy.
+        fixture.preferences.set(420, forKey: "storage.eventsMaxSizeMB")
+        try session().appear(inheritedEnvelopeMiB: 476)
+        #expect(binding.wrappedValue == 2000)
+        #expect(try Data(contentsOf: fixture.url) == before)
+        #expect(writes == 0)
+        #expect(fixture.reloads == 0)
+        #expect(saves.isEmpty)
+        binding.wrappedValue = 1900
+        #expect(writes == 1)
+        #expect(binding.wrappedValue == 1900)
+        #expect(fixture.reloads == 1)
+        #expect(saves == [.reloadQueued])
+        #expect(failures == 0)
+        #expect(try fixture.storage()["eventsMaxSizeMB"] as? Int == 1900)
+        #expect(try fixture.storage()["futureKnob"] as? Int == 7)
+        let edited = try Data(contentsOf: fixture.url)
+        try session().appear(inheritedEnvelopeMiB: 476)
+        #expect(try Data(contentsOf: fixture.url) == edited)
+        #expect(writes == 1)
+        #expect(fixture.reloads == 1)
+    }
+
+    @Test("production binding reports persistence failure without reload or display advancement")
+    func productionBindingFailure() throws {
+        enum Refused: Error { case write }
+        let fixture = try Fixture()
+        try fixture.write(["storage": ["eventsMaxSizeMB": 2000]])
+        let before = try Data(contentsOf: fixture.url)
+        var failures = 0
+        var displaySets = 0
+        let session = SettingsStorageSession(
+            preferences: fixture.preferences, url: fixture.url,
+            persist: { _, _ in throw Refused.write },
+            queueReload: { fixture.reloads += 1; return true }
+        )
+        try session.appear()
+        let binding = session.binding(.eventsMaxSizeMB,
+            display: Binding(get: { fixture.preferences.integer(forKey: "storage.eventsMaxSizeMB") }, set: {
+                displaySets += 1
+                fixture.preferences.set($0, forKey: "storage.eventsMaxSizeMB")
+            }),
+            displayedEnvelopeMiB: { 2000 }, onSave: { result in
+                if case .failure = result { failures += 1 }
+            })
+        binding.wrappedValue = 1900
+        #expect(failures == 1)
+        #expect(displaySets == 0)
+        #expect(fixture.reloads == 0)
+        #expect(binding.wrappedValue == 2000)
+        #expect(try Data(contentsOf: fixture.url) == before)
     }
 }
