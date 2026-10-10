@@ -1424,6 +1424,11 @@
 "settings.llmRemoteApprovalRequired" = "Die App-Einstellungen wurden gespeichert, aber die Erkennungsengine wurde nicht geändert. Geben Sie genau diesen Remote-Endpunkt frei, um Modelleingaben von diesem Mac zu senden.";
 "settings.llmRemoteEndpointWarning" = "Remote-Endpunkt: %@. Die Zustimmung gilt genau für diese URL und wird bei Änderungen aufgehoben. Modelleingaben können diesen Mac verlassen.";
 "settings.storageFamilyCapsDisclosure" = "Dauerhafte Grenzen je Datenbankfamilie: events.db %lld MB; alerts.db %lld MB; zusammen %lld MB. Upgrades können vorübergehend eine gemessene Reserve für ältere Belege behalten (höchstens %lld MB), bis diese Zeilen ablaufen.";
+"settings.storageSavedValuesDisclosure" = "Die Steuerelemente zeigen bearbeitbare Werte innerhalb ihrer zulässigen Grenzen. Das Öffnen der Einstellungen ändert die Richtlinie der Engine nicht; angezeigte oder gespeicherte Werte bestätigen nicht, dass die Engine sie übernommen hat.";
+"settings.storageReadFailed" = "Die gespeicherten benutzerdefinierten Speichereinstellungen konnten nicht gelesen werden. Es wurden keine Änderungen an die Engine gesendet.";
+"settings.storageReloadQueued" = "Gespeichert. Neuladen angefordert; die Übernahme durch die Engine ist noch nicht bestätigt.";
+"settings.storageReloadNotQueued" = "Gespeichert, aber es wurde kein Neuladen eingereiht. Die Einstellungen werden beim nächsten Start der Engine oder beim nächsten erfolgreichen Neuladen gelesen.";
+"settings.storageSaveFailed" = "Die Speichereinstellungen konnten nicht gespeichert werden. Vorhandene benutzerdefinierte Einstellungen wurden nicht ersetzt und es wurde kein Neuladen angefordert.";
 "sidebar.ax.moreWorkspaces" = "%lld weitere Arbeitsbereiche. Öffnet die Befehlspalette.";
 "sidebar.moreWorkspaces" = "%lld weitere Arbeitsbereiche";
 "sidebar.moreWorkspacesHelp" = "Öffnen Sie die Befehlspalette, um im aktuellen Anzeigemodus verborgene Arbeitsbereiche aufzurufen";

@@ -1423,6 +1423,11 @@
 "settings.llmRemoteApprovalRequired" = "As configurações do aplicativo foram salvas, mas o mecanismo de detecção não foi alterado. Aprove este endpoint remoto exato para enviar dados de entrada do modelo para fora deste Mac.";
 "settings.llmRemoteEndpointWarning" = "Endpoint remoto: %@. A aprovação vale apenas para esta URL exata e é apagada quando ela muda. Os dados de entrada do modelo podem sair deste Mac.";
 "settings.storageFamilyCapsDisclosure" = "Limites das famílias em operação estável: events.db %lld MB; alerts.db %lld MB; total %lld MB. Atualizações podem manter temporariamente uma reserva medida de evidências legadas (nunca superior a %lld MB) até que essas linhas expirem.";
+"settings.storageSavedValuesDisclosure" = "Os controles mostram valores editáveis dentro dos limites permitidos. Abrir Configurações não altera a política do mecanismo; valores exibidos ou salvos não confirmam que o mecanismo os tenha aplicado.";
+"settings.storageReadFailed" = "Não foi possível ler as configurações personalizadas de armazenamento salvas. Nenhuma alteração foi enviada ao mecanismo.";
+"settings.storageReloadQueued" = "Salvo. Recarregamento solicitado; a aplicação pelo mecanismo ainda não foi confirmada.";
+"settings.storageReloadNotQueued" = "Salvo, mas nenhum recarregamento foi colocado na fila. As configurações serão lidas na próxima inicialização do mecanismo ou no próximo recarregamento bem-sucedido.";
+"settings.storageSaveFailed" = "Não foi possível salvar as configurações de armazenamento. As configurações personalizadas existentes não foram substituídas e nenhum recarregamento foi solicitado.";
 "sidebar.ax.moreWorkspaces" = "Mais %lld espaços de trabalho. Abre a paleta de comandos.";
 "sidebar.moreWorkspaces" = "Mais %lld espaços de trabalho";
 "sidebar.moreWorkspacesHelp" = "Abra a paleta de comandos para acessar espaços de trabalho ocultos pelo modo de exibição atual";

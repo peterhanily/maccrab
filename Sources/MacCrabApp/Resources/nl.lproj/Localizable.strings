@@ -1423,6 +1423,11 @@
 "settings.llmRemoteApprovalRequired" = "De appinstellingen zijn opgeslagen, maar de detectie-engine is niet gewijzigd. Keur precies dit externe eindpunt goed om modelinvoer buiten deze Mac te verzenden.";
 "settings.llmRemoteEndpointWarning" = "Extern eindpunt: %@. Goedkeuring geldt voor precies deze URL en vervalt wanneer die verandert. Modelinvoer kan deze Mac verlaten.";
 "settings.storageFamilyCapsDisclosure" = "Vaste limieten per databasefamilie: events.db %lld MB; alerts.db %lld MB; samen %lld MB. Upgrades kunnen tijdelijk een gemeten reserve voor ouder bewijsmateriaal behouden (nooit meer dan %lld MB), totdat die rijen verlopen.";
+"settings.storageSavedValuesDisclosure" = "De bedieningselementen tonen bewerkbare waarden binnen hun grenzen. Het openen van Instellingen verandert het enginebeleid niet; weergegeven of opgeslagen waarden bevestigen niet dat de engine ze heeft toegepast.";
+"settings.storageReadFailed" = "De opgeslagen aangepaste opslaginstellingen konden niet worden gelezen. Er zijn geen wijzigingen naar de engine gestuurd.";
+"settings.storageReloadQueued" = "Opgeslagen. Herladen is aangevraagd; toepassing door de engine is nog niet bevestigd.";
+"settings.storageReloadNotQueued" = "Opgeslagen, maar er is geen herlaadverzoek in de wachtrij geplaatst. De instellingen worden bij de volgende start van de engine of de volgende geslaagde herlaadactie gelezen.";
+"settings.storageSaveFailed" = "De opslaginstellingen konden niet worden opgeslagen. Bestaande aangepaste instellingen zijn niet vervangen en er is geen herlaadverzoek ingediend.";
 "sidebar.ax.moreWorkspaces" = "%lld extra werkruimten. Opent het opdrachtpalet.";
 "sidebar.moreWorkspaces" = "%lld extra werkruimten";
 "sidebar.moreWorkspacesHelp" = "Open het opdrachtpalet voor werkruimten die in de huidige weergavemodus verborgen zijn";

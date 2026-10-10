@@ -26,10 +26,10 @@ public enum SettingsTab: String {
 
 // MARK: - Storage-default migration
 
-/// The complete storage tuple emitted by the Settings UI.  The app has always
-/// written this whole tuple to `user_overrides.json`, even when the operator
-/// never moved a storage control, so the tuple (rather than the events value
-/// alone) is the only safe signature of an old UI-generated default.
+/// The complete storage tuple historically emitted by the Settings UI, even
+/// when the operator never moved a storage control. The tuple, rather than the
+/// events value alone, identifies an old UI-generated default. Current Settings
+/// writes only explicit field edits and necessary coupled evidence clamps.
 struct SettingsStorageDefaultsSnapshot: Equatable {
     let eventsHotTierMinutes: Int
     let eventsMaxSizeMB: Int
@@ -63,7 +63,7 @@ enum SettingsStorageDefaultMigration {
     static let markerKey = "storage.eventsEnvelopeDefaultMigrationVersion"
     /// Stored inside user_overrides.json's storage object. The daemon uses the
     /// absence of this field to recognize the exact pre-rc.12 generated tuple;
-    /// once Settings writes it, even an intentional 420 MB cap stays pinned.
+    /// explicit edits write it so an intentional 420 MB cap stays pinned.
     static let overrideGenerationKey = "settingsDefaultsGeneration"
     static let currentGeneration = 1
     static let currentEventsMaxSizeMB = 440
@@ -139,15 +139,17 @@ struct SettingsView: View {
     // DaemonConfig.StorageConfig in MacCrabAgentKit. Legacy keys are
     // migrated onto these on first appear via `migrateLegacyStorageKeys`.
     @AppStorage("storage.eventsHotTierMinutes") private var eventsHotTierMinutes: Int = 30
-    // A missing key adopts the new shipped default. The one-shot migration
-    // below upgrades only the complete prior UI-generated default tuple; a
-    // distinguishable operator override, including 420, remains authoritative.
-    @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 476  // factory fallback only; saved caps remain authoritative
+    // This is a factory display fallback, not an override. Appearance hydrates
+    // existing overrides or fresh inherited limits without publishing policy;
+    // an explicit operator override, including 420, remains authoritative.
+    @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 476
     @AppStorage("storage.alertsRetentionDays")   private var alertsRetentionDays: Int = 365
     @AppStorage("storage.alertsMaxSizeMB")       private var alertsMaxSizeMB: Int = 100
     @AppStorage("storage.evidenceMaxSizeMB")     private var evidenceMaxSizeMB: Int = 100
     @AppStorage("storage.campaignsRetentionDays") private var campaignsRetentionDays: Int = 365
     @AppStorage("storage.campaignsMaxSizeMB")    private var campaignsMaxSizeMB: Int = 50
+    @State private var storageSettingsStatus: String?
+    @State private var storageSettingsStatusIsError = false
 
     // Mirror DaemonConfig.StorageConfig's steady-state ownership split in the
     // UI. On upgrade, the daemon may temporarily add only the measured legacy
@@ -395,10 +397,10 @@ struct SettingsView: View {
                             label: String(localized: "settings.events.label", defaultValue: "Event firehose"),
                             help: String(localized: "settings.events.help", defaultValue: "Recent raw activity for live rules. This legacy envelope reserves the alert-evidence budget; the effective events.db cap is shown below. Floor 15 min."),
                             stepperValue: eventsTierLabel(eventsHotTierMinutes),
-                            stepperBinding: $eventsHotTierMinutes,
+                            stepperBinding: storageBinding(.eventsHotTierMinutes, $eventsHotTierMinutes),
                             stepperRange: 15...1440,
                             stepperStep: 15,
-                            sizeBinding: $eventsMaxSizeMB,
+                            sizeBinding: storageBinding(.eventsMaxSizeMB, $eventsMaxSizeMB),
                             sizeRange: 162...2000,
                             sizeStep: 100,
                             currentSize: currentSize(databaseFile: "events.db"),
@@ -415,10 +417,10 @@ struct SettingsView: View {
                             label: String(localized: "settings.alerts.label", defaultValue: "Alert history"),
                             help: String(localized: "settings.alerts.help", defaultValue: "Detections plus bounded alert-owned event context. The gauge uses the combined alerts.db family cap."),
                             stepperValue: "\(alertsRetentionDays)d",
-                            stepperBinding: $alertsRetentionDays,
+                            stepperBinding: storageBinding(.alertsRetentionDays, $alertsRetentionDays),
                             stepperRange: 30...1095,
                             stepperStep: 30,
-                            sizeBinding: $alertsMaxSizeMB,
+                            sizeBinding: storageBinding(.alertsMaxSizeMB, $alertsMaxSizeMB),
                             sizeRange: 50...500,
                             sizeStep: 50,
                             currentSize: currentSize(databaseFile: "alerts.db"),
@@ -428,7 +430,7 @@ struct SettingsView: View {
 
                         Stepper(
                             String(localized: "settings.evidence.cap", defaultValue: "Alert evidence allocation: \(effectiveEvidenceMaxSizeMB) MB"),
-                            value: $evidenceMaxSizeMB,
+                            value: storageBinding(.evidenceMaxSizeMB, $evidenceMaxSizeMB),
                             in: 50...min(500, max(50, eventsMaxSizeMB - 112)),
                             step: 50
                         )
@@ -441,6 +443,15 @@ struct SettingsView: View {
                             .font(.caption2)
                             .foregroundColor(.secondary)
 
+                        Text(String(localized: "settings.storageSavedValuesDisclosure", defaultValue: "Controls show editable values within their limits. Opening Settings does not change engine policy; displayed or saved values do not confirm engine application."))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        if let storageSettingsStatus {
+                            Text(storageSettingsStatus)
+                                .font(.caption)
+                                .foregroundColor(storageSettingsStatusIsError ? .orange : .secondary)
+                        }
+
                         Divider()
 
                         // Campaign history — even longer; campaigns are tiny.
@@ -448,10 +459,10 @@ struct SettingsView: View {
                             label: String(localized: "settings.campaigns.label", defaultValue: "Campaign history"),
                             help: String(localized: "settings.campaigns.help", defaultValue: "Multi-step attack chains MacCrab has correlated."),
                             stepperValue: "\(campaignsRetentionDays)d",
-                            stepperBinding: $campaignsRetentionDays,
+                            stepperBinding: storageBinding(.campaignsRetentionDays, $campaignsRetentionDays),
                             stepperRange: 30...1095,
                             stepperStep: 30,
-                            sizeBinding: $campaignsMaxSizeMB,
+                            sizeBinding: storageBinding(.campaignsMaxSizeMB, $campaignsMaxSizeMB),
                             sizeRange: 25...200,
                             sizeStep: 25,
                             currentSize: currentSize(databaseFile: "campaigns.db"),
@@ -460,14 +471,10 @@ struct SettingsView: View {
                         )
                     }
                     .padding(8)
-                    .onChange(of: eventsHotTierMinutes) { _ in syncStorageOverrides() }
-                    .onChange(of: eventsMaxSizeMB)       { _ in normalizeStorageBudgetSplit(); syncStorageOverrides() }
-                    .onChange(of: alertsRetentionDays)   { _ in syncStorageOverrides() }
-                    .onChange(of: alertsMaxSizeMB)       { _ in syncStorageOverrides() }
-                    .onChange(of: evidenceMaxSizeMB)     { _ in syncStorageOverrides() }
-                    .onChange(of: campaignsRetentionDays) { _ in syncStorageOverrides() }
-                    .onChange(of: campaignsMaxSizeMB)    { _ in syncStorageOverrides() }
-                    .onAppear { migrateLegacyStorageKeys() }
+                    .onAppear {
+                        migrateLegacyStorageKeys()
+                        hydrateStorageOverrides()
+                    }
                 }
 
                 // v1.9 hot-fix: manual events.db flush. Workaround
@@ -1900,39 +1907,55 @@ struct SettingsView: View {
         llmConfigRequestQueuedAt = queuedAt
     }
 
-    /// v1.6.14 / v1.8.0: write the per-tier storage block to
-    /// `~/Library/Application Support/MacCrab/user_overrides.json` and
-    /// SIGHUP the sysext so the new values take effect on the next sweep
-    /// tick. Until v1.6.14 landed, the sliders wrote only to @AppStorage
-    /// and the daemon never saw them. v1.8.0 expanded the payload from
-    /// (maxDatabaseSizeMB, retentionDays) to the full storage block.
-    ///
-    /// The daemon overlays this file on top of its own
-    /// `daemon_config.json` in `DaemonConfig.applyUserOverrides`. The
-    /// file is restricted to the storage block so a writable user-home
-    /// file can never perturb security-sensitive settings (thresholds,
-    /// outputs, LLM provider).
-    private func syncStorageOverrides() {
-        // v1.19.1: route through the merge-safe shared writer so this storage
-        // block no longer clobbers the top-level network-enrichment flags that
-        // share user_overrides.json, and reload via the cross-uid-safe inbox
-        // path. (The old bare `pkill -HUP com.maccrab.agent` here was EPERM
-        // against the root sysext + hardened-runtime-blocked, so it never
-        // actually reloaded release builds — reloadDetectionRules() fixes that.)
-        _ = V2DaemonControl.writeUserOverrides { obj in
-            obj["storage"] = [
-                "eventsHotTierMinutes":   eventsHotTierMinutes,
-                "eventsMaxSizeMB":        eventsMaxSizeMB,
-                "alertsRetentionDays":    alertsRetentionDays,
-                "alertsMaxSizeMB":        alertsMaxSizeMB,
-                "evidenceMaxSizeMB":      effectiveEvidenceMaxSizeMB,
-                "campaignsRetentionDays": campaignsRetentionDays,
-                "campaignsMaxSizeMB":     campaignsMaxSizeMB,
-                SettingsStorageDefaultMigration.overrideGenerationKey:
-                    SettingsStorageDefaultMigration.currentGeneration,
-            ]
+    /// A binding setter is user intent; an AppStorage notification or view
+    /// appearance is not. Never publish a whole stale UI snapshot as policy.
+    private func storageBinding(_ field: SettingsStorageField, _ value: Binding<Int>) -> Binding<Int> {
+        Binding(get: { value.wrappedValue }, set: { newValue in
+            syncStorageOverrides(field: field, value: newValue)
+        })
+    }
+
+    private func hydrateStorageOverrides() {
+        let heartbeat = V2EngineSource.session.heartbeat()
+        let budget = heartbeat.flatMap {
+            $0.engineIdentity != nil && $0.isReady && !$0.isStale ? $0.alertEvidenceBudget : nil
         }
-        _ = V2DaemonControl.reloadDetectionRules()
+        func mib(_ bytes: Int64?) -> Int? {
+            guard let bytes, bytes > 0, bytes % 1_048_576 == 0 else { return nil }
+            return Int(exactly: bytes / 1_048_576)
+        }
+        do {
+            try SettingsStorageEdits.hydrate(
+                preferences: .standard, at: SettingsStorageEdits.overridesURL,
+                inheritedEnvelopeMiB: mib(budget?.eventsLegacyEnvelopeBytes),
+                inheritedEvidenceMiB: mib(budget?.evidenceMaxBytes)
+            )
+        } catch {
+            storageSettingsStatus = String(localized: "settings.storageReadFailed", defaultValue: "Stored storage overrides could not be read. No changes were sent to the engine.")
+            storageSettingsStatusIsError = true
+        }
+    }
+
+    /// Save only the explicit edit and any required evidence-budget clamp.
+    /// Successful queueing is deliberately not described as engine application.
+    private func syncStorageOverrides(field: SettingsStorageField, value: Int) {
+        do {
+            let result = try SettingsStorageEdits.save(
+                field: field, value: value, displayedEnvelopeMiB: eventsMaxSizeMB,
+                preferences: .standard, at: SettingsStorageEdits.overridesURL,
+                queueReload: { V2DaemonControl.reloadDetectionRules() }
+            )
+            storageSettingsStatusIsError = false
+            switch result {
+            case .reloadQueued:
+                storageSettingsStatus = String(localized: "settings.storageReloadQueued", defaultValue: "Saved. Reload requested; application by the engine is not yet confirmed.")
+            case .savedAwaitingReload:
+                storageSettingsStatus = String(localized: "settings.storageReloadNotQueued", defaultValue: "Saved, but no reload was queued. The settings will be read on the next engine start or successful reload.")
+            }
+        } catch {
+            storageSettingsStatus = String(localized: "settings.storageSaveFailed", defaultValue: "Storage settings could not be saved. Existing overrides were not replaced and no reload was requested.")
+            storageSettingsStatusIsError = true
+        }
     }
 
     /// v1.19.1: persist the four opt-in network-enrichment flags + ask the
@@ -2477,11 +2500,9 @@ struct SettingsView: View {
         }
     }
 
-    /// v1.8.0: migrate legacy @AppStorage keys (retentionDays,
-    /// maxDatabaseSizeMB) onto the new per-tier shape on first appear.
-    /// One-shot — once the new keys are non-default OR the legacy keys
-    /// are absent, this becomes a no-op. After migration, the legacy
-    /// keys remain in UserDefaults but nothing reads them.
+    /// Migrate legacy local display preferences on appearance. The generated
+    /// default classification is one-shot; legacy keys remain available for
+    /// compatibility. This never writes daemon overrides or requests a reload.
     private func migrateLegacyStorageKeys() {
         let defaults = UserDefaults.standard
 
@@ -2547,21 +2568,20 @@ struct SettingsView: View {
         // choice.
         if let legacyHours = defaults.object(forKey: "storage.eventsHotTierHours") as? Int {
             if eventsHotTierMinutes == 30 {
-                eventsHotTierMinutes = max(15, min(legacyHours * 60, 1440))
+                eventsHotTierMinutes = SettingsStorageEdits.displayMinutes(fromLegacyHours: legacyHours)
             }
         }
 
         normalizeStorageBudgetSplit()
 
-        // Push the (possibly migrated) values to user_overrides.json so
-        // the daemon's overlay reader sees them on the next SIGHUP / boot.
-        syncStorageOverrides()
+        // These are display preferences only. The daemon already understands
+        // legacy overrides; opening Settings must not turn a missing override
+        // into an explicit policy choice or request a reload.
     }
 
-    /// Keep @AppStorage itself inside the same feasible region displayed and
-    /// written to the daemon. Without this normalization, lowering the legacy
-    /// envelope could leave a stale larger evidence value in the Stepper while
-    /// the daemon silently clamped a different effective allocation.
+    /// Keep migrated display preferences inside the editable control bounds.
+    /// This does not change daemon policy; explicit edits are persisted through
+    /// SettingsStorageEdits, which separately enforces their coupled bounds.
     private func normalizeStorageBudgetSplit() {
         eventsMaxSizeMB = max(162, min(2_000, eventsMaxSizeMB))
         evidenceMaxSizeMB = min(

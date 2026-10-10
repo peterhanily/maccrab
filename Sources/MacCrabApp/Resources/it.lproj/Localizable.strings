@@ -1422,6 +1422,11 @@
 "settings.llmRemoteApprovalRequired" = "Le impostazioni dell’app sono state salvate, ma il motore di rilevamento non è stato modificato. Autorizza questo endpoint remoto esatto per inviare i dati del modello fuori da questo Mac.";
 "settings.llmRemoteEndpointWarning" = "Endpoint remoto: %@. L’autorizzazione è legata a questo URL esatto e viene cancellata se cambia. I dati inviati al modello possono uscire da questo Mac.";
 "settings.storageFamilyCapsDisclosure" = "Limiti dei gruppi di file a regime: events.db %lld MB; alerts.db %lld MB; totale %lld MB. Gli aggiornamenti possono conservare temporaneamente una riserva misurata di prove precedenti (mai oltre %lld MB) fino alla scadenza di tali righe.";
+"settings.storageSavedValuesDisclosure" = "I controlli mostrano valori modificabili entro i limiti consentiti. Aprire Impostazioni non modifica i criteri del motore; i valori visualizzati o salvati non ne confermano l’applicazione da parte del motore.";
+"settings.storageReadFailed" = "Non è stato possibile leggere le impostazioni di archiviazione personalizzate salvate. Non sono state inviate modifiche al motore.";
+"settings.storageReloadQueued" = "Salvato. È stato richiesto un ricaricamento; l’applicazione da parte del motore non è ancora confermata.";
+"settings.storageReloadNotQueued" = "Salvato, ma nessun ricaricamento è stato messo in coda. Le impostazioni verranno lette al prossimo avvio del motore o al prossimo ricaricamento riuscito.";
+"settings.storageSaveFailed" = "Non è stato possibile salvare le impostazioni di archiviazione. Le impostazioni personalizzate esistenti non sono state sostituite e non è stato richiesto alcun ricaricamento.";
 "sidebar.ax.moreWorkspaces" = "Altri %lld spazi di lavoro. Apre la palette dei comandi.";
 "sidebar.moreWorkspaces" = "Altri %lld spazi di lavoro";
 "sidebar.moreWorkspacesHelp" = "Apri la palette dei comandi per accedere agli spazi nascosti dalla modalità di visualizzazione attuale";

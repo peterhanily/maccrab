@@ -1424,6 +1424,11 @@
 "settings.llmRemoteApprovalRequired" = "Les réglages de l’app ont été enregistrés, mais le moteur de détection n’a pas été modifié. Autorisez ce serveur distant exact pour envoyer les données du modèle hors de ce Mac.";
 "settings.llmRemoteEndpointWarning" = "Serveur distant : %@. L’autorisation est liée à cette URL exacte et est effacée si elle change. Les données envoyées au modèle peuvent quitter ce Mac.";
 "settings.storageFamilyCapsDisclosure" = "Limites des groupes de fichiers en régime normal : events.db %lld Mo ; alerts.db %lld Mo ; total %lld Mo. Les mises à niveau peuvent conserver temporairement une réserve mesurée d’anciennes preuves (au maximum %lld Mo) jusqu’à l’expiration de ces lignes.";
+"settings.storageSavedValuesDisclosure" = "Les commandes affichent des valeurs modifiables dans les limites autorisées. Ouvrir Réglages ne change pas la politique du moteur ; les valeurs affichées ou enregistrées ne confirment pas leur application par le moteur.";
+"settings.storageReadFailed" = "Les réglages de stockage personnalisés enregistrés n’ont pas pu être lus. Aucune modification n’a été envoyée au moteur.";
+"settings.storageReloadQueued" = "Enregistré. Un rechargement a été demandé ; l’application par le moteur n’est pas encore confirmée.";
+"settings.storageReloadNotQueued" = "Enregistré, mais aucun rechargement n’a été mis en attente. Les réglages seront lus au prochain démarrage du moteur ou au prochain rechargement réussi.";
+"settings.storageSaveFailed" = "Les réglages de stockage n’ont pas pu être enregistrés. Les réglages personnalisés existants n’ont pas été remplacés et aucun rechargement n’a été demandé.";
 "sidebar.ax.moreWorkspaces" = "%lld espaces supplémentaires. Ouvre la palette de commandes.";
 "sidebar.moreWorkspaces" = "%lld espaces supplémentaires";
 "sidebar.moreWorkspacesHelp" = "Ouvrir la palette de commandes pour accéder aux espaces masqués par le mode d’affichage actuel";

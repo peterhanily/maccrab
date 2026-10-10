@@ -960,6 +960,11 @@
 "aiGuard.retainedTelemetryDisclosure" = "Retained session telemetry is bounded to 2,000 recent events per active session and resets when that AI root exits. It is not a 24-hour history or a safety verdict; durable AI Guard alerts appear in Alerts.";
 "settings.evidence.cap" = "Alert evidence allocation: %lld MB";
 "settings.storageFamilyCapsDisclosure" = "Steady-state family caps: events.db %lld MB; alerts.db %lld MB; combined %lld MB. Upgrades may temporarily retain a measured legacy-evidence reserve (never more than %lld MB) until those rows expire.";
+"settings.storageSavedValuesDisclosure" = "Controls show editable values within their limits. Opening Settings does not change engine policy; displayed or saved values do not confirm engine application.";
+"settings.storageReadFailed" = "Stored storage overrides could not be read. No changes were sent to the engine.";
+"settings.storageReloadQueued" = "Saved. Reload requested; application by the engine is not yet confirmed.";
+"settings.storageReloadNotQueued" = "Saved, but no reload was queued. The settings will be read on the next engine start or successful reload.";
+"settings.storageSaveFailed" = "Storage settings could not be saved. Existing overrides were not replaced and no reload was requested.";
 "system.alertEvidenceTransitionDetail" = "Live transition-aware caps: events %@, events+alerts %@. Steady-state caps after preserved legacy events.db evidence ages out: events %@, events+alerts %@. Current bounded reserve: %@ of maximum %@; legacy evidence rows %@, charged %@. %@. A single in-flight capture is normal; pending on repeated heartbeats is stuck.";
 "system.llmRuntimeDegradedChip" = "Fail-closed";
 "system.llmRuntimeDegradedTitle" = "AI runtime quality needs attention";

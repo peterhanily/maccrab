@@ -717,6 +717,11 @@ struct DeferredEnrichmentIntegrationTests {
         ), "failed canonical terminal work must not promote sparse projection")
         #expect(loop.contains("markReadyAndDispatch("))
         #expect(loop.contains("await DeferredEnrichmentDispatcher.drainAvailable"))
+        #expect(loop.contains("if state.enricher.hasDeferredEnrichments"))
+        #expect(!timers.contains("hasDeferredEnrichments"),
+                "Quiet-period drain must not rely on a previous event's availability hint")
+        #expect(!dispatcher.contains("hasDeferredEnrichments"),
+                "Authoritative and shutdown drains must remain unconditional")
         let baseBoundary = try #require(loop.range(
             of: "let journalBaseEvent = enrichedEvent"
         ))

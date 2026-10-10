@@ -1680,6 +1680,11 @@
 "settings.llmRemoteApprovalRequired" = "アプリ設定は保存されましたが、検出エンジンは変更されていません。このMacの外部へモデル入力を送信するには、このリモートエンドポイントの正確なURLを承認してください。";
 "settings.llmRemoteEndpointWarning" = "リモートエンドポイント：%@。承認はこのURLのみに適用され、URLを変更すると解除されます。モデル入力がこのMacの外部へ送信される場合があります。";
 "settings.storageFamilyCapsDisclosure" = "定常時のファミリー容量上限：events.db %lld MB、alerts.db %lld MB、合計 %lld MB。アップグレード時には旧証拠用の実測済み予約領域（最大 %lld MB）を、対象行の保持期限が切れるまで一時的に保持する場合があります。";
+"settings.storageSavedValuesDisclosure" = "各コントロールには、許容範囲内の編集可能な値が表示されます。設定を開いてもエンジンのポリシーは変更されません。値が表示または保存されていても、エンジンへの適用が確認されたことにはなりません。";
+"settings.storageReadFailed" = "保存済みのストレージ上書き設定を読み取れませんでした。エンジンに変更は送信されていません。";
+"settings.storageReloadQueued" = "保存しました。再読み込みを要求しましたが、エンジンによる適用はまだ確認されていません。";
+"settings.storageReloadNotQueued" = "保存しましたが、再読み込みはキューに登録されませんでした。設定は、エンジンの次回起動時または次に再読み込みが成功したときに読み取られます。";
+"settings.storageSaveFailed" = "ストレージ設定を保存できませんでした。既存の上書き設定は置き換えられておらず、再読み込みも要求されていません。";
 "sidebar.ax.moreWorkspaces" = "ほか%lld個のワークスペース。コマンドパレットを開きます。";
 "sidebar.moreWorkspaces" = "ほか%lld個のワークスペース";
 "sidebar.moreWorkspacesHelp" = "コマンドパレットを開くと、現在の表示モードで非表示のワークスペースに移動できます";

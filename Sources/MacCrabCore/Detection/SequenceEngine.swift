@@ -392,9 +392,9 @@ public actor SequenceEngine {
     private var lastPendingPressure: PendingPressureSnapshot?
 
     /// Exact admission ledger for the bounded pending-step journal. These are
-    /// updated from identity differences in `setPendingBucket`, so a full
-    /// bucket that admits one item while evicting another cannot hide behind an
-    /// unchanged depth gauge.
+    /// updated from exact unique admissions and identity differences on bucket
+    /// replacement, so a full bucket that admits one item while evicting another
+    /// cannot hide behind an unchanged depth gauge.
     private var pendingStepsOfferedTotal: UInt64 = 0
     private var pendingStepsCompletedTotal: UInt64 = 0
     private var pendingStepsExplicitlyShedTotal: UInt64 = 0
@@ -1921,6 +1921,26 @@ public actor SequenceEngine {
         pendingLaterSteps[ruleId] = pending.isEmpty ? nil : pending
     }
 
+    /// The caller has already rejected duplicate (eventID, stepID) identities.
+    /// An append changes precisely one admission and one record weight. Avoid
+    /// copying the bucket, rebuilding both full identity sets, and rescanning
+    /// every cached weight while the shared sequence mutation lease is held.
+    /// General replacement/retirement still uses setPendingBucket; capture
+    /// independently audits this incremental weight against the exact model.
+    private func appendUniquePendingStep(_ pending: PendingStep, for ruleId: String) {
+        let startsBucket = pendingLaterSteps[ruleId]?.isEmpty ?? true
+        pendingLaterSteps[ruleId, default: []].append(pending)
+        Self.addSaturating(1, to: &pendingStepsOfferedTotal)
+        Self.addSaturating(1, for: ruleId, in: &pendingStepsOfferedByRule)
+        let bucketOverhead = startsBucket
+            ? SequenceCheckpointCodec.estimatedBucketOverhead(ruleID: ruleId)
+            : 0
+        checkpointStateWeight = Self.saturatingTelemetryAdd(
+            checkpointStateWeight,
+            Self.saturatingTelemetryAdd(bucketOverhead, pending.checkpointWeight)
+        )
+    }
+
     private nonisolated static func weightedPartial(
         _ partial: PartialMatch,
         rule: SequenceRule
@@ -3174,8 +3194,9 @@ public actor SequenceEngine {
     }
 
     private func bufferPendingStep(ruleId: String, step: SequenceStep, matched: MatchedStep, now: Date) {
-        var buf = pendingLaterSteps[ruleId] ?? []
-        if buf.contains(where: { $0.matched.eventId == matched.eventId && $0.step.id == step.id }) {
+        if pendingLaterSteps[ruleId]?.contains(where: {
+            $0.matched.eventId == matched.eventId && $0.step.id == step.id
+        }) == true {
             return
         }
         guard let rule = rules[ruleId] else { return }
@@ -3186,19 +3207,18 @@ public actor SequenceEngine {
             checkpointWeight: 0
         )
         pending = Self.weightedPending(pending, ruleId: ruleId, rule: rule)
-        buf.append(pending)
         pendingEvictionQueue.append(PendingStepRef(
             identity: pendingIdentity(ruleId: ruleId, pending: pending)
         ))
         // Account admission before retirement so an expired item is completed,
         // and a genuinely displaced live item is shed, in separate mutations.
-        setPendingBucket(buf, for: ruleId)
-        if buf.count > Self.maxPendingPerRule || totalPendingStepCount > Self.maxPendingTotal {
+        appendUniquePendingStep(pending, for: ruleId)
+        if (pendingLaterSteps[ruleId]?.count ?? 0) > Self.maxPendingPerRule
+            || totalPendingStepCount > Self.maxPendingTotal {
             sweepExpiredBeforePressure()
-            // The sweep replaces buckets; never write back the stale snapshot.
-            buf = pendingLaterSteps[ruleId] ?? []
         }
-        if buf.count > Self.maxPendingPerRule {
+        // Copy only at actual pressure, after the sweep replaced any buckets.
+        if var buf = pendingLaterSteps[ruleId], buf.count > Self.maxPendingPerRule {
             let pressureBefore = pendingPressureSnapshot(
                 reason: .perRuleCount, pendingCount: totalPendingStepCount,
                 ruleID: ruleId, stepID: buf[0].step.id

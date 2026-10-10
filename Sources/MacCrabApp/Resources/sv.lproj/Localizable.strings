@@ -1424,6 +1424,11 @@
 "settings.llmRemoteApprovalRequired" = "Appinställningarna sparades, men detekteringsmotorn ändrades inte. Godkänn exakt denna fjärranslutningspunkt för att skicka modellindata från denna Mac.";
 "settings.llmRemoteEndpointWarning" = "Fjärranslutningspunkt: %@. Godkännandet gäller exakt denna URL och tas bort när den ändras. Modellindata kan lämna denna Mac.";
 "settings.storageFamilyCapsDisclosure" = "Normala gränser per databasfamilj: events.db %lld MB; alerts.db %lld MB; totalt %lld MB. Uppgraderingar kan tillfälligt behålla en uppmätt reserv för äldre belägg (aldrig mer än %lld MB) tills dessa rader löper ut.";
+"settings.storageSavedValuesDisclosure" = "Reglagen visar redigerbara värden inom tillåtna gränser. Att öppna Inställningar ändrar inte motorns policy; visade eller sparade värden bekräftar inte att motorn har tillämpat dem.";
+"settings.storageReadFailed" = "De sparade anpassade lagringsinställningarna kunde inte läsas. Inga ändringar skickades till motorn.";
+"settings.storageReloadQueued" = "Sparat. Omläsning har begärts; det är ännu inte bekräftat att motorn har tillämpat inställningarna.";
+"settings.storageReloadNotQueued" = "Sparat, men ingen omläsning köades. Inställningarna läses vid nästa motorstart eller nästa lyckade omläsning.";
+"settings.storageSaveFailed" = "Lagringsinställningarna kunde inte sparas. Befintliga anpassade inställningar ersattes inte och ingen omläsning begärdes.";
 "sidebar.ax.moreWorkspaces" = "%lld fler arbetsytor. Öppnar kommandopaletten.";
 "sidebar.moreWorkspaces" = "%lld fler arbetsytor";
 "sidebar.moreWorkspacesHelp" = "Öppna kommandopaletten för att nå arbetsytor som döljs av det aktuella visningsläget";

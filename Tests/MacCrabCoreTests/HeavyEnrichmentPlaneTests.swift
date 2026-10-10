@@ -134,6 +134,102 @@ struct HeavyEnrichmentPlaneTests {
         return latest
     }
 
+    @Test("Deferred availability follows exact bounded and byte-limited drains")
+    func deferredAvailabilityTracksQueue() async {
+        let plane = HeavyEnrichmentPlane(configuration: .init(
+            maximumConcurrentWorkers: 1, maximumQueuedWorkItems: 4,
+            maximumOutstandingResults: 8, cacheCapacity: 0,
+            operationTimeoutSeconds: 86_400
+        ), liveMemoryBudget: Self.isolatedMemoryBudget())
+        #expect(!plane.hasDeferredResults)
+        for uid in UInt32(701)...UInt32(703) {
+            let offer = await plane.offer(
+                component: .userName,
+                binding: HeavyEnrichmentBinding(event: Self.event(uid: uid)),
+                cacheResult: false
+            ) { .userName("ordinary fixture") }
+            guard case .pending = offer else {
+                Issue.record("fixture work must be accepted")
+                _ = await plane.shutdown()
+                return
+            }
+        }
+        let completed = await Self.waitForSnapshot(plane) { $0.deferredResults == 3 }
+        #expect(completed.requestsConserved && completed.resultByteCapacityConserved)
+        #expect(plane.hasDeferredResults)
+        #expect(await plane.drainDeferredResults(limit: 0).isEmpty)
+        #expect(await plane.drainDeferredResults(limit: 3, maximumBytes: 0).isEmpty)
+        #expect(plane.hasDeferredResults, "A refused byte/count claim must not clear availability")
+        #expect(await plane.drainDeferredResults(limit: 1).count == 1)
+        #expect(plane.hasDeferredResults, "A partial drain leaves the remaining prefix visible")
+        #expect(await plane.drainDeferredResults(limit: 3).count == 2)
+        #expect(!plane.hasDeferredResults)
+        #expect(await plane.drainDeferredResults(limit: 3).isEmpty)
+        let stopped = await plane.shutdown()
+        #expect(stopped.cleanlyDrained && stopped.requestsConserved)
+    }
+
+    @Test("Completion after a false event hint remains available for the quiet drain")
+    func deferredCompletionAfterFalseHint() async {
+        let plane = HeavyEnrichmentPlane(configuration: .init(
+            maximumConcurrentWorkers: 1, maximumQueuedWorkItems: 1,
+            maximumOutstandingResults: 2, cacheCapacity: 0,
+            operationTimeoutSeconds: 86_400
+        ), liveMemoryBudget: Self.isolatedMemoryBudget())
+        let gate = HeavyEnrichmentTestGate()
+        let fixture = Self.event(uid: 705)
+        let offer = await plane.offer(
+            component: .userName, binding: HeavyEnrichmentBinding(event: fixture),
+            cacheResult: false
+        ) {
+            await gate.runIgnoringCancellation()
+            return .userName("ordinary fixture")
+        }
+        guard case .pending = offer else {
+            Issue.record("gated fixture work must be accepted")
+            await gate.release()
+            _ = await plane.shutdown()
+            return
+        }
+        await gate.waitUntilEntered()
+        #expect(!plane.hasDeferredResults)
+        // Deterministically place completion AFTER the event boundary's false
+        // read. No subsequent input is required: the quiet timer's existing
+        // unconditional drain is separately pinned by lifecycleSourceGuards.
+        await gate.release()
+        let completed = await Self.waitForSnapshot(plane) { $0.deferredResults == 1 }
+        #expect(completed.requestsConserved)
+        #expect(plane.hasDeferredResults)
+        let quietDrain = await plane.drainDeferredResults(limit: 2)
+        #expect(quietDrain.count == 1 && quietDrain.first?.binding.eventID == fixture.id)
+        #expect(!plane.hasDeferredResults)
+        let stopped = await plane.shutdown()
+        #expect(stopped.cleanlyDrained && stopped.requestsConserved)
+    }
+
+    @Test("Unavailable oversized results remain visible until their terminal marker drains")
+    func deferredUnavailableMarkerAvailability() async {
+        let plane = HeavyEnrichmentPlane(configuration: .init(
+            maximumConcurrentWorkers: 1, maximumQueuedWorkItems: 1,
+            maximumOutstandingResults: 2, cacheCapacity: 0,
+            operationTimeoutSeconds: 86_400
+        ), liveMemoryBudget: Self.isolatedMemoryBudget())
+        _ = await plane.offer(
+            component: .userName,
+            binding: HeavyEnrichmentBinding(event: Self.event(uid: 706)),
+            cacheResult: false, maximumResultBytes: 1
+        ) { .userName(String(repeating: "ordinary", count: 2_048)) }
+        let completed = await Self.waitForSnapshot(plane) { $0.deferredResults == 1 }
+        #expect(completed.oversizedResultValuesTotal == 1)
+        #expect(completed.requestsConserved && completed.resultByteCapacityConserved)
+        #expect(plane.hasDeferredResults)
+        let patches = await plane.drainDeferredResults(limit: 2)
+        #expect(patches.count == 1 && patches.first?.value == nil)
+        #expect(!plane.hasDeferredResults)
+        let stopped = await plane.shutdown()
+        #expect(stopped.cleanlyDrained && stopped.requestsConserved)
+    }
+
     @Test("timed-out worker remains charged; queue cap and request conservation hold")
     func stalledWorkerStaysCharged() async {
         let plane = HeavyEnrichmentPlane(configuration: .init(
@@ -163,6 +259,7 @@ struct HeavyEnrichmentPlaneTests {
         #expect(timedOut.requestsConserved)
         #expect(timedOut.physicalWorkers == 1)
         #expect(timedOut.lingeringTimedOutOrCancelledWorkers == 1)
+        #expect(plane.hasDeferredResults, "Timeout markers use the same availability publication")
 
         let second = await plane.offer(
             component: .userName,
@@ -204,6 +301,7 @@ struct HeavyEnrichmentPlaneTests {
         #expect(results.count == 2)
         #expect(results.map(\.outcome).contains(.timedOut))
         #expect(results.map(\.outcome).contains(.completed))
+        #expect(!plane.hasDeferredResults)
         _ = await plane.shutdown()
     }
 
@@ -323,6 +421,7 @@ struct HeavyEnrichmentPlaneTests {
                 "cancel marker transfers within the original reservation")
         #expect(stopped.resultByteCapacityConserved)
         #expect(stopped.requestsConserved)
+        #expect(plane.hasDeferredResults, "Shutdown cancellation markers remain drainable")
 
         let afterSeal = await plane.offer(
             component: .userName,
@@ -341,6 +440,8 @@ struct HeavyEnrichmentPlaneTests {
         #expect(exited.cleanlyDrained)
         #expect(exited.lateWorkerExitsTotal == 1)
         #expect(exited.requestsConserved)
+        #expect(!plane.hasDeferredResults,
+                "Late cancelled worker exits must not publish duplicate results")
     }
 
     @Test("512-result count cannot bypass the shared result and cache byte cap")

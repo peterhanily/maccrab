@@ -800,6 +800,23 @@ public enum HeavyEnrichmentOffer: Sendable, Equatable {
     case rejected
 }
 
+/// A scheduling hint only: queue ownership and every terminal ledger remain
+/// actor-isolated. No callbacks or actor work run while this lock is held.
+private final class HeavyEnrichmentDeferredAvailability: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nonempty = false
+
+    func read() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return nonempty
+    }
+
+    func update(nonempty: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        self.nonempty = nonempty
+    }
+}
+
 /// Fixed-concurrency owner for every heavyweight enrichment operation.
 public actor HeavyEnrichmentPlane {
     public typealias Operation = @Sendable () async -> HeavyEnrichmentValue
@@ -887,6 +904,7 @@ public actor HeavyEnrichmentPlane {
     private var workerTasks: [UInt64: Task<Void, Never>] = [:]
     private var deadlineTasks: [UInt64: Task<Void, Never>] = [:]
     private var deferred: [BufferedDeferredResult] = []
+    private nonisolated let deferredAvailability = HeavyEnrichmentDeferredAvailability()
     private var deferredResultBytes = 0
     private var retainedResultBytesHighWatermark = 0
     private var cache: [WorkKey: CachedValue] = [:]
@@ -913,6 +931,13 @@ public actor HeavyEnrichmentPlane {
     ) {
         self.configuration = configuration
         self.liveMemoryBudget = liveMemoryBudget
+    }
+
+    /// Avoids empty event-boundary actor hops. A completion can race a false
+    /// read; the existing unconditional quiet timer and shutdown drain pick it
+    /// up. A true read grants no ownership and may race another consumer.
+    package nonisolated var hasDeferredResults: Bool {
+        deferredAvailability.read()
     }
 
     /// Offers one component operation.  The call performs no supplied work;
@@ -1057,6 +1082,7 @@ public actor HeavyEnrichmentPlane {
             )
         }
         deferred.removeFirst(count)
+        deferredAvailability.update(nonempty: !deferred.isEmpty)
         deferredResultBytes = max(0, deferredResultBytes - bytes)
         return result
     }
@@ -1412,6 +1438,7 @@ public actor HeavyEnrichmentPlane {
             retainedByteCharge: charge,
             memoryLease: subscriber.memoryLease
         ))
+        deferredAvailability.update(nonempty: true)
         deferredResultBytes += charge
         updateRetainedResultBytesHighWatermark()
     }

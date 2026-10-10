@@ -620,6 +620,11 @@ public actor EventEnricher {
 
     // MARK: Diagnostics
 
+    /// Advisory only; the authoritative deferred drain remains actor-owned.
+    package nonisolated var hasDeferredEnrichments: Bool {
+        heavyEnrichmentPlane.hasDeferredResults
+    }
+
     /// Number of processes currently tracked in the lineage graph.
     public func lineageNodeCount() async -> Int {
         await lineage.nodeCount

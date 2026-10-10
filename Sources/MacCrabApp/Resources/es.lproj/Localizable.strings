@@ -1395,6 +1395,11 @@
 "settings.llmRemoteApprovalRequired" = "Los ajustes de la app se guardaron, pero el motor de detección no cambió. Autoriza este servidor remoto exacto para enviar datos al modelo fuera de este Mac.";
 "settings.llmRemoteEndpointWarning" = "Servidor remoto: %@. La autorización se vincula a esta URL exacta y se borra si cambia. Los datos enviados al modelo pueden salir de este Mac.";
 "settings.storageFamilyCapsDisclosure" = "Límites de cada grupo de archivos en funcionamiento normal: events.db %lld MB; alerts.db %lld MB; total %lld MB. Las actualizaciones pueden conservar temporalmente una reserva medida de pruebas antiguas (nunca superior a %lld MB) hasta que caduquen esas filas.";
+"settings.storageSavedValuesDisclosure" = "Los controles muestran valores editables dentro de sus límites. Abrir Ajustes no cambia la política del motor; los valores mostrados o guardados no confirman que el motor los haya aplicado.";
+"settings.storageReadFailed" = "No se pudieron leer los ajustes de almacenamiento personalizados guardados. No se enviaron cambios al motor.";
+"settings.storageReloadQueued" = "Guardado. Se solicitó una recarga; aún no se ha confirmado que el motor haya aplicado los ajustes.";
+"settings.storageReloadNotQueued" = "Guardado, pero no se puso ninguna recarga en cola. Los ajustes se leerán en el próximo inicio del motor o en la próxima recarga correcta.";
+"settings.storageSaveFailed" = "No se pudieron guardar los ajustes de almacenamiento. No se reemplazaron los ajustes personalizados existentes ni se solicitó una recarga.";
 "sidebar.ax.moreWorkspaces" = "%lld espacios de trabajo más. Abre la paleta de comandos.";
 "sidebar.moreWorkspaces" = "%lld espacios de trabajo más";
 "sidebar.moreWorkspacesHelp" = "Abre la paleta de comandos para acceder a los espacios de trabajo ocultos por el modo de visualización actual";

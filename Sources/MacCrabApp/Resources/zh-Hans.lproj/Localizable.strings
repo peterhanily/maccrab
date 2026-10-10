@@ -1680,6 +1680,11 @@
 "settings.llmRemoteApprovalRequired" = "应用设置已保存，但检测引擎未更改。如要将模型输入发送到此 Mac 外部，请批准此确切的远程端点。";
 "settings.llmRemoteEndpointWarning" = "远程端点：%@。批准仅适用于此确切 URL，更改 URL 后将清除批准。模型输入可能离开此 Mac。";
 "settings.storageFamilyCapsDisclosure" = "稳定运行时的文件族容量上限：events.db %lld MB；alerts.db %lld MB；合计 %lld MB。升级时可能暂时保留经测量的旧证据预留空间（最多 %lld MB），直到这些行过期。";
+"settings.storageSavedValuesDisclosure" = "控件显示允许范围内可编辑的值。打开设置不会更改引擎策略；显示或保存了这些值并不代表已确认引擎应用了它们。";
+"settings.storageReadFailed" = "无法读取已保存的存储覆盖设置。未向引擎发送任何更改。";
+"settings.storageReloadQueued" = "已保存。已请求重新加载，但尚未确认引擎已应用这些设置。";
+"settings.storageReloadNotQueued" = "已保存，但未将重新加载请求加入队列。下次启动引擎或下次成功重新加载时将读取这些设置。";
+"settings.storageSaveFailed" = "无法保存存储设置。未替换现有覆盖设置，也未请求重新加载。";
 "sidebar.ax.moreWorkspaces" = "另外 %lld 个工作区。打开命令面板。";
 "sidebar.moreWorkspaces" = "另外 %lld 个工作区";
 "sidebar.moreWorkspacesHelp" = "打开命令面板可访问当前显示模式下隐藏的工作区";

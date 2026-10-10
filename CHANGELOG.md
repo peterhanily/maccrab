@@ -36,6 +36,13 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   after a size pause.
 
 ### Changed
+- **Sequence pending-step admission avoids repeated whole-bucket copies and
+  accounting scans.** Unique appends update their admission ledger and cached
+  checkpoint weight directly. Duplicate checks, pressure retirement, ordering
+  and independent checkpoint-weight validation are unchanged.
+- **Ordinary events skip an empty deferred-enrichment drain.** A lock-protected
+  availability hint avoids unnecessary actor hops; event readiness, the
+  unconditional quiet timer and shutdown draining retain their ownership.
 - **Runtime journal expiry groups small transactions within the existing
   storage reserve.** Up to four expired blocks share a commit, reducing
   repeated WAL page writes while preserving atomic rollups and deletion.
@@ -121,6 +128,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   being judged, and a held tick with no loss says so.
 
 ### Fixed
+- **Opening Settings no longer publishes saved display values as engine
+  storage policy.** Only an explicit control edit writes an override, preserving
+  inherited values and unrelated settings. Invalid or unreadable override
+  files fail closed, and save/reload messages distinguish a queued request from
+  confirmed engine application.
 - **The alert inspector suggests a command that exists.** It showed
   `maccrabctl trace from-alert <id>`, which maccrabctl does not have. The
   section is now "Explain with maccrabctl" and shows `maccrabctl why <id>`.

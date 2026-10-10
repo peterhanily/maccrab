@@ -2594,7 +2594,13 @@ enum EventLoop {
                     state: state
                 )
             }
-            await DeferredEnrichmentDispatcher.drainAvailable(state: state)
+            // Most ordinary events have no completed heavy result to transfer.
+            // A false hint racing a completion is harmless: the next event or
+            // the unconditional 100 ms timer drains it. Never gate markReady
+            // above, which may own patches already transferred into the buffer.
+            if state.enricher.hasDeferredEnrichments {
+                await DeferredEnrichmentDispatcher.drainAvailable(state: state)
+            }
             stageAwaits.record(.deferredEnrichmentDrain, startedAt: stageStartedNanos)
 
             // Establish the lexical lifetime after every terminal/deferred path.

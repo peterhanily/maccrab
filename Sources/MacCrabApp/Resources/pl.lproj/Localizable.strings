@@ -1423,6 +1423,11 @@
 "settings.llmRemoteApprovalRequired" = "Ustawienia aplikacji zostały zapisane, ale silnik wykrywania nie został zmieniony. Zatwierdź ten konkretny zdalny punkt końcowy, aby wysyłać dane wejściowe modelu poza tego Maca.";
 "settings.llmRemoteEndpointWarning" = "Zdalny punkt końcowy: %@. Zgoda dotyczy dokładnie tego adresu URL i jest usuwana po jego zmianie. Dane wejściowe modelu mogą opuścić tego Maca.";
 "settings.storageFamilyCapsDisclosure" = "Docelowe limity rodzin plików: events.db %lld MB; alerts.db %lld MB; łącznie %lld MB. Aktualizacje mogą tymczasowo zachować zmierzoną rezerwę starszych dowodów, nie większą niż %lld MB, do upływu okresu przechowywania tych rekordów.";
+"settings.storageSavedValuesDisclosure" = "Elementy sterujące pokazują edytowalne wartości w dozwolonych granicach. Otwarcie Ustawień nie zmienia zasad silnika; wyświetlenie lub zapisanie wartości nie potwierdza ich zastosowania przez silnik.";
+"settings.storageReadFailed" = "Nie można odczytać zapisanych niestandardowych ustawień pamięci masowej. Nie wysłano żadnych zmian do silnika.";
+"settings.storageReloadQueued" = "Zapisano. Zażądano ponownego wczytania; zastosowanie ustawień przez silnik nie zostało jeszcze potwierdzone.";
+"settings.storageReloadNotQueued" = "Zapisano, ale żądanie ponownego wczytania nie zostało dodane do kolejki. Ustawienia zostaną odczytane przy następnym uruchomieniu silnika lub następnym udanym ponownym wczytaniu.";
+"settings.storageSaveFailed" = "Nie można zapisać ustawień pamięci masowej. Istniejące ustawienia niestandardowe nie zostały zastąpione i nie zażądano ponownego wczytania.";
 "sidebar.ax.moreWorkspaces" = "Więcej sekcji: %lld. Otwiera paletę poleceń.";
 "sidebar.moreWorkspaces" = "Więcej sekcji: %lld";
 "sidebar.moreWorkspacesHelp" = "Otwórz paletę poleceń, aby przejść do sekcji ukrytych w bieżącym trybie wyświetlania";
