@@ -2234,6 +2234,13 @@ public final class ESCollector: @unchecked Sendable {
         Self.mergeCountMaps(contexts.map { $0.worker.backpressureDroppedByEventType() })
     }
 
+    /// Each worker is sampled atomically, but the independent ES clients are
+    /// not frozen together. Durations are monotonic wall time (including
+    /// scheduling delays), not CPU time. Counters reset with a new worker.
+    public func esWorkerSnapshots() -> [String: ESMessageWorker.Snapshot] {
+        Dictionary(uniqueKeysWithValues: contexts.map { ($0.label, $0.worker.snapshot()) })
+    }
+
     /// v1.21.4 Phase-4 (Mitigation C): true iff the file/exec client split could
     /// NOT be established (the second `es_new_client` failed) and the collector
     /// fell back to a single client subscribing ALL types (the pre-split
@@ -3302,9 +3309,8 @@ private final class ESPendingMessage {
 /// The worker takes OWNERSHIP of every handle passed to `submit` and guarantees
 /// its injected `free` closure runs EXACTLY ONCE per handle, on every path:
 ///
-///   • **accepted** → the serial worker runs `process(handle)` then
-///     `free(handle)` inside one dispatched block, and GCD runs each async block
-///     exactly once;
+///   • **accepted** → one FIFO entry is removed by the sole serial drain,
+///     which runs `process(handle)` then `free(handle)` exactly once;
 ///   • **over-bound** → `submit` frees inline (and counts the drop) and never
 ///     enqueues, so the accepted branch cannot also run for that handle;
 ///   • **shutting down** → `submit` frees inline and never enqueues.
@@ -3315,7 +3321,7 @@ private final class ESPendingMessage {
 /// exactly once — no leak (a missed free leaks kernel message memory) and no
 /// double-free / use-after-free (either would crash the ES client). `process`
 /// never frees (that is `free`'s sole job) and always runs strictly before
-/// `free` within the same block, so nothing touches the handle after it is
+/// `free` in the drain, so nothing touches the handle after it is
 /// freed.
 ///
 /// # Bounded / backpressure
@@ -3325,25 +3331,25 @@ private final class ESPendingMessage {
 /// `backpressureDroppedCount`) rather than blocking the callback — blocking the
 /// ES callback thread would itself starve the kernel queue, the exact failure
 /// this change fixes — or growing memory without bound. Bounding by an in-flight
-/// COUNT on a dedicated serial queue is the first mechanism the plan names; it
-/// drops-newest because you cannot evict an already-enqueued item from a GCD
-/// queue. Drop-newest and drop-oldest bound memory identically, and the drop is
-/// COUNTED either way, which is the point (an honest userspace gauge instead of
-/// a silent kernel drop).
+/// COUNT preserves the existing drop-newest policy, including its reserved
+/// capacity. The FIFO is preallocated to the same cap; there is no spill queue.
+/// One dispatch block drains a busy period instead of allocating and scheduling
+/// a block for every message. Message processing remains strictly serial.
 ///
 /// # Ordering
 ///
 /// The queue is SERIAL, so messages are normalised and yielded in the same
 /// kernel-delivery order as the old inline handler — one at a time, but the
-/// callback no longer waits for it. `submit` increments `inFlight` and enqueues
-/// under one lock, giving `shutdownAndDrain` a consistent view: every enqueued
-/// block is enqueued before a concurrent shutdown observes the flag, or the
-/// submit sees the flag and frees inline.
+/// callback no longer waits for it. `submit` appends and, if necessary,
+/// schedules the sole drain under one lock. Thus the drain is enqueued before
+/// a concurrent shutdown observes the flag, or submit sees the flag and frees
+/// inline. Finishing a drain and appending new work use the same lock, so an
+/// idle-to-busy transition cannot lose its wakeup.
 ///
 /// # Concurrency
 ///
-/// One `NSLock` guards `inFlight`, `shuttingDown`, and `backpressureDroppedCount`
-/// — mirroring the sibling `ESSeqTracker` / `ESCanaryRegistry` locked primitives.
+/// One `NSLock` guards the ring, admission state and telemetry. Processing and
+/// freeing accepted handles happen outside it. No caller waits for capacity.
 public final class ESMessageWorker: @unchecked Sendable {
 
     /// Opaque per-message handle. In production this is
@@ -3352,10 +3358,61 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// only contract is "pass me to `process` then `free`, exactly once each."
     public typealias Handle = UnsafeRawPointer
 
+    /// A coherent view of one worker. Offered = accepted + capacity drops +
+    /// shutdown rejects; accepted = completed + inFlight. Completed means both
+    /// process and free returned. Queue/service totals and maxima include only
+    /// completed messages; the age gauges expose work still waiting/running.
+    /// No paths, process identities or per-message samples are retained here.
+    public struct Snapshot: Codable, Sendable {
+        public let capacity: Int
+        public let reservedCapacity: Int
+        public let offeredTotal: UInt64
+        public let acceptedTotal: UInt64
+        public let completedTotal: UInt64
+        public let capacityDroppedTotal: UInt64
+        public let shutdownRejectedTotal: UInt64
+        public let inFlight: Int
+        public let queued: Int
+        public let inFlightHighWater: Int
+        public let drainDispatchesTotal: UInt64
+        public let queueWaitNanosecondsTotal: UInt64
+        public let queueWaitNanosecondsMax: UInt64
+        public let serviceNanosecondsTotal: UInt64
+        public let serviceNanosecondsMax: UInt64
+        public let oldestQueuedAgeNanoseconds: UInt64
+        public let currentServiceAgeNanoseconds: UInt64
+
+        private enum CodingKeys: String, CodingKey {
+            case capacity
+            case reservedCapacity = "reserved_capacity"
+            case offeredTotal = "offered_total"
+            case acceptedTotal = "accepted_total"
+            case completedTotal = "completed_total"
+            case capacityDroppedTotal = "capacity_dropped_total"
+            case shutdownRejectedTotal = "shutdown_rejected_total"
+            case inFlight = "in_flight"
+            case queued
+            case inFlightHighWater = "in_flight_high_water"
+            case drainDispatchesTotal = "drain_dispatches_total"
+            case queueWaitNanosecondsTotal = "queue_wait_nanoseconds_total"
+            case queueWaitNanosecondsMax = "queue_wait_nanoseconds_max"
+            case serviceNanosecondsTotal = "service_nanoseconds_total"
+            case serviceNanosecondsMax = "service_nanoseconds_max"
+            case oldestQueuedAgeNanoseconds = "oldest_queued_age_nanoseconds"
+            case currentServiceAgeNanoseconds = "current_service_age_nanoseconds"
+        }
+    }
+
+    private struct Pending {
+        let handle: Handle
+        let enqueuedAt: UInt64
+    }
+
     private let queue: DispatchQueue
     private let maxInFlight: Int
     private let process: (Handle) -> Void
     private let free: (Handle) -> Void
+    private let uptimeNanoseconds: () -> UInt64
 
     /// v1.21.5 PERF: slots held back at the TOP of the in-flight budget for
     /// lineage-critical types (EXEC/FORK/EXIT). Pre-fix the cap was a single
@@ -3369,8 +3426,24 @@ public final class ESMessageWorker: @unchecked Sendable {
     private let lineageReserve: Int
 
     private let lock = NSLock()
+    private var pending: [Pending?]
+    private var head = 0
+    private var tail = 0
+    private var queued = 0
+    private var drainScheduled = false
+    private var processingStartedAt: UInt64?
     private var inFlight = 0
+    private var inFlightHighWater = 0
     private var shuttingDown = false
+    private var offeredTotal: UInt64 = 0
+    private var acceptedTotal: UInt64 = 0
+    private var completedTotal: UInt64 = 0
+    private var shutdownRejectedTotal: UInt64 = 0
+    private var drainDispatchesTotal: UInt64 = 0
+    private var queueWaitNanosecondsTotal: UInt64 = 0
+    private var queueWaitNanosecondsMax: UInt64 = 0
+    private var serviceNanosecondsTotal: UInt64 = 0
+    private var serviceNanosecondsMax: UInt64 = 0
     private var backpressureDroppedCount: UInt64 = 0
     /// v1.21.6 (audit DET-05): per-event-type breakdown of the same drops.
     /// Guarded by the same `lock` as the aggregate.
@@ -3380,21 +3453,33 @@ public final class ESMessageWorker: @unchecked Sendable {
     ///   - maxInFlight: in-flight cap (clamped to ≥1).
     ///   - label: dispatch-queue label.
     ///   - reservesLineageSlots: whether a quarter of the budget is held back
-    ///     for lineage-critical types (see `lineageReserve`). Only meaningful
-    ///     for a client that can carry BOTH lineage-critical and non-critical
-    ///     traffic on the same queue; a client whose subscribed types never
-    ///     include EXEC/FORK/EXIT (e.g. the FILE client) has nothing to protect
-    ///     and should pass `false` so the reserve isn't dead capacity. Defaults
-    ///     to `true` so every existing caller keeps today's behavior.
+    ///     for reserve-eligible traffic (see `usesWorkerReserve`). This also
+    ///     protects the FILE client's write family and protected OPENs from
+    ///     ordinary OPEN volume. Defaults to the existing enabled policy.
     ///   - process: run the message pipeline; MUST NOT free the handle.
     ///   - free: release the handle; the worker calls it exactly once per handle.
-    public init(maxInFlight: Int,
-                label: String = "com.maccrab.es.message-worker",
-                reservesLineageSlots: Bool = true,
-                process: @escaping (Handle) -> Void,
-                free: @escaping (Handle) -> Void) {
+    public convenience init(maxInFlight: Int,
+                            label: String = "com.maccrab.es.message-worker",
+                            reservesLineageSlots: Bool = true,
+                            process: @escaping (Handle) -> Void,
+                            free: @escaping (Handle) -> Void) {
+        self.init(maxInFlight: maxInFlight, label: label,
+                  reservesLineageSlots: reservesLineageSlots,
+                  uptimeNanoseconds: { DispatchTime.now().uptimeNanoseconds },
+                  process: process, free: free)
+    }
+
+    /// Internal clock seam for deterministic duration tests. Production always
+    /// uses DispatchTime's monotonic uptime; this does not change admission.
+    init(maxInFlight: Int,
+         label: String = "com.maccrab.es.message-worker",
+         reservesLineageSlots: Bool = true,
+         uptimeNanoseconds: @escaping () -> UInt64,
+         process: @escaping (Handle) -> Void,
+         free: @escaping (Handle) -> Void) {
         let cap = Swift.max(1, maxInFlight)
         self.maxInFlight = cap
+        self.pending = Array(repeating: nil, count: cap)
         // A quarter of the budget is held for lineage-critical types (see
         // `lineageReserve`). Floored at 1 so even a tiny test cap reserves a slot,
         // and capped below `maxInFlight` so non-critical traffic is never refused
@@ -3408,12 +3493,13 @@ public final class ESMessageWorker: @unchecked Sendable {
         self.queue = DispatchQueue(label: label, qos: .userInitiated)
         self.process = process
         self.free = free
+        self.uptimeNanoseconds = uptimeNanoseconds
     }
 
     /// Take ownership of `handle` and either dispatch it for processing or, if
     /// the worker is at capacity or shutting down, free it inline. On EVERY
     /// return path the handle is freed exactly once (see the type doc). Never
-    /// blocks the caller (the ES callback thread).
+    /// waits for capacity or processing (only the short state lock is shared).
     ///
     /// Returns whether the handle was ACCEPTED for processing. `false` means it
     /// was freed inline (over-bound drop or shutdown drain) and will never reach
@@ -3428,7 +3514,9 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// of this worker still compile unchanged.
     public func submit(_ handle: Handle, lineageCritical: Bool = true, eventType: UInt32 = 0) -> Bool {
         lock.lock()
+        offeredTotal &+= 1
         if shuttingDown {
+            shutdownRejectedTotal &+= 1
             lock.unlock()
             free(handle)                       // drain path — free once
             return false
@@ -3459,19 +3547,56 @@ public final class ESMessageWorker: @unchecked Sendable {
             return false
         }
         inFlight += 1
-        // Enqueue UNDER the lock so (inFlight += 1, enqueue) is atomic w.r.t.
-        // shutdownAndDrain: any block we enqueue is enqueued before a concurrent
-        // shutdown can observe `shuttingDown` and run its drain barrier.
-        // `async` never blocks, so holding the lock across it cannot deadlock.
-        queue.async {
-            self.process(handle)               // pipeline — must not free
-            self.free(handle)                  // accepted path — free once
-            self.lock.lock()
-            self.inFlight -= 1
-            self.lock.unlock()
+        acceptedTotal &+= 1
+        inFlightHighWater = Swift.max(inFlightHighWater, inFlight)
+        // The current processing item still occupies an in-flight slot, so a
+        // successful admission always has room in this same-capacity ring.
+        pending[tail] = Pending(handle: handle, enqueuedAt: uptimeNanoseconds())
+        tail = (tail + 1) % maxInFlight
+        queued += 1
+        if !drainScheduled {
+            drainScheduled = true
+            drainDispatchesTotal &+= 1
+            // Schedule UNDER the lock, before shutdown can enqueue its barrier.
+            queue.async { self.drain() }
         }
         lock.unlock()
         return true
+    }
+
+    private func drain() {
+        lock.lock()
+        while queued > 0 {
+            // Exactly one drain owns accepted handles. Removing a slot before
+            // processing permits ring reuse but does NOT release its admission
+            // budget until process and free have both completed.
+            let item = pending[head]!
+            pending[head] = nil
+            head = (head + 1) % maxInFlight
+            queued -= 1
+            let startedAt = uptimeNanoseconds()
+            processingStartedAt = startedAt
+            lock.unlock()
+
+            process(item.handle)
+            free(item.handle)
+
+            let finishedAt = uptimeNanoseconds()
+            let wait = startedAt &- item.enqueuedAt
+            let service = finishedAt &- startedAt
+            lock.lock()
+            inFlight -= 1
+            completedTotal &+= 1
+            queueWaitNanosecondsTotal &+= wait
+            queueWaitNanosecondsMax = Swift.max(queueWaitNanosecondsMax, wait)
+            serviceNanosecondsTotal &+= service
+            serviceNanosecondsMax = Swift.max(serviceNanosecondsMax, service)
+            processingStartedAt = nil
+            // Keep the lock across completion → next dequeue (or idle), so a
+            // producer cannot observe an idle flag before this drain is done.
+        }
+        drainScheduled = false
+        lock.unlock()
     }
 
     /// Stop accepting new work and block until every in-flight handle has been
@@ -3482,11 +3607,31 @@ public final class ESMessageWorker: @unchecked Sendable {
         lock.lock()
         shuttingDown = true
         lock.unlock()
-        // Serial queue: this empty sync block runs only after every block
-        // enqueued before it (all currently in-flight work) has completed, and
-        // each of those frees its handle. Submits after the flag is set free
-        // inline and never enqueue, so nothing new can appear behind this barrier.
+        // The sole drain was scheduled before the flag was set, and it empties
+        // its entire FIFO before returning (it never reschedules behind this
+        // barrier). Later submissions free inline and cannot extend the drain.
         queue.sync { }
+    }
+
+    public func snapshot() -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        let now = uptimeNanoseconds()
+        let oldestQueuedAge = queued > 0 ? now &- pending[head]!.enqueuedAt : 0
+        let serviceAge = processingStartedAt.map { now &- $0 } ?? 0
+        return Snapshot(
+            capacity: maxInFlight, reservedCapacity: lineageReserve,
+            offeredTotal: offeredTotal, acceptedTotal: acceptedTotal,
+            completedTotal: completedTotal, capacityDroppedTotal: backpressureDroppedCount,
+            shutdownRejectedTotal: shutdownRejectedTotal, inFlight: inFlight,
+            queued: queued, inFlightHighWater: inFlightHighWater,
+            drainDispatchesTotal: drainDispatchesTotal,
+            queueWaitNanosecondsTotal: queueWaitNanosecondsTotal,
+            queueWaitNanosecondsMax: queueWaitNanosecondsMax,
+            serviceNanosecondsTotal: serviceNanosecondsTotal,
+            serviceNanosecondsMax: serviceNanosecondsMax,
+            oldestQueuedAgeNanoseconds: oldestQueuedAge,
+            currentServiceAgeNanoseconds: serviceAge
+        )
     }
 
     /// Count of handles dropped at the copy/hand-off stage because the in-flight

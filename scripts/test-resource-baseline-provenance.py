@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Controls for the single historical reference protocol compatibility proof."""
+"""Offline controls for historical compatibility, not current baseline acceptance.
+
+Sources are parsed or hashed as data, never executed. No Git history, network,
+installed-host probe, private receipt or workload execution is required.
+Archived-source compatibility has positive coverage. Full historical integration
+does not: the old workload bytes are intentionally not reintroduced as fixtures.
+Current integration must reject the changed workload, never claim acceptance.
+"""
 import importlib.util
 import json
 from pathlib import Path
-import shutil
 import tempfile
 import unittest
 
@@ -16,21 +22,30 @@ CURRENT = (ROOT / 'scripts/candidate-qualification.py').read_bytes()
 
 
 class ResourceBaselineProvenanceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Establish the positive control before any mutation test runs.
+        P.verify_sources(ARCHIVED, ARCHIVED)
+
     def reject(self, source):
         with self.assertRaises(P.ProvenanceError):
             P.verify_sources(ARCHIVED, source.encode())
 
-    def altered(self, before, after, raw=CURRENT):
+    def altered(self, before, after, raw=ARCHIVED):
+        self.assertEqual(P.digest(raw), P.RECORDER_SHA, 'Mutation base must be the verified archive')
         source = raw.decode()
         self.assertTrue(before in source, "Mutation target is absent: " + before)
         return source.replace(before, after, 1)
 
-    def test_actual_drain_only_changes_preserve_reference_protocol(self):
-        proof = P.verify_sources(ARCHIVED, CURRENT)
+    def test_exact_archived_source_preserves_reference_protocol(self):
+        proof = P.verify_sources(ARCHIVED, ARCHIVED)
         self.assertEqual(proof['status'], 'EXACT_HISTORICAL_RESOURCE_PROTOCOL_VERIFIED')
         self.assertEqual(proof['dependency_count'], 102)
-        self.assertEqual(P.verify_sources(ARCHIVED, ARCHIVED)['dependency_manifest_sha256'],
-                         proof['dependency_manifest_sha256'])
+        self.assertEqual(proof['current_recorder_sha256'], P.RECORDER_SHA)
+
+    def test_current_recorder_changed_the_historical_executor_inventory(self):
+        with self.assertRaisesRegex(P.ProvenanceError, 'RUNTIME_WORKLOAD_EXECUTORS'):
+            P.verify_sources(ARCHIVED, CURRENT)
 
     def test_only_exact_guard_normalization_is_allowed(self):
         updated = self.altered(P.OLD_GUARD, P.NEW_GUARD, ARCHIVED)
@@ -60,14 +75,14 @@ class ResourceBaselineProvenanceTests(unittest.TestCase):
             '\nsubprocess.run = None\n',
         ):
             with self.subTest(added=added):
-                self.reject(CURRENT.decode() + added)
+                self.reject(ARCHIVED.decode() + added)
         self.reject(self.altered('@functools.lru_cache(maxsize=1)', '@functools.lru_cache(maxsize=2)'))
 
     def test_interpreter_bindings_and_top_level_order_are_preserved(self):
         for name in ('__name__', '__builtins__', '__file__', '__package__', '__spec__'):
             with self.subTest(name=name):
-                self.reject(CURRENT.decode() + '\n' + name + ' = "disabled"\n')
-        source = CURRENT.decode()
+                self.reject(ARCHIVED.decode() + '\n' + name + ' = "disabled"\n')
+        source = ARCHIVED.decode()
         marker = 'if __name__ == "__main__":'
         at = source.rindex(marker)
         guard = source[at:]
@@ -76,46 +91,60 @@ class ResourceBaselineProvenanceTests(unittest.TestCase):
 
     def test_missing_dependencies_and_new_builtin_shadowing_are_rejected(self):
         self.reject(self.altered('def percentile_nearest_rank(', 'def renamed_percentile_nearest_rank('))
-        self.reject(CURRENT.decode() + '\nlen = 3\n')
+        self.reject(ARCHIVED.decode() + '\nlen = 3\n')
 
     def test_archive_bytes_are_not_a_general_old_hash_exception(self):
         with self.assertRaisesRegex(P.ProvenanceError, 'archive hash'):
-            P.verify_sources(ARCHIVED + b'\n', CURRENT)
+            P.verify_sources(ARCHIVED + b'\n', ARCHIVED)
 
     def fixture(self, root):
-        for relative in (P.ARCHIVE, 'docs/RELEASE_RESOURCE_BASELINE.json',
-                         'scripts/candidate-qualification.py', 'scripts/runtime-qualification-workload.sh',
-                         'scripts/test-otlp-curl.sh'):
+        payloads = {
+            P.ARCHIVE: ARCHIVED,
+            'docs/RELEASE_RESOURCE_BASELINE.json': (ROOT / 'docs/RELEASE_RESOURCE_BASELINE.json').read_bytes(),
+            'scripts/candidate-qualification.py': ARCHIVED,
+            'scripts/runtime-qualification-workload.sh': (ROOT / 'scripts/runtime-qualification-workload.sh').read_bytes(),
+            'scripts/test-otlp-curl.sh': (ROOT / 'scripts/test-otlp-curl.sh').read_bytes(),
+        }
+        for relative, raw in payloads.items():
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT / relative, target)
+            target.write_bytes(raw)
+            target.chmod(0o600)  # Inert private fixture data, never executable.
         return json.loads((root / 'docs/RELEASE_RESOURCE_BASELINE.json').read_bytes())['private_evidence']['canonical_sha256']
 
-    def test_exact_document_workload_and_archive_bindings(self):
+    def test_current_workload_bytes_cannot_reuse_the_historical_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             document_hash = self.fixture(root)
-            self.assertEqual(P.verify(root, document_hash)['baseline_sha256'], P.BASELINE_SHA)
+            public = json.loads((root / 'docs/RELEASE_RESOURCE_BASELINE.json').read_bytes())
+            for row in public['workload']['executors']:
+                with self.subTest(relative=row['path']):
+                    self.assertNotEqual(P.digest((root / row['path']).read_bytes()), row['sha256'])
+            with self.assertRaisesRegex(P.ProvenanceError, 'Historical workload executor changed'):
+                P.verify(root, document_hash)
+
+    def test_public_document_bindings_reject_before_stale_workloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            document_hash = self.fixture(root)
+            # This is intentionally not a passing historical workload fixture.
+            # Specific early-guard messages distinguish the mutation from the
+            # unchanged, independently asserted stale-workload rejection.
+            with self.assertRaisesRegex(P.ProvenanceError, 'Historical workload executor changed'):
+                P.verify(root, document_hash)
             public = json.loads((root / 'docs/RELEASE_RESOURCE_BASELINE.json').read_bytes())
             public_hash = P.digest(P.canonical(public))
-            self.assertEqual(P.verify(root, document_hash, public_hash)['baseline_sha256'], P.BASELINE_SHA)
+            with self.assertRaisesRegex(P.ProvenanceError, 'Historical workload executor changed'):
+                P.verify(root, document_hash, public_hash)
             public['limits']['gui_p95_percent'] += 1
             with self.assertRaisesRegex(P.ProvenanceError, 'Passed public policy document'):
                 P.verify(root, document_hash, P.digest(P.canonical(public)))
             with self.assertRaisesRegex(P.ProvenanceError, 'Passed baseline document'):
                 P.verify(root, '0' * 64)
-            for relative, message in (
-                ('docs/RELEASE_RESOURCE_BASELINE.json', 'exact accepted public resource policy'),
-                (P.ARCHIVE, 'archive hash'),
-                ('scripts/runtime-qualification-workload.sh', 'workload executor'),
-            ):
-                with self.subTest(relative=relative):
-                    target = root / relative
-                    previous = target.read_bytes()
-                    target.write_bytes(previous + b'\n')
-                    with self.assertRaisesRegex(P.ProvenanceError, message):
-                        P.verify(root, document_hash)
-                    target.write_bytes(previous)
+            target = root / 'docs/RELEASE_RESOURCE_BASELINE.json'
+            target.write_bytes(target.read_bytes() + b'\n')
+            with self.assertRaisesRegex(P.ProvenanceError, 'exact accepted public resource policy'):
+                P.verify(root, document_hash)
 
     def test_redirected_reference_inputs_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

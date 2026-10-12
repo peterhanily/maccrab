@@ -1871,6 +1871,22 @@ public actor SequenceEngine {
         partialMatches[ruleId] = partials.isEmpty ? nil : partials
     }
 
+    /// A unique seed adds exactly one record and, only for a new bucket, its
+    /// overhead. Mutate the dictionary's array in place rather than copying and
+    /// re-summing the complete bucket twice for every ordinary initial event.
+    /// Replacements/retirement retain the audited general setter above.
+    private func appendUniquePartial(_ partial: PartialMatch, for ruleId: String) {
+        let startsBucket = partialMatches[ruleId]?.isEmpty ?? true
+        partialMatches[ruleId, default: []].append(partial)
+        let overhead = startsBucket
+            ? SequenceCheckpointCodec.estimatedBucketOverhead(ruleID: ruleId)
+            : 0
+        checkpointStateWeight = Self.saturatingTelemetryAdd(
+            checkpointStateWeight,
+            Self.saturatingTelemetryAdd(overhead, partial.checkpointWeight)
+        )
+    }
+
     private func setPendingBucket(
         _ pending: [PendingStep],
         for ruleId: String,
@@ -2554,7 +2570,15 @@ public actor SequenceEngine {
             // --- Phase 1: Try to advance existing partial matches ---
             var advancedPartials: [(Int, PartialMatch)] = []  // (index, updated partial)
             var completedIndices: Set<Int> = []
-            let existingPartials = partialMatches[ruleId] ?? []
+            // Ordered partials already contain their initial step, so a
+            // first-step-only event cannot advance any of them. Avoid a full
+            // bucket scan whose only outcome would be advancePartial's existing
+            // step rejection. A later matching step (or unordered rule) keeps
+            // the original fan-out/order semantics.
+            let canAdvance = !rule.ordered || matchingSteps.contains {
+                $0.id != rule.steps.first?.id
+            }
+            let existingPartials = canAdvance ? (partialMatches[ruleId] ?? []) : []
             for (idx, partial) in existingPartials.enumerated() {
                 // Check if this partial has expired.
                 if now.timeIntervalSince(partial.createdAt) > rule.window {
@@ -2595,9 +2619,13 @@ public actor SequenceEngine {
                     }
                 }
 
-                // Remove completed (iterate in reverse to preserve indices).
-                for idx in completedIndices.sorted().reversed() {
-                    updatedList.remove(at: idx)
+                // One event may complete thousands of compatible partials.
+                // Repeated Array.remove(at:) shifts survivors on every removal;
+                // filtering indices once preserves their exact relative order.
+                if !completedIndices.isEmpty {
+                    updatedList = updatedList.enumerated().compactMap {
+                        completedIndices.contains($0.offset) ? nil : $0.element
+                    }
                 }
 
                 setPartialBucket(updatedList, for: ruleId)
@@ -2639,11 +2667,10 @@ public actor SequenceEngine {
 
                 // Avoid creating a duplicate partial if this event already started
                 // one for the same rule with the same correlation key in this evaluation.
-                let existingForRule = partialMatches[ruleId] ?? []
-                let alreadyStarted = existingForRule.contains { partial in
+                let alreadyStarted = partialMatches[ruleId]?.contains { partial in
                     partial.correlationKey == correlationKey
                     && partial.matchedSteps[step.id]?.eventId == event.id
-                }
+                } == true
                 guard !alreadyStarted else { continue }
 
                 var newPartial = PartialMatch(
@@ -2662,9 +2689,7 @@ public actor SequenceEngine {
                     completedMatches.append(makeMatch(rule: rule, partial: newPartial))
                     // Don't store the partial -- it's already complete.
                 } else {
-                    var bucket = partialMatches[ruleId] ?? []
-                    bucket.append(newPartial)
-                    setPartialBucket(bucket, for: ruleId)
+                    appendUniquePartial(newPartial, for: ruleId)
                     evictionQueue.append(PartialMatchRef(
                         ruleId: ruleId,
                         partialId: newPartial.id,
@@ -2987,30 +3012,6 @@ public actor SequenceEngine {
         }
     }
 
-    private func processRelationNeedsLineage(_ relation: ProcessRelation) -> Bool {
-        switch relation {
-        case .descendant, .ancestor, .sibling, .sameTree:
-            return true
-        case .same, .sameProcess, .any:
-            return false
-        }
-    }
-
-    private func stepNeedsLineageSnapshot(_ step: SequenceStep, rule: SequenceRule) -> Bool {
-        if rule.correlationType == .processLineage, step.processRelation == nil {
-            return true
-        }
-        guard let relation = step.processRelation?.relation else { return false }
-        return processRelationNeedsLineage(relation)
-    }
-
-    private func isInitialStep(_ step: SequenceStep, in rule: SequenceRule) -> Bool {
-        if rule.ordered {
-            return step.id == rule.steps.first?.id
-        }
-        return step.afterStep == nil && step.processRelation == nil
-    }
-
     /// Whether the live advance or a possible Phase-3 replay can issue an
     /// ancestry query. Keeping this precise avoids even the single batch actor
     /// hop for predicate matches whose relations are PID-local (`same`/`any`).
@@ -3019,7 +3020,11 @@ public actor SequenceEngine {
         // seed or pending candidate. Capture the authoritative snapshot proof
         // now even when no relation is evaluated on this call; it cannot be
         // reconstructed after ProcessLineage restarts.
-        if plan.rule.correlationType == .processLineage
+        // These definition-level cases exhaust every relationship operation
+        // that consults ProcessLineage. For all remaining rules, inspecting
+        // every stored partial/pending step cannot change the answer; that
+        // redundant scan formerly ran even for first-step-only seed traffic.
+        return plan.rule.correlationType == .processLineage
             || plan.rule.steps.contains(where: {
                 guard let relation = $0.processRelation?.relation else { return false }
                 switch relation {
@@ -3028,29 +3033,7 @@ public actor SequenceEngine {
                 case .same, .sameProcess, .any:
                     return false
                 }
-            }) {
-            return true
-        }
-        let existingPartials = partialMatches[plan.ruleId] ?? []
-        let liveAdvanceCanQuery = existingPartials.contains { partial in
-            plan.matchingSteps.contains { step in
-                partial.matchedSteps[step.id] == nil
-                    && stepNeedsLineageSnapshot(step, rule: plan.rule)
-            }
-        }
-        if liveAdvanceCanQuery {
-            return true
-        }
-
-        let canSeed = plan.matchingSteps.contains(where: {
-            isInitialStep($0, in: plan.rule)
-        })
-        guard canSeed, let pending = pendingLaterSteps[plan.ruleId], !pending.isEmpty else {
-            return false
-        }
-        return pending.contains(where: {
-            stepNeedsLineageSnapshot($0.step, rule: plan.rule)
-        })
+            })
     }
 
     // MARK: - Advance / Match Construction (#95 shared helpers)
@@ -3506,8 +3489,13 @@ public actor SequenceEngine {
             }
 
             let surviving = partials.filter { now.timeIntervalSince($0.createdAt) <= rule.window }
-            if surviving != partials { checkpointStateChanged = true }
-            setPartialBucket(surviving, for: ruleId)
+            // Filtering preserves exact records/order. Equal counts therefore
+            // prove a no-op without deep equality over every matched step, and
+            // avoid re-summing/replacing an unchanged bucket during pressure.
+            if surviving.count != partials.count {
+                checkpointStateChanged = true
+                setPartialBucket(surviving, for: ruleId)
+            }
         }
 
         // #95: prune the out-of-order backfill buffer on the same cadence — a
@@ -3521,8 +3509,10 @@ public actor SequenceEngine {
                 continue
             }
             let surviving = buffered.filter { now.timeIntervalSince($0.arrivedAt) <= rule.window }
-            if surviving != buffered { checkpointStateChanged = true }
-            setPendingBucket(surviving, for: ruleId)
+            if surviving.count != buffered.count {
+                checkpointStateChanged = true
+                setPendingBucket(surviving, for: ruleId)
+            }
         }
 
         // Rebuild from exact live IDs. Age-only front trimming retained every

@@ -437,6 +437,83 @@ public struct ExactAlertEvidenceSnapshot: Sendable, Equatable {
     }
 }
 
+/// Payload-independent ordering for capture-time alert evidence. Build this
+/// only after exact journal/legacy validation; rank admission is not validation.
+struct AlertEvidenceSelectionRank: Comparable {
+    let timestamp: Date
+    let id: String
+    private let severityRank: Int
+    private let distanceToAlert: TimeInterval
+
+    init(timestamp: Date, id: String, severity: Severity, alertTimestamp: Date) {
+        self.timestamp = timestamp
+        self.id = id
+        switch severity {
+        case .critical: severityRank = 0
+        case .high: severityRank = 1
+        case .medium: severityRank = 2
+        case .low: severityRank = 3
+        default: severityRank = 4
+        }
+        distanceToAlert = abs(timestamp.timeIntervalSince1970
+            - alertTimestamp.timeIntervalSince1970)
+    }
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        if lhs.severityRank != rhs.severityRank {
+            return lhs.severityRank < rhs.severityRank
+        }
+        if lhs.distanceToAlert != rhs.distanceToAlert {
+            return lhs.distanceToAlert < rhs.distanceToAlert
+        }
+        if lhs.timestamp != rhs.timestamp {
+            return lhs.timestamp > rhs.timestamp
+        }
+        return lhs.id < rhs.id
+    }
+}
+
+/// Keep only the best fixed-size prefix throughout a scan. Losing ranks never
+/// materialize payloads, and a displaced payload is released before its
+/// replacement is built. Payloads may be gap-only candidates: those consume a
+/// rank slot just like evidence and must not be filtered out during selection.
+struct BoundedAlertEvidenceSelection<Payload> {
+    private struct Entry {
+        let rank: AlertEvidenceSelectionRank
+        let payload: Payload
+    }
+
+    private let limit: Int
+    private var entries: [Entry] = []
+
+    init(limit: Int) {
+        precondition(limit >= 0)
+        self.limit = limit
+        entries.reserveCapacity(limit)
+    }
+
+    var count: Int { entries.count }
+    var values: [Payload] { entries.map(\.payload) }
+
+    mutating func consider(
+        rank: AlertEvidenceSelectionRank,
+        makePayload: () -> Payload
+    ) {
+        guard limit > 0 else { return }
+        // Insert after equal ranks, preserving the existing stable ordering.
+        let insertionIndex = entries.firstIndex { rank < $0.rank }
+            ?? entries.endIndex
+        guard insertionIndex < limit else { return }
+        if entries.count == limit {
+            entries.removeLast()
+        }
+        entries.insert(
+            Entry(rank: rank, payload: makePayload()),
+            at: insertionIndex
+        )
+    }
+}
+
 public struct ExactEventLookupSnapshot: Sendable, Equatable {
     public let event: Event?
     public let mutationGeneration: UInt64
@@ -19032,8 +19109,8 @@ public actor EventStore {
     /// The inner ordering chooses the strongest/closest candidates; the outer
     /// ordering returns the selected set chronologically for incident review.
     /// Both caller-controlled bounds are clamped to the fixed policy ceiling.
-    /// Full Events are compacted immediately while scanning; retained ranking
-    /// ownership is therefore bounded to the shared <=64-KiB representation.
+    /// Rank admission precedes compaction; throughout the scan only the best
+    /// requestedRows own the shared <=64-KiB evidence representation.
     public func alertEvidenceCandidates(
         alertTimestamp: Date,
         windowSeconds: TimeInterval = AlertEvidencePolicy.lookbackSeconds,
@@ -19091,45 +19168,17 @@ public actor EventStore {
             )
         }
         struct RankedCandidate {
-            let timestamp: Date
-            let id: String
-            let severityRank: Int
             let evidence: AlertEvidenceCandidate?
             let poison: [EventJournalPoisonRecord]
             let corruptLegacy: Bool
             let inheritedLegacyLoss: Bool
             let resourceLimited: Bool
         }
-        func rank(_ severity: Severity) -> Int {
-            switch severity {
-            case .critical: return 0
-            case .high: return 1
-            case .medium: return 2
-            case .low: return 3
-            default: return 4
-            }
-        }
-        func precedes(_ lhs: RankedCandidate, _ rhs: RankedCandidate) -> Bool {
-            if lhs.severityRank != rhs.severityRank {
-                return lhs.severityRank < rhs.severityRank
-            }
-            let lhsDistance = abs(lhs.timestamp.timeIntervalSince1970 - alertTs)
-            let rhsDistance = abs(rhs.timestamp.timeIntervalSince1970 - alertTs)
-            if lhsDistance != rhsDistance { return lhsDistance < rhsDistance }
-            if lhs.timestamp != rhs.timestamp {
-                return lhs.timestamp > rhs.timestamp
-            }
-            return lhs.id < rhs.id
-        }
         return try withVerifiedExactReadSnapshot { generation in
-            var ranked: [RankedCandidate] = []
-            ranked.reserveCapacity(requestedRows * 2)
+            var selection = BoundedAlertEvidenceSelection<RankedCandidate>(
+                limit: requestedRows
+            )
             var unscopedCorruptLegacyRecords = 0
-            func trim() {
-                guard ranked.count > requestedRows * 2 else { return }
-                ranked.sort(by: precedes)
-                ranked.removeLast(ranked.count - requestedRows)
-            }
 
             let journalSchemaPresent = try hasJournalSchema()
             if journalSchemaPresent {
@@ -19150,24 +19199,28 @@ public actor EventStore {
                             block.poisonByOrdinal[ordinal]?.contains {
                                 $0.kind == .terminal
                             } == true
-                        let compactEvidence = isPoisoned
-                            ? nil
-                            : EventSnapshot.prepare(event).evidenceCandidate
-                        ranked.append(RankedCandidate(
+                        let rank = AlertEvidenceSelectionRank(
                             timestamp: event.timestamp,
                             id: event.id.uuidString,
-                            severityRank: terminalSeverityUnknown
-                                ? rank(.critical) : rank(event.severity),
-                            evidence: compactEvidence,
-                            poison: block.poisonByOrdinal[ordinal] ?? [],
-                            corruptLegacy: false,
-                            inheritedLegacyLoss:
-                                block.inheritedLossOrdinals.contains(ordinal),
-                            resourceLimited: !isPoisoned
-                                && compactEvidence == nil
-                        ))
+                            severity: terminalSeverityUnknown
+                                ? .critical : event.severity,
+                            alertTimestamp: alertTimestamp
+                        )
+                        selection.consider(rank: rank) {
+                            let compactEvidence = isPoisoned
+                                ? nil
+                                : EventSnapshot.prepare(event).evidenceCandidate
+                            return RankedCandidate(
+                                evidence: compactEvidence,
+                                poison: block.poisonByOrdinal[ordinal] ?? [],
+                                corruptLegacy: false,
+                                inheritedLegacyLoss:
+                                    block.inheritedLossOrdinals.contains(ordinal),
+                                resourceLimited: !isPoisoned
+                                    && compactEvidence == nil
+                            )
+                        }
                     }
-                    trim()
                 }
             }
 
@@ -19217,7 +19270,7 @@ public actor EventStore {
                     Int32(Self.legacyTypedEventColumns.count + 1)
                 ) != 0 {
                     if typedIntersects || rawIntersects {
-                        ranked.append(RankedCandidate(
+                        let rank = AlertEvidenceSelectionRank(
                             timestamp: rawIntersects
                                 ? (raw?.timestamp ?? Date(
                                     timeIntervalSince1970: row.timestamp
@@ -19225,14 +19278,18 @@ public actor EventStore {
                                 : Date(timeIntervalSince1970: row.timestamp),
                             id: String(data: row.idBytes, encoding: .utf8)
                                 ?? row.idBytes.base64EncodedString(),
-                            severityRank: 0,
-                            evidence: nil,
-                            poison: [],
-                            corruptLegacy: true,
-                            inheritedLegacyLoss: false,
-                            resourceLimited: false
-                        ))
-                        trim()
+                            severity: .critical,
+                            alertTimestamp: alertTimestamp
+                        )
+                        selection.consider(rank: rank) {
+                            RankedCandidate(
+                                evidence: nil,
+                                poison: [],
+                                corruptLegacy: true,
+                                inheritedLegacyLoss: false,
+                                resourceLimited: false
+                            )
+                        }
                     } else if !typedScopeTrusted && !rawScopeTrusted {
                         unscopedCorruptLegacyRecords += 1
                     }
@@ -19243,7 +19300,7 @@ public actor EventStore {
                     decoded = try decodeLegacyJournalRowWithLoss(row)
                 } catch {
                     if typedIntersects || rawIntersects {
-                        ranked.append(RankedCandidate(
+                        let rank = AlertEvidenceSelectionRank(
                             timestamp: rawIntersects
                                 ? (raw?.timestamp ?? Date(
                                     timeIntervalSince1970: row.timestamp
@@ -19251,14 +19308,18 @@ public actor EventStore {
                                 : Date(timeIntervalSince1970: row.timestamp),
                             id: String(data: row.idBytes, encoding: .utf8)
                                 ?? row.idBytes.base64EncodedString(),
-                            severityRank: 0,
-                            evidence: nil,
-                            poison: [],
-                            corruptLegacy: true,
-                            inheritedLegacyLoss: false,
-                            resourceLimited: false
-                        ))
-                        trim()
+                            severity: .critical,
+                            alertTimestamp: alertTimestamp
+                        )
+                        selection.consider(rank: rank) {
+                            RankedCandidate(
+                                evidence: nil,
+                                poison: [],
+                                corruptLegacy: true,
+                                inheritedLegacyLoss: false,
+                                resourceLimited: false
+                            )
+                        }
                     } else if !typedScopeTrusted && !rawScopeTrusted {
                         unscopedCorruptLegacyRecords += 1
                     }
@@ -19283,24 +19344,25 @@ public actor EventStore {
                     )
                     continue
                 }
-                let compactEvidence = EventSnapshot.prepare(event)
-                    .evidenceCandidate
-                ranked.append(RankedCandidate(
+                let rank = AlertEvidenceSelectionRank(
                     timestamp: event.timestamp,
                     id: event.id.uuidString,
-                    severityRank: rank(event.severity),
-                    evidence: compactEvidence,
-                    poison: [],
-                    corruptLegacy: false,
-                    inheritedLegacyLoss: decoded.inheritedLoss != nil,
-                    resourceLimited: compactEvidence == nil
-                ))
-                trim()
+                    severity: event.severity,
+                    alertTimestamp: alertTimestamp
+                )
+                selection.consider(rank: rank) {
+                    let compactEvidence = EventSnapshot.prepare(event)
+                        .evidenceCandidate
+                    return RankedCandidate(
+                        evidence: compactEvidence,
+                        poison: [],
+                        corruptLegacy: false,
+                        inheritedLegacyLoss: decoded.inheritedLoss != nil,
+                        resourceLimited: compactEvidence == nil
+                    )
+                }
             }
-            ranked.sort(by: precedes)
-            if ranked.count > requestedRows {
-                ranked.removeLast(ranked.count - requestedRows)
-            }
+            let ranked = selection.values
             var selected = ranked.compactMap(\.evidence)
             selected.sort {
                 if $0.timestamp != $1.timestamp {

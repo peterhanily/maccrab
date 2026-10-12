@@ -135,8 +135,25 @@ enum SequenceCheckpointCodec {
     }
 
     private static func escapedJSONWeight(_ value: String) -> Int {
-        let bytes = value.utf8.count
-        return bytes > Int.max / 6 ? Int.max : bytes * 6
+        // The budget bounds canonical JSON, not the runtime heap. Ordinary
+        // printable ASCII is emitted literally by canonicalEncoder; charging
+        // six bytes for every rule identifier/path byte prematurely shed exact
+        // history despite ample room in the unchanged carrier envelope.
+        // Keep the old six-per-UTF8-byte bound for controls and non-ASCII (even
+        // when Foundation emits them literally). Quotes/backslashes need two
+        // bytes; reserve two for slash as well despite withoutEscapingSlashes.
+        // Structural quotes/keys remain included in the fixed record weights.
+        var total = 0
+        for byte in value.utf8 {
+            let weight: Int
+            switch byte {
+            case 0x22, 0x2F, 0x5C: weight = 2
+            case 0x20...0x7E: weight = 1
+            default: weight = 6
+            }
+            total = saturatingWeightAdd(total, weight)
+        }
+        return total
     }
 
     private static func saturatingWeightAdd(_ lhs: Int, _ rhs: Int) -> Int {

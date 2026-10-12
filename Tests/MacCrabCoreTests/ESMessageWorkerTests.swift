@@ -16,8 +16,8 @@
 //   2. over-bound submissions are DROPPED, FREED, and COUNTED (backpressure);
 //   3. shutdown DRAINS all in-flight handles, freeing each exactly once.
 //
-// All tests are gate-driven (DispatchSemaphore), not sleep-driven, so they are
-// deterministic under parallel execution.
+// Backpressure/race tests are semaphore-driven. Only the idle-wakeup test polls
+// the observable zero-in-flight boundary, with a bounded deadline.
 
 import Testing
 import Foundation
@@ -31,9 +31,10 @@ private final class HandleRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var freed: [UnsafeRawPointer: Int] = [:]
     private var processed: [UnsafeRawPointer: Int] = [:]
+    private var order: [UnsafeRawPointer] = []
 
     func recordProcess(_ h: UnsafeRawPointer) {
-        lock.lock(); processed[h, default: 0] += 1; lock.unlock()
+        lock.lock(); processed[h, default: 0] += 1; order.append(h); lock.unlock()
     }
     func recordFree(_ h: UnsafeRawPointer) {
         lock.lock(); freed[h, default: 0] += 1; lock.unlock()
@@ -51,6 +52,21 @@ private final class HandleRecorder: @unchecked Sendable {
     /// of 2 would be a double-free, which crashes the ES client in production).
     func maxFreeCount() -> Int {
         lock.lock(); defer { lock.unlock() }; return freed.values.max() ?? 0
+    }
+    func processOrder() -> [UnsafeRawPointer] {
+        lock.lock(); defer { lock.unlock() }; return order
+    }
+}
+
+private final class WorkerTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64 = 100
+
+    func now() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }; return value
+    }
+    func set(_ next: UInt64) {
+        lock.lock(); value = next; lock.unlock()
     }
 }
 
@@ -108,6 +124,15 @@ struct ESMessageWorkerTests {
         for h in overflow { worker.submit(h) }
         #expect(worker.backpressureDropped() == 12)
         for h in overflow { #expect(rec.freeCount(h) == 1) }   // dropped ⇒ freed
+        let full = worker.snapshot()
+        #expect(full.offeredTotal == 20)
+        #expect(full.acceptedTotal == 8)
+        #expect(full.completedTotal == 0)
+        #expect(full.capacityDroppedTotal == 12)
+        #expect(full.inFlight == 8)
+        #expect(full.inFlightHighWater == 8)
+        #expect(full.offeredTotal == full.acceptedTotal + full.capacityDroppedTotal + full.shutdownRejectedTotal)
+        #expect(full.acceptedTotal == full.completedTotal + UInt64(full.inFlight))
 
         // Release the gate; the 8 accepted now complete and are freed. Drain
         // blocks until they do.
@@ -118,6 +143,10 @@ struct ESMessageWorkerTests {
         #expect(rec.totalFrees() == bound + 12)   // every handle freed once
         #expect(rec.maxFreeCount() == 1)          // no double-free anywhere
         #expect(worker.inFlightCount() == 0)
+        let drained = worker.snapshot()
+        #expect(drained.completedTotal == 8)
+        #expect(drained.inFlight == 0)
+        #expect(drained.queued == 0)
     }
 
     @Test("shutdown drains and frees all in-flight handles")
@@ -259,5 +288,192 @@ struct ESMessageWorkerTests {
         worker.shutdownAndDrain()
         #expect(rec.totalFrees() == bound + 1)   // 75 accepted + 25 dropped + 1 critical
         #expect(rec.maxFreeCount() == 1)
+    }
+
+    @Test("FIFO survives ring wraparound with one drain and exact completion accounting")
+    func ringWraparoundPreservesFIFO() throws {
+        let rec = HandleRecorder()
+        let entered = DispatchSemaphore(value: 0)
+        let permit = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: 4,
+            process: { h in rec.recordProcess(h); entered.signal(); permit.wait() },
+            free: { rec.recordFree($0) }
+        )
+        defer {
+            for _ in 0..<12 { permit.signal() }
+            worker.shutdownAndDrain()
+        }
+        let hs = handles(1...12)
+        for h in hs.prefix(4) { #expect(worker.submit(h)) }
+        try #require(entered.wait(timeout: .now() + 5) == .success)
+        // Keep the FIFO continuously busy. Starting the next process proves
+        // its predecessor was freed and its admission slot is reusable.
+        for h in hs.dropFirst(4) {
+            permit.signal()
+            try #require(entered.wait(timeout: .now() + 5) == .success)
+            #expect(worker.submit(h))
+            #expect(worker.inFlightCount() == 4)
+        }
+        for _ in 0..<4 { permit.signal() }
+        worker.shutdownAndDrain()
+        #expect(rec.processOrder() == hs)
+        #expect(rec.totalFrees() == 12)
+        #expect(rec.maxFreeCount() == 1)
+        let snapshot = worker.snapshot()
+        #expect(snapshot.capacity == 4)
+        #expect(snapshot.inFlightHighWater == 4)
+        #expect(snapshot.offeredTotal == 12)
+        #expect(snapshot.acceptedTotal == 12)
+        #expect(snapshot.completedTotal == 12)
+        #expect(snapshot.capacityDroppedTotal == 0)
+        #expect(snapshot.drainDispatchesTotal == 1)
+        #expect(snapshot.inFlight == 0 && snapshot.queued == 0)
+    }
+
+    @Test("every idle-to-busy transition schedules a fresh drain without a lost wakeup")
+    func idleWakeup() throws {
+        let rec = HandleRecorder()
+        let freed = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: 1,
+            process: { rec.recordProcess($0) },
+            free: { rec.recordFree($0); freed.signal() }
+        )
+        defer { worker.shutdownAndDrain() }
+        for h in handles(1...20) {
+            try #require(worker.submit(h))
+            try #require(freed.wait(timeout: .now() + 5) == .success)
+            // free precedes accounting. Wait for the coherent idle state,
+            // rather than treating entry into free as a finished drain.
+            let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+            while worker.inFlightCount() > 0 && DispatchTime.now().uptimeNanoseconds < deadline {
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+            try #require(worker.inFlightCount() == 0)
+        }
+        worker.shutdownAndDrain()
+        #expect(rec.processOrder() == handles(1...20))
+        #expect(rec.totalFrees() == 20)
+        #expect(rec.maxFreeCount() == 1)
+        #expect(worker.snapshot().drainDispatchesTotal == 20)
+        #expect(worker.snapshot().completedTotal == 20)
+    }
+
+    @Test("shutdown racing with producers frees all offers exactly once and conserves counters")
+    func shutdownRacesWithEnqueues() throws {
+        let rec = HandleRecorder()
+        let first = handles(1...1)[0]
+        let entered = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let start = DispatchSemaphore(value: 0)
+        let producers = DispatchGroup()
+        let stopped = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: 16,
+            process: { h in
+                rec.recordProcess(h)
+                if h == first { entered.signal(); releaseFirst.wait() }
+            },
+            free: { rec.recordFree($0) }
+        )
+        defer { releaseFirst.signal(); worker.shutdownAndDrain() }
+        try #require(worker.submit(first))
+        try #require(entered.wait(timeout: .now() + 5) == .success)
+        for shard in 0..<2 {
+            producers.enter()
+            DispatchQueue.global().async {
+                start.wait()
+                for i in 0..<64 {
+                    let h = UnsafeRawPointer(bitPattern: 2 + shard * 64 + i)!
+                    worker.submit(h, lineageCritical: i.isMultiple(of: 2), eventType: UInt32(shard))
+                }
+                producers.leave()
+            }
+        }
+        DispatchQueue.global().async {
+            start.wait()
+            worker.shutdownAndDrain()
+            stopped.signal()
+        }
+        for _ in 0..<3 { start.signal() }
+        let producersFinished = producers.wait(timeout: .now() + 5)
+        releaseFirst.signal()
+        try #require(producersFinished == .success)
+        try #require(stopped.wait(timeout: .now() + 5) == .success)
+        worker.shutdownAndDrain() // also pins idempotence after a racing stop
+        #expect(!worker.submit(UnsafeRawPointer(bitPattern: 130)!))
+        let snapshot = worker.snapshot()
+        #expect(rec.totalFrees() == 130)
+        #expect(rec.distinctFreed() == 130)
+        #expect(rec.maxFreeCount() == 1)
+        #expect(snapshot.offeredTotal == 130)
+        #expect(snapshot.offeredTotal == snapshot.acceptedTotal + snapshot.capacityDroppedTotal + snapshot.shutdownRejectedTotal)
+        #expect(snapshot.acceptedTotal == snapshot.completedTotal)
+        #expect(snapshot.completedTotal == UInt64(rec.processOrder().count))
+        #expect(snapshot.shutdownRejectedTotal >= 1)
+        #expect(snapshot.inFlight == 0 && snapshot.queued == 0)
+        #expect(snapshot.inFlightHighWater <= snapshot.capacity)
+        #expect(worker.backpressureDroppedByEventType().values.reduce(0, +) == snapshot.capacityDroppedTotal)
+    }
+
+    @Test("queue wait, service and live ages use separate monotonic boundaries")
+    func queueAndServiceTelemetry() throws {
+        let clock = WorkerTestClock()
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let first = handles(1...1)[0]
+        let worker = ESMessageWorker(
+            maxInFlight: 4,
+            uptimeNanoseconds: { clock.now() },
+            process: { h in
+                if h == first { entered.signal(); release.wait() }
+                else { clock.set(400) }
+            },
+            free: { _ in }
+        )
+        defer { release.signal(); worker.shutdownAndDrain() }
+        try #require(worker.submit(first)) // enqueued and started at 100
+        try #require(entered.wait(timeout: .now() + 5) == .success)
+        clock.set(200)
+        try #require(worker.submit(handles(2...2)[0]))
+        clock.set(300)
+        let busy = worker.snapshot()
+        #expect(busy.inFlight == 2 && busy.queued == 1)
+        #expect(busy.completedTotal == 0)
+        #expect(busy.oldestQueuedAgeNanoseconds == 100)
+        #expect(busy.currentServiceAgeNanoseconds == 200)
+        #expect(busy.queueWaitNanosecondsTotal == 0)
+        #expect(busy.serviceNanosecondsTotal == 0)
+        release.signal() // first finishes at 300; second runs from 300 to 400
+        worker.shutdownAndDrain()
+        let finished = worker.snapshot()
+        #expect(finished.completedTotal == 2)
+        #expect(finished.queueWaitNanosecondsTotal == 100)
+        #expect(finished.queueWaitNanosecondsMax == 100)
+        #expect(finished.serviceNanosecondsTotal == 300)
+        #expect(finished.serviceNanosecondsMax == 200)
+        #expect(finished.oldestQueuedAgeNanoseconds == 0)
+        #expect(finished.currentServiceAgeNanoseconds == 0)
+        #expect(finished.inFlight == 0 && finished.queued == 0)
+    }
+
+    @Test("worker telemetry encodes the documented heartbeat keys without handles")
+    func snapshotEncoding() throws {
+        let worker = ESMessageWorker(maxInFlight: 8, process: { _ in }, free: { _ in })
+        worker.shutdownAndDrain()
+        let data = try JSONEncoder().encode(worker.snapshot())
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(Set(json.keys) == Set([
+            "capacity", "reserved_capacity", "offered_total", "accepted_total", "completed_total",
+            "capacity_dropped_total", "shutdown_rejected_total", "in_flight", "queued",
+            "in_flight_high_water", "drain_dispatches_total", "queue_wait_nanoseconds_total",
+            "queue_wait_nanoseconds_max", "service_nanoseconds_total", "service_nanoseconds_max",
+            "oldest_queued_age_nanoseconds", "current_service_age_nanoseconds",
+        ]))
+        let decoded = try JSONDecoder().decode(ESMessageWorker.Snapshot.self, from: data)
+        #expect(decoded.capacity == 8)
+        #expect(decoded.reservedCapacity == 2)
+        #expect(decoded.offeredTotal == 0 && decoded.inFlight == 0)
     }
 }

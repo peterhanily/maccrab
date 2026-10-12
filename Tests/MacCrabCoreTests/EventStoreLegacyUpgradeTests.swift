@@ -483,6 +483,48 @@ struct EventStoreLegacyUpgradeTests {
         #expect(try preservedEvidence(in: fixture) == fixture.evidenceJSON)
     }
 
+    @Test("Exact evidence keeps identical ranked UUIDs before and after legacy journal migration")
+    func exactEvidenceSelectionAcrossLegacyMigration() async throws {
+        let fixture = try fixture(rows: 80, variedSeverity: true)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let originals = try originalEvents(in: fixture)
+        try #require(originals.count == 80)
+        // Independent reference: all fixture events precede first.timestamp,
+        // so decreasing timestamp is increasing distance from this alert.
+        let expected = originals.values.sorted {
+            if $0.severity != $1.severity { return $0.severity > $1.severity }
+            if $0.timestamp != $1.timestamp { return $0.timestamp > $1.timestamp }
+            return $0.id.uuidString < $1.id.uuidString
+        }.prefix(7).sorted {
+            if $0.timestamp != $1.timestamp { return $0.timestamp < $1.timestamp }
+            return $0.id.uuidString < $1.id.uuidString
+        }.map { $0.id.uuidString }
+        let store = try EventStore(path: fixture.path)
+        // Prove the first call really exercises the unmigrated legacy path.
+        do {
+            var raw: OpaquePointer?
+            try #require(sqlite3_open_v2(fixture.path, &raw, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+            let db = try #require(raw)
+            defer { sqlite3_close(db) }
+            try #require(try scalar(
+                "SELECT COUNT(*) FROM events WHERE journal_block_id IS NULL", on: db
+            ) == 80)
+        }
+        let before = try await store.exactAlertEvidenceSnapshot(
+            alertTimestamp: fixture.first.timestamp, maxRows: 7
+        )
+        #expect(before.isComplete)
+        #expect(before.candidates.map(\.eventId) == expected)
+        let recovery = try await store.recoverJournalBeforeProducers()
+        try #require(recovery.complete && recovery.migratedEvents == 80)
+        let after = try await store.exactAlertEvidenceSnapshot(
+            alertTimestamp: fixture.first.timestamp, maxRows: 7
+        )
+        #expect(after.isComplete)
+        #expect(after.candidates.map(\.eventId) == expected)
+        #expect(after.candidates == before.candidates)
+    }
+
     @Test("Default maintenance preserves the predecessor's full per-alert evidence after journal upgrade")
     func defaultMaintenancePreservesPublishedEvidenceAllowance() async throws {
         let fixture = try fixture(

@@ -3869,6 +3869,17 @@ enum DaemonTimers {
                 (state.collector?.esCopyBackpressureDroppedByType() ?? [:])
                     .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
             let esClientSplitDegraded = state.collector?.esClientSplitDegraded() ?? false
+            // Fixed-size, per-client admission/service ledgers locate worker
+            // saturation without recording process identities or event paths.
+            // A missing collector/encoding failure is unknown, not zero work.
+            let esMessageWorkers: Any
+            if let snapshots = state.collector?.esWorkerSnapshots(),
+               let encoded = try? JSONEncoder().encode(snapshots),
+               let object = try? JSONSerialization.jsonObject(with: encoded) {
+                esMessageWorkers = object
+            } else {
+                esMessageWorkers = NSNull()
+            }
 
             // Loss before a collector's AsyncStream has no normalized Event and
             // therefore no honest final-lane attribution. Keep it source-only,
@@ -5031,6 +5042,7 @@ enum DaemonTimers {
                 // pre-worker filtering and normalizer rejects, now split above.
                 "es_copy_backpressure_dropped_by_type": esCopyBackpressureDroppedByType,
                 "es_client_split_degraded": esClientSplitDegraded,
+                "es_message_workers": esMessageWorkers,
                 // Which kernel event source actually won the boot-time fallback
                 // chain (native ES client → eslogger proxy → kdebug → nothing).
                 // Previously `esMode` was ONLY `print`ed at startup and rendered
