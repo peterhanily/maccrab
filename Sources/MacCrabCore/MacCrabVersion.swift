@@ -19,12 +19,12 @@
 //      resolves to the bare CLI binary (no Info.plist), so step 1 misses.
 //      We walk up from the executable to `<exec_dir>/../../Info.plist`
 //      (i.e. `Contents/Info.plist`) and read `CFBundleShortVersionString`
-//      so `maccrabctl version` / the MCP serverInfo track the installed
-//      app version instead of the compiled-in literal.
+//      after resolving executable symlinks, so installed CLI aliases and
+//      the MCP serverInfo track the app instead of the compiled-in literal.
 //   3. `MacCrabVersion.fallback` — the build-time string baked into
 //      MacCrabCore.framework. Used when neither bundle is present (bare
-//      daemon binary launched via `swift run maccrabd`, the maccrabctl
-//      CLI symlinked into /usr/local/bin, the test bundle).
+//      daemon binary launched via `swift run maccrabd`, standalone CLI
+//      copies outside an app bundle, the test bundle).
 //
 // Updating: bump `fallback` below whenever the project version changes.
 // `scripts/prerelease-check.sh` enforces parity between this constant
@@ -62,7 +62,15 @@ public enum MacCrabVersion {
     /// malformed rather than crashing, so dev/standalone runs fall through
     /// to `fallback`.
     private static func enclosingAppVersion() -> String? {
-        let execURL = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let selectedExecutableURL = Bundle.main.executableURL
+            ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        return enclosingAppVersion(executableURL: selectedExecutableURL)
+    }
+
+    /// Resolve the selected URL, not just the CommandLine fallback. Kept
+    /// internal so tests can use inert filesystem fixtures, never a live CLI.
+    static func enclosingAppVersion(executableURL: URL) -> String? {
+        let execURL = executableURL.resolvingSymlinksInPath()
         // <exec_dir>/../../Info.plist  i.e.  Contents/Resources/bin/.. /.. /Info.plist
         let plistURL = execURL
             .deletingLastPathComponent()   // bin/

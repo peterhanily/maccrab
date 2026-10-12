@@ -21620,6 +21620,11 @@ public actor EventStore {
         }
     }
 
+    /// Read-only controller counters; not atomic with other actor snapshots.
+    public func controlledCheckpointSnapshot() -> SQLiteControlledCheckpointSnapshot? {
+        checkpointController?.snapshot()
+    }
+
     public func storageAdmissionSnapshot() -> SQLitePersistentStoreAdmissionSnapshot? {
         guard var admission = storageAdmission else { return nil }
         defer { storageAdmission = admission }

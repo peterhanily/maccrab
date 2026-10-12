@@ -229,6 +229,71 @@ public struct CausalGraphStorageRecoveryResult: Sendable, Equatable {
     public let eligibleBacklogRemaining: Bool?
 }
 
+/// One fixed checkpoint mode, cumulative for this actor's lifetime. Requests
+/// include fresh headroom probes; attempts count only calls into SQLite.
+/// Requests = attempts + admission deferrals + unavailable handles, and
+/// attempts = completed + pinned deferrals + failures (until UInt64 saturation).
+/// Durations are monotonic wall time, not CPU time or bytes written. Last frame
+/// counts describe the last actual SQLite attempt, including its failure.
+public struct CausalGraphCheckpointModeTelemetry: Sendable, Codable, Equatable {
+    public private(set) var requestsTotal: UInt64 = 0
+    public private(set) var attemptsTotal: UInt64 = 0
+    public private(set) var completedTotal: UInt64 = 0
+    public private(set) var pinnedDeferralsTotal: UInt64 = 0
+    public private(set) var failuresTotal: UInt64 = 0
+    public private(set) var admissionDeferralsTotal: UInt64 = 0
+    public private(set) var unavailableTotal: UInt64 = 0
+    public private(set) var requestNanosecondsTotal: UInt64 = 0
+    public private(set) var requestMaxNanoseconds: UInt64 = 0
+    public private(set) var sqliteNanosecondsTotal: UInt64 = 0
+    public private(set) var sqliteMaxNanoseconds: UInt64 = 0
+    public private(set) var lastLogFrames: Int32?
+    public private(set) var lastCheckpointedFrames: Int32?
+
+    fileprivate enum Outcome {
+        case completed, pinned, failed, admissionDeferred, unavailable
+    }
+
+    fileprivate mutating func record(
+        outcome: Outcome,
+        requestNanoseconds: UInt64,
+        sqliteNanoseconds: UInt64?,
+        logFrames: Int32?,
+        checkpointedFrames: Int32?
+    ) {
+        func add(_ value: UInt64, _ amount: UInt64 = 1) -> UInt64 {
+            let sum = value.addingReportingOverflow(amount)
+            return sum.overflow ? .max : sum.partialValue
+        }
+        requestsTotal = add(requestsTotal)
+        requestNanosecondsTotal = add(requestNanosecondsTotal, requestNanoseconds)
+        requestMaxNanoseconds = max(requestMaxNanoseconds, requestNanoseconds)
+        if let sqliteNanoseconds {
+            attemptsTotal = add(attemptsTotal)
+            sqliteNanosecondsTotal = add(sqliteNanosecondsTotal, sqliteNanoseconds)
+            sqliteMaxNanoseconds = max(sqliteMaxNanoseconds, sqliteNanoseconds)
+            lastLogFrames = logFrames
+            lastCheckpointedFrames = checkpointedFrames
+        }
+        switch outcome {
+        case .completed: completedTotal = add(completedTotal)
+        case .pinned: pinnedDeferralsTotal = add(pinnedDeferralsTotal)
+        case .failed: failuresTotal = add(failuresTotal)
+        case .admissionDeferred: admissionDeferralsTotal = add(admissionDeferralsTotal)
+        case .unavailable: unavailableTotal = add(unavailableTotal)
+        }
+    }
+}
+
+/// Fixed labels only: no database paths, SQL text, or event identifiers. This
+/// covers explicit store checkpoints, not the separately owned WAL-hook
+/// controller. The whole value is captured in one synchronous actor turn.
+public struct CausalGraphCheckpointTelemetry: Sendable, Codable, Equatable {
+    public let passive: CausalGraphCheckpointModeTelemetry
+    public let restart: CausalGraphCheckpointModeTelemetry
+    public let truncate: CausalGraphCheckpointModeTelemetry
+}
+
 /// Why an awaited boot-time TraceGraph drain could not restore ordinary
 /// mutation admission before ingestion producers were started.
 public enum CausalGraphStartupRecoveryNonconvergenceReason: String, Sendable, Equatable {
@@ -399,6 +464,9 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     private var db: OpaquePointer?
     private var checkpointController: SQLiteControlledCheckpointController?
+    private var passiveCheckpointTelemetry = CausalGraphCheckpointModeTelemetry()
+    private var restartCheckpointTelemetry = CausalGraphCheckpointModeTelemetry()
+    private var truncateCheckpointTelemetry = CausalGraphCheckpointModeTelemetry()
     private let databasePath: String
     private let encryption: DatabaseEncryption?
     /// True when the handle ended up read-only — either because the caller
@@ -3968,8 +4036,6 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         let requestedBatchSize = batchSize ?? Self.substrateDeleteBatchSize
         let boundedBatchSize = max(1, min(requestedBatchSize, Self.substrateDeleteBatchSize))
         while remaining > 0 {
-            guard checkpointAllowsMaintenance() else { break }
-            guard recoveryMutationHeadroomAdmitted() else { break }
             let thisBatch = min(boundedBatchSize, remaining)
             let selection = try boundedSubstrateDeleteSelection(
                 db: db,
@@ -3980,6 +4046,12 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 limit: thisBatch
             )
             guard !selection.ids.isEmpty else { break }
+            // The bounded SELECT finalizes its reader before returning. An
+            // empty table needs no per-batch checkpoint, but every real DELETE
+            // still freshly proves pin/free-space admission here. The DELETE
+            // also revalidates eligibility in SQL; this selection is no lease.
+            guard checkpointAllowsMaintenance() else { break }
+            guard recoveryMutationHeadroomAdmitted() else { break }
             let placeholders = selection.ids.map { _ in "?" }
                 .joined(separator: ", ")
             var revalidation = [guardSQL]
@@ -4121,9 +4193,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             let msg = String(cString: sqlite3_errmsg(db))
             throw CausalGraphStoreError.stepFailed("VACUUM failed: \(msg)")
         }
-        let trailing = checkpointObservation(
-            mode: Int32(SQLITE_CHECKPOINT_TRUNCATE)
-        )
+        let trailing = checkpointObservation(mode: .truncate)
         guard trailing.completed && !trailing.pinned else {
             throw CausalGraphStoreError.stepFailed(
                 "VACUUM completed but its WAL could not be fully truncated"
@@ -4136,6 +4206,32 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         let pinned: Bool
         let logFrames: Int32
         let checkpointedFrames: Int32
+    }
+
+    private enum CheckpointMode {
+        case passive, restart, truncate
+
+        var sqliteValue: Int32 {
+            switch self {
+            case .passive: return Int32(SQLITE_CHECKPOINT_PASSIVE)
+            case .restart: return Int32(SQLITE_CHECKPOINT_RESTART)
+            case .truncate: return Int32(SQLITE_CHECKPOINT_TRUNCATE)
+            }
+        }
+    }
+
+    public func checkpointTelemetry() -> CausalGraphCheckpointTelemetry {
+        CausalGraphCheckpointTelemetry(
+            passive: passiveCheckpointTelemetry,
+            restart: restartCheckpointTelemetry,
+            truncate: truncateCheckpointTelemetry
+        )
+    }
+
+    /// The controller's own lock protects this separate snapshot. It is not
+    /// atomic with explicit checkpoint telemetry or storage-admission status.
+    public func controlledCheckpointSnapshot() -> SQLiteControlledCheckpointSnapshot? {
+        checkpointController?.snapshot()
     }
 
     /// Fresh floor + sidecar gate for every checkpoint mode. A checkpoint can
@@ -4199,23 +4295,65 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         return true
     }
 
-    private func checkpointObservation(mode: Int32) -> CheckpointObservation {
-        guard let db, checkpointHeadroomAdmitted() else {
+    private func checkpointObservation(mode: CheckpointMode) -> CheckpointObservation {
+        let requestStarted = DispatchTime.now().uptimeNanoseconds
+        var outcome = CausalGraphCheckpointModeTelemetry.Outcome.unavailable
+        var sqliteNanoseconds: UInt64?
+        var observedLogFrames: Int32?
+        var observedCheckpointedFrames: Int32?
+        defer {
+            let elapsed = DispatchTime.now().uptimeNanoseconds - requestStarted
+            switch mode {
+            case .passive:
+                passiveCheckpointTelemetry.record(
+                    outcome: outcome, requestNanoseconds: elapsed,
+                    sqliteNanoseconds: sqliteNanoseconds,
+                    logFrames: observedLogFrames,
+                    checkpointedFrames: observedCheckpointedFrames)
+            case .restart:
+                restartCheckpointTelemetry.record(
+                    outcome: outcome, requestNanoseconds: elapsed,
+                    sqliteNanoseconds: sqliteNanoseconds,
+                    logFrames: observedLogFrames,
+                    checkpointedFrames: observedCheckpointedFrames)
+            case .truncate:
+                truncateCheckpointTelemetry.record(
+                    outcome: outcome, requestNanoseconds: elapsed,
+                    sqliteNanoseconds: sqliteNanoseconds,
+                    logFrames: observedLogFrames,
+                    checkpointedFrames: observedCheckpointedFrames)
+            }
+        }
+        guard let db else {
+            return CheckpointObservation(
+                completed: false, pinned: false, logFrames: 0, checkpointedFrames: 0)
+        }
+        guard checkpointHeadroomAdmitted() else {
+            outcome = .admissionDeferred
             return CheckpointObservation(
                 completed: false, pinned: false, logFrames: 0, checkpointedFrames: 0)
         }
         var logFrames: Int32 = 0
         var checkpointedFrames: Int32 = 0
+        let sqliteStarted = DispatchTime.now().uptimeNanoseconds
         let rc = sqlite3_wal_checkpoint_v2(
-            db, nil, mode, &logFrames, &checkpointedFrames
+            db, nil, mode.sqliteValue, &logFrames, &checkpointedFrames
         )
         // Capture the connection/VFS error state before any filesystem probe or
         // log call can obscure it. BUSY/LOCKED are reader coordination, not
         // storage exhaustion; FULL and IOERR+ENOSPC/EDQUOT latch admission.
+        let failure: SQLiteFailureMetadata?
         if rc != SQLITE_OK, rc != SQLITE_BUSY, rc != SQLITE_LOCKED {
-            let failure = SQLiteFailureMetadata(resultCode: rc, db: db)
+            failure = SQLiteFailureMetadata(resultCode: rc, db: db)
+        } else {
+            failure = nil
+        }
+        sqliteNanoseconds = DispatchTime.now().uptimeNanoseconds - sqliteStarted
+        observedLogFrames = logFrames
+        observedCheckpointedFrames = checkpointedFrames
+        if let failure {
             _ = latchSQLiteStorageFailure(
-                failure, context: "WAL checkpoint mode \(mode)")
+                failure, context: "WAL checkpoint mode \(mode.sqliteValue)")
         }
         // Frame counts, not WAL byte size, identify a reader-pinned snapshot.
         // A perfectly valid reader can pin one 4 KiB frame; the old >64 MB
@@ -4225,6 +4363,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             && logFrames > checkpointedFrames
         let isPinned = rc == SQLITE_BUSY || rc == SQLITE_LOCKED || frameGap
         pinnedReader = isPinned
+        if rc != SQLITE_OK, rc != SQLITE_BUSY, rc != SQLITE_LOCKED {
+            outcome = .failed
+        } else if isPinned {
+            outcome = .pinned
+        } else {
+            outcome = .completed
+        }
         return CheckpointObservation(
             completed: rc == SQLITE_OK && !frameGap,
             pinned: isPinned,
@@ -4236,7 +4381,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// Checkpoint before every maintenance write. If a reader has pinned even
     /// a small WAL snapshot, no DELETE or vacuum is issued on that tick.
     private func checkpointAllowsMaintenance() -> Bool {
-        let observation = checkpointObservation(mode: Int32(SQLITE_CHECKPOINT_TRUNCATE))
+        let observation = checkpointObservation(mode: .truncate)
         if observation.pinned {
             logger.warning("TraceGraph recovery paused: reader pins WAL (\(observation.checkpointedFrames)/\(observation.logFrames) frames checkpointed); no delete or vacuum issued")
         }
@@ -4247,9 +4392,9 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// footprint measurements include WAL content.
     @discardableResult
     public func walCheckpoint() async -> Bool {
-        let passive = checkpointObservation(mode: Int32(SQLITE_CHECKPOINT_PASSIVE))
+        let passive = checkpointObservation(mode: .passive)
         if passive.completed { return true }
-        let restart = checkpointObservation(mode: Int32(SQLITE_CHECKPOINT_RESTART))
+        let restart = checkpointObservation(mode: .restart)
         return restart.completed
     }
 
@@ -4264,7 +4409,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// WAL open, which is still progress.
     @discardableResult
     public func walCheckpointTruncate() async -> Bool {
-        checkpointObservation(mode: Int32(SQLITE_CHECKPOINT_TRUNCATE)).completed
+        checkpointObservation(mode: .truncate).completed
     }
 
     private func recoveryBacklogSnapshot(
@@ -4703,7 +4848,6 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 batchSize: min(256, graphBudget)
             )
             if shouldPreemptForForeground() { return result() }
-            guard checkpointAllowsMaintenance() else { return result() }
         }
 
         // Only rows older than the caller's explicit evidence cutoffs are ever
@@ -4711,6 +4855,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // cutoffs, silently evicting recent traces/substrate. Repeated bounded
         // passes and caller-controlled tightening now provide convergence
         // without crossing the one-hour evidence floor.
+        // This common boundary also follows the entity phase. There is no
+        // intervening await or SQLite write requiring a duplicate checkpoint.
         guard checkpointAllowsMaintenance() else { return result() }
         guard recoveryMutationHeadroomAdmitted() else { return result() }
         if vacuumBudget > pagesReclaimed, mode == 2 {

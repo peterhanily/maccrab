@@ -4,6 +4,110 @@ import CSQLCipher
 import os.log
 import SystemConfiguration
 
+/// The production heartbeat uses this fixed-schema projection. Deliberately
+/// excludes rule labels, event identities and event content.
+enum SequencePartialPressureHeartbeat {
+    static func fields(_ diagnostics: SequenceEngine.PartialPressureDiagnostics) -> [String: Any] {
+        var fields: [String: Any] = [
+            "global_count_shed_partials_total": diagnostics.globalCountShedTotal,
+            "semantic_weight_shed_partials_total": diagnostics.semanticWeightShedTotal,
+            "total_shed_partials": diagnostics.totalShed,
+            "classification_conserved": diagnostics.classificationConserved,
+            "counters_at_limit": diagnostics.countersAtLimit,
+            "global_count_limit": diagnostics.globalCountLimit,
+            "state_weight_limit_bytes": diagnostics.stateWeightLimitBytes,
+        ]
+        if let pressure = diagnostics.lastPressure {
+            fields["last_pressure"] = [
+                "reason": pressure.reason.rawValue,
+                "observed_at_unix": pressure.observedAt.timeIntervalSince1970,
+                "pending_count_before": pressure.pendingCountBefore,
+                "partial_count_before": pressure.partialCountBefore,
+                "partial_count_after": pressure.partialCountAfter,
+                "state_weight_bytes_before": pressure.stateWeightBytesBefore,
+                "state_weight_bytes_after": pressure.stateWeightBytesAfter,
+                "removed_partials": pressure.removedPartials,
+            ] as [String: Any]
+        }
+        return fields
+    }
+}
+
+/// Fixed-schema, read-only connection/controller diagnostics. These separately
+/// awaited snapshots are not cross-store atomic and are not per-file write-byte
+/// measurements. Attached schemas remain part of their owning controller's
+/// totals; no schema names, database paths, SQL or event identities are emitted.
+enum SQLiteCheckpointHeartbeat {
+    static func fields(
+        event: SQLiteControlledCheckpointSnapshot?,
+        alert: SQLiteControlledCheckpointSnapshot?,
+        tracegraph: SQLiteControlledCheckpointSnapshot?,
+        graphExplicit: CausalGraphCheckpointTelemetry?
+    ) -> [String: Any] {
+        [
+            "event": ["controlled": controlledFields(event)],
+            "alert": ["controlled": controlledFields(alert)],
+            "tracegraph": [
+                "controlled": controlledFields(tracegraph),
+                "explicit": explicitFields(graphExplicit),
+            ],
+        ]
+    }
+
+    private static func controlledFields(
+        _ snapshot: SQLiteControlledCheckpointSnapshot?
+    ) -> [String: Any] {
+        guard let snapshot else { return ["available": false] }
+        return [
+            "available": true,
+            "threshold_pages": snapshot.thresholdPages,
+            "attempts_total": snapshot.attemptCount,
+            "backoff_skips_total": snapshot.backoffSkipCount,
+            "completed_total": snapshot.completedCount,
+            "admission_deferrals_total": snapshot.admissionDeferralCount,
+            "pinned_reader_deferrals_total": snapshot.pinnedReaderDeferralCount,
+            "sqlite_failures_total": snapshot.sqliteFailureCount,
+            "last_disposition": snapshot.lastDisposition.rawValue,
+            "last_wal_pages": snapshot.lastWalPages,
+            "last_checkpointed_pages": snapshot.lastCheckpointedPages,
+            "retry_backoff_remaining_commits": snapshot.retryBackoffRemainingCommits,
+            "active": snapshot.active,
+        ]
+    }
+
+    private static func explicitFields(
+        _ snapshot: CausalGraphCheckpointTelemetry?
+    ) -> [String: Any] {
+        guard let snapshot else { return ["available": false] }
+        return [
+            "available": true,
+            "passive": modeFields(snapshot.passive),
+            "restart": modeFields(snapshot.restart),
+            "truncate": modeFields(snapshot.truncate),
+        ]
+    }
+
+    private static func modeFields(
+        _ snapshot: CausalGraphCheckpointModeTelemetry
+    ) -> [String: Any] {
+        [
+            "requests_total": snapshot.requestsTotal,
+            "attempts_total": snapshot.attemptsTotal,
+            "completed_total": snapshot.completedTotal,
+            "pinned_deferrals_total": snapshot.pinnedDeferralsTotal,
+            "failures_total": snapshot.failuresTotal,
+            "admission_deferrals_total": snapshot.admissionDeferralsTotal,
+            "unavailable_total": snapshot.unavailableTotal,
+            "request_nanoseconds_total": snapshot.requestNanosecondsTotal,
+            "request_max_nanoseconds": snapshot.requestMaxNanoseconds,
+            "sqlite_nanoseconds_total": snapshot.sqliteNanosecondsTotal,
+            "sqlite_max_nanoseconds": snapshot.sqliteMaxNanoseconds,
+            "last_log_frames": snapshot.lastLogFrames.map { $0 as Any } ?? NSNull(),
+            "last_checkpointed_frames": snapshot.lastCheckpointedFrames.map { $0 as Any } ?? NSNull(),
+        ]
+    }
+}
+
 // v1.7.3 added a HeartbeatInFlight class that wrapped the heartbeat
 // body in an outer overlap guard. Combined with serial `await` of
 // the snapshot writers it created a deadlock: any single guard-less
@@ -3916,7 +4020,9 @@ enum DaemonTimers {
             // cumulative evictions and the current depth makes that visible:
             // in-flight parked near the cap with evictions climbing is the
             // signature of the flush, whether accidental or deliberate.
-            let sequencePartialsEvicted = await state.sequenceEngine.partialsEvictedTotal
+            let sequencePartialPressure = await state.sequenceEngine.partialPressureDiagnostics()
+            let sequencePartialsEvicted = sequencePartialPressure.totalShed
+            let sequencePartialPressureDict = SequencePartialPressureHeartbeat.fields(sequencePartialPressure)
             let sequencePendingStepsEvicted = await state.sequenceEngine.pendingStepsEvictedTotal
             let sequenceJournalConservation = await state.sequenceEngine.pendingStepConservation()
             let sequenceJournalByRule = await state.sequenceEngine
@@ -4451,6 +4557,14 @@ enum DaemonTimers {
                 ]
             }
 
+            let eventCheckpoints = await state.eventStore.controlledCheckpointSnapshot()
+            let alertCheckpoints = await state.alertStore.controlledCheckpointSnapshot()
+            let graphCheckpoints = await state.causalStore?.controlledCheckpointSnapshot()
+            let graphExplicitCheckpoints = await state.causalStore?.checkpointTelemetry()
+            let sqliteCheckpointWork = SQLiteCheckpointHeartbeat.fields(
+                event: eventCheckpoints, alert: alertCheckpoints,
+                tracegraph: graphCheckpoints, graphExplicit: graphExplicitCheckpoints)
+
             // traces.db holds loopback OTLP input supplied by local tools. It
             // is explicitly unauthenticated/self-reported, but silently losing
             // even advisory evidence would still make an empty trace view
@@ -4952,6 +5066,7 @@ enum DaemonTimers {
                 "rule_sync": ruleSync,
                 "event_journal_recovery": eventJournalRecovery,
                 "event_journal_index": eventJournalIndexDict,
+                "sqlite_checkpoint_work": sqliteCheckpointWork,
                 "dns_capture": state.dnsCollector.captureDiagnostics.dictionary,
                 "event_pipeline_live_memory_by_owner":
                     eventPipelineLiveMemoryByOwnerDict,
@@ -5107,6 +5222,7 @@ enum DaemonTimers {
                 // complete. `in_flight` parked at the 10K cap is the companion
                 // signal. Both were previously invisible outside one log line.
                 "sequence_partials_evicted_total": sequencePartialsEvicted,
+                "sequence_partial_pressure": sequencePartialPressureDict,
                 "sequence_partials_in_flight": sequencePartialsInFlight,
                 "sequence_pending_steps_current": sequencePendingStepsCurrent,
                 "sequence_pending_steps_evicted_total": sequencePendingStepsEvicted,

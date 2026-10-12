@@ -373,32 +373,22 @@ public enum EventSnapshot {
                 with: sanitizedData
             )
 
-            if ingress.overflow != nil,
+            // An oversized original cannot be returned directly. Avoid
+            // decoding it before compaction, and validate an in-bound original
+            // only once, including overflow preparations. Publicly constructed
+            // ingress values still receive both JSON parsing and identity/time
+            // validation; the preparation is not assumed trustworthy.
+            if sanitizedData.count <= maxBytesPerEvent,
                validatesEvent(
                    sanitizedData,
                    eventID: eventID,
                    timestamp: timestamp
-               ), sanitizedData.count <= maxBytesPerEvent {
+               ) {
                 return prepared(
                     data: sanitizedData,
                     eventID: eventID,
                     timestamp: timestamp,
-                    disposition: .poison,
-                    canonicalSHA256: ingress.canonicalSHA256,
-                    canonicalByteCount: ingress.canonicalJSON.count
-                )
-            }
-
-            if validatesEvent(
-                sanitizedData,
-                eventID: eventID,
-                timestamp: timestamp
-            ), sanitizedData.count <= maxBytesPerEvent {
-                return prepared(
-                    data: sanitizedData,
-                    eventID: eventID,
-                    timestamp: timestamp,
-                    disposition: .complete,
+                    disposition: ingress.overflow == nil ? .complete : .poison,
                     canonicalSHA256: ingress.canonicalSHA256,
                     canonicalByteCount: ingress.canonicalJSON.count
                 )

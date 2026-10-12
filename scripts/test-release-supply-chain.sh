@@ -484,6 +484,58 @@ if /usr/bin/grep -E 'verify_bare_tool_runtime .*\|\|[[:space:]]*true' \
     exit 1
 fi
 
+# Exercise only the extracted version probes with inert synthetic scripts.
+# This runs no product binary, signing, installation, daemon or network I/O.
+BARE_RUNTIME_HELPER="$TMP_ROOT/bare-runtime-probes.sh"
+/usr/bin/sed -n '/^# BEGIN BARE_TOOL_RUNTIME_PROBES$/,/^# END BARE_TOOL_RUNTIME_PROBES$/p' \
+    "$SCRIPT_DIR/build-release.sh" > "$BARE_RUNTIME_HELPER"
+[ -s "$BARE_RUNTIME_HELPER" ] || { echo "missing bare-runtime probes" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$BARE_RUNTIME_HELPER"
+BARE_RUNTIME_APP="$TMP_ROOT/runtime-fixture/MacCrab.app"
+/bin/mkdir -p "$BARE_RUNTIME_APP/Contents/Resources/bin"
+cat > "$BARE_RUNTIME_APP/Contents/Resources/bin/maccrabctl" <<'BARE_RUNTIME_FIXTURE'
+#!/bin/bash
+set -eu
+case "$0" in
+    */MacCrab.app/Contents/Resources/bin/*) fixture_version=9.8.7-rc.2; route=direct ;;
+    *) fixture_version="${FIXTURE_LINK_VERSION:-9.8.7-rc.2}"; route=symlink ;;
+esac
+printf '%s %s\n' "$route" "${0##*/}" >> "$FIXTURE_INVOCATIONS"
+case "${0##*/}:$*" in
+    maccrabctl:version) printf 'MacCrab Detection Engine v%s\n' "$fixture_version" ;;
+    maccrab-mcp:--version) printf 'maccrab-mcp %s\n' "$fixture_version" ;;
+    *) exit 2 ;;
+esac
+BARE_RUNTIME_FIXTURE
+/bin/cp "$BARE_RUNTIME_APP/Contents/Resources/bin/maccrabctl" \
+    "$BARE_RUNTIME_APP/Contents/Resources/bin/maccrab-mcp"
+/bin/chmod 0700 "$BARE_RUNTIME_APP/Contents/Resources/bin/maccrabctl" \
+    "$BARE_RUNTIME_APP/Contents/Resources/bin/maccrab-mcp"
+export FIXTURE_INVOCATIONS="$TMP_ROOT/bare-runtime-invocations"
+(
+    VERSION=9.8.7-rc.2
+    unset FIXTURE_LINK_VERSION
+    verify_bare_tool_runtime "$BARE_RUNTIME_APP" fixture
+) > "$TMP_ROOT/bare-runtime-success.log" 2>&1
+expected_invocations=$(printf '%s\n' 'direct maccrabctl' 'direct maccrab-mcp' \
+    'symlink maccrabctl' 'symlink maccrab-mcp')
+[ "$(/bin/cat "$FIXTURE_INVOCATIONS")" = "$expected_invocations" ] \
+    || { echo "bare-runtime gate did not exercise both direct and alias paths" >&2; exit 1; }
+if (
+    VERSION=9.8.7-rc.2
+    export FIXTURE_LINK_VERSION=9.8.7
+    verify_bare_tool_runtime "$BARE_RUNTIME_APP" fixture
+) > "$TMP_ROOT/bare-runtime-wrong-alias.log" 2>&1; then
+    echo "bare-runtime gate accepted an alias reporting the compiled base version" >&2
+    exit 1
+fi
+/usr/bin/grep -qF 'external-symlink maccrabctl runtime probe returned the wrong version' \
+    "$TMP_ROOT/bare-runtime-wrong-alias.log" \
+    || { echo "alias mismatch failed for an unrelated reason" >&2; exit 1; }
+unset FIXTURE_INVOCATIONS
+pass "signed-runtime gate checks both external aliases and rejects alias-only version drift"
+
 for binding_marker in \
         'SOURCE_COMMIT=' \
         'SOURCE_TREE=' \

@@ -40,4 +40,82 @@ struct MacCrabVersionTests {
         // to `fallback`. Documenting that pin here.
         #expect(v == MacCrabVersion.fallback)
     }
+
+    // No binaries are executed and no process-wide environment or cwd is changed.
+    private func withVersionFixture(_ body: (URL, URL, URL) throws -> Void) throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent(
+            "MacCrabVersionTests-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? fm.removeItem(at: root) }
+        let contents = root.appendingPathComponent("MacCrab.app/Contents", isDirectory: true)
+        let bin = contents.appendingPathComponent("Resources/bin", isDirectory: true)
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        let tool = bin.appendingPathComponent("maccrabctl")
+        try Data("inert fixture, not executable".utf8).write(to: tool)
+        let plist = contents.appendingPathComponent("Info.plist")
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleShortVersionString": "9.8.7-rc.2"],
+            format: .xml, options: 0)
+        try data.write(to: plist)
+        try body(root, tool, plist)
+    }
+
+    @Test("direct bundled tool reads the enclosing prerelease version")
+    func directBundledToolVersion() throws {
+        try withVersionFixture { _, tool, _ in
+            #expect(MacCrabVersion.enclosingAppVersion(executableURL: tool) == "9.8.7-rc.2")
+        }
+    }
+
+    @Test("selected external executable URL resolves absolute, relative and chained symlinks")
+    func selectedExecutableSymlinkVersions() throws {
+        try withVersionFixture { root, tool, _ in
+            let fm = FileManager.default
+            let aliases = root.appendingPathComponent("usr/local/bin", isDirectory: true)
+            try fm.createDirectory(at: aliases, withIntermediateDirectories: true)
+            // If the selected URL is not resolved, its parent walk reaches this
+            // unrelated plist instead of the actual executable's app version.
+            let decoy = try PropertyListSerialization.data(
+                fromPropertyList: ["CFBundleShortVersionString": "0.0.0"],
+                format: .xml, options: 0)
+            try decoy.write(to: root.appendingPathComponent("usr/Info.plist"))
+            let absolute = aliases.appendingPathComponent("maccrabctl")
+            try fm.createSymbolicLink(atPath: absolute.path, withDestinationPath: tool.path)
+            let relative = aliases.appendingPathComponent("relative-tool")
+            try fm.createSymbolicLink(atPath: relative.path,
+                withDestinationPath: "../../../MacCrab.app/Contents/Resources/bin/maccrabctl")
+            let chained = aliases.appendingPathComponent("chained-tool")
+            try fm.createSymbolicLink(atPath: chained.path, withDestinationPath: "relative-tool")
+            for selectedURL in [absolute, relative, chained] {
+                #expect(MacCrabVersion.enclosingAppVersion(executableURL: selectedURL) == "9.8.7-rc.2")
+            }
+        }
+    }
+
+    @Test("symlinked app directory resolves to the executable's real enclosing plist")
+    func symlinkedAppDirectoryVersion() throws {
+        try withVersionFixture { root, _, _ in
+            let alias = root.appendingPathComponent("linked-app", isDirectory: true)
+            try FileManager.default.createSymbolicLink(atPath: alias.path,
+                withDestinationPath: "MacCrab.app")
+            let selectedURL = alias.appendingPathComponent("Contents/Resources/bin/maccrabctl")
+            #expect(MacCrabVersion.enclosingAppVersion(executableURL: selectedURL) == "9.8.7-rc.2")
+        }
+    }
+
+    @Test("missing, malformed and non-string enclosing versions preserve the fallback path")
+    func unavailableEnclosingVersion() throws {
+        try withVersionFixture { _, tool, plist in
+            try FileManager.default.removeItem(at: plist)
+            #expect(MacCrabVersion.enclosingAppVersion(executableURL: tool) == nil)
+            try Data("not a property list".utf8).write(to: plist)
+            #expect(MacCrabVersion.enclosingAppVersion(executableURL: tool) == nil)
+            let nonString = try PropertyListSerialization.data(
+                fromPropertyList: ["CFBundleShortVersionString": 42],
+                format: .xml, options: 0)
+            try nonString.write(to: plist)
+            #expect(MacCrabVersion.enclosingAppVersion(executableURL: tool) == nil)
+        }
+    }
 }

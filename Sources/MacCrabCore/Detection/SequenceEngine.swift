@@ -516,11 +516,13 @@ public actor SequenceEngine {
         (Int.max - evictionQueueStaleSlack) / 8
     private static let defaultSweepInterval: TimeInterval = 1.0
 
-    /// Cumulative partial matches dropped by the global cap. Read via
+    /// Cumulative partial matches dropped by the count or semantic-weight cap. Read via
     /// `partialsEvictedTotal` and published in the heartbeat — see that
     /// accessor for why an unmetered eviction is a detection-integrity problem
     /// and not just a diagnostics gap.
     private var evictedPartialCount: Int = 0
+    private var partialPressureTotals = PartialPressureTotals()
+    private var lastPartialPressure: PartialPressureSnapshot?
 
     /// `SequenceEngine` is an actor, but actor isolation is reentrant at every
     /// `await`. Evaluation performs asynchronous lineage queries after taking
@@ -864,6 +866,89 @@ public actor SequenceEngine {
             pendingEvictionQueueHead = 0
         }
         return reference
+    }
+
+    public enum PartialPressureReason: String, Sendable {
+        case globalCount = "global_count"
+        case semanticWeight = "semantic_weight"
+    }
+
+    /// Fixed-size accounting only: no event identities, rule labels or content.
+    /// Internal value type permits deterministic saturation testing without a
+    /// mutable test hook into a live engine's counters.
+    struct PartialPressureTotals: Sendable {
+        private(set) var globalCount: Int = 0
+        private(set) var semanticWeight: Int = 0
+
+        var classifiedTotal: Int {
+            SequenceEngine.saturatingTelemetryAdd(globalCount, semanticWeight)
+        }
+
+        mutating func record(_ count: Int, reason: PartialPressureReason) {
+            switch reason {
+            case .globalCount:
+                globalCount = SequenceEngine.saturatingTelemetryAdd(globalCount, count)
+            case .semanticWeight:
+                semanticWeight = SequenceEngine.saturatingTelemetryAdd(semanticWeight, count)
+            }
+        }
+    }
+
+    /// Latest actual partial removal, sampled after expiry retirement. Both
+    /// sides of the boundary are captured synchronously inside the mutation.
+    public struct PartialPressureSnapshot: Sendable {
+        public let reason: PartialPressureReason
+        public let observedAt: Date
+        public let pendingCountBefore: Int
+        public let partialCountBefore: Int
+        public let partialCountAfter: Int
+        public let stateWeightBytesBefore: Int
+        public let stateWeightBytesAfter: Int
+        public let removedPartials: Int
+    }
+
+    public struct PartialPressureDiagnostics: Sendable {
+        public let globalCountShedTotal: Int
+        public let semanticWeightShedTotal: Int
+        public let totalShed: Int
+        /// Equality of saturating totals, not proof of an exact lifetime count
+        /// once countersAtLimit is true.
+        public let classificationConserved: Bool
+        public let countersAtLimit: Bool
+        public let globalCountLimit: Int
+        public let stateWeightLimitBytes: Int
+        public let lastPressure: PartialPressureSnapshot?
+    }
+
+    /// One actor read includes the existing aggregate and both reason totals;
+    /// no await can expose a partially recorded pressure boundary.
+    public func partialPressureDiagnostics() -> PartialPressureDiagnostics {
+        let classified = partialPressureTotals.classifiedTotal
+        return PartialPressureDiagnostics(
+            globalCountShedTotal: partialPressureTotals.globalCount,
+            semanticWeightShedTotal: partialPressureTotals.semanticWeight,
+            totalShed: evictedPartialCount,
+            classificationConserved: classified == evictedPartialCount,
+            countersAtLimit: classified == Int.max || evictedPartialCount == Int.max,
+            globalCountLimit: maxPartialMatches,
+            stateWeightLimitBytes: SequenceCheckpointCodec.maximumSemanticStateWeight,
+            lastPressure: lastPartialPressure
+        )
+    }
+
+    private func recordPartialPressure(
+        _ count: Int, reason: PartialPressureReason, observedAt: Date,
+        pendingCountBefore: Int, partialCountBefore: Int, stateWeightBytesBefore: Int
+    ) {
+        guard count > 0 else { return }
+        partialPressureTotals.record(count, reason: reason)
+        lastPartialPressure = PartialPressureSnapshot(
+            reason: reason, observedAt: observedAt,
+            pendingCountBefore: pendingCountBefore,
+            partialCountBefore: partialCountBefore, partialCountAfter: totalPartialCount,
+            stateWeightBytesBefore: stateWeightBytesBefore,
+            stateWeightBytesAfter: checkpointStateWeight, removedPartials: count
+        )
     }
 
     public enum PendingPressureReason: String, Sendable {
@@ -2054,6 +2139,8 @@ public actor SequenceEngine {
                     }
                 }
                 if !selected.isEmpty {
+                    let pressureObservedAt = Date()
+                    let partialCountBefore = totalPartialCount
                     for (ruleId, partials) in Array(partialMatches) {
                         let surviving = partials.filter { !selected.contains($0.id) }
                         if surviving.count != partials.count {
@@ -2062,6 +2149,11 @@ public actor SequenceEngine {
                     }
                     removedThisPass = selected.count
                     partialsRemoved += selected.count
+                    recordPartialPressure(
+                        selected.count, reason: .semanticWeight, observedAt: pressureObservedAt,
+                        pendingCountBefore: pendingCountBefore,
+                        partialCountBefore: partialCountBefore, stateWeightBytesBefore: before
+                    )
                     compactEvictionQueue(force: true)
                 }
             }
@@ -2448,6 +2540,11 @@ public actor SequenceEngine {
             return []
         }
 
+        // Resolution and folding are pure functions of this Event value. Keep
+        // the memo local to this evaluation (including each enriched replay),
+        // and use it only during synchronous predicate planning before lineage
+        // awaits. No field cache is stored on the actor or shared between events.
+        let fieldMemo = RuleEngine.FieldMemo(event: event)
         var plans: [EventEvaluationPlan] = []
         for ruleId in candidateRuleIds {
             guard let rule = rules[ruleId], rule.enabled else { continue }
@@ -2484,7 +2581,8 @@ public actor SequenceEngine {
                     step,
                     against: event,
                     dependencyMask: stepDependencyMask,
-                    unresolvedMask: unresolvedMask
+                    unresolvedMask: unresolvedMask,
+                    memo: fieldMemo
                 )
             }
 
@@ -2506,6 +2604,16 @@ public actor SequenceEngine {
         var relationshipPIDs: Set<pid_t> = []
         for plan in plans where planNeedsLineageSnapshot(plan) {
             relationshipPIDs.insert(event.process.pid)
+            // An ordered first-step-only event cannot advance an existing
+            // partial. With no pending history it cannot replay one either.
+            // Keep the incoming PID's authoritative ancestry for its durable
+            // seed, but do not rebuild unused ancestry for the retained pool.
+            // Any possible advance/replay keeps the complete existing union.
+            let canAdvanceExisting = !plan.rule.ordered || plan.matchingSteps.contains {
+                $0.id != plan.rule.steps.first?.id
+            }
+            let hasPendingReplay = pendingLaterSteps[plan.ruleId]?.isEmpty == false
+            guard canAdvanceExisting || hasPendingReplay else { continue }
             for partial in partialMatches[plan.ruleId] ?? [] {
                 for matched in partial.matchedSteps.values {
                     relationshipPIDs.insert(matched.processPid)
@@ -2776,7 +2884,8 @@ public actor SequenceEngine {
         _ step: SequenceStep,
         against event: Event,
         dependencyMask: HeavyEnrichmentDependencyMask,
-        unresolvedMask: HeavyEnrichmentDependencyMask
+        unresolvedMask: HeavyEnrichmentDependencyMask,
+        memo: RuleEngine.FieldMemo
     ) -> Bool {
         let predicates = step.predicates
 
@@ -2788,7 +2897,7 @@ public actor SequenceEngine {
             // A tree without predicates is malformed. validateRule rejects it,
             // but keep the hot path fail-closed if an invariant ever regresses.
             guard !predicates.isEmpty else { return false }
-            return evaluateConditionNode(tree, predicates: predicates, against: event)
+            return evaluateConditionNode(tree, predicates: predicates, against: event, memo: memo)
         }
 
         // Preserve the legacy meaning of an intentionally predicate-free flat
@@ -2797,13 +2906,13 @@ public actor SequenceEngine {
 
         switch step.condition {
         case .allOf:
-            return predicates.allSatisfy { evaluatePredicate($0, against: event) }
+            return predicates.allSatisfy { evaluatePredicate($0, against: event, memo: memo) }
         case .anyOf:
-            return predicates.contains { evaluatePredicate($0, against: event) }
+            return predicates.contains { evaluatePredicate($0, against: event, memo: memo) }
         case .oneOfEach:
             let groups = Dictionary(grouping: predicates, by: { $0.field })
             return groups.values.allSatisfy { group in
-                group.contains { evaluatePredicate($0, against: event) }
+                group.contains { evaluatePredicate($0, against: event, memo: memo) }
             }
         }
     }
@@ -2815,24 +2924,25 @@ public actor SequenceEngine {
     private func evaluateConditionNode(
         _ node: ConditionNode,
         predicates: [Predicate],
-        against event: Event
+        against event: Event,
+        memo: RuleEngine.FieldMemo
     ) -> Bool {
         switch node {
         case .and(let operands):
             guard !operands.isEmpty else { return false }
             return operands.allSatisfy {
-                evaluateConditionNode($0, predicates: predicates, against: event)
+                evaluateConditionNode($0, predicates: predicates, against: event, memo: memo)
             }
         case .or(let operands):
             guard !operands.isEmpty else { return false }
             return operands.contains {
-                evaluateConditionNode($0, predicates: predicates, against: event)
+                evaluateConditionNode($0, predicates: predicates, against: event, memo: memo)
             }
         case .not(let operand):
-            return !evaluateConditionNode(operand, predicates: predicates, against: event)
+            return !evaluateConditionNode(operand, predicates: predicates, against: event, memo: memo)
         case .predicate(let index):
             guard index >= 0, index < predicates.count else { return false }
-            return evaluatePredicate(predicates[index], against: event)
+            return evaluatePredicate(predicates[index], against: event, memo: memo)
         case .predicateGroup(let range, let mode):
             guard !range.isEmpty,
                   range.lowerBound >= 0,
@@ -2840,13 +2950,13 @@ public actor SequenceEngine {
             let group = predicates[range]
             switch mode {
             case .allOf:
-                return group.allSatisfy { evaluatePredicate($0, against: event) }
+                return group.allSatisfy { evaluatePredicate($0, against: event, memo: memo) }
             case .anyOf:
-                return group.contains { evaluatePredicate($0, against: event) }
+                return group.contains { evaluatePredicate($0, against: event, memo: memo) }
             case .oneOfEach:
                 let groups = Dictionary(grouping: group, by: { $0.field })
                 return groups.values.allSatisfy { predicates in
-                    predicates.contains { evaluatePredicate($0, against: event) }
+                    predicates.contains { evaluatePredicate($0, against: event, memo: memo) }
                 }
             }
         }
@@ -2854,24 +2964,28 @@ public actor SequenceEngine {
 
     /// Evaluate a single predicate against an event.
     ///
-    /// This is a self-contained copy of the logic from `RuleEngine` to avoid
-    /// cross-actor dependency and keep the sequence engine independently testable.
-    private func evaluatePredicate(_ predicate: Predicate, against event: Event) -> Bool {
+    /// Uses RuleEngine's value-bound memo, not another actor call. Exact field
+    /// names remain distinct keys; absent and empty fields retain their meaning.
+    private func evaluatePredicate(
+        _ predicate: Predicate, against event: Event, memo: RuleEngine.FieldMemo
+    ) -> Bool {
         let rawResult: Bool
 
         if predicate.modifier == .exists {
-            let fieldValue = resolveField(predicate.field, from: event)
+            let fieldValue = memo.value(for: predicate.field)
             rawResult = fieldValue?.isEmpty == false
         } else {
-            guard let fieldValue = resolveField(predicate.field, from: event) else {
+            guard let fieldValue = memo.value(for: predicate.field) else {
                 let rawMiss = false
                 return predicate.negate ? !rawMiss : rawMiss
             }
             rawResult = evaluateModifier(
                 predicate.modifier,
                 fieldValue: fieldValue,
+                field: predicate.field,
                 values: predicate.values,
-                lowercasedValues: predicate.lowercasedValues
+                lowercasedValues: predicate.lowercasedValues,
+                memo: memo
             )
         }
 
@@ -2891,10 +3005,21 @@ public actor SequenceEngine {
     private func evaluateModifier(
         _ modifier: PredicateModifier,
         fieldValue: String,
+        field: String,
         values: [String],
-        lowercasedValues: [String]
+        lowercasedValues: [String],
+        memo: RuleEngine.FieldMemo
     ) -> Bool {
-        let fieldLower = fieldValue.lowercased()
+        // Regex, numeric and presence checks consume the original value. Only
+        // the four case-insensitive string modifiers need a folded copy; reuse
+        // that exact Swift lowercasing once per field, as RuleEngine does.
+        let needsLower: Bool
+        switch modifier {
+        case .equals, .contains, .startswith, .endswith: needsLower = true
+        default: needsLower = false
+        }
+        let fieldLower = needsLower
+            ? (memo.lowercasedValue(for: field) ?? fieldValue.lowercased()) : ""
 
         switch modifier {
         case .equals:
@@ -3541,6 +3666,10 @@ public actor SequenceEngine {
     private func evictOldest(count: Int) {
         guard count > 0 else { return }
 
+        let pressureObservedAt = Date()
+        let partialCountBefore = totalPartialCount
+        let pendingCountBefore = totalPendingStepCount
+        let stateWeightBefore = checkpointStateWeight
         var removed = 0
         while removed < count, let ref = popOldestEvictionReference() {
 
@@ -3564,6 +3693,11 @@ public actor SequenceEngine {
         }
 
         if removed > 0 {
+            recordPartialPressure(
+                removed, reason: .globalCount, observedAt: pressureObservedAt,
+                pendingCountBefore: pendingCountBefore,
+                partialCountBefore: partialCountBefore, stateWeightBytesBefore: stateWeightBefore
+            )
             markCheckpointStateMutation()
             evictedPartialCount = Self.saturatingTelemetryAdd(
                 evictedPartialCount,

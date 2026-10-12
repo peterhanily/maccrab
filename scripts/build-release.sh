@@ -315,11 +315,11 @@ verify_bare_tool_signature_contract() {
     done
 }
 
-verify_bare_tool_runtime() {
-    local app="$1"
-    local phase="$2"
-    local ctl="$app/Contents/Resources/bin/maccrabctl"
-    local mcp="$app/Contents/Resources/bin/maccrab-mcp"
+# BEGIN BARE_TOOL_RUNTIME_PROBES
+verify_bare_tool_runtime_paths() {
+    local ctl="$1"
+    local mcp="$2"
+    local phase="$3"
     local output status
 
     if output=$("$ctl" version 2>&1); then
@@ -349,6 +349,31 @@ verify_bare_tool_runtime() {
     fi
     echo "    ✓ $phase bare tools launch under AMFI and report v$VERSION"
 }
+
+# A private alias outside the app exercises the installed CLI resolution route.
+# A subshell keeps this cleanup trap separate from the release's EXIT cleanup.
+verify_bare_tool_symlink_runtime() (
+    local app="$1"
+    local phase="$2"
+    local link_dir status
+    umask 077
+    link_dir=$(/usr/bin/mktemp -d /private/tmp/maccrab-tool-links.XXXXXX) || return 1
+    trap 'status=$?; /bin/rm -f "$link_dir/maccrabctl" "$link_dir/maccrab-mcp" || status=1; /bin/rmdir "$link_dir" || status=1; exit "$status"' EXIT
+    /bin/ln -s "$app/Contents/Resources/bin/maccrabctl" "$link_dir/maccrabctl" || return 1
+    /bin/ln -s "$app/Contents/Resources/bin/maccrab-mcp" "$link_dir/maccrab-mcp" || return 1
+    verify_bare_tool_runtime_paths "$link_dir/maccrabctl" "$link_dir/maccrab-mcp" \
+        "$phase external-symlink"
+)
+
+verify_bare_tool_runtime() {
+    local app="$1"
+    local phase="$2"
+    # Preserve the direct probes and their error propagation at both callers.
+    verify_bare_tool_runtime_paths "$app/Contents/Resources/bin/maccrabctl" \
+        "$app/Contents/Resources/bin/maccrab-mcp" "$phase direct" || return 1
+    verify_bare_tool_symlink_runtime "$app" "$phase" || return 1
+}
+# END BARE_TOOL_RUNTIME_PROBES
 
 # The exec probe above proves maccrabctl/maccrab-mcp are allowed to run — but
 # `verify_bare_tool_entitlements` asserts those two carry ZERO entitlements, so
