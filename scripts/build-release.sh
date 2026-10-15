@@ -841,6 +841,11 @@ stage_assemble() {
     if [ -f "$ICON_SRC" ]; then
         cp "$ICON_SRC" "$APP/Contents/Resources/AppIcon.icns"
     fi
+    # Container-only recompression of the pinned icon's ic10 PNG stream. All
+    # resolutions, pixels and non-IDAT metadata are preserved; source is never
+    # modified. Run before any app signature and refuse unexpected icon bytes.
+    /usr/bin/python3 -I -B "$PROJECT_DIR/scripts/compress-staged-icon.py" \
+        --staging-dir "$STAGING_DIR" --icon "$APP/Contents/Resources/AppIcon.icns"
 
     # v1.12.0 RC2 fix (B9): copy SPM-generated MacCrab_MacCrabCore.bundle
     # into the .app's Resources directory. Without this, Bundle.module

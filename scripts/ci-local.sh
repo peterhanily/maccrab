@@ -34,6 +34,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/release.sh
     scripts/build-release.sh
     scripts/optimize-staged-localizations.py
+    scripts/compress-staged-icon.py
     scripts/trim-staged-sparkle-sdk.py
     scripts/prepare-dmg-payload.sh
     scripts/install.sh
@@ -778,7 +779,11 @@ check() {
     local name="$1"
     shift
     CI_PHASE_NUMBER=$((CI_PHASE_NUMBER + 1))
-    local slug phase_script phase_status
+    local slug phase_script phase_status phase_timeout
+    phase_timeout=1800
+    case "$name" in
+        "Staged icon compression fixtures"|"Staged icon native parity") phase_timeout=120 ;;
+    esac
     slug=$(printf '%s' "$name" | LC_ALL=C tr -cs 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z')
     slug=${slug#-}
     slug=${slug%-}
@@ -795,7 +800,7 @@ check() {
     fi
     printf "  %-40s " "$name"
     if /usr/bin/python3 -I "$SCRIPT_DIR/run-ci-phase.py" \
-        --label "$name" --timeout-seconds 1800 \
+        --label "$name" --timeout-seconds "$phase_timeout" \
         --log "$CI_LOCAL_OUTPUT" --result "$prefix.json" -- "$@"; then
         echo -e "${GREEN}PASS${NC}"
         PASS=$((PASS + 1))
@@ -877,6 +882,8 @@ check "Localization checker tests" /usr/bin/python3 -I scripts/test-localization
 check "Staged localization optimization fixtures" /usr/bin/env -u MACCRAB_LOCALIZATION_TEST_RESOURCES \
     /usr/bin/python3 -I -B scripts/test-staged-localizations.py
 check "Staged localization Foundation parity" /usr/bin/python3 -I -B scripts/test-staged-localizations-foundation.py
+check "Staged icon compression fixtures" /usr/bin/python3 -I -B scripts/test-compress-staged-icon.py
+check "Staged icon native parity" /usr/bin/python3 -I -B scripts/test-staged-icon-native.py
 
 echo ""
 echo -e "${BOLD}Rules${NC}"

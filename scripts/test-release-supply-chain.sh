@@ -664,7 +664,7 @@ done
     || { echo "  ✗ critical executor list is unexpectedly incomplete" >&2; exit 1; }
 /usr/bin/grep -qx 'scripts/resource-baseline-provenance.py' "$EXECUTOR_BASELINE" \
     || { echo "  ✗ resource provenance verifier is missing from critical executors" >&2; exit 1; }
-for staged_helper in optimize-staged-localizations.py trim-staged-sparkle-sdk.py; do
+for staged_helper in optimize-staged-localizations.py compress-staged-icon.py trim-staged-sparkle-sdk.py; do
     /usr/bin/grep -qx "scripts/$staged_helper" "$EXECUTOR_BASELINE" \
         || { echo "  ✗ staged artifact transformer is missing from critical executors: $staged_helper" >&2; exit 1; }
 done
@@ -672,7 +672,7 @@ for workload_executor in runtime-qualification-workload.sh runtime-workload-dire
     /usr/bin/grep -qx "scripts/$workload_executor" "$EXECUTOR_BASELINE" \
         || { echo "  ✗ transitive runtime workload executor is missing from critical executors: $workload_executor" >&2; exit 1; }
 done
-for staged_test in test-staged-localizations.py test-staged-localizations-foundation.py test-trim-staged-sparkle-sdk.py; do
+for staged_test in test-staged-localizations.py test-staged-localizations-foundation.py test-compress-staged-icon.py test-staged-icon-native.py test-trim-staged-sparkle-sdk.py; do
     /usr/bin/grep -q "$staged_test" "$PROJECT_DIR/scripts/ci-local.sh" \
         || { echo "  ✗ staged artifact regression is missing from clean CI: $staged_test" >&2; exit 1; }
 done

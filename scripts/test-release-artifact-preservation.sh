@@ -41,6 +41,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/release.sh
     scripts/build-release.sh
     scripts/optimize-staged-localizations.py
+    scripts/compress-staged-icon.py
     scripts/trim-staged-sparkle-sdk.py
     scripts/prepare-dmg-payload.sh
     scripts/install.sh
@@ -249,6 +250,8 @@ make_ci_fixture() {
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-localizations.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-localizations.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-localizations-foundation.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-compress-staged-icon.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-icon-native.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-trim-staged-sparkle-sdk.py"
     write_executable "$fixture/scripts/pre-release-audit.sh" \
         '#!/bin/bash' \

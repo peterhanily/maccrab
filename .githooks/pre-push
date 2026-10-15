@@ -50,6 +50,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/release.sh
     scripts/build-release.sh
     scripts/optimize-staged-localizations.py
+    scripts/compress-staged-icon.py
     scripts/trim-staged-sparkle-sdk.py
     scripts/prepare-dmg-payload.sh
     scripts/install.sh
