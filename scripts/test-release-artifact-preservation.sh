@@ -40,6 +40,8 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/ci-receipt.py
     scripts/release.sh
     scripts/build-release.sh
+    scripts/optimize-staged-localizations.py
+    scripts/trim-staged-sparkle-sdk.py
     scripts/prepare-dmg-payload.sh
     scripts/install.sh
     scripts/release-env.sh
@@ -48,7 +50,9 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/candidate-qualification.py
     scripts/resource-baseline-provenance.py
     scripts/runtime-qualification-workload.sh
+    scripts/runtime-workload-directories.py
     scripts/test-otlp-curl.sh
+    scripts/otlp-smoke.py
     scripts/check-release-dependencies.sh
     scripts/prepare-release-pyyaml.sh
     scripts/check-release-pyyaml.sh
@@ -243,6 +247,9 @@ make_ci_fixture() {
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-swift-toolchain.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/check-localizations.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-localizations.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-localizations.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-localizations-foundation.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-trim-staged-sparkle-sdk.py"
     write_executable "$fixture/scripts/pre-release-audit.sh" \
         '#!/bin/bash' \
         'if [ "${MACCRAB_TEST_LATE_DELETE:-0}" = "1" ]; then rm -f .build/MacCrab-v*.dmg; fi' \

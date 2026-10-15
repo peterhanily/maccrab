@@ -361,14 +361,55 @@ expect_failure "duplicate Sparkle build identity rejected" \
     --item "$FIXTURE/cdata-item.xml" --current "$FIXTURE/new-feed.xml" \
     --output "$FIXTURE/duplicate.xml" --expected-version 1.2.3 --expected-build 1.2.3.44
 
-printf '%s' '<!DOCTYPE item [<!ENTITY x SYSTEM "file:///etc/passwd">]><item>&x;</item>' > "$FIXTURE/xxe.xml"
+# The negative fixture names only an owned canary, never a host file. Require
+# the specific pre-parse refusal; a later parse/I/O/network failure is not proof
+# that the intended guard ran.
+XML_CANARY="$TMP_ROOT/xml-canary.txt"
+printf 'owned-xml-canary-must-not-be-read\n' > "$XML_CANARY"
+printf '<!DOCTYPE item [<!ENTITY x SYSTEM "file://%s">]><item>&x;</item>' \
+    "$XML_CANARY" > "$FIXTURE/xxe.xml"
 expect_failure "DOCTYPE/entity item rejected before publisher network boundary" \
     /usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C \
     /usr/bin/python3 -I "$FIXTURE/scripts/_appcast_xml.py" validate-item --item "$FIXTURE/xxe.xml"
+/usr/bin/grep -Fq 'DOCTYPE/ENTITY is forbidden' "$TMP_ROOT/failure.out" \
+    || { echo "  ✗ malformed XML did not reach the pre-parse guard" >&2; exit 1; }
+
+# Never call the live publisher transport, even if the XML refusal regresses.
+# This copy uses the exact source XML helper and a marker-only curl stub; all
+# relative helper lookup still follows the production publisher's own layout.
+OFFLINE_PUBLISHER_DIR="$TMP_ROOT/offline-appcast-publisher"
+/bin/mkdir "$OFFLINE_PUBLISHER_DIR"
+/bin/cp "$SCRIPT_DIR/_appcast_xml.py" "$OFFLINE_PUBLISHER_DIR/_appcast_xml.py"
+OFFLINE_CURL="$OFFLINE_PUBLISHER_DIR/curl-fixture"
+OFFLINE_CURL_MARKER="$TMP_ROOT/unexpected-appcast-network-attempt"
+cat > "$OFFLINE_CURL" <<'OFFLINE_CURL_FIXTURE'
+#!/bin/bash
+set -eu
+printf attempted > "${OFFLINE_CURL_MARKER:?}"
+exit 99
+OFFLINE_CURL_FIXTURE
+/bin/chmod 0700 "$OFFLINE_CURL"
+/usr/bin/grep -qF '/usr/bin/curl' "$SCRIPT_DIR/publish-appcast-entry.sh" \
+    || { echo "  ✗ publisher transport seam changed" >&2; exit 1; }
+/usr/bin/sed "s#/usr/bin/curl#$OFFLINE_CURL#g" "$SCRIPT_DIR/publish-appcast-entry.sh" \
+    > "$OFFLINE_PUBLISHER_DIR/publish-appcast-entry.sh"
+if /usr/bin/grep -qF '/usr/bin/curl' "$OFFLINE_PUBLISHER_DIR/publish-appcast-entry.sh"; then
+    echo "  ✗ offline publisher retained a live transport" >&2; exit 1
+fi
 expect_failure "publisher rejects malformed item before any curl" \
     /usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C SITE_REPO_TOKEN=fixturetoken \
-    "$SCRIPT_DIR/publish-appcast-entry.sh" --item "$FIXTURE/xxe.xml" \
+    OFFLINE_CURL_MARKER="$OFFLINE_CURL_MARKER" \
+    /bin/bash "$OFFLINE_PUBLISHER_DIR/publish-appcast-entry.sh" --item "$FIXTURE/xxe.xml" \
     --site-repo owner/repo --version 1.2.3
+/usr/bin/grep -Fq 'DOCTYPE/ENTITY is forbidden' "$TMP_ROOT/failure.out" \
+    || { echo "  ✗ publisher failed for a reason other than the pre-parse guard" >&2; exit 1; }
+[[ ! -e "$OFFLINE_CURL_MARKER" ]] \
+    || { echo "  ✗ malformed XML reached the mocked network boundary" >&2; exit 1; }
+[[ "$(/bin/cat "$XML_CANARY")" = owned-xml-canary-must-not-be-read ]] \
+    || { echo "  ✗ owned XML canary changed" >&2; exit 1; }
+if /usr/bin/grep -qF 'owned-xml-canary-must-not-be-read' "$TMP_ROOT/failure.out"; then
+    echo "  ✗ owned XML canary content appeared in parser output" >&2; exit 1
+fi
 
 echo "Static drift guards"
 for file in "$PROJECT_DIR/scripts/build-release.sh" "$PROJECT_DIR/scripts/release.sh"; do
@@ -623,6 +664,18 @@ done
     || { echo "  ✗ critical executor list is unexpectedly incomplete" >&2; exit 1; }
 /usr/bin/grep -qx 'scripts/resource-baseline-provenance.py' "$EXECUTOR_BASELINE" \
     || { echo "  ✗ resource provenance verifier is missing from critical executors" >&2; exit 1; }
+for staged_helper in optimize-staged-localizations.py trim-staged-sparkle-sdk.py; do
+    /usr/bin/grep -qx "scripts/$staged_helper" "$EXECUTOR_BASELINE" \
+        || { echo "  ✗ staged artifact transformer is missing from critical executors: $staged_helper" >&2; exit 1; }
+done
+for workload_executor in runtime-qualification-workload.sh runtime-workload-directories.py test-otlp-curl.sh otlp-smoke.py; do
+    /usr/bin/grep -qx "scripts/$workload_executor" "$EXECUTOR_BASELINE" \
+        || { echo "  ✗ transitive runtime workload executor is missing from critical executors: $workload_executor" >&2; exit 1; }
+done
+for staged_test in test-staged-localizations.py test-staged-localizations-foundation.py test-trim-staged-sparkle-sdk.py; do
+    /usr/bin/grep -q "$staged_test" "$PROJECT_DIR/scripts/ci-local.sh" \
+        || { echo "  ✗ staged artifact regression is missing from clean CI: $staged_test" >&2; exit 1; }
+done
 /usr/bin/grep -q 'test-release-privacy.py' "$PROJECT_DIR/scripts/ci-local.sh" \
     || { echo "  ✗ release privacy controls missing from clean CI" >&2; exit 1; }
 pass "release source retains all provenance/isolation/parse boundaries"

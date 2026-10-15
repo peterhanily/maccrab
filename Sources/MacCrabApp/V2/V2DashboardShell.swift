@@ -59,23 +59,13 @@ struct V2DashboardShell: View {
                     )
 
                     ZStack {
-                        // Pre-fix: `.id(state.currentWorkspace)` here
-                        // forced SwiftUI to dismantle the entire
-                        // workspace subtree on every nav, which (a)
-                        // wiped per-workspace `@State` (e.g. the
-                        // TraceGraph's traceMembersCache + force-
-                        // layout cachedPositions, the Investigation's
-                        // selectedTrace), so every visit re-fetched +
-                        // re-solved from cold; and (b) ran the new
-                        // workspace's `.task(id:)` cold-fetch
-                        // alongside the old workspace's still-
-                        // animating render. SwiftUI's `switch` in
-                        // `workspaceContent` already replaces views
-                        // correctly when the case changes — the .id
-                        // was redundant + actively harmful. Removing
-                        // it keeps caches alive across workspace
-                        // switches, eliminates the cold cascade, and
-                        // shaves the dismantle time off every nav.
+                        // Identity follows the conditional workspace tree;
+                        // do not add a redundant .id(currentWorkspace).
+                        // Switching cases can still recreate view-local
+                        // @State. Reusable rule definitions live in the
+                        // retained provider, and the shared Events reader
+                        // lives in AppState; rows and per-view query
+                        // presentation may reload on return.
                         workspaceContent
                             .transition(V2Motion.workspaceTransition(reduceMotion: reduceMotion))
                     }

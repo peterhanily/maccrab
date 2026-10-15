@@ -25,7 +25,9 @@ enum SequenceCheckpointCodec {
     private static let rawCodec: UInt8 = 0
     private static let lzfseCodec: UInt8 = 1
 
-    private struct SemanticState: Codable {
+    // Hash input only; checkpoints are decoded through their versioned wire
+    // models. Avoid synthesizing an unused legacy digest-input decoder.
+    private struct SemanticState: Encodable {
         let schemaVersion: Int
         let ruleFingerprint: String
         let partialBuckets: [SequenceCheckpointPartialBucket]

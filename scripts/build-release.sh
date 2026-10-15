@@ -900,6 +900,12 @@ stage_assemble() {
             break
         fi
     done
+    # Only optimize the staged tables after the nested copies above have been
+    # compared byte-for-byte. Preserve all locales and decoded string/plural
+    # content; reject malformed inputs or any non-staging target.
+    /usr/bin/python3 -I -B "$PROJECT_DIR/scripts/optimize-staged-localizations.py" \
+        --staging-dir "$STAGING_DIR" --resources "$APP/Contents/Resources"
+
     # The rule channel is release-disabled pending an owner-approved offline key
     # rotation/custody record. Check the FINAL app tree that will be code-signed
     # and placed in the DMG; checking source alone would miss a stale resource.
@@ -1083,7 +1089,7 @@ PLIST
     <!-- Build channel: "release" or "dev". Read this, never infer the
          channel from the version string. -->
     <key>MacCrabBuildChannel</key><string>${CHANNEL}</string>
-    <!-- maccrab:// deep-link scheme (APPCORE-01). Routes `open maccrab://...`
+    <!-- maccrab:// deep-link scheme (APPCORE-01). Routes open maccrab://...
          and in-app bookmarks to MacCrab.app via the scene .onOpenURL →
          V2DashboardState.goto(url:) pipeline. -->
     <key>CFBundleURLTypes</key>
@@ -1339,6 +1345,10 @@ ATTESTATION_EOF
         # -R preserves the framework's internal symlinks (Versions/B ↔ Current).
         # Without -R, macOS treats the copy as malformed and codesign rejects it.
         cp -R "$SPARKLE_SRC" "$FRAMEWORKS_DIR/"
+        # SDK headers/module maps are not runtime resources. Trim only this
+        # copied framework, before re-signing; never change the pinned artifact.
+        /usr/bin/python3 -I -B "$PROJECT_DIR/scripts/trim-staged-sparkle-sdk.py" \
+            --staging-dir "$STAGING_DIR" --framework "$FRAMEWORKS_DIR/Sparkle.framework"
         echo "    ✓ Embedded Sparkle.framework"
 
         # Re-sign Sparkle's bundled helpers + the framework itself with

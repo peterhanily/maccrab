@@ -4932,6 +4932,9 @@ def normalized_runtime_sample(
         checkpoint, "conservation", "heartbeat.sequence_checkpoint"
     )
 
+    partial_evictions = heartbeat_counter(
+        heartbeat, "sequence_partials_evicted_total", "heartbeat"
+    )
     pending_evictions = heartbeat_counter(
         heartbeat, "sequence_pending_steps_evicted_total", "heartbeat"
     )
@@ -5035,6 +5038,7 @@ def normalized_runtime_sample(
         "engine_process": dict(engine_process),
         "gui_cpu_seconds_total": gui_cpu_seconds_total,
         "gui_process": dict(gui_process),
+        "sequence_partials_evicted_total": partial_evictions,
         "sequence_pending_steps_evicted_total": pending_evictions,
         "sequence_state_continuity_maintained": bool_value(
             heartbeat.get("sequence_state_continuity_maintained"),
@@ -5756,6 +5760,18 @@ def runtime_readiness_failures(
     if search_gaps:
         fatal.append(f"event search exact-evidence gaps={search_gaps}")
 
+    # Partial and pending eviction totals are current-process loss history,
+    # not the recency-based continuity verdict. A flat positive total before
+    # t0 still fails; checkpoint restoration does not reset these counters.
+    partial_evictions = int_value(
+        sample.get("sequence_partials_evicted_total"),
+        f"{path}.sequence_partials_evicted_total",
+    )
+    if partial_evictions:
+        fatal.append(
+            "cumulative sequence partial-match evictions="
+            f"{partial_evictions}"
+        )
     sequence_evictions = int_value(
         sample.get("sequence_pending_steps_evicted_total"),
         f"{path}.sequence_pending_steps_evicted_total",

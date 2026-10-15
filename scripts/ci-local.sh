@@ -33,6 +33,8 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/ci-receipt.py
     scripts/release.sh
     scripts/build-release.sh
+    scripts/optimize-staged-localizations.py
+    scripts/trim-staged-sparkle-sdk.py
     scripts/prepare-dmg-payload.sh
     scripts/install.sh
     scripts/release-env.sh
@@ -41,7 +43,9 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/candidate-qualification.py
     scripts/resource-baseline-provenance.py
     scripts/runtime-qualification-workload.sh
+    scripts/runtime-workload-directories.py
     scripts/test-otlp-curl.sh
+    scripts/otlp-smoke.py
     scripts/check-release-dependencies.sh
     scripts/prepare-release-pyyaml.sh
     scripts/check-release-pyyaml.sh
@@ -870,6 +874,9 @@ check "CI receipt reuse fixtures" /usr/bin/python3 -I scripts/test-ci-receipt.py
 check "Toolchain identity fixtures" /usr/bin/python3 -I scripts/test-swift-toolchain.py
 check "Localization catalog contracts" /usr/bin/python3 -I scripts/check-localizations.py
 check "Localization checker tests" /usr/bin/python3 -I scripts/test-localizations.py
+check "Staged localization optimization fixtures" /usr/bin/env -u MACCRAB_LOCALIZATION_TEST_RESOURCES \
+    /usr/bin/python3 -I -B scripts/test-staged-localizations.py
+check "Staged localization Foundation parity" /usr/bin/python3 -I -B scripts/test-staged-localizations-foundation.py
 
 echo ""
 echo -e "${BOLD}Rules${NC}"
@@ -899,6 +906,7 @@ check "Site publisher one-commit fixtures" ./scripts/test-site-release-publish.s
 check "Exact-candidate qualification fixtures" /usr/bin/python3 -I ./scripts/test-candidate-qualification.py
 check "Resource baseline provenance fixtures" /usr/bin/python3 -I ./scripts/test-resource-baseline-provenance.py
 check "Release privacy fixtures" /usr/bin/python3 -I ./scripts/test-release-privacy.py
+check "Staged Sparkle SDK trimming fixtures" /usr/bin/python3 -I -B ./scripts/test-trim-staged-sparkle-sdk.py
 check "Installer/DMG payload fixtures" ./scripts/test-install-payload.sh
 check "SQLCipher provenance fixtures" ./scripts/test-sqlcipher-provenance.sh
 

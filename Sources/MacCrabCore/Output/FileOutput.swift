@@ -223,7 +223,8 @@ public actor FileOutput: Output {
 
     /// Shape used when `format == .native`. Mirrors the existing webhook
     /// payload so tooling that consumes webhooks can also tail the file.
-    private struct NativeEnvelope: Codable {
+    /// These private output-only records never decode incoming data.
+    private struct NativeEnvelope: Encodable {
         let schema: String
         let version: String
         let timestamp: Date
@@ -238,7 +239,7 @@ public actor FileOutput: Output {
             self.event = event.map(EventPayload.init)
         }
 
-        struct AlertPayload: Codable {
+        struct AlertPayload: Encodable {
             let id: String
             let ruleId: String
             let ruleTitle: String
@@ -264,7 +265,7 @@ public actor FileOutput: Output {
             }
         }
 
-        struct EventPayload: Codable {
+        struct EventPayload: Encodable {
             let id: String
             let category: String
             let action: String

@@ -5715,14 +5715,15 @@ public actor EventStore {
         let metadata: JournalBlockMetadata
     }
 
-    private struct AuthenticatedCategoryMetadata: Codable {
+    // Hash-input records are encoded only; no decoder is part of this contract.
+    private struct AuthenticatedCategoryMetadata: Encodable {
         let category: String
         let count: Int
         let minimum: TimeInterval?
         let maximum: TimeInterval?
     }
 
-    private struct AuthenticatedJournalMetadata: Codable {
+    private struct AuthenticatedJournalMetadata: Encodable {
         let version: Int
         let minimum: TimeInterval
         let maximum: TimeInterval
@@ -5774,6 +5775,42 @@ public actor EventStore {
         hasher.update(data: payloadDigest)
         return Data(hasher.finalize())
     }
+
+    #if DEBUG
+    /// Pure compatibility seam: feeds synthetic primitive metadata to the real
+    /// digest encoder. This exposes no database handle and is absent in release.
+    static func journalMetadataDigestForTesting(
+        minimum: TimeInterval,
+        maximum: TimeInterval,
+        retainedUntil: TimeInterval,
+        admissionBucket: Int64,
+        categories: [EventCategory: (count: Int, minimum: TimeInterval?, maximum: TimeInterval?)],
+        eventCount: Int,
+        roster: Data,
+        sourceIdentityRoster: Data,
+        rawBytes: Int,
+        codec: Int,
+        payloadDigest: Data
+    ) throws -> Data {
+        let byCategory = Dictionary(uniqueKeysWithValues: categories.map { entry in
+            (entry.key, JournalCategoryMetadata(
+                count: entry.value.count,
+                minimum: entry.value.minimum,
+                maximum: entry.value.maximum
+            ))
+        })
+        return try journalMetadataDigest(
+            metadata: JournalBlockMetadata(
+                minimum: minimum, maximum: maximum,
+                retainedUntil: retainedUntil, admissionBucket: admissionBucket,
+                byCategory: byCategory
+            ),
+            eventCount: eventCount, roster: roster,
+            sourceIdentityRoster: sourceIdentityRoster,
+            rawBytes: rawBytes, codec: codec, payloadDigest: payloadDigest
+        )
+    }
+    #endif
 
     private static func uuidData(_ id: UUID) -> Data {
         var bytes = id.uuid

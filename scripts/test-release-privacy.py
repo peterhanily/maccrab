@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -195,6 +196,65 @@ class AttestationPrivacyControls(unittest.TestCase):
                 self.assertEqual(result.returncode==0,not mutate)
                 if mutate:self.assertIn('stable-copy attestation',result.stdout+result.stderr)
                 else:self.assertEqual((app/'Contents/embedded.provisionprofile').read_bytes(),profile.read_bytes())
+
+
+class BundleMetadataExpansionControls(unittest.TestCase):
+    @staticmethod
+    def require_nonexecuting_template(body):
+        # Metadata heredocs need parameter expansion, never command expansion.
+        # Refuse before handing any extracted production text to the shell.
+        if '`' in body or '$(' in body:
+            raise ValueError('bundle metadata contains command substitution')
+
+    def test_actual_bundle_templates_expand_identity_without_launching_commands(self):
+        source = (BASE / 'scripts/build-release.sh').read_text()
+        for channel, automatic_checks in (('dev', False), ('release', True)):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                app, extension = root / 'app', root / 'extension'
+                for bundle in (app, extension):
+                    (bundle / 'Contents').mkdir(parents=True)
+                marker = root / 'unexpected-open'
+                env = {'PATH': str(root / 'no-external-tools'), 'APP': str(app),
+                       'SYSEXT_BUNDLE': str(extension), 'AGENT_ID': 'com.maccrab.agent',
+                       'VERSION': '0.0.1-rc.9', 'BUILD_NUMBER': '0.0.1.99',
+                       'CHANNEL': channel, 'SU_AUTOCHECK': str(automatic_checks).lower(),
+                       'SU_FEEDURL': 'https://example.invalid/appcast.xml',
+                       'SU_EDKEY': 'ordinary-public-fixture', 'UNEXPECTED_OPEN': str(marker)}
+                for variable, bundle in (('APP', app), ('SYSEXT_BUNDLE', extension)):
+                    opening = '    cat > "$' + variable + '/Contents/Info.plist" << PLIST\n'
+                    self.assertEqual(source.count(opening), 1)
+                    body = source.split(opening, 1)[1].split('\nPLIST\n', 1)[0]
+                    self.require_nonexecuting_template(body)
+                    # Only the extracted, prechecked metadata heredoc runs.
+                    # No build/sign/install script or real open command runs;
+                    # PATH is empty and even an accidental bare open is inert.
+                    script = ('cat() { /bin/cat "$@"; }\n'
+                              'open() { printf attempted > "$UNEXPECTED_OPEN"; return 99; }\n'
+                              + opening + body + '\nPLIST\n')
+                    result = subprocess.run(['/bin/bash', '--noprofile', '--norc', '-eu', '-c', script],
+                                            env=env, text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, '')
+                    self.assertFalse(marker.exists())
+                    info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
+                    self.assertEqual(info['CFBundleShortVersionString'], env['VERSION'])
+                    self.assertEqual(info['CFBundleVersion'], env['BUILD_NUMBER'])
+                    self.assertEqual(info['MacCrabBuildChannel'], channel)
+                    if variable == 'APP':
+                        self.assertIs(info['SUEnableAutomaticChecks'], automatic_checks)
+                        self.assertEqual(info['SUFeedURL'], env['SU_FEEDURL'])
+                        self.assertEqual(info['SUPublicEDKey'], env['SU_EDKEY'])
+                        self.assertEqual(info['CFBundleURLTypes'][0]['CFBundleURLSchemes'], ['maccrab'])
+                        self.assertIn('Routes open maccrab://...', body)
+                    else:
+                        self.assertEqual(info['CFBundleIdentifier'], env['AGENT_ID'])
+                        self.assertEqual(info['NSEndpointSecurityEarlyBoot'], False)
+
+    def test_metadata_guard_rejects_both_command_substitution_spellings_without_execution(self):
+        for body in ('<!-- `ordinary-fixture` -->', '<!-- $(ordinary-fixture) -->'):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, 'command substitution'):
+                self.require_nonexecuting_template(body)
 
 
 if __name__=='__main__':unittest.main()

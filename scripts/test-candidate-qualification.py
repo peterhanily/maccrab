@@ -173,6 +173,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "engine_disk_write_bytes_total": engine_write_bytes * offset // 900,
                 "engine_memory_footprint_bytes": rss,
                 "gui_cpu_seconds_total": offset * 3 / 60,
+                "sequence_partials_evicted_total": 0,
                 "sequence_pending_steps_evicted_total": 0,
                 "sequence_state_continuity_maintained": True,
                 "sequence_state_continuity_detail": "nominal",
@@ -446,6 +447,9 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
             "sequence_checkpoint": {
                 "conservation": boundaries["sequence-checkpoint"]
             },
+            "sequence_partials_evicted_total": sample[
+                "sequence_partials_evicted_total"
+            ],
             "sequence_pending_steps_evicted_total": sample[
                 "sequence_pending_steps_evicted_total"
             ],
@@ -1820,14 +1824,61 @@ class CandidateQualificationTests(unittest.TestCase):
                 with self.assertRaises(qualification.QualificationError):
                     qualification.validate_resource_policy(changed, source_root=ROOT)
 
-    def test_historical_public_policy_binds_the_passed_document_as_well_as_disk(self) -> None:
-        policy = json.loads((ROOT / qualification.RESOURCE_BASELINE_PATH).read_text())
-        self.assertEqual(qualification.validate_resource_policy(policy, source_root=ROOT), policy["limits"])
-        original = (ROOT / qualification.RESOURCE_BASELINE_PATH).read_bytes()
-        policy["limits"]["gui_p95_percent"] += 1
-        with self.assertRaisesRegex(qualification.QualificationError, "Passed public policy document"):
-            qualification.validate_resource_policy(policy, source_root=ROOT)
-        self.assertEqual((ROOT / qualification.RESOURCE_BASELINE_PATH).read_bytes(), original)
+    def test_historical_public_policy_rejects_unsupported_executor_inventory_without_changes(self) -> None:
+        # This accepted historical measurement is not a current qualification:
+        # it predates two required executors and must not be silently rebound.
+        path = ROOT / qualification.RESOURCE_BASELINE_PATH
+        original = path.read_bytes()
+        policy = json.loads(original)
+        historical_paths = tuple(row["path"] for row in policy["workload"]["executors"])
+        self.assertEqual(historical_paths, (
+            "scripts/runtime-qualification-workload.sh", "scripts/test-otlp-curl.sh",
+        ))
+        self.assertNotEqual(len(historical_paths), len(qualification.RUNTIME_WORKLOAD_EXECUTORS))
+        with mock.patch.object(qualification, "run_checked") as provenance:
+            with self.assertRaisesRegex(qualification.QualificationError, "must bind both workload executors"):
+                qualification.validate_resource_policy(policy, source_root=ROOT)
+            provenance.assert_not_called()
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_synthetic_compatible_policy_forwards_exact_document_bindings_to_provenance(self) -> None:
+        directory = self.resource_baseline_source()
+        current = self.write_resource_policy_fixture(directory)
+        self.assertEqual(qualification.validate_resource_policy(current, source_root=directory), current["limits"])
+
+        # Exercise forwarding and refusal propagation, not historical acceptance.
+        # The real provenance verifier's document-tamper refusal is independently
+        # covered in test-resource-baseline-provenance.py, without stale-workload
+        # success being fabricated here.
+        baseline = self.resource_baseline_fixture()
+        baseline["recorder"]["sha256"] = "0" * 64
+        self.assertNotEqual(baseline["recorder"]["sha256"], qualification.sha256_file(MODULE_PATH))
+        policy = self.write_resource_policy_fixture(directory, baseline)
+        path = directory / qualification.RESOURCE_BASELINE_PATH
+        original = path.read_bytes()
+        forwarded_public_hashes = []
+        for tampered in (False, True):
+            with self.subTest(tampered=tampered):
+                document = copy.deepcopy(policy)
+                if tampered:
+                    document["limits"]["gui_p95_percent"] += 1
+                canonical = (json.dumps(document, sort_keys=True, separators=(",", ":"),
+                                        ensure_ascii=False) + "\n").encode("utf-8")
+                public_hash = hashlib.sha256(canonical).hexdigest()
+                forwarded_public_hashes.append(public_hash)
+                expected_command = [
+                    sys.executable, "-I", "-B", str(directory / "scripts/resource-baseline-provenance.py"),
+                    "--source-root", str(directory),
+                    "--document-sha256", policy["private_evidence"]["canonical_sha256"],
+                    "--public-policy-document-sha256", public_hash,
+                ]
+                refusal = qualification.QualificationError("synthetic provenance refusal")
+                with mock.patch.object(qualification, "run_checked", side_effect=refusal) as provenance:
+                    with self.assertRaisesRegex(qualification.QualificationError, "synthetic provenance refusal"):
+                        qualification.validate_resource_policy(document, source_root=directory)
+                    provenance.assert_called_once_with(expected_command, "resource baseline recorder provenance")
+                self.assertEqual(path.read_bytes(), original)
+        self.assertNotEqual(*forwarded_public_hashes)
 
     def test_public_policy_preflight_never_substitutes_for_private_host_evidence(self) -> None:
         directory = self.resource_baseline_source()
@@ -6227,6 +6278,127 @@ class CandidateQualificationTests(unittest.TestCase):
         report["measurements"]["disk_writes"]["windows"][1]["bytes"] += 512 * 1024
         with self.assertRaisesRegex(qualification.QualificationError, "cumulative samples"):
             self.validate_runtime(report)
+
+    def test_sequence_partial_evictions_explicit_zero_qualifies(self) -> None:
+        """Only synthetic, raw-bound explicit zero is a passing loss history."""
+        key = "sequence_partials_evicted_total"
+        for observation, sample in zip(
+            self.runtime["recorder_observations"], self.runtime["samples"]
+        ):
+            self.assertIs(type(observation["heartbeat"][key]), int)
+            self.assertEqual(observation["heartbeat"][key], 0)
+            self.assertEqual(sample[key], 0)
+        self.validate_runtime()
+
+    def test_sequence_partial_evictions_missing_or_invalid_is_rejected(self) -> None:
+        key = "sequence_partials_evicted_total"
+        missing = object()
+        values = (missing, None, False, True, -1, 0.0, "0", [], {},
+                  float("nan"), float("inf"))
+        for value in values:
+            with self.subTest(value="missing" if value is missing else repr(value)):
+                report = copy.deepcopy(self.runtime)
+                observation = report["recorder_observations"][12]
+                if value is missing:
+                    del observation["heartbeat"][key]
+                else:
+                    observation["heartbeat"][key] = value
+                self.rebind_observation_heartbeat(observation)
+                with self.assertRaisesRegex(qualification.QualificationError, key):
+                    qualification.heartbeat_counter(observation["heartbeat"], key, "heartbeat")
+                # NaN is unequal to its independently parsed JSON value, so
+                # exact raw binding rejects it before the integer type guard.
+                # The direct check above independently pins that guard too.
+                expected = ("heartbeat does not match the exact captured JSON bytes"
+                            if isinstance(value, float) and value != value else key)
+                with self.assertRaisesRegex(qualification.QualificationError, expected):
+                    qualification.sample_from_recorder_observation(
+                        observation, "synthetic invalid partial-loss counter"
+                    )
+                with self.assertRaisesRegex(qualification.QualificationError, expected):
+                    self.validate_runtime(report)
+
+    def test_sequence_partial_evictions_before_t0_remain_fatal(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        key = "sequence_partials_evicted_total"
+        for index, observation in enumerate(report["recorder_observations"]):
+            observation["heartbeat"][key] = 3
+            self.rederive_sample(report, index)
+        self.assertEqual(report["samples"][-1][key] - report["samples"][0][key], 0)
+        self.assertTrue(all(sample["sequence_state_continuity_maintained"]
+                            and sample["sequence_state_continuity_detail"] == "nominal"
+                            for sample in report["samples"]))
+        with self.assertRaisesRegex(qualification.QualificationError,
+                                    "cumulative sequence partial-match evictions=3"):
+            self.validate_runtime(report)
+
+    def test_sequence_partial_evictions_mid_or_final_epoch_are_rejected(self) -> None:
+        for first_loss_index in (12, len(self.runtime["samples"]) - 1):
+            with self.subTest(first_loss_index=first_loss_index):
+                report = copy.deepcopy(self.runtime)
+                for index in range(first_loss_index, len(report["samples"])):
+                    report["recorder_observations"][index]["heartbeat"][
+                        "sequence_partials_evicted_total"
+                    ] = 1
+                    self.rederive_sample(report, index)
+                with self.assertRaisesRegex(qualification.QualificationError,
+                                            "cumulative sequence partial-match evictions=1"):
+                    self.validate_runtime(report)
+
+    def test_sequence_partial_evictions_cannot_hide_between_zero_endpoints(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        key = "sequence_partials_evicted_total"
+        report["recorder_observations"][12]["heartbeat"][key] = 2
+        self.rederive_sample(report, 12)
+        self.assertEqual(report["samples"][0][key], 0)
+        self.assertEqual(report["samples"][-1][key], 0)
+        # A reset or a recovered recency flag cannot erase an observed loss.
+        with self.assertRaisesRegex(qualification.QualificationError,
+                                    "cumulative sequence partial-match evictions=2"):
+            self.validate_runtime(report)
+
+    def test_sequence_partial_evictions_cannot_be_laundered_in_samples(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        key = "sequence_partials_evicted_total"
+        report["recorder_observations"][12]["heartbeat"][key] = 1
+        self.rederive_sample(report, 12)
+        report["samples"][12][key] = 0
+        self.rehash_samples(report)
+        with self.assertRaisesRegex(qualification.QualificationError,
+                                    "samples do not match the raw recorder observations"):
+            self.validate_runtime(report)
+
+    def test_sequence_partial_evictions_fail_prewarm_readiness(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        observation["heartbeat"]["sequence_partials_evicted_total"] = 1
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(qualification.QualificationError,
+                                    "cumulative sequence partial-match evictions=1"):
+            qualification.validate_runtime_readiness(
+                observation, "synthetic prewarm", phase="prewarm",
+                require_drained=False, expected_pid=4321,
+            )
+
+    def test_sequence_partial_evictions_start_anchor_must_be_zero_and_present(self) -> None:
+        key = "sequence_partials_evicted_total"
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                report = copy.deepcopy(self.runtime)
+                start = report["start_readiness"]
+                anchor = start["anchor_observation"]
+                if missing:
+                    del anchor["heartbeat"][key]
+                else:
+                    anchor["heartbeat"][key] = 1
+                self.rebind_observation_heartbeat(anchor)
+                start["anchor_sha256"] = qualification.sha256_bytes(
+                    qualification.canonical_json_bytes(anchor)
+                )
+                expected = key if missing else "cumulative sequence partial-match evictions=1"
+                with self.assertRaisesRegex(qualification.QualificationError, expected):
+                    qualification.validate_epoch_start_readiness(start, report["samples"][0])
+                with self.assertRaisesRegex(qualification.QualificationError, expected):
+                    self.validate_runtime(report)
 
     def test_sequence_eviction_during_epoch_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)

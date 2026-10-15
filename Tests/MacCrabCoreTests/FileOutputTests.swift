@@ -82,10 +82,10 @@ struct FileOutputTests {
 
     @Test("Parent directory is created on first write")
     func createsParentDir() async throws {
-        let nestedPath = NSTemporaryDirectory() + "maccrab_fo_\(UUID().uuidString)/sub/deep/alerts.jsonl"
-        defer { try? FileManager.default.removeItem(
-            atPath: NSTemporaryDirectory() + "maccrab_fo_")
-        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab_fo_\(UUID().uuidString)", isDirectory: true)
+        let nestedPath = root.appendingPathComponent("sub/deep/alerts.jsonl").path
+        defer { try? FileManager.default.removeItem(at: root) }
 
         let out = FileOutput(path: nestedPath)
         let (a, e) = alertAndEvent()

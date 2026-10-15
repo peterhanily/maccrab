@@ -47,6 +47,8 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/ci-receipt.py
     scripts/release.sh
     scripts/build-release.sh
+    scripts/optimize-staged-localizations.py
+    scripts/trim-staged-sparkle-sdk.py
     scripts/prepare-dmg-payload.sh
     scripts/install.sh
     scripts/release-env.sh
@@ -55,7 +57,9 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/candidate-qualification.py
     scripts/resource-baseline-provenance.py
     scripts/runtime-qualification-workload.sh
+    scripts/runtime-workload-directories.py
     scripts/test-otlp-curl.sh
+    scripts/otlp-smoke.py
     scripts/check-release-dependencies.sh
     scripts/prepare-release-pyyaml.sh
     scripts/check-release-pyyaml.sh
