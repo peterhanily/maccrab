@@ -207,6 +207,27 @@ struct EventPresentationRetentionTests {
         }
     }
 
+    @Test("One cache decision uses one clock sample at the inclusive lifetime boundary")
+    func cacheAgeUsesOneClockSample() async {
+        let reader = Reader()
+        reader.rows = [row()]
+        var checkingCache = false
+        var clockReads = 0
+        let session = EventQuerySession(reader: reader, now: {
+            guard checkingCache else { return instant }
+            clockReads += 1
+            // A hypothetical second read crosses the lifetime boundary. The
+            // decision must refer to its first sampled instant, not mix two.
+            return instant.addingTimeInterval(
+                EventQuerySession.retainedLifetime + Double(clockReads - 1))
+        })
+        await session.loadEvents(query(), presentationKey: key())
+        session.invalidatePendingReads()
+        checkingCache = true
+        #expect(session.canPresentCached(query(), key: key()))
+        #expect(clockReads == 1)
+    }
+
     @Test("Fixed upper bound, category, center, half-window and incremental mode are part of compatibility")
     func fixedPresentationBounds() async {
         let reader = Reader()

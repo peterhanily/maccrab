@@ -152,10 +152,9 @@ final class EventQuerySession: ObservableObject {
     /// Compatibility is checked before first paint as well as before a read.
     /// Only advancing the lower time bound is allowed for a moving range.
     func canPresentCached(_ next: Query, key: PresentationKey?) -> Bool {
-        guard matchesPresentation(next, key: key), let lastSuccessAt, !events.isEmpty,
-              now().timeIntervalSince(lastSuccessAt) >= 0,
-              now().timeIntervalSince(lastSuccessAt) <= Self.retainedLifetime else { return false }
-        return true
+        guard matchesPresentation(next, key: key), let lastSuccessAt, !events.isEmpty else { return false }
+        let age = now().timeIntervalSince(lastSuccessAt)
+        return age.isFinite && age >= 0 && age <= Self.retainedLifetime
     }
 
     /// The exact-row table is not presented in aggregate mode. Retire only its

@@ -1092,7 +1092,7 @@ final class AppState: ObservableObject, EventQueryReading {
     /// persists despite FDA actually being granted. Persisted to
     /// UserDefaults; auto-cleared when detection confirms both principals
     /// are granted so future revocations re-surface the banner.
-    @Published var fdaBannerDismissedByUser: Bool = UserDefaults.standard.bool(forKey: "fdaBannerDismissedByUser")
+    @Published var fdaBannerDismissedByUser: Bool = false
     @Published var recentAlerts: [AlertViewModel] = []
     @Published var dashboardAlerts: [AlertViewModel] = []
     @Published var events: [EventViewModel] = []
@@ -1345,9 +1345,7 @@ final class AppState: ObservableObject, EventQueryReading {
     /// config file and SIGHUPs the daemon so the receiver lifecycle
     /// matches. Initialised from disk so a UI restart preserves the
     /// last setting.
-    @Published var agentTracesReceiverEnabled: Bool = AgentTracesConfigStore.read(
-        from: NSHomeDirectory() + "/Library/Application Support/MacCrab/" + AgentTracesConfigStore.filename
-    )?.receiverEnabled ?? false
+    @Published var agentTracesReceiverEnabled: Bool = false
 
     /// Daemon-published receiver health snapshot. Polled on the
     /// regular refresh tick.
@@ -1443,11 +1441,43 @@ final class AppState: ObservableObject, EventQueryReading {
 
     // MARK: Initialization
 
-    init(engineSource: V2EngineSource = .session, startBackgroundWork: Bool = true) {
+    /// The only persisted preferences needed synchronously at startup. Keep
+    /// their readers lazy so an explicitly sourced inert fixture never consults
+    /// the user's preferences or configuration before the background-work guard.
+    struct StartupPreferences {
+        let fdaBannerDismissedByUser: Bool
+        let agentTracesReceiverEnabled: Bool
+
+        static func read(
+            fdaDismissed: () -> Bool = {
+                UserDefaults.standard.bool(forKey: "fdaBannerDismissedByUser")
+            },
+            receiverEnabled: () -> Bool = {
+                AgentTracesConfigStore.read(
+                    from: NSHomeDirectory() + "/Library/Application Support/MacCrab/"
+                        + AgentTracesConfigStore.filename
+                )?.receiverEnabled ?? false
+            }
+        ) -> Self {
+            Self(fdaBannerDismissedByUser: fdaDismissed(),
+                 agentTracesReceiverEnabled: receiverEnabled())
+        }
+    }
+
+    init(
+        engineSource: V2EngineSource = .session,
+        startBackgroundWork: Bool = true,
+        readStartupPreferences: () -> StartupPreferences = { StartupPreferences.read() }
+    ) {
         self.engineSource = engineSource
         // Ordinary presentation fixtures opt out of timers, Keychain requests,
-        // file reads and store-opening tasks; production starts them normally.
+        // preference/config reads and store-opening tasks. They must also pass
+        // an explicit engineSource: the default .session selects real sources
+        // before this initializer is entered. Production starts normally.
         guard startBackgroundWork else { return }
+        let preferences = readStartupPreferences()
+        fdaBannerDismissedByUser = preferences.fdaBannerDismissedByUser
+        agentTracesReceiverEnabled = preferences.agentTracesReceiverEnabled
         startPolling()
         // Start the root→dashboard trace-key handshake at launch rather than
         // waiting for the operator to open Agent Traces. The same envelope also

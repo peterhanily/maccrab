@@ -898,6 +898,12 @@ public actor EventStore {
     /// Observes actual expiry checkpoint attempts; production leaves this nil.
     private var journalExpiryCheckpointHookForTesting:
         (@Sendable () -> Void)?
+    #if DEBUG
+    /// Per-store fixture control for normal inserts spanning multiple journal
+    /// blocks. Release builds always use the serialized wall-clock admission
+    /// boundary; explicit migration buckets retain precedence in both builds.
+    private var journalAdmissionBucketOverrideForTesting: Int64?
+    #endif
     private var storagePolicy: SQLitePersistentStorePolicy?
     private var legacyUpgradeConfiguredPolicy: SQLitePersistentStorePolicy?
     private var legacyUpgradeReceipt: EventStoreLegacyUpgradeEnvelope.Receipt?
@@ -4702,6 +4708,12 @@ public actor EventStore {
     ) {
         journalExpiryCheckpointHookForTesting = hook
     }
+
+    #if DEBUG
+    internal func setJournalAdmissionBucketForTesting(_ bucket: Int64?) {
+        journalAdmissionBucketOverrideForTesting = bucket
+    }
+    #endif
 
     public func insert(event: Event) throws {
         let lane = EventPipelineLane.finalLane(for: event)
@@ -9439,10 +9451,16 @@ public actor EventStore {
             // behind another process can never consume part of the durable
             // fifteen-minute floor or assign a normal block to an old bucket.
             let now = Date().timeIntervalSince1970
+            #if DEBUG
+            let effectiveAdmissionBucketOverride = admissionBucketOverride
+                ?? journalAdmissionBucketOverrideForTesting
+            #else
+            let effectiveAdmissionBucketOverride = admissionBucketOverride
+            #endif
             let metadata = try Self.journalBlockMetadata(
                 events,
                 now: now,
-                admissionBucketOverride: admissionBucketOverride
+                admissionBucketOverride: effectiveAdmissionBucketOverride
             )
             let metadataDigest = try Self.journalMetadataDigest(
                 metadata: metadata,

