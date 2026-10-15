@@ -7,6 +7,11 @@ import AppKit
 import UniformTypeIdentifiers
 import MacCrabCore
 
+private struct V2AlertsWorkspaceLoadContext: Hashable {
+    let presentation: V2AlertsPresentationContext
+    let tab: V2WorkspaceTab
+}
+
 struct V2AlertsWorkspace: View {
     // v1.11.1 (audit perf LOW): hoisted formatter for the JSON-export
     // path so we don't pay ~0.5 ms per alert row to instantiate one.
@@ -14,20 +19,21 @@ struct V2AlertsWorkspace: View {
 
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
+    @ObservedObject var presentation: V2AlertsPresentationModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selected: V2MockAlert?
-    @State private var suppressionEntries: [V2SuppressionEntry] = []
-    @State private var alerts: [V2MockAlert] = []
-    @State private var campaigns: [V2MockCampaign] = []
-    @State private var suppressedCampaigns: [V2MockCampaign] = []
+    @State private var suppressionRows: [V2SuppressionEntry] = []
+    @State private var campaignRows: [V2MockCampaign] = []
+    @State private var suppressedCampaignRows: [V2MockCampaign] = []
+    @State private var auxiliaryContext: V2AlertsWorkspaceLoadContext?
+    @State private var auxiliaryLoaded = false
+    @State private var suppressionError: String?
     @State private var selectedCampaignIds: Set<String> = []
     // v1.21.4: multi-select set for the Open table's checkbox column. When
     // non-empty, Bulk suppress targets the checked subset instead of every
     // visible row.
     @State private var selectedAlertIds: Set<String> = []
-    @State private var loaded = false
-    @State private var alertsReadError: String?
-    @StateObject private var loadCoordinator = V2AlertsLoadCoordinator<V2AlertsLoadContext>()
+    @StateObject private var loadCoordinator = V2AlertsLoadCoordinator<V2AlertsWorkspaceLoadContext>()
     // Requests are displayed separately from stored alert/campaign state.
     // An accepted inbox request must never hide or rewrite a committed row.
     @State private var mutations = V2MutationTracker()
@@ -45,9 +51,10 @@ struct V2AlertsWorkspace: View {
     /// confirmation dialog gates the action.
     private let bulkSuppressConfirmThreshold = 5
 
-    init(state: V2DashboardState, appState: AppState) {
+    init(state: V2DashboardState, appState: AppState, presentation: V2AlertsPresentationModel) {
         self.state = state
         self.appState = appState
+        self.presentation = presentation
     }
 
     /// Bind to the workspace-state-owned filter so a navigation
@@ -60,11 +67,22 @@ struct V2AlertsWorkspace: View {
         Binding(get: { state.alertSearchQuery },
                 set: { state.alertSearchQuery = $0 })
     }
-    private var loadContext: V2AlertsLoadContext {
-        .init(providerID: ObjectIdentifier(state.provider), timeRange: state.alertTimeRange,
-              windowStart: state.pendingAlertsWindow?.start,
-              windowEnd: state.pendingAlertsWindow?.end)
+    private var presentationContext: V2AlertsPresentationContext {
+        .init(query: .init(providerID: ObjectIdentifier(state.provider), timeRange: state.alertTimeRange,
+                           windowStart: state.pendingAlertsWindow?.start,
+                           windowEnd: state.pendingAlertsWindow?.end),
+              directory: state.provider.dataDir,
+              engine: appState.heartbeat?.engineIdentity.map(V2AlertsPresentationContext.Engine.init))
     }
+    private var selectedTab: V2WorkspaceTab { state.selectedTabs[.alerts] ?? .alertsOpen }
+    private var isAlertList: Bool { selectedTab == .alertsOpen || selectedTab == .alertsHistory }
+    private var loadContext: V2AlertsWorkspaceLoadContext {
+        .init(presentation: presentationContext, tab: selectedTab)
+    }
+    private var alerts: [V2MockAlert] { presentation.rows(for: presentationContext) }
+    private var campaigns: [V2MockCampaign] { auxiliaryContext == loadContext ? campaignRows : [] }
+    private var suppressedCampaigns: [V2MockCampaign] { auxiliaryContext == loadContext ? suppressedCampaignRows : [] }
+    private var suppressionEntries: [V2SuppressionEntry] { auxiliaryContext == loadContext ? suppressionRows : [] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -86,7 +104,10 @@ struct V2AlertsWorkspace: View {
         }
         .task(id: loadContext) { await reload() }
         .onChange(of: state.refreshTick) { _ in requestReload() }
-        .onDisappear { loadCoordinator.cancel() }
+        .onDisappear {
+            loadCoordinator.cancel()
+            presentation.pause()
+        }
         // Table refresh cancellation must not starve saved-state confirmation.
         // SwiftUI cancels this task when its provider changes or the view leaves.
         .task(id: ObjectIdentifier(state.provider)) { await confirmMutations() }
@@ -135,6 +156,27 @@ struct V2AlertsWorkspace: View {
             Text(String(localized: "alerts.confirmBulkSuppressMessage",
                         defaultValue: "\(targets.count) alerts currently visible will be suppressed. You can lift suppressions from the History and Suppressions tabs."))
         }
+    }
+
+    private func listReadStatus(isEmpty: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            UIContentReadinessMarker(readiness: presentation.readiness(for: presentationContext)
+                .forDisplayedContent(isEmpty: isEmpty))
+                .frame(height: 18)
+            if presentation.hasSnapshot(for: presentationContext), !presentation.isFresh(for: presentationContext) {
+                Text("Cached alert snapshot — refreshing is required before this list is current.")
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
+            }
+            if let error = presentation.error(for: presentationContext) {
+                HStack(alignment: .top) {
+                    Text("Couldn’t read alerts (\(error)). This is not an all-clear.")
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
+                    Spacer()
+                    Button("Retry") { Task { await reload() } }
+                }
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 6)
     }
 
     private var mutationStatusBanner: some View {
@@ -275,77 +317,56 @@ struct V2AlertsWorkspace: View {
     @MainActor
     private func loadSnapshot(
         provider: any V2DataProvider,
-        context: V2AlertsLoadContext,
-        ticket: V2AlertsLoadCoordinator<V2AlertsLoadContext>.Ticket
+        context: V2AlertsWorkspaceLoadContext,
+        ticket: V2AlertsLoadCoordinator<V2AlertsWorkspaceLoadContext>.Ticket
     ) async {
         guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
         syncMutationProvider()
         mutations.expire()
-        // Timer ticks do not cancel slow reads. Provider/filter changes and
-        // disappearance invalidate their ticket; every awaited stage checks it
-        // before publishing or issuing another query on a retired provider.
-        let cutoff: Date = {
-            switch context.timeRange {
-            case "24h": return Date().addingTimeInterval(-86_400)
-            case "7d":  return Date().addingTimeInterval(-7 * 86_400)
-            case "30d": return Date().addingTimeInterval(-30 * 86_400)
-            default:    return Date.distantPast
+        // Auxiliary queries belong to their visible tab. Open/History never
+        // wait for campaigns or suppression state before presenting alerts.
+        guard context.tab == .alertsOpen || context.tab == .alertsHistory else {
+            presentation.pause()
+            auxiliaryLoaded = false
+            auxiliaryContext = context
+            campaignRows = []
+            suppressedCampaignRows = []
+            suppressionRows = []
+            suppressionError = nil
+            if context.tab == .alertsCampaigns {
+                let range = V2AlertsPresentationContext(query: .init(
+                    providerID: context.presentation.query.providerID,
+                    timeRange: context.presentation.query.timeRange, windowStart: nil, windowEnd: nil),
+                    directory: context.presentation.directory, engine: context.presentation.engine)
+                let cutoff = range.lowerBound(now: Date())
+                let rows = await provider.campaigns(since: cutoff, limit: 50)
+                guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
+                campaignRows = rows.filter { $0.lastSeen >= cutoff }
+                let suppressed = await provider.suppressedCampaigns(limit: 50)
+                guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
+                suppressedCampaignRows = suppressed
+            } else if context.tab == .alertsSuppressions {
+                let rows = await provider.suppressions()
+                guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
+                suppressionRows = rows
+                suppressionError = provider.suppressionReadError
             }
-        }()
-
-        // D7: an Overview histogram bar tap constrains the Open list to a
-        // single [start, end] bucket. When present it overrides the range
-        // chip's lower bound (fetch `since:` its start) and adds an upper
-        // bound (filtered below). Persists until the user picks a chip or
-        // clears the banner, so it survives the 5 s refresh reload.
-        let lowerBound = context.windowStart ?? cutoff
-
-        // Wide ranges need a higher ceiling than the default 200 so All-time
-        // doesn't silently truncate the history the chip just unlocked. A
-        // window is a tight bucket, so the default 200 is ample there.
-        let fetchLimit = (context.windowStart != nil || context.timeRange == "24h" || context.timeRange == "7d") ? 200 : 1000
-        let result = await provider.alertsSnapshot(since: lowerBound, limit: fetchLimit)
-        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
-        let a: [V2MockAlert]
-        switch result {
-        case .success(let rows):
-            a = rows
-            alertsReadError = nil
-            self.alerts = a.filter { alert in
-                // D7: bound below by the range cutoff (or window start) and,
-                // when a histogram window is active, above by its end.
-                alert.timestamp >= lowerBound
-                    && (context.windowEnd.map { alert.timestamp <= $0 } ?? true)
-            }
-            // Reconcile the floating inspector against the fresh data:
-            // drop the selection if its row is gone (deleted, or aged
-            // past the time-range cutoff), otherwise refresh it to the
-            // new snapshot so the inspector never shows a stale,
-            // pre-mutation copy.
-            if let sel = self.selected {
-                self.selected = self.alerts.first(where: { $0.id == sel.id })
-            }
-            self.loaded = true
-        case .failed(let error):
-            alertsReadError = error
-            loaded = true
-            a = []
-        case .cancelled:
+            auxiliaryLoaded = true
             return
         }
-
-        let c = await provider.campaigns(since: cutoff, limit: 50)
-        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
-        self.campaigns = c.filter { $0.lastSeen >= cutoff }
-
-        // Suppressed campaigns — powers the in-UI restore surface.
-        let sc = await provider.suppressedCampaigns(limit: 50)
-        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
-        self.suppressedCampaigns = sc
-
-        let s = await provider.suppressions()
-        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
-        self.suppressionEntries = s
+        await presentation.refresh(context: context.presentation, isCurrent: {
+            // Open and History share the same backend population. Switching
+            // between them may join this read; it must not inherit the old
+            // tab's cancelled coordinator ticket.
+            presentationContext == context.presentation && isAlertList
+                && state.currentWorkspace == .alerts
+        }, fetch: { since, limit in
+            await provider.alertsSnapshot(since: since, limit: limit)
+        })
+        guard loadCoordinator.accepts(ticket, context: loadContext),
+              presentation.isFresh(for: context.presentation) else { return }
+        let a = presentation.rows(for: context.presentation)
+        if let selection = selected { selected = a.first { $0.id == selection.id } }
         // If navigation requested a specific alert, select it only from this
         // successful read; failures must not consume pending navigation.
         let candidateKeys = ["alerts:alertsOpen", "alerts"]
@@ -669,33 +690,14 @@ struct V2AlertsWorkspace: View {
         return ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 16) {
                 daemonStaleBanner
+                listReadStatus(isEmpty: visible.isEmpty)
                 timeRangeChips
                 if let window = state.pendingAlertsWindow {
                     histogramWindowBanner(window)
                 }
                 severityCards
                 searchBarMemoized(visible: visible)
-                if let readError = alertsReadError {
-                    // UX-02: a store read that threw returns [] exactly like a
-                    // quiet machine, and the B6 heartbeat gate can't see it
-                    // (heartbeat_rich.json is written independently of
-                    // alerts.db). Pre-fix that rendered the green
-                    // "you're clear" panel over a failed read. The flag
-                    // self-clears on the next successful read, so a transient
-                    // busy-DB failure resolves itself on the next tick.
-                    V2ErrorState(
-                        title: String(localized: "alerts.readFailedTitle", defaultValue: "Couldn't read alerts"),
-                        body: String(localized: "alerts.readFailedBody", defaultValue: "The on-disk alert store could not be read (\(readError)), so this list is NOT an all-clear."),
-                        retry: {
-                            Task {
-                                await state.reconnectLiveDataIfStale()
-                                await reload()
-                            }
-                        }
-                    )
-                    .frame(minHeight: 280)
-                    .v2Panel()
-                } else if daemonReporting && loaded && !hasOpenAlerts {
+                if daemonReporting && presentation.isFresh(for: presentationContext) && !hasOpenAlerts {
                     V2EmptyState(
                         title: String(localized: "alerts.emptyOpenTitle", defaultValue: "No open alerts"),
                         body: String(localized: "alerts.emptyOpenBody", defaultValue: "No unsuppressed alerts appear in the selected time range. The engine is reporting active monitoring."),
@@ -710,7 +712,7 @@ struct V2AlertsWorkspace: View {
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if let alert = selected {
+            if let selection = selected, let alert = alerts.first(where: { $0.id == selection.id }) {
                 alertInspector(for: alert)
                     .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
                     .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
@@ -1529,11 +1531,8 @@ struct V2AlertsWorkspace: View {
     private var campaignsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // B6: without this an empty campaigns list on a dead/stale daemon
-                // rendered a reassuring "No active campaigns" all-clear — the
-                // same "daemon-down looks safe" trap the Open/History tabs guard
-                // against. Show the stale banner and only show the all-clear
-                // empty state when the engine is actually reporting.
+                // Campaigns still lack per-call error provenance. Even with a
+                // reporting daemon, an empty response must not claim all-clear.
                 daemonStaleBanner
                 timeRangeChips
                 if !campaigns.isEmpty {
@@ -1543,14 +1542,17 @@ struct V2AlertsWorkspace: View {
                     ForEach(campaigns) { campaign in
                         campaignCard(campaign)
                     }
-                } else if daemonReporting && loaded {
+                } else if auxiliaryContext == loadContext && auxiliaryLoaded {
                     V2EmptyState(
-                        title: "No active campaigns",
-                        body: "MacCrab has not detected any multi-step attack campaigns in the selected time range.",
+                        title: "No campaign rows available",
+                        body: "This campaign reader does not distinguish an empty result from a read failure. This is not an all-clear.",
                         icon: "flame"
                     )
                     .frame(minHeight: 280)
                     .v2Panel()
+                } else {
+                    Text("Loading campaign rows…")
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                 }
                 if !suppressedCampaigns.isEmpty {
                     suppressedCampaignsSection
@@ -1796,6 +1798,7 @@ struct V2AlertsWorkspace: View {
                     .sorted { $0.timestamp > $1.timestamp }
                     .prefix(4)
                 let history = suppressed + resolved
+                listReadStatus(isEmpty: history.isEmpty)
                 V2DataTable(
                     columns: [
                         V2DataColumn(id: "sev", title: "Severity", width: .fixed(96),
@@ -1876,18 +1879,22 @@ struct V2AlertsWorkspace: View {
                 Text(String(localized: "ui.V2AlertsWorkspace.active.suppressions.silence.specific.rule.scope.pairs", defaultValue: "Active suppressions apply to the scopes shown until expiry. Lift requests remove one saved entry; the list changes after the engine confirms removal."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
+                if auxiliaryContext != loadContext || !auxiliaryLoaded {
+                    Text("Loading suppression state…")
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                }
                 // B6: only assert "no active suppressions" when the engine is
                 // actually reporting — on a dead/stale daemon an empty list is
                 // a read failure, not a fact. Gate the empty state on
                 // daemonReporting (the stale banner above already explains the
                 // gap), mirroring the Open + Campaigns tabs.
-                if let error = state.provider.suppressionReadError {
+                if auxiliaryContext == loadContext, let error = suppressionError {
                     V2EmptyState(
                         title: String(localized: "alerts.suppressionsUnavailableTitle", defaultValue: "Suppression state unavailable"),
                         body: error, icon: "exclamationmark.triangle"
                     )
                     .v2Panel()
-                } else if suppressionEntries.isEmpty && loaded && daemonReporting {
+                } else if suppressionEntries.isEmpty && auxiliaryContext == loadContext && auxiliaryLoaded && daemonReporting {
                     V2EmptyState(
                         title: String(localized: "alerts.noActiveSuppressions", defaultValue: "No active suppressions"),
                         body: String(localized: "alerts.noActiveSuppressionsBody", defaultValue: "The engine’s saved snapshot contains no active suppression entries. Alert dispositions are shown separately in the alert lists."),

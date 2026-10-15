@@ -49,6 +49,7 @@ struct EventStream: View {
     /// for ordinary direct mounts.
     let initialCenterTime: Date?
     let centerHalfWindowSeconds: TimeInterval
+    private let intentFilter: String
 
     init(
         appState: AppState,
@@ -59,7 +60,15 @@ struct EventStream: View {
     ) {
         self.appState = appState
         self.querySession = querySession
-        self._filterText = State(initialValue: initialFilterText)
+        let saved = querySession.controls
+        let sameIntent = saved.intentFilter == initialFilterText
+            && saved.intentCenter == initialCenterTime
+            && saved.intentHalfWindow == centerHalfWindowSeconds
+        self._filterText = State(initialValue: sameIntent ? saved.filter : initialFilterText)
+        self._filterCategory = State(initialValue: sameIntent ? saved.category : nil)
+        self._timeRange = State(initialValue: sameIntent ? saved.range : .last24h)
+        self._isPaused = State(initialValue: sameIntent ? saved.paused : false)
+        self.intentFilter = initialFilterText
         self.initialCenterTime = initialCenterTime
         self.centerHalfWindowSeconds = centerHalfWindowSeconds
     }
@@ -110,6 +119,13 @@ struct EventStream: View {
     /// reference between unrelated AppState mutations (heartbeat,
     /// agentLineage, mcpBaselines, etc.) and stops re-binding the Table.
     @State private var filteredCache: [EventViewModel] = []
+    // The session reports read completion; the marker reports its application
+    // to this view's table. In particular, aggregate rows arrive by return value.
+    @State private var displayedReadiness = UIContentReadiness(workspace: .events)
+    @State private var unavailableReadiness = UIContentReadiness(workspace: .events)
+    @State private var displayedQueryKey: EventQueryKey?
+    @State private var displayedAggregateKey: String?
+    @State private var displayedAggregateMode: Bool?
     /// v1.8.0: warm-tier aggregate rows surfaced when `timeRange` exceeds the
     /// 24h hot-tier window. Empty inside the window — the live filteredCache
     /// covers that path. Backed by `event_aggregates` rolled up by the daemon's
@@ -171,6 +187,61 @@ struct EventStream: View {
                       epoch: querySession.sourceEpoch, retry: querySession.retryTick)
     }
 
+    private var contentReadinessForDisplay: UIContentReadiness {
+        guard displayedAggregateMode == isAggregateMode else { return unavailableReadiness }
+        if isAggregateMode {
+            guard hasCompatibleAggregateContext else { return unavailableReadiness }
+            // The page starts its own non-fresh loading phase before awaiting
+            // the model. Only an applied result borrows the model's generation.
+            guard !displayedReadiness.phase.isFreshCompletion
+                    || displayedReadiness.generation == querySession.aggregateReadiness.generation else {
+                return unavailableReadiness
+            }
+            return displayedReadiness
+        }
+        return displayedQueryKey == eventQueryKey
+            && querySession.matchesPresentation(currentQuery(), key: presentationKey)
+            && displayedReadiness.generation == querySession.readiness.generation
+            ? displayedReadiness : unavailableReadiness
+    }
+
+    /// Body evaluation can precede onChange/task invalidation. Never label or
+    /// expose the old table under a replacement query/source, even for that
+    /// first evaluation. Returning the stored array is O(1); filtering/sorting
+    /// remains confined to recomputeFilter and matching cached rows stay usable.
+    private var hasCompatibleExactPresentation: Bool {
+        !isAggregateMode && displayedAggregateMode == false
+            && displayedQueryKey == eventQueryKey
+            && querySession.canDisplay(currentQuery(), key: presentationKey)
+    }
+
+    private var presentedEvents: [EventViewModel] {
+        hasCompatibleExactPresentation ? filteredCache : []
+    }
+
+    private var hasCompatibleAggregateContext: Bool {
+        isAggregateMode && displayedAggregateMode == true
+            && displayedAggregateKey == aggregateInputsKey
+            && querySession.source == appState.engineSource
+            && querySession.sourceEpoch == appState.eventQueryEpoch
+            && !appState.eventReadsDeferred
+    }
+
+    /// Aggregate rows have no retained-cache policy. A replaced or invalidated
+    /// result is hidden synchronously, before the keyed task clears its arrays.
+    private var hasCompatibleAggregatePresentation: Bool {
+        hasCompatibleAggregateContext
+            && displayedReadiness.generation == querySession.aggregateReadiness.generation
+    }
+
+    private var presentedAggregateRows: [EventStore.AggregateRow] {
+        hasCompatibleAggregatePresentation ? aggregateRows : []
+    }
+
+    private var presentedAggregates: [IdentifiedAggregate] {
+        hasCompatibleAggregatePresentation ? identifiedAggregates : []
+    }
+
     /// ISO date string for `daysAgo` days before now. Matches the
     /// `strftime('%Y-%m-%d', timestamp, 'unixepoch')` format the daemon's
     /// roll-up uses, so day strings sort + compare as text.
@@ -208,7 +279,7 @@ struct EventStream: View {
 
     @ViewBuilder
     private var aggregateTable: some View {
-        if aggregateRows.isEmpty {
+        if presentedAggregates.isEmpty {
             VStack(spacing: 12) {
                 Spacer()
                 Image(systemName: "tray")
@@ -227,7 +298,7 @@ struct EventStream: View {
             }
             .frame(maxWidth: .infinity)
         } else {
-            Table(identifiedAggregates, selection: $selectedAggregateID) {
+            Table(presentedAggregates, selection: $selectedAggregateID) {
                 TableColumn(String(localized: "events.day", defaultValue: "Day")) { agg in
                     Text(agg.row.day)
                         .font(.system(.caption, design: .monospaced))
@@ -272,7 +343,7 @@ struct EventStream: View {
             // range for per-event detail" but rows were inert).
             .contextMenu(forSelectionType: IdentifiedAggregate.ID.self) { ids in
                 if let id = ids.first,
-                   let agg = identifiedAggregates.first(where: { $0.id == id }) {
+                   let agg = presentedAggregates.first(where: { $0.id == id }) {
                     Button {
                         drillIntoAggregate(agg.row)
                     } label: {
@@ -324,6 +395,12 @@ struct EventStream: View {
         return .init(filter: filterText.isEmpty ? nil : filterText,
                      since: bounds.since, until: bounds.until, category: coreCategory,
                      acceptsIncremental: initialCenterTime == nil && !isAggregateMode)
+    }
+
+    private var presentationKey: EventQuerySession.PresentationKey {
+        .init(range: timeRange.rawValue, filter: filterText,
+              category: filterCategory?.rawValue, center: initialCenterTime,
+              halfWindowSeconds: centerHalfWindowSeconds)
     }
 
     /// Effective [endingAt, span] for the hot-tier histogram. During an
@@ -436,7 +513,7 @@ struct EventStream: View {
 
     private func exportEventsCSV() {
         let header = "Time,Action,Category,Process,PID,Signer,Detail"
-        let rows = filteredCache.map { e in
+        let rows = presentedEvents.map { e in
             [e.dateTimeString,
              RuleTranslations.translateAction(e.action),
              e.category.rawValue,
@@ -450,7 +527,7 @@ struct EventStream: View {
 
     private func exportEventsJSON() {
         let iso = ISO8601DateFormatter()
-        let objects: [[String: Any]] = filteredCache.map { e in
+        let objects: [[String: Any]] = presentedEvents.map { e in
             ["id": e.id.uuidString,
              "timestamp": iso.string(from: e.timestamp),
              "action": e.action,
@@ -467,7 +544,7 @@ struct EventStream: View {
 
     private func exportAggregatesCSV() {
         let header = "Day,Category,Signer,Process Path,Count"
-        let rows = identifiedAggregates.map { a in
+        let rows = presentedAggregates.map { a in
             [a.row.day,
              a.row.category.rawValue,
              a.row.processSigner,
@@ -478,6 +555,12 @@ struct EventStream: View {
     }
 
     private func recomputeFilter(_ rows: [EventViewModel]? = nil) {
+        guard !isAggregateMode else { filteredCache = []; return }
+        guard querySession.canDisplay(currentQuery(), key: presentationKey) else {
+            filteredCache = []
+            applyExactReadiness()
+            return
+        }
         var results = rows ?? querySession.events
 
         if let category = filterCategory {
@@ -501,6 +584,17 @@ struct EventStream: View {
         }
 
         filteredCache = results.sorted(using: sortOrder)
+        applyExactReadiness()
+    }
+
+    private func applyExactReadiness() {
+        displayedAggregateMode = false
+        displayedQueryKey = eventQueryKey
+        if querySession.matchesPresentation(currentQuery(), key: presentationKey) {
+            displayedReadiness = querySession.readiness.forDisplayedContent(isEmpty: filteredCache.isEmpty)
+        } else {
+            displayedReadiness.invalidate()
+        }
     }
 
     var body: some View {
@@ -511,7 +605,7 @@ struct EventStream: View {
                     .font(.title2)
                     .fontWeight(.bold)
 
-                Text("\(filteredCache.count)")
+                Text("\(isAggregateMode ? presentedAggregates.count : presentedEvents.count)")
                     .font(.caption)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
@@ -548,7 +642,8 @@ struct EventStream: View {
 
                 Button {
                     Task {
-                        await querySession.loadEvents(currentQuery(), isPresented: !isAggregateMode)
+                        await querySession.loadEvents(currentQuery(), isPresented: !isAggregateMode,
+                                                      presentationKey: presentationKey)
                         guard !Task.isCancelled else { return }
                         if isAggregateMode { aggregateRefreshTick &+= 1 }
                         recomputeFilter()
@@ -618,7 +713,7 @@ struct EventStream: View {
                 .menuIndicator(.hidden)
                 .controlSize(.small)
                 .fixedSize()
-                .disabled(isAggregateMode ? identifiedAggregates.isEmpty : filteredCache.isEmpty)
+                .disabled(isAggregateMode ? presentedAggregates.isEmpty : presentedEvents.isEmpty)
                 .help(String(localized: "events.export.help", defaultValue: "Export the current events to CSV or JSON"))
                 .accessibilityLabel(String(localized: "ui.EventStream.export.events", defaultValue: "Export events"))
             }
@@ -649,7 +744,7 @@ struct EventStream: View {
                 )
                 EventTimeHistogram(
                     bins: isAggregateMode
-                        ? EventTimeHistogram.dailyBins(from: aggregateRows, endingAt: Date(), spanDays: dailySpanDays)
+                        ? EventTimeHistogram.dailyBins(from: presentedAggregateRows, endingAt: Date(), spanDays: dailySpanDays)
                         : EventTimeHistogram.bins(
                             fromSQL: histogramRows,
                             granularity: hotGranularity,
@@ -715,10 +810,22 @@ struct EventStream: View {
                 .accessibilityLabel(Text(warning))
             }
 
+            UIContentReadinessMarker(readiness: contentReadinessForDisplay)
+                .padding(.horizontal)
+                .fixedSize(horizontal: false, vertical: true)
+            if !isAggregateMode && querySession.showingCachedEvents && !presentedEvents.isEmpty {
+                Text(querySession.isLoading
+                     ? "Showing cached events while refreshing."
+                     : "Showing cached events; the latest read has not completed successfully.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal)
+            }
+
             // Event table
             if isAggregateMode {
                 aggregateTable
-            } else if filteredCache.isEmpty {
+            } else if presentedEvents.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "list.bullet.rectangle")
@@ -745,7 +852,7 @@ struct EventStream: View {
                 .frame(maxWidth: .infinity)
             } else {
                 HStack(spacing: 0) {
-                    Table(filteredCache, selection: $selectedEventID, sortOrder: $sortOrder) {
+                    Table(presentedEvents, selection: $selectedEventID, sortOrder: $sortOrder) {
                         TableColumn("Time", value: \.timestamp) { event in
                             Text(event.dateTimeString)
                                 .font(.system(.caption, design: .monospaced))
@@ -783,7 +890,7 @@ struct EventStream: View {
                     // #6: per-row actions — copy the selected event(s), or
                     // pivot the filter to the row's process.
                     .contextMenu(forSelectionType: EventViewModel.ID.self) { ids in
-                        let selected = filteredCache.filter { ids.contains($0.id) }
+                        let selected = presentedEvents.filter { ids.contains($0.id) }
                         if !selected.isEmpty {
                             Button {
                                 copyEventDetails(selected)
@@ -805,7 +912,7 @@ struct EventStream: View {
 
                     // Event detail panel — only when selected
                     if let selectedID = selectedEventID,
-                       let event = filteredCache.first(where: { $0.id == selectedID }) {
+                       let event = presentedEvents.first(where: { $0.id == selectedID }) {
                         Divider()
                         EventDetailPanel(event: event, triggeredAlerts: triggeredAlerts(for: event))
                             .frame(minWidth: 280, idealWidth: 350, maxWidth: 450)
@@ -820,7 +927,7 @@ struct EventStream: View {
             // anchored at the bottom. Hidden once we hit the end-of-table OR
             // when the user is in aggregate mode (the cursor only makes
             // sense over the hot-tier events table, not over rollup rows).
-            if querySession.hasMoreEvents && !isAggregateMode && !loadOlderCrossedWindow {
+            if querySession.hasMoreEvents && hasCompatibleExactPresentation && !loadOlderCrossedWindow {
                 HStack {
                     Spacer()
                     Button {
@@ -906,23 +1013,47 @@ struct EventStream: View {
             .background(.bar)
         }
         .onAppear { recomputeFilter() }
+        .onChange(of: querySession.readiness) { readiness in
+            guard !isAggregateMode else { return }
+            guard querySession.matchesPresentation(currentQuery(), key: presentationKey) else {
+                displayedReadiness.invalidate()
+                return
+            }
+            if !isPaused { recomputeFilter() }
+            // Explicit paused queries apply their rows in the query task below.
+            if !isPaused || !readiness.phase.isFreshCompletion {
+                displayedReadiness = readiness.forDisplayedContent(isEmpty: filteredCache.isEmpty)
+                displayedQueryKey = eventQueryKey
+                displayedAggregateMode = false
+            }
+        }
+        .onDisappear {
+            querySession.controls = .init(intentFilter: intentFilter, intentCenter: initialCenterTime,
+                                          intentHalfWindow: centerHalfWindowSeconds, filter: filterText,
+                                          category: filterCategory, range: timeRange, paused: isPaused)
+        }
         .task(id: eventQueryKey) {
             guard !Task.isCancelled else { return }
             // Pause freezes live arrivals, not a newly selected query. Clear
             // the old query's table before debounce or an asynchronous read.
-            filteredCache = []
+            recomputeFilter()
             selectedEventID = nil
             guard !isAggregateMode else {
                 querySession.deactivateExactPresentation()
                 return
             }
-            guard !appState.eventReadsDeferred else { return }
+            guard !appState.eventReadsDeferred else {
+                displayedReadiness.invalidate()
+                return
+            }
             let debounce = Self.shouldDebounce(previousFilter: lastRequestedFilter, nextFilter: filterText)
             lastRequestedFilter = filterText
-            await querySession.loadEvents(currentQuery(), debounce: debounce)
+            await querySession.loadEvents(currentQuery(), debounce: debounce, presentationKey: presentationKey)
             guard !Task.isCancelled else { return }
             // Explicit queries refresh even a paused stream.
             recomputeFilter()
+            displayedReadiness = querySession.readiness.forDisplayedContent(isEmpty: filteredCache.isEmpty)
+            displayedQueryKey = eventQueryKey
         }
         // v1.8.0: refresh aggregate rows whenever the time range crosses the
         // 24h boundary or the category filter changes. Runs only in aggregate
@@ -933,6 +1064,9 @@ struct EventStream: View {
             identifiedAggregates = []
             guard !appState.eventReadsDeferred else { return }
             if isAggregateMode {
+                displayedAggregateKey = aggregateInputsKey
+                displayedAggregateMode = true
+                _ = displayedReadiness.begin(retainingCachedContent: false)
                 let sinceDay = Self.isoDay(daysAgo: rangeDays)
                 let rows = await querySession.fetchAggregates(
                     sinceDay: sinceDay,
@@ -940,6 +1074,8 @@ struct EventStream: View {
                 )
                 guard !Task.isCancelled, !appState.eventReadsDeferred else { return }
                 aggregateRows = rows
+                identifiedAggregates = Self.identify(rows)
+                displayedReadiness = querySession.aggregateReadiness.forDisplayedContent(isEmpty: rows.isEmpty)
             } else {
                 aggregateRows = []
             }
@@ -977,8 +1113,8 @@ struct EventStream: View {
         // C4: honour Pause. When paused, drop the live poll's prepended
         // rows on the floor instead of rebuilding the table — the visible
         // set stays frozen. Explicit filter/sort changes below still apply.
-        .onReceive(querySession.$presentationResetTick) { _ in
-            filteredCache = []
+        .onChange(of: querySession.presentationResetTick) { _ in
+            recomputeFilter()
             selectedEventID = nil
         }
         .onReceive(querySession.$events) { rows in

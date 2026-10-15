@@ -18883,6 +18883,19 @@ public actor EventStore {
         public let count: Int
     }
 
+    #if DEBUG
+    private var aggregateReadInterruptAfterRowsForTesting: Int?
+    private(set) var aggregateReadRowsObservedForTesting = 0
+
+    /// One-shot interruption of the real private-fixture cursor after a row
+    /// prefix. No SQLite handle escapes the actor, and release builds omit it.
+    func setAggregateReadInterruptAfterRowsForTesting(_ rows: Int?) {
+        precondition(rows == nil || rows! > 0)
+        aggregateReadInterruptAfterRowsForTesting = rows
+        aggregateReadRowsObservedForTesting = 0
+    }
+    #endif
+
     /// Read aggregated event counts for any window, optionally narrowed to a
     /// category. Used by the Overview trends widget and the SIEM-style time
     /// histogram in v1.8 — both want "how many process exec / file / network
@@ -18944,7 +18957,23 @@ public actor EventStore {
             return String(cString: cstr)
         }
         var rows: [AggregateRow] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while true {
+            let result = sqlite3_step(stmt)
+            if result == SQLITE_DONE { return rows }
+            guard result == SQLITE_ROW else {
+                // Capture diagnostics before defer finalizes the statement.
+                // A prefix followed by BUSY/IOERR/INTERRUPT is not a complete
+                // aggregate result and must not be published as one.
+                let failure = SQLiteFailureDetails(resultCode: result, db: db)
+                let message = db.map { String(cString: sqlite3_errmsg($0)) }
+                    ?? "aggregate query did not complete"
+                throw EventStoreError.sqliteFailure(
+                    context: "aggregate query step", message: message,
+                    resultCode: failure.resultCode,
+                    extendedResultCode: failure.extendedResultCode,
+                    systemErrno: failure.systemErrno
+                )
+            }
             guard let dayStr = readText(stmt, 0),
                   let catStr = readText(stmt, 1),
                   let cat = EventCategory(rawValue: catStr)
@@ -18957,8 +18986,16 @@ public actor EventStore {
                 processSigner: signer, processPath: path,
                 count: count
             ))
+            #if DEBUG
+            if let threshold = aggregateReadInterruptAfterRowsForTesting {
+                aggregateReadRowsObservedForTesting += 1
+                if aggregateReadRowsObservedForTesting == threshold {
+                    aggregateReadInterruptAfterRowsForTesting = nil
+                    sqlite3_interrupt(db)
+                }
+            }
+            #endif
         }
-        return rows
     }
 
     /// Number of aggregate rows. Cheap; used by tests + the Overview widget

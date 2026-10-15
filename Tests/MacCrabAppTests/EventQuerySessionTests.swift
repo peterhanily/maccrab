@@ -88,16 +88,20 @@ struct EventQuerySessionTests {
     func actualStoreIsolation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("maccrab-query-windows-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try EventStore(directory: directory.path)
+        let budget = EventPipelineLiveMemoryBudget.isolatedProductionEquivalentForTesting()
+        let store = try EventStore(directory: directory.path, liveMemoryBudget: budget)
         let base = Date().addingTimeInterval(-600)
         let values = (0..<6).map { event($0.isMultiple(of: 2) ? "windowalpha" : "windowbeta",
                                          at: base.addingTimeInterval(Double($0) * 60)) }
         for value in values { try await store.insert(event: value) }
         let app = AppState(engineSource: .init(directory: directory.path), startBackgroundWork: false)
+        app.eventReaderMemoryBudgetForTesting = budget
         defer { app.stopPolling() }
         let first = EventQuerySession(reader: app)
         let second = EventQuerySession(reader: app)
         await first.loadEvents(query(), limit: 2)
+        #expect(app.eventReaderLastPressureForTesting == nil,
+                "First fixture read pressure: \(String(describing: app.eventReaderLastPressureForTesting)); budget: \(budget.snapshot())")
         await second.loadEvents(query(until: values[3].timestamp), limit: 2)
         #expect(first.events.map(\.id) == [values[5].id, values[4].id])
         #expect(second.events.map(\.id) == [values[3].id, values[2].id])
@@ -117,6 +121,47 @@ struct EventQuerySessionTests {
         #expect(first.eventSearchActive && second.eventSearchActive)
         #expect(app.events.isEmpty, "Window search must not replace the shared recent cache used by Alerts")
         #expect(!app.eventSearchActive)
+    }
+
+    @Test("Occupied production-sized workspace defers honestly and the same query recovers after release")
+    func workspacePressureAndRecovery() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("maccrab-query-pressure-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let budget = EventPipelineLiveMemoryBudget.isolatedProductionEquivalentForTesting()
+        let store = try EventStore(directory: directory.path, liveMemoryBudget: budget)
+        let value = event("pressurefixture", at: Date().addingTimeInterval(-60))
+        try await store.insert(event: value)
+        let app = AppState(engineSource: .init(directory: directory.path), startBackgroundWork: false)
+        app.eventReaderMemoryBudgetForTesting = budget
+        defer { app.stopPolling() }
+        let session = EventQuerySession(reader: app)
+        let workspace = EventPipelineLiveMemoryBudget.productionEventStoreWorkspaceReserveBytes
+        var held: [EventPipelineMemoryLease] = []
+        // Model independent fixture workspaces occupying one process envelope.
+        // Bounded accounting leases only; this does not allocate 96MiB buffers.
+        for _ in 0..<9 {
+            guard let lease = budget.tryAcquire(bytes: workspace, owner: .eventStoreWorkspace) else { break }
+            held.append(lease)
+        }
+        try #require(!held.isEmpty)
+        try #require(budget.snapshot().maximumBytes - budget.snapshot().currentBytes < workspace)
+        let rejectionsBeforeRead = budget.snapshot().nonblockingRejectionsTotal
+        await session.loadEvents(query())
+        withExtendedLifetime(held) {}
+        #expect(session.events.isEmpty && session.readiness.phase == .deferred)
+        guard case .some(.memoryLeaseUnavailable) = app.eventReaderLastPressureForTesting else {
+            Issue.record("Expected exact workspace pressure, not an unexplained empty success")
+            return
+        }
+        #expect(budget.snapshot().nonblockingRejectionsTotal > rejectionsBeforeRead)
+        let tick = session.retryTick
+        held.removeAll()
+        session.pollTick()
+        #expect(session.retryTick == tick + 1)
+        await session.loadEvents(query())
+        #expect(session.events.map(\.id) == [value.id])
+        #expect(session.readiness.phase == .loadedNonempty && app.eventReaderLastPressureForTesting == nil)
+        #expect(budget.snapshot().withinCapacity && budget.snapshot().leasesConserved)
     }
 
     @Test("late query results cannot replace a newer query", arguments: [false, true])
@@ -186,10 +231,12 @@ struct EventQuerySessionTests {
     func sharedIncrementalDelivery() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("maccrab-query-poll-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try EventStore(directory: directory.path)
+        let budget = EventPipelineLiveMemoryBudget.isolatedProductionEquivalentForTesting()
+        let store = try EventStore(directory: directory.path, liveMemoryBudget: budget)
         let baseline = event("windowalpha", at: Date().addingTimeInterval(-120))
         try await store.insert(event: baseline)
         let app = AppState(engineSource: .init(directory: directory.path), startBackgroundWork: false)
+        app.eventReaderMemoryBudgetForTesting = budget
         defer { app.stopPolling() }
         let first = EventQuerySession(reader: app), second = EventQuerySession(reader: app), search = EventQuerySession(reader: app)
         await first.loadEvents(query(live: true))
@@ -280,14 +327,18 @@ struct EventQuerySessionTests {
     func actualIncrementalConsumerGate() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("maccrab-query-gate-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try EventStore(directory: directory.path)
+        let budget = EventPipelineLiveMemoryBudget.isolatedProductionEquivalentForTesting()
+        let store = try EventStore(directory: directory.path, liveMemoryBudget: budget)
         let baseline = event("windowalpha", at: Date().addingTimeInterval(-60))
         try await store.insert(event: baseline)
         let app = AppState(engineSource: .init(directory: directory.path), startBackgroundWork: false)
+        app.eventReaderMemoryBudgetForTesting = budget
         defer { app.stopPolling() }
         let search = EventQuerySession(reader: app), centred = EventQuerySession(reader: app)
         await search.loadEvents(query("windowalpha"))
         await centred.loadEvents(query(until: baseline.timestamp))
+        #expect(app.eventReaderLastPressureForTesting == nil,
+                "Centred fixture read pressure: \(String(describing: app.eventReaderLastPressureForTesting)); budget: \(budget.snapshot())")
         #expect(search.events.map(\.id) == [baseline.id])
         #expect(centred.events.map(\.id) == [baseline.id])
         for session in [search, centred] {
@@ -315,7 +366,8 @@ struct EventQuerySessionTests {
     func newSessionsAcrossStartupReadiness() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("maccrab-query-startup-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try EventStore(directory: directory.path)
+        let budget = EventPipelineLiveMemoryBudget.isolatedProductionEquivalentForTesting()
+        let store = try EventStore(directory: directory.path, liveMemoryBudget: budget)
         let first = event("readyalpha", at: Date().addingTimeInterval(-120))
         let second = event("readybeta", at: first.timestamp.addingTimeInterval(60))
         try await store.insert(event: first)
@@ -333,6 +385,7 @@ struct EventQuerySessionTests {
         }
         try writeHeartbeat("starting", revision: 0)
         let app = AppState(engineSource: .init(directory: directory.path), startBackgroundWork: false)
+        app.eventReaderMemoryBudgetForTesting = budget
         defer { app.stopPolling() }
         app.refreshHeartbeat()
         #expect(app.eventReadsDeferred)

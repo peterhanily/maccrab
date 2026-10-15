@@ -1769,6 +1769,18 @@ final class AppState: ObservableObject, EventQueryReading {
     /// Used by the idle-release test; an idle handle alone is not a read-mark.
     var hasCachedEventStoreForTesting: Bool { cachedEventStore != nil }
 
+    enum EventReaderOperationForTesting: Equatable, Sendable {
+        case exactQuery, searchQuery, olderPage, incremental, eventLookup, aggregates, histogram
+    }
+    /// Suspend/cancel only after the real Core operation has returned and
+    /// finalized its statements. This seam never replaces a storage read.
+    var eventReaderDidReturnForTesting: (@MainActor (EventReaderOperationForTesting) async -> Void)?
+    /// Per-instance diagnostic, never a global policy or a synthetic read result.
+    var eventReaderLastPressureForTesting: EventStoreError?
+    /// Unrelated fixture apps model separate processes. Production always uses
+    /// the shared envelope; an injected fixture uses the identical limits.
+    var eventReaderMemoryBudgetForTesting: EventPipelineLiveMemoryBudget?
+
     /// Test-only: install a cached events.db connection to stand in for the one
     /// the getter opens, so the idle-release path can be verified deterministically
     /// without the getter's live directory probing.
@@ -1878,6 +1890,11 @@ final class AppState: ObservableObject, EventQueryReading {
         if !mayRetainIdle, cachedEventStore === lease.store {
             cachedEventReaderAllowsIdleRetention = false
         }
+        // `successful` describes the storage operation, not whether its result
+        // is still wanted by a view. Cancelling publication after a completed
+        // read must not retire another consumer's healthy shared reader/index.
+        // Core throws (including cancellation while it is reading) and required
+        // exact-completeness failures still take the conservative retire path.
         if !successful, cachedEventStore === lease.store { discardCachedEventReader() }
     }
 
@@ -1926,10 +1943,16 @@ final class AppState: ObservableObject, EventQueryReading {
         discardCachedEventReader() // path changed: permanently retire before reopening
         let openedIdentity = EventReaderEngineIdentity.read(directory: chosen)
         // Wave 9A.1 (v1.12.6 RC2): dashboard event store is read-only.
+        let memoryBudget: EventPipelineLiveMemoryBudget
+        #if DEBUG
+        memoryBudget = eventReaderMemoryBudgetForTesting ?? .processShared
+        #else
+        memoryBudget = .processShared
+        #endif
         let store = try EventStore(
             directory: chosen,
             forceReadOnly: true,
-            liveMemoryBudget: .processShared
+            liveMemoryBudget: memoryBudget
         )
         cachedEventStore = store
         cachedEventStorePath = chosen
@@ -2712,6 +2735,9 @@ final class AppState: ObservableObject, EventQueryReading {
     }
 
     func readEventQuery(_ query: EventQuerySession.Query, limit: Int) async throws -> EventQuerySession.Page? {
+        #if DEBUG
+        eventReaderLastPressureForTesting = nil
+        #endif
         guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return nil }
         let generation = storeGeneration
         do {
@@ -2726,6 +2752,10 @@ final class AppState: ObservableObject, EventQueryReading {
             if let text = query.filter, query.isSearch {
                 let snapshot = try await store.searchSnapshot(
                     text: text, since: query.since, until: query.until, limit: limit)
+                successful = true // partial search coverage is an explicit supported result
+                #if DEBUG
+                await eventReaderDidReturnForTesting?(.searchQuery)
+                #endif
                 guard generation == storeGeneration else { throw CancellationError() }
                 try Task.checkCancellation()
                 searchOwnership = snapshot
@@ -2743,6 +2773,10 @@ final class AppState: ObservableObject, EventQueryReading {
                 // crowd a historical investigation window out of the result.
                 let snapshot = try await store.exactEventsSnapshot(
                     since: query.since, until: query.until, category: query.category, limit: limit)
+                successful = snapshot.isComplete
+                #if DEBUG
+                await eventReaderDidReturnForTesting?(.exactQuery)
+                #endif
                 guard generation == storeGeneration else { throw CancellationError() }
                 try Task.checkCancellation()
                 guard snapshot.isComplete else {
@@ -2765,9 +2799,11 @@ final class AppState: ObservableObject, EventQueryReading {
                                                 nextCursor: next, coverageWarning: warning)
             withExtendedLifetime(exactOwnership) {}
             withExtendedLifetime(searchOwnership) {}
-            successful = true
             return result
         } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
+            #if DEBUG
+            eventReaderLastPressureForTesting = error
+            #endif
             return nil
         }
     }
@@ -2844,6 +2880,10 @@ final class AppState: ObservableObject, EventQueryReading {
         defer { finishEventReaderLease(lease, successful: successful) }
         let store = lease.store
         let page = try await store.exactEventsPageSnapshot(before: cursor, category: query.category, pageSize: pageSize)
+        successful = true // Core rejects an incomplete exact page before returning
+        #if DEBUG
+        await eventReaderDidReturnForTesting?(.olderPage)
+        #endif
         guard generation == storeGeneration else { throw CancellationError() }
         try Task.checkCancellation()
         let rows = page.items.filter { $0.timestamp >= query.since && $0.timestamp <= query.until }
@@ -2851,7 +2891,6 @@ final class AppState: ObservableObject, EventQueryReading {
         let result = EventQuerySession.Page(events: rows.map { eventToViewModel($0) },
                                             nextCursor: reachedStart ? nil : page.nextCursor)
         withExtendedLifetime(page) {}
-        successful = true
         return result
     }
 
@@ -3327,7 +3366,13 @@ final class AppState: ObservableObject, EventQueryReading {
             }
         } else {
             visibleEventsWorkspaceOwners.remove(owner)
-            eventQueryRegistrations.removeValue(forKey: owner)?.session?.invalidatePendingReads()
+            let removed = eventQueryRegistrations.removeValue(forKey: owner)?.session
+            // SwiftUI transitions may overlap old/new owners of this window's
+            // retained session. Retiring the old view must not cancel its new
+            // owner's query. Distinct windows still own independent sessions.
+            if let removed, !eventQueryRegistrations.values.contains(where: { $0.session === removed }) {
+                removed.invalidatePendingReads()
+            }
         }
     }
 
@@ -3353,6 +3398,10 @@ final class AppState: ObservableObject, EventQueryReading {
                 since: lastEventTimestamp,
                 limit: 200
             )
+            successful = snapshot.isComplete
+            #if DEBUG
+            await eventReaderDidReturnForTesting?(.incremental)
+            #endif
             guard generation == storeGeneration, !Task.isCancelled else { return }
             guard snapshot.isComplete else {
                 eventSearchCoverageWarning =
@@ -3373,7 +3422,6 @@ final class AppState: ObservableObject, EventQueryReading {
             }
             for session in sessions { session.receiveIncremental(newViewModels, epoch: generation) }
             withExtendedLifetime(snapshot) {}
-            successful = true
         } catch {}
     }
 
@@ -3414,8 +3462,11 @@ final class AppState: ObservableObject, EventQueryReading {
             defer { finishEventReaderLease(lease, successful: successful) }
             let store = lease.store
             let snapshot = try await store.exactEventSnapshot(id: uuid)
-            guard generation == storeGeneration, !Task.isCancelled else { return nil }
             successful = true
+            #if DEBUG
+            await eventReaderDidReturnForTesting?(.eventLookup)
+            #endif
+            guard generation == storeGeneration, !Task.isCancelled else { return nil }
             return snapshot
         } catch {
             return nil
@@ -3464,9 +3515,12 @@ final class AppState: ObservableObject, EventQueryReading {
         var successful = false
         defer { finishEventReaderLease(lease, successful: successful) }
         let rows = try await lease.store.aggregates(sinceDay: sinceDay, category: category)
+        successful = true
+        #if DEBUG
+        await eventReaderDidReturnForTesting?(.aggregates)
+        #endif
         guard generation == storeGeneration else { throw CancellationError() }
         try Task.checkCancellation()
-        successful = true
         return rows
     }
 
@@ -3501,6 +3555,10 @@ final class AppState: ObservableObject, EventQueryReading {
             defer { finishEventReaderLease(lease, successful: successful) }
             let snapshot = try await lease.store.histogramSnapshot(spanSeconds: spanSeconds, stepSeconds: stepSeconds,
                                                                    endingAt: endingAt, category: category)
+            successful = true // incomplete histogram coverage remains explicitly labelled below
+            #if DEBUG
+            await eventReaderDidReturnForTesting?(.histogram)
+            #endif
             guard generation == storeGeneration else { throw CancellationError() }
             try Task.checkCancellation()
             var warning: String?
@@ -3509,7 +3567,6 @@ final class AppState: ObservableObject, EventQueryReading {
                 warning = "Histogram covers only the provable retained \(seconds)-second interval and has "
                     + "\(snapshot.gaps.total) evidence gaps; missing bins are unknown, not zero."
             }
-            successful = true
             return .init(bins: snapshot.bins.map { ($0.start, $0.count) }, effectiveSince: snapshot.effectiveSince,
                          effectiveUntil: snapshot.effectiveUntil, coverageWarning: warning)
         } catch let error as EventStoreError where Self.isTransientReadPressure(error) {

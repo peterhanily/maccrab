@@ -39,29 +39,13 @@ func aiToolRollup(_ sessions: [AgentSessionSnapshot]) -> [AIToolRollupRow] {
 public struct V2DetectionWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
+    @ObservedObject private var presentation: V2DetectionPresentation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedRule: V2MockRule?
-    /// Cached lowercased haystack per rule, computed once when
-    /// `rules` is loaded. Each rule's haystack is the concat of
-    /// (id, title, category, mitre joined, description) — so an operator
-    /// can find a rule by its id, its name/title (= the alert name), its
-    /// MITRE tag, OR free text from its description. Pre-fix the rulesTable
-    /// rebuilt this concatenation + lowercased per row × the loaded rules
-    /// per keystroke — that's 1700+ string allocations per char
-    /// typed in the search box. Now: precompute once + cheap
-    /// `contains(q)` per row per keystroke.
-    @State private var rulesHaystack: [String: String] = [:]
-    @State private var filteredRules: [V2MockRule] = []
-    @State private var rulesRevision = UUID()
+    /// Non-rule tabs retain their existing selected-tab request session.
+    /// Rules/search preparation instead belong to the dashboard window.
     @StateObject private var loads = V2DetectionLoadSession()
-    @StateObject private var ruleFilter = V2DetectionRuleFilter()
-    /// Debounced query — driven by ruleQuery via .task(id:). Pre-fix
-    /// the filter ran inline in body, so every keystroke re-filtered
-    /// the loaded rules synchronously on @MainActor. Now the filter result
-    /// is cached, filterTask coalesces fast typing.
-    @State private var debouncedRuleQuery: String = ""
     @State private var presentingNewRule = false
-    @State private var rules: [V2MockRule] = []
     @State private var extensions: [V2MockExtension] = []
     @State private var selectedExtension: V2MockExtension? = nil
     @State private var mcpServers: [V2MockMCP] = []
@@ -79,24 +63,39 @@ public struct V2DetectionWorkspace: View {
     /// IDs of rules the user has overridden to disabled via
     /// /Library/Application Support/MacCrab/user_rules/<id>.json.
     /// Refreshed at .task and after each Disable / Enable action.
-    @State private var userDisabledRuleIDs: Set<String> = []
+    @State private var localDisabledRuleIDs: Set<String>?
     /// Sequence + graph (composite) rule id → title, lowercased keys.
     /// An alert can deep-link a composite-rule id into the search box;
     /// those rules aren't single-event Sigma and never appear in
     /// `rules`, so without this the table just goes blank. Loaded in
     /// the rules-load task. See `builtInDetectionNote`.
-    @State private var compositeRuleLabels: [String: String] = [:]
+    private var compositeRuleLabels: [String: String] {
+        presentation.snapshot(for: presentationIdentity)?.compositeLabels ?? [:]
+    }
+    private var rules: [V2MockRule] { presentation.snapshot(for: presentationIdentity)?.rules ?? [] }
+    private var filteredRules: [V2MockRule] {
+        presentation.rows(for: presentationIdentity, query: state.ruleSearchQuery)
+    }
+    private var debouncedRuleQuery: String { V2DetectionPresentation.normalizedQuery(state.ruleSearchQuery) }
+    private var userDisabledRuleIDs: Set<String> {
+        get { localDisabledRuleIDs ?? presentation.snapshot(for: presentationIdentity)?.disabledOverrideIDs ?? [] }
+        nonmutating set { localDisabledRuleIDs = newValue }
+    }
+    private var presentationIdentity: V2DetectionPresentation.Identity {
+        .init(provider: ObjectIdentifier(state.provider), directory: state.engineSource.directory,
+              epoch: appState.eventQueryEpoch)
+    }
 
-    init(state: V2DashboardState, appState: AppState) {
+    init(state: V2DashboardState, appState: AppState, presentation: V2DetectionPresentation) {
         self.state = state
         self.appState = appState
+        self.presentation = presentation
     }
 
     /// Lowercased search haystack for one rule — id + title (= the alert
     /// name) + category + MITRE + description. The single source of truth
-    /// for the rule search box, used by BOTH the precomputed cache and the
-    /// not-yet-built fallback so the two can't drift. Extracted as a pure
-    /// function so the searchable-field set is unit-testable.
+    /// for the window-owned precomputed cache. Kept pure so the searchable
+    /// field set remains unit-testable.
     nonisolated static func ruleSearchHaystack(for rule: V2MockRule) -> String {
         (rule.id + " " + rule.title + " " + rule.category + " "
             + rule.mitre.joined(separator: " ") + " " + rule.description).lowercased()
@@ -108,8 +107,16 @@ public struct V2DetectionWorkspace: View {
     }
 
     private var selectedTab: V2WorkspaceTab { state.selectedTabs[.detection] ?? .detectionRules }
-    private var loadKey: V2DetectionLoadSession.Key {
-        .init(provider: ObjectIdentifier(state.provider), tab: .init(selectedTab), tick: state.refreshTick)
+    private struct LoadKey: Equatable {
+        let provider: ObjectIdentifier
+        let source: String
+        let epoch: UInt64
+        let tab: V2DetectionLoadSession.Tab
+        let tick: Int
+    }
+    private var loadKey: LoadKey {
+        .init(provider: ObjectIdentifier(state.provider), source: state.engineSource.directory,
+              epoch: appState.eventQueryEpoch, tab: .init(selectedTab), tick: state.refreshTick)
     }
 
     public var body: some View {
@@ -138,66 +145,36 @@ public struct V2DetectionWorkspace: View {
                 catch { return }
             }
         }
-        // Debounce + filter task. Drives both:
-        //   - debouncedRuleQuery (delayed mirror of ruleQuery)
-        //   - filteredRules (precomputed filter result cached off-main)
-        // The .task(id:) cancellation semantics mean fast typing
-        // discards in-flight filter computations from prior
-        // keystrokes — only the last one's result lands.
-        .task(id: "\(rulesRevision):\(state.ruleSearchQuery)") {
-            let revision = rulesRevision
-            let q = state.ruleSearchQuery
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            // 200 ms debounce window. Less than EventStream's 300 ms
-            // because the rule filter is in-memory + cheap.
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            guard !Task.isCancelled else { return }
-            // Snapshot current rules + haystack on the actor.
-            let snapshot = self.rules
-            let haystack = self.rulesHaystack
-            guard let result = await ruleFilter.filter(rules: snapshot, haystack: haystack, query: q),
-                  !Task.isCancelled, rulesRevision == revision,
-                  state.ruleSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == q else { return }
-            self.debouncedRuleQuery = q
-            self.filteredRules = result
+        .task(id: "\(presentation.revision):\(presentation.phase):\(state.ruleSearchQuery):\(appState.eventQueryEpoch)") {
+            guard selectedTab == .detectionRules else { return }
+            await presentation.filter(identity: presentationIdentity, query: state.ruleSearchQuery)
         }
         .task(id: loadKey) {
             let provider = state.provider
             let tab = selectedTab
+            if tab == .detectionRules {
+                let identity = presentationIdentity
+                await presentation.refresh(identity: identity, query: state.ruleSearchQuery, provider: provider)
+                guard !Task.isCancelled, identity == presentationIdentity, selectedTab == tab else { return }
+                localDisabledRuleIDs = nil
+                let r = rules
+                resyncSelectedRule(from: r)
+                for key in ["detection:detectionRules", "detection"] {
+                    if let pendingId = state.selectedEntities[key], let match = r.first(where: { $0.id == pendingId }) {
+                        selectedRule = match
+                        state.selectedEntities[key] = nil
+                        break
+                    }
+                }
+                return
+            }
+            presentation.leave()
             guard let snapshot = await loads.load(tab: .init(tab), provider: provider),
                   !Task.isCancelled,
                   ObjectIdentifier(state.provider) == ObjectIdentifier(provider),
                   selectedTab == tab else { return }
             switch snapshot {
-            case .rules(let snapshot):
-                let r = snapshot.rules
-                self.rules = r
-                self.rulesHaystack = snapshot.haystack
-                self.compositeRuleLabels = snapshot.compositeLabels
-                self.userDisabledRuleIDs = snapshot.disabledOverrideIDs
-                // Filter immediately after this snapshot; no browser scan,
-                // MCP configuration or EventStore query gates rule rendering.
-                ruleFilter.invalidate()
-                self.rulesRevision = UUID()
-                // C6: re-point the open inspector at the fresh rule so a
-                // mute/disable/severity change (or an external edit) reflects
-                // in its status chip + action labels on the next refresh tick.
-                self.resyncSelectedRule(from: r)
-                // Default (no filter): show all rules immediately.
-                if state.ruleSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    self.filteredRules = r
-                }
-                // Cross-workspace deep-link: alerts → rule.
-                let candidateKeys = ["detection:detectionRules", "detection"]
-                for key in candidateKeys {
-                    if let pendingId = state.selectedEntities[key],
-                       let match = r.first(where: { $0.id == pendingId }) {
-                        self.selectedRule = match
-                        state.selectedEntities[key] = nil
-                        break
-                    }
-                }
+            case .rules: break // rules use the window-owned presentation above
             case .browser(let rows): self.extensions = rows
             case .mcp(let rows): self.mcpServers = rows
             case .agents(let rows):
@@ -205,7 +182,7 @@ public struct V2DetectionWorkspace: View {
                 await appState.refreshAgentLineage()
             }
         }
-        .onDisappear { loads.invalidate(); ruleFilter.invalidate() }
+        .onDisappear { loads.invalidate(); presentation.leave() }
         // Cross-workspace intent — Overview's "Create rule" quick
         // action bumps presentNewRuleTick after navigating here.
         .onChange(of: state.presentNewRuleTick) { _ in
@@ -278,6 +255,7 @@ public struct V2DetectionWorkspace: View {
     /// The dashboard queues an owner-bound inbox request; the root engine owns
     /// and updates the secure override directory without a password dialog.
     private func toggleRuleDisabled(_ rule: V2MockRule) async {
+        guard presentation.isCurrent(for: presentationIdentity) else { return }
         guard state.ruleChanges.canSubmit(ruleID: rule.id) else { return }
         // C6: re-sync the inspector snapshot on every exit path so its labels
         // don't lag the action the user just took.
@@ -423,6 +401,7 @@ public struct V2DetectionWorkspace: View {
     /// sequence/graph rules are read-only (their engines don't read the
     /// user_rules overlay).
     private func setSeverityOverride(_ rule: V2MockRule, severityRaw: String?) async {
+        guard presentation.isCurrent(for: presentationIdentity) else { return }
         guard state.ruleChanges.canSubmit(ruleID: rule.id) else { return }
         // C6: keep the inspector snapshot in step with the severity change.
         defer { resyncSelectedRule(from: rules) }
@@ -556,6 +535,7 @@ public struct V2DetectionWorkspace: View {
                 }
             }
             .menuStyle(.borderlessButton)
+            .disabled(!presentation.isCurrent(for: presentationIdentity))
             .menuIndicator(.hidden)
             .fixedSize()
             .help(String(localized: "ui.V2DetectionWorkspace.change.this.rule.s.effective.severity", defaultValue: "Change this rule's effective severity"))
@@ -570,13 +550,16 @@ public struct V2DetectionWorkspace: View {
         // float over the rightmost ~340 pt of the rules table.
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 16) {
+                UIContentReadinessMarker(readiness: presentation.readiness(for: presentationIdentity, query: state.ruleSearchQuery))
+                Text(presentation.status(for: presentationIdentity, query: state.ruleSearchQuery))
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                 rulesStatsRow
                 if !state.ruleChanges.entries.isEmpty { requestedRuleChanges }
                 rulesSearchBar
                 if builtInDetectionSearchUnmatched {
                     builtInDetectionNote
                 }
-                if rules.isEmpty {
+                if rules.isEmpty && presentation.isCurrent(for: presentationIdentity) {
                     rulesEmptyState
                 }
                 rulesTable
@@ -584,7 +567,7 @@ public struct V2DetectionWorkspace: View {
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if let rule = selectedRule {
+            if let rule = selectedRule, rules.contains(where: { $0.id == rule.id }) {
                 ruleInspector(rule)
                     .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
                     .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
@@ -630,7 +613,8 @@ public struct V2DetectionWorkspace: View {
         let enabled = rules.filter { $0.isEnabled }.count
         let custom = rules.filter { $0.isCustom }.count
         let firedRecently = rules.reduce(0) { $0 + $1.firesLastWeek }
-        let currentTelemetry = state.provider.ruleTelemetryContext?.current == true
+        let currentTelemetry = presentation.isCurrent(for: presentationIdentity)
+            && state.provider.ruleTelemetryContext?.current == true
         return HStack(spacing: 12) {
             metricCard(title: "Rules loaded", value: "\(sigmaCount)",
                        trend: rules.isEmpty ? "no rules"
@@ -716,6 +700,8 @@ public struct V2DetectionWorkspace: View {
     /// search box, so an AI-Guard / campaign / behavioral / threat-intel
     /// alert lands the operator on an empty table — explain why.
     private var builtInDetectionSearchUnmatched: Bool {
+        guard presentation.isCurrent(for: presentationIdentity),
+              presentation.hasFilteredResult(for: presentationIdentity, query: state.ruleSearchQuery) else { return false }
         let q = debouncedRuleQuery.lowercased()
         guard !q.isEmpty else { return false }
         guard filteredRules.isEmpty else { return false }
@@ -786,11 +772,9 @@ public struct V2DetectionWorkspace: View {
     }
 
     private var rulesTable: some View {
-        // `filteredRules` is updated by a debounced `.task(id:)`
-        // inside `tabBody` so we don't re-filter on every keystroke.
-        // When the query is empty, fall back to `rules` directly to
-        // avoid waiting for the .task to update filteredRules on
-        // first mount.
+        // The window model retains only the matching query/revision result;
+        // empty queries need no filter task, and unchanged search membership
+        // is rebased to fresh telemetry without a blank/debounce each poll.
         let items = debouncedRuleQuery.isEmpty ? rules : filteredRules
         return V2DataTable(
             columns: [
@@ -828,6 +812,7 @@ public struct V2DetectionWorkspace: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .disabled(!presentation.isCurrent(for: presentationIdentity))
                         .help(r.isEnabled ? "Enabled — click to disable" : "Disabled — click to enable")
                         .accessibilityLabel(r.isEnabled
                             ? "Rule enabled. Activate to disable."
@@ -931,7 +916,8 @@ public struct V2DetectionWorkspace: View {
                 // Built-in detection: logic isn't editable, but it can be muted
                 // or have its severity overridden (applied at the daemon's
                 // AlertSink chokepoint via the inbox IPC).
-                BuiltinRuleSettingsSection(rule: r, pending: !state.ruleChanges.canSubmit(ruleID: r.id)) { severity in
+                BuiltinRuleSettingsSection(rule: r, pending: !presentation.isCurrent(for: presentationIdentity)
+                                           || !state.ruleChanges.canSubmit(ruleID: r.id)) { severity in
                     Task { await setSeverityOverride(r, severityRaw: severity) }
                 }
                 V2InspectorSection(String(localized: "inspector.actions", defaultValue: "Actions")) {
@@ -947,6 +933,7 @@ public struct V2DetectionWorkspace: View {
                         ) {
                             Task { await toggleRuleDisabled(r) }
                         }
+                        .disabled(!presentation.isCurrent(for: presentationIdentity))
                         V2ActionButton(String(localized: "ui.V2DetectionWorkspace.view.fires", defaultValue: "View fires"), icon: "list.bullet", style: .secondary, fullWidth: true,
                                        tooltip: "Show this rule's alerts in Alerts › Open") {
                             // Pre-fill the alert search so Open filters to this
@@ -983,6 +970,7 @@ public struct V2DetectionWorkspace: View {
                                            tooltip: "Open the YAML in an in-app editor. Save writes a user-rule override that survives Sparkle updates.") {
                                 yamlEditorRule = r
                             }
+                            .disabled(!presentation.isCurrent(for: presentationIdentity))
                         }
                         let isDisabled = userDisabledRuleIDs.contains(r.id) || !r.isEnabled
                         HStack(spacing: 8) {
@@ -997,6 +985,7 @@ public struct V2DetectionWorkspace: View {
                             ) {
                                 Task { await toggleRuleDisabled(r) }
                             }
+                            .disabled(!presentation.isCurrent(for: presentationIdentity))
                             V2ActionButton(String(localized: "ui.V2DetectionWorkspace.view.fires", defaultValue: "View fires"), icon: "list.bullet", style: .secondary, fullWidth: true,
                                            tooltip: "Show this rule's alerts in Alerts › Open") {
                                 // Pre-fill the alert search so Open filters to

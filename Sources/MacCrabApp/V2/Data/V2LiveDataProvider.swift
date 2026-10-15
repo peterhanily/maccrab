@@ -13,7 +13,7 @@ import Darwin
 import MacCrabCore
 
 @MainActor
-public final class V2LiveDataProvider: V2DataProvider {
+public final class V2LiveDataProvider: V2DataProvider, V2DetectionRuleReading {
 
     public let mode: V2DataSourceMode = .live
     public private(set) var lastErrorDescription: String? = nil
@@ -297,7 +297,12 @@ public final class V2LiveDataProvider: V2DataProvider {
     // readers. Marked clearly so consumers can label them as such.
 
     public func rules() async -> [V2MockRule] {
-        guard !Task.isCancelled, let dir = dataDir else { return [] }
+        await detectionRulesSnapshot().rows
+    }
+
+    func detectionRulesSnapshot() async -> V2DetectionRulesRead {
+        guard !Task.isCancelled else { return .cancelled }
+        guard let dir = dataDir else { return .failed }
         let generation = UUID()
         ruleReadGeneration = generation
         // Only definition bytes are cached. Read current epoch/freshness on
@@ -305,7 +310,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         let context = await Task.detached(priority: .userInitiated) {
             RuleTelemetryContext.load(directory: dir)
         }.value
-        guard !Task.isCancelled else { return [] }
+        guard !Task.isCancelled else { return .cancelled }
         let profile = await Task.detached(priority: .userInitiated) {
             Self.ruleProfile(configDir: dir, context: context).lowercased()
         }.value
@@ -324,16 +329,16 @@ public final class V2LiveDataProvider: V2DataProvider {
                 }
                 return definitions.overlay(finalContext)
             }.result
-            guard !Task.isCancelled else { return [] }
+            guard !Task.isCancelled else { return .cancelled }
             if ruleReadGeneration == generation { ruleTelemetryContext = finalContext }
-            return try result.get()
+            return .success(try result.get())
         } catch {
-            guard !Task.isCancelled else { return [] }
+            guard !Task.isCancelled else { return .cancelled }
             if ruleReadGeneration == generation {
                 ruleTelemetryContext = observedContext
                 lastErrorDescription = "rules read: \(error)"
             }
-            return []
+            return .failed
         }
     }
 

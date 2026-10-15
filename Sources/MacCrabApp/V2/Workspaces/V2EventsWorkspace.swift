@@ -15,12 +15,12 @@ struct V2EventsWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
     @State private var visibilityOwner = UUID()
-    @StateObject private var querySession: EventQuerySession
+    @ObservedObject var querySession: EventQuerySession
 
-    init(state: V2DashboardState, appState: AppState) {
+    init(state: V2DashboardState, appState: AppState, querySession: EventQuerySession) {
         self.state = state
         self.appState = appState
-        _querySession = StateObject(wrappedValue: EventQuerySession(reader: appState))
+        self.querySession = querySession
     }
 
     var body: some View {
@@ -53,7 +53,7 @@ struct V2EventsWorkspace: View {
                 initialCenterTime: state.pendingEventsCenterTime,
                 centerHalfWindowSeconds: state.pendingEventsHalfWindowSeconds
             )
-            .id("events:\(state.pendingEventsFilter ?? "default"):\(state.pendingEventsCenterTime?.timeIntervalSince1970 ?? 0)")
+            .id("events:\(state.pendingEventsFilter ?? "default"):\(state.pendingEventsCenterTime?.timeIntervalSince1970 ?? 0):\(state.pendingEventsHalfWindowSeconds)")
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         // Register the workspace, not the EventStream whose filter-driven .id

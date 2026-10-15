@@ -7,6 +7,9 @@ import SwiftUI
 struct V2DashboardShell: View {
 
     @StateObject private var state: V2DashboardState
+    @StateObject private var eventQuerySession: EventQuerySession
+    @StateObject private var alertsPresentation = V2AlertsPresentationModel()
+    @StateObject private var detectionPresentation = V2DetectionPresentation()
     @State private var noticesExpanded = false
     @State private var refreshAppearanceID: UUID?
     @ObservedObject var appState: AppState
@@ -27,6 +30,7 @@ struct V2DashboardShell: View {
 
     init(appState: AppState, sysextManager: SystemExtensionManager) {
         _state = StateObject(wrappedValue: V2DashboardState(engineSource: appState.engineSource))
+        _eventQuerySession = StateObject(wrappedValue: EventQuerySession(reader: appState))
         self.appState = appState
         self.sysextManager = sysextManager
     }
@@ -62,10 +66,9 @@ struct V2DashboardShell: View {
                         // Identity follows the conditional workspace tree;
                         // do not add a redundant .id(currentWorkspace).
                         // Switching cases can still recreate view-local
-                        // @State. Reusable rule definitions live in the
-                        // retained provider, and the shared Events reader
-                        // lives in AppState; rows and per-view query
-                        // presentation may reload on return.
+                        // @State. Bounded presentation models belong to this
+                        // window; hidden workspaces do not retain live views,
+                        // run timers or keep database read transactions open.
                         workspaceContent
                             .transition(V2Motion.workspaceTransition(reduceMotion: reduceMotion))
                     }
@@ -134,6 +137,10 @@ struct V2DashboardShell: View {
         // On return, re-probe only a missing or failed provider.
         .onChange(of: controlActiveState) { activity in
             let becameActive = state.setWindowActivity(activity)
+            if activity == .inactive {
+                alertsPresentation.pause()
+                detectionPresentation.leave()
+            }
             guard becameActive,
                   state.provider.mode != .live || state.provider.lastErrorDescription != nil
             else { return }
@@ -165,11 +172,11 @@ struct V2DashboardShell: View {
     private var workspaceContent: some View {
         switch state.currentWorkspace {
         case .overview:      V2OverviewWorkspace(state: state, appState: appState)
-        case .alerts:        V2AlertsWorkspace(state: state, appState: appState)
-        case .events:        V2EventsWorkspace(state: state, appState: appState)
+        case .alerts:        V2AlertsWorkspace(state: state, appState: appState, presentation: alertsPresentation)
+        case .events:        V2EventsWorkspace(state: state, appState: appState, querySession: eventQuerySession)
         case .investigation: V2InvestigationWorkspace(state: state, appState: appState)
         case .forensics:     V2ForensicsWorkspace(state: state, appState: appState)
-        case .detection:     V2DetectionWorkspace(state: state, appState: appState)
+        case .detection:     V2DetectionWorkspace(state: state, appState: appState, presentation: detectionPresentation)
         case .prevention:    V2PreventionWorkspace(state: state)
         case .intelligence:  V2IntelligenceWorkspace(state: state)
         case .system:        V2SystemWorkspace(state: state, sysextManager: sysextManager)
