@@ -164,8 +164,9 @@ public actor SequenceCheckpointCoordinator {
             lastFailure = nil
 
             let pruned = applied.expiredPartialCount > 0 || applied.expiredPendingCount > 0
-            currentSemanticDigest = pruned ? nil : diskSemanticDigest
-            dirty = pruned
+            let needsMigration = payload.schemaVersion != SequenceCheckpointPayload.currentSchemaVersion
+            currentSemanticDigest = (pruned || needsMigration) ? nil : diskSemanticDigest
+            dirty = pruned || needsMigration
             logger.info("Sequence checkpoint restored: \(applied.partialCount) partials, \(applied.pendingCount) pending, \(applied.expiredPartialCount + applied.expiredPendingCount) expired pruned")
             return .restored(
                 partials: applied.partialCount,

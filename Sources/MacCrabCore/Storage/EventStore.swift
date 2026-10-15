@@ -865,6 +865,17 @@ public actor EventStore {
         retiredReadOnlyReads.withLock { $0 = true }
     }
 
+    /// An idle owner may keep this SAME reader warm briefly, but only after
+    /// closing admission and accounting for all queued/active calls. This does
+    /// not pause, reopen or unretire a reader, and transfers no verified index.
+    /// Normal authenticated refresh remains mandatory on its next read.
+    public func permitsIdleReadOnlyRetention() -> Bool {
+        guard !Task.isCancelled, !retiredReadOnlyReads.withLock({ $0 }),
+              SQLiteIdleReadCertificate.permitsRetention(db, readOnly: isReadOnly)
+        else { return false }
+        return !retiredReadOnlyReads.withLock({ $0 })
+    }
+
     private func checkReadOnlyRetirement() throws {
         if isReadOnly && (Task.isCancelled || retiredReadOnlyReads.withLock({ $0 })) {
             throw CancellationError()

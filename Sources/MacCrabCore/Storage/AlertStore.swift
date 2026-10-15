@@ -4413,7 +4413,7 @@ public actor AlertStore {
         }
 
         var results: [Alert] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try AlertQueryReadStep.advance(statement: stmt, database: db) {
             // Columns by index match the CREATE TABLE order:
             // 0: id, 1: timestamp, 2: rule_id, 3: rule_title, 4: severity,
             // 5: event_id, 6: process_path, 7: process_name, 8: description,

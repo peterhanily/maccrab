@@ -27,8 +27,8 @@ public final class V2LiveDataProvider: V2DataProvider {
     public let dataDir: String?
     public private(set) var browserInventoryCoverage: V2BrowserInventoryCoverage?
     public private(set) var ruleTelemetryContext: RuleTelemetryContext?
-    private var rulesCacheContextKey: String?
-    private var rulesCacheBuiltinMtime: Date?
+    private let ruleDefinitions = V2RuleDefinitionCache()
+    private var ruleReadGeneration = UUID()
 
     private let alertStore: AlertStore?
     private let eventStore: EventStore?
@@ -41,26 +41,6 @@ public final class V2LiveDataProvider: V2DataProvider {
     }
     private let campaignStore: CampaignStore?
     private let causalStore: SQLiteCausalGraphStore?
-
-    /// Cached V2-shape rules + the directory mtime used to compute
-    /// the cache. Pre-fix `rules()` re-loaded all compiled JSON files +
-    /// re-decoded them on every 5s refresh tick — even when nothing
-    /// in `compiled_rules/` had changed. The compiled_rules dir is
-    /// only mutated when the daemon recompiles or an operator drops
-    /// a custom YAML, both rare. Now: stat the directory's
-    /// mtime, return the cache if it matches, only re-load on
-    /// change. Cache is per-instance (one V2LiveDataProvider lives
-    /// for the dashboard's lifetime), so the cache survives
-    /// workspace switches but resets on reconnect / app launch.
-    private var rulesCache: [V2MockRule] = []
-    private var rulesCacheDirMtime: Date? = nil
-    private var rulesCacheTelemetryMtime: Date? = nil
-    /// v1.12.0 RC20: track user_rules dir mtime so the dashboard
-    /// rule-list refreshes after the user saves a YAML edit. Pre-fix,
-    /// rulesCache wasn't invalidated when user_rules changed, so the
-    /// inspector kept showing the bundled severity even after the
-    /// user-override JSON landed on disk.
-    private var rulesCacheUserRulesMtime: Date? = nil
 
     /// Cached sequence + graph (composite) rule id→title map, gated on
     /// the compiled_rules dir mtime — the same invalidation signal as
@@ -184,7 +164,17 @@ public final class V2LiveDataProvider: V2DataProvider {
     // so the main thread stays free for SwiftUI re-render.
 
     public func alerts(since: Date, limit: Int) async -> [V2MockAlert] {
-        guard let alertStore else { return [] }
+        await alertsSnapshot(since: since, limit: limit).rows
+    }
+
+    public func alertsSnapshot(since: Date, limit: Int) async -> V2AlertsReadSnapshot {
+        guard !Task.isCancelled else { return .cancelled }
+        guard let alertStore else {
+            let message = "alerts read: alert store is unavailable"
+            alertsReadError = message
+            lastErrorDescription = message
+            return .failed(message)
+        }
         do {
             // v1.18 (audit): honour the caller's time range. Pre-this the fetch
             // was hardcoded to -7d, so the Alerts 30d / All-time chips filtered a
@@ -193,23 +183,22 @@ public final class V2LiveDataProvider: V2DataProvider {
                 since: since,
                 severity: nil, suppressed: nil, limit: limit
             )
+            guard !Task.isCancelled else { return .cancelled }
             let mapped = await Task.detached(priority: .userInitiated) {
                 raw.map(V2LiveDataProvider.toV2Alert)
             }.value
+            guard !Task.isCancelled else { return .cancelled }
             // A successful read retires the previous failure, so the Alerts
             // error panel disappears on the next 5 s tick once the store is
             // readable again.
             alertsReadError = nil
-            return mapped
+            return .success(mapped)
         } catch {
-            lastErrorDescription = "alerts read: \(error)"
-            // UX-02: `return []` here is indistinguishable from a quiet
-            // machine, and the Alerts workspace rendered exactly that as the
-            // green "you're clear" empty state. Record the failure on its own
-            // slot so the workspace can render an error instead of an
-            // all-clear on a security product.
-            alertsReadError = "alerts read: \(error)"
-            return []
+            guard !Task.isCancelled, !(error is CancellationError) else { return .cancelled }
+            let message = "alerts read: \(error)"
+            lastErrorDescription = message
+            alertsReadError = message
+            return .failed(message)
         }
     }
 
@@ -308,36 +297,53 @@ public final class V2LiveDataProvider: V2DataProvider {
     // readers. Marked clearly so consumers can label them as such.
 
     public func rules() async -> [V2MockRule] {
-        guard let dir = dataDir else { return [] }
-        let rulesPath = dir + "/compiled_rules"
-        let telemetryPath = dir + "/rule_telemetry.json"
+        guard !Task.isCancelled, let dir = dataDir else { return [] }
+        let generation = UUID()
+        ruleReadGeneration = generation
+        // Only definition bytes are cached. Read current epoch/freshness on
+        // every request, off main; changing telemetry never reparses the corpus.
         let context = await Task.detached(priority: .userInitiated) {
             RuleTelemetryContext.load(directory: dir)
         }.value
-        ruleTelemetryContext = context
-        let contextKey = "\(context.freshness.rawValue):\(context.engineIdentity?.pid ?? 0):\(context.engineIdentity?.startedAtUnix ?? 0):\(context.ruleProfile ?? "unknown")"
-        let fm = FileManager.default
-
-        // mtime gate — return the cache unchanged if neither the
-        // compiled_rules directory, the rule_telemetry.json file, NOR
-        // the user_rules dir has been touched since the last call.
-        // v1.12.0 RC20: user_rules mtime added so Edit-YAML saves
-        // invalidate the cache and the dashboard re-renders with the
-        // new severity.
-        let userRulesPath = dir + "/user_rules"
-        let dirMtime  = (try? fm.attributesOfItem(atPath: rulesPath))?[.modificationDate] as? Date
-        let teleMtime = (try? fm.attributesOfItem(atPath: telemetryPath))?[.modificationDate] as? Date
-        let userMtime = (try? fm.attributesOfItem(atPath: userRulesPath))?[.modificationDate] as? Date
-        let builtinMtime = (try? fm.attributesOfItem(atPath: dir + "/" + BuiltinRuleSettings.fileName))?[.modificationDate] as? Date
-        if !rulesCache.isEmpty,
-           contextKey == rulesCacheContextKey,
-           builtinMtime == rulesCacheBuiltinMtime,
-           dirMtime == rulesCacheDirMtime,
-           teleMtime == rulesCacheTelemetryMtime,
-           userMtime == rulesCacheUserRulesMtime {
-            return rulesCache
+        guard !Task.isCancelled else { return [] }
+        let profile = await Task.detached(priority: .userInitiated) {
+            Self.ruleProfile(configDir: dir, context: context).lowercased()
+        }.value
+        var observedContext = context
+        do {
+            let definitions = try await ruleDefinitions.definitions(directory: dir, profile: profile)
+            // A cold definition load may outlive the heartbeat's validity.
+            // Recheck the context after it, never re-stamp old counters as fresh.
+            let finalContext = await Task.detached(priority: .userInitiated) {
+                RuleTelemetryContext.load(directory: dir)
+            }.value
+            observedContext = finalContext
+            let result = await Task.detached(priority: .userInitiated) {
+                guard Self.ruleProfile(configDir: dir, context: finalContext).lowercased() == profile else {
+                    throw V2RuleDefinitionCache.ReadError.definitionsChangedDuringRead
+                }
+                return definitions.overlay(finalContext)
+            }.result
+            guard !Task.isCancelled else { return [] }
+            if ruleReadGeneration == generation { ruleTelemetryContext = finalContext }
+            return try result.get()
+        } catch {
+            guard !Task.isCancelled else { return [] }
+            if ruleReadGeneration == generation {
+                ruleTelemetryContext = observedContext
+                lastErrorDescription = "rules read: \(error)"
+            }
+            return []
         }
+    }
 
+    /// Runs only in the definition cache's background task. Preserve the
+    /// existing RuleEngine loader/profile/overlay semantics, without retaining
+    /// a second complete predicate engine just to display rule rows.
+    nonisolated static func loadRuleDefinitions(directory dir: String, profile: String) async throws -> V2RuleDefinitions {
+        let rulesPath = dir + "/compiled_rules"
+        let fm = FileManager.default
+        let userRulesPath = dir + "/user_rules"
         let rulesURL = URL(fileURLWithPath: rulesPath)
         let engine = RuleEngine()
         // v1.21.6: apply the rule_profile gate to SINGLE-EVENT rules too. v1.21.5
@@ -346,13 +352,8 @@ public final class V2LiveDataProvider: V2DataProvider {
         // profile rule was presented as an active detection with a working-looking
         // toggle. Mirrors the daemon: profile "all" loads everything, anything
         // else loads only "stable".
-        let profile = V2LiveDataProvider.ruleProfile(configDir: dir).lowercased()
         let statuses: Set<String>? = (profile == "all") ? nil : ["stable"]
-        do { _ = try await engine.loadRules(from: rulesURL, enabledStatuses: statuses) }
-        catch {
-            lastErrorDescription = "rules read: \(error)"
-            return []
-        }
+        _ = try await engine.loadRules(from: rulesURL, enabledStatuses: statuses)
         // v1.12.0 RC20: overlay user_rules on top of bundled rules so
         // the dashboard's Detection → Rules list reflects user edits
         // (severity changes, disabled flags) the same way the daemon
@@ -367,21 +368,13 @@ public final class V2LiveDataProvider: V2DataProvider {
         }
         let rules = await engine.listRules()
 
-        let mapped = await Task.detached(priority: .userInitiated) {
-            rules.map { rule in
-                V2LiveDataProvider.toV2Rule(rule, stats: context.statsByID[rule.id],
-                    autoDisabled: context.autoDisabledRuleIDs.contains(rule.id),
-                    coverage: V2RuleCoverage(rawValue: context.coverage(ruleID: rule.id,
-                        status: rule.status ?? "", enabled: rule.enabled).rawValue) ?? .unknown,
-                    writtenAt: context.snapshotWrittenAt)
-            }
-        }.value
+        let mapped = rules.map { toV2Rule($0) }
 
         // v1.18: surface the hardcoded maccrab.* built-in detections in the
         // Rules view (read-only content) with their operator overrides applied.
         // Settings are written by the daemon (root) via the inbox IPC; the
         // dashboard reads the same file for display.
-        let builtinSettings = dataDir.map { BuiltinRuleSettings.load(fromDir: $0) } ?? BuiltinRuleSettings()
+        let builtinSettings = BuiltinRuleSettings.load(fromDir: dir)
         let builtins: [V2MockRule] = BuiltinRuleCatalog.all.map { def in
             let s = builtinSettings.setting(forRuleId: def.id)
             return V2MockRule(
@@ -404,20 +397,9 @@ public final class V2LiveDataProvider: V2DataProvider {
         // SequenceEngine / TraceGraph engine (not RuleEngine), so they were
         // previously only used for alert title lookup (compositeRuleLabels)
         // and never appeared in the Rules list.
-        let composite = await Task.detached(priority: .userInitiated) {
-            V2LiveDataProvider.loadCompositeRules(
-                sequencesDir: rulesPath + "/sequences",
-                graphDir: rulesPath + "/graph",
-                ruleProfile: V2LiveDataProvider.ruleProfile(configDir: dir))
-        }.value
-        let merged = mapped + composite + builtins
-        rulesCache = merged
-        rulesCacheDirMtime = dirMtime
-        rulesCacheContextKey = contextKey
-        rulesCacheBuiltinMtime = builtinMtime
-        rulesCacheTelemetryMtime = teleMtime
-        rulesCacheUserRulesMtime = userMtime
-        return merged
+        let composite = loadCompositeRules(sequencesDir: rulesPath + "/sequences",
+                                           graphDir: rulesPath + "/graph", ruleProfile: profile)
+        return .init(singleEvent: mapped, other: composite + builtins)
     }
 
     public func compositeRuleLabels() async -> [String: String] {
@@ -477,13 +459,17 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// state — the engines skip out-of-profile rules at load, so the compiled
     /// `enabled` flag alone overstates what actually runs.
     nonisolated static func ruleProfile(configDir: String) -> String {
+        ruleProfile(configDir: configDir, context: RuleTelemetryContext.load(directory: configDir))
+    }
+
+    nonisolated static func ruleProfile(configDir: String, context: RuleTelemetryContext) -> String {
         // Prefer the heartbeat: on a release install daemon_config.json is
         // root-0600, so this uid-501 process can never read it and always fell
         // back to "stable". That is right by accident on a default install and
         // WRONG for any operator who set rule_profile: all — the dashboard would
         // hide the rules the engine is actually running. heartbeat_rich.json is
         // 0644 and carries the daemon's own effective profile.
-        if let profile = RuleTelemetryContext.load(directory: configDir).ruleProfile {
+        if let profile = context.ruleProfile {
             return profile
         }
         let path = configDir + "/daemon_config.json"

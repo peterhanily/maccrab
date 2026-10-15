@@ -295,7 +295,7 @@ struct EventQuerySessionTests {
         }
         // Release the real cached handle, while retaining both visible query
         // registrations. A stray poll read would reopen it and populate events.
-        app.stopPolling()
+        app.discardEventReaderForTesting()
         #expect(!app.hasCachedEventStoreForTesting)
         await app.loadEventsIncremental()
         #expect(!app.hasCachedEventStoreForTesting && app.events.isEmpty)
@@ -305,7 +305,7 @@ struct EventQuerySessionTests {
         let live = EventQuerySession(reader: app)
         await live.loadEvents(query(live: true))
         app.setEventsWorkspaceVisible(true, owner: live.id, session: live)
-        app.stopPolling()
+        app.discardEventReaderForTesting()
         await app.loadEventsIncremental()
         #expect(app.hasCachedEventStoreForTesting)
         #expect(app.events.map(\.id) == [baseline.id])

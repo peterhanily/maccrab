@@ -26,6 +26,8 @@ struct V2AlertsWorkspace: View {
     // visible row.
     @State private var selectedAlertIds: Set<String> = []
     @State private var loaded = false
+    @State private var alertsReadError: String?
+    @StateObject private var loadCoordinator = V2AlertsLoadCoordinator<V2AlertsLoadContext>()
     // Requests are displayed separately from stored alert/campaign state.
     // An accepted inbox request must never hide or rewrite a committed row.
     @State private var mutations = V2MutationTracker()
@@ -58,11 +60,10 @@ struct V2AlertsWorkspace: View {
         Binding(get: { state.alertSearchQuery },
                 set: { state.alertSearchQuery = $0 })
     }
-    /// Stable key for the reload `.task(id:)` so a new histogram-window
-    /// (D7) triggers a re-fetch bounded to that window; empty when none.
-    private var windowTaskKey: String {
-        guard let w = state.pendingAlertsWindow else { return "" }
-        return "\(Int(w.start.timeIntervalSince1970))-\(Int(w.end.timeIntervalSince1970))"
+    private var loadContext: V2AlertsLoadContext {
+        .init(providerID: ObjectIdentifier(state.provider), timeRange: state.alertTimeRange,
+              windowStart: state.pendingAlertsWindow?.start,
+              windowEnd: state.pendingAlertsWindow?.end)
     }
 
     var body: some View {
@@ -83,7 +84,9 @@ struct V2AlertsWorkspace: View {
             tabBody
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .task(id: "\(state.provider.mode):\(state.refreshTick):\(state.alertTimeRange):\(windowTaskKey)") { await reload() }
+        .task(id: loadContext) { await reload() }
+        .onChange(of: state.refreshTick) { _ in requestReload() }
+        .onDisappear { loadCoordinator.cancel() }
         // Table refresh cancellation must not starve saved-state confirmation.
         // SwiftUI cancels this task when its provider changes or the view leaves.
         .task(id: ObjectIdentifier(state.provider)) { await confirmMutations() }
@@ -253,26 +256,36 @@ struct V2AlertsWorkspace: View {
         })
     }
 
+    @MainActor
     private func reload() async {
-        await MainActor.run {
-            syncMutationProvider()
-            mutations.expire()
+        guard !Task.isCancelled else { return }
+        await requestReload().value
+    }
+
+    @MainActor
+    @discardableResult
+    private func requestReload() -> Task<Void, Never> {
+        let context = loadContext
+        let provider = state.provider
+        return loadCoordinator.request(context: context) { ticket in
+            await loadSnapshot(provider: provider, context: context, ticket: ticket)
         }
-        // v1.12.6 Wave 9P: write each piece of @State as soon as it
-        // resolves, rather than batching all three into one trailing
-        // MainActor.run. Pre-9P, on a host with a big alerts.db /
-        // campaigns.db, the three sequential awaits could exceed the
-        // 5s auto-refresh-tick interval. When `state.refreshTick`
-        // incremented, SwiftUI's `.task(id:)` cancelled the running
-        // reload before the final MainActor.run ever fired —
-        // permanent staleness until the user closed and reopened the
-        // dashboard (which reset refreshTick to 0 and gave the body
-        // an uncontested first load). Same root cause as Wave 9G,
-        // just in three more workspaces. The cutoff calculation +
-        // filtering stays inside MainActor.run so the filtered
-        // arrays don't get computed against the wrong state.
+    }
+
+    @MainActor
+    private func loadSnapshot(
+        provider: any V2DataProvider,
+        context: V2AlertsLoadContext,
+        ticket: V2AlertsLoadCoordinator<V2AlertsLoadContext>.Ticket
+    ) async {
+        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
+        syncMutationProvider()
+        mutations.expire()
+        // Timer ticks do not cancel slow reads. Provider/filter changes and
+        // disappearance invalidate their ticket; every awaited stage checks it
+        // before publishing or issuing another query on a retired provider.
         let cutoff: Date = {
-            switch state.alertTimeRange {
+            switch context.timeRange {
             case "24h": return Date().addingTimeInterval(-86_400)
             case "7d":  return Date().addingTimeInterval(-7 * 86_400)
             case "30d": return Date().addingTimeInterval(-30 * 86_400)
@@ -285,20 +298,24 @@ struct V2AlertsWorkspace: View {
         // chip's lower bound (fetch `since:` its start) and adds an upper
         // bound (filtered below). Persists until the user picks a chip or
         // clears the banner, so it survives the 5 s refresh reload.
-        let window = state.pendingAlertsWindow
-        let lowerBound = window?.start ?? cutoff
+        let lowerBound = context.windowStart ?? cutoff
 
         // Wide ranges need a higher ceiling than the default 200 so All-time
         // doesn't silently truncate the history the chip just unlocked. A
         // window is a tight bucket, so the default 200 is ample there.
-        let fetchLimit = (window != nil || state.alertTimeRange == "24h" || state.alertTimeRange == "7d") ? 200 : 1000
-        let a = await state.provider.alerts(since: lowerBound, limit: fetchLimit)
-        await MainActor.run {
+        let fetchLimit = (context.windowStart != nil || context.timeRange == "24h" || context.timeRange == "7d") ? 200 : 1000
+        let result = await provider.alertsSnapshot(since: lowerBound, limit: fetchLimit)
+        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
+        let a: [V2MockAlert]
+        switch result {
+        case .success(let rows):
+            a = rows
+            alertsReadError = nil
             self.alerts = a.filter { alert in
                 // D7: bound below by the range cutoff (or window start) and,
                 // when a histogram window is active, above by its end.
                 alert.timestamp >= lowerBound
-                    && (window.map { alert.timestamp <= $0.end } ?? true)
+                    && (context.windowEnd.map { alert.timestamp <= $0 } ?? true)
             }
             // Reconcile the floating inspector against the fresh data:
             // drop the selection if its row is gone (deleted, or aged
@@ -309,33 +326,35 @@ struct V2AlertsWorkspace: View {
                 self.selected = self.alerts.first(where: { $0.id == sel.id })
             }
             self.loaded = true
+        case .failed(let error):
+            alertsReadError = error
+            loaded = true
+            a = []
+        case .cancelled:
+            return
         }
 
-        let c = await state.provider.campaigns(since: cutoff, limit: 50)
-        await MainActor.run {
-            self.campaigns = c.filter { $0.lastSeen >= cutoff }
-        }
+        let c = await provider.campaigns(since: cutoff, limit: 50)
+        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
+        self.campaigns = c.filter { $0.lastSeen >= cutoff }
 
         // Suppressed campaigns — powers the in-UI restore surface.
-        let sc = await state.provider.suppressedCampaigns(limit: 50)
-        await MainActor.run { self.suppressedCampaigns = sc }
+        let sc = await provider.suppressedCampaigns(limit: 50)
+        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
+        self.suppressedCampaigns = sc
 
-        let s = await state.provider.suppressions()
-        await MainActor.run {
-            self.suppressionEntries = s
-            // If the navigation destination requested a specific alert
-            // (notification "View" button or palette entity link), select
-            // it now that we have the data. entityKey format matches
-            // V2DashboardState.entityKey: "<workspace>:<tab>" or just
-            // "<workspace>".
-            let candidateKeys = ["alerts:alertsOpen", "alerts"]
-            for key in candidateKeys {
-                if let pendingId = state.selectedEntities[key],
-                   let match = a.first(where: { $0.id == pendingId }) {
-                    self.selected = match
-                    state.selectedEntities[key] = nil
-                    break
-                }
+        let s = await provider.suppressions()
+        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
+        self.suppressionEntries = s
+        // If navigation requested a specific alert, select it only from this
+        // successful read; failures must not consume pending navigation.
+        let candidateKeys = ["alerts:alertsOpen", "alerts"]
+        for key in candidateKeys {
+            if let pendingId = state.selectedEntities[key],
+               let match = a.first(where: { $0.id == pendingId }) {
+                self.selected = match
+                state.selectedEntities[key] = nil
+                break
             }
         }
     }
@@ -656,7 +675,7 @@ struct V2AlertsWorkspace: View {
                 }
                 severityCards
                 searchBarMemoized(visible: visible)
-                if let readError = state.provider.alertsReadError {
+                if let readError = alertsReadError {
                     // UX-02: a store read that threw returns [] exactly like a
                     // quiet machine, and the B6 heartbeat gate can't see it
                     // (heartbeat_rich.json is written independently of

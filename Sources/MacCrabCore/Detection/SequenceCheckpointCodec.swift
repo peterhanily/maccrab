@@ -101,9 +101,13 @@ enum SequenceCheckpointCodec {
     }
 
     static func estimatedWeight(of partial: SequenceCheckpointPartial) -> Int {
-        var total = 280 // record keys, UUIDs, dates, numbers, eviction UUID
-        total = saturatingWeightAdd(total, escapedJSONWeight(partial.ruleID))
-        total = saturatingWeightAdd(total, escapedJSONWeight(partial.correlationKey ?? ""))
+        // V2 stores rule membership only in the bucket. This fixed allowance
+        // covers the record's keys/date/UUID plus its global eviction UUID.
+        var total = 200
+        if let key = partial.correlationKey {
+            total = saturatingWeightAdd(total, 24)
+            total = saturatingWeightAdd(total, escapedJSONWeight(key))
+        }
         for matched in partial.matchedSteps {
             total = saturatingWeightAdd(total, estimatedWeight(of: matched))
         }
@@ -111,12 +115,11 @@ enum SequenceCheckpointCodec {
     }
 
     static func estimatedWeight(of pending: SequenceCheckpointPendingStep) -> Int {
-        var total = 420 // record + global-order identity + UUID/date overhead
+        var total = 220 // record + global-order identity + UUID/date overhead
         let ruleWeight = escapedJSONWeight(pending.ruleID)
         let stepWeight = escapedJSONWeight(pending.stepID)
-        // Both identifiers appear once in pendingBuckets and again in the
-        // global pendingEvictionOrder identity.
-        total = saturatingWeightAdd(total, ruleWeight)
+        // Rule ID is carried by the bucket and by global order, not by each
+        // pending record. Step ID is retained in the record and global order.
         total = saturatingWeightAdd(total, ruleWeight)
         total = saturatingWeightAdd(total, stepWeight)
         total = saturatingWeightAdd(total, stepWeight)
@@ -124,13 +127,62 @@ enum SequenceCheckpointCodec {
     }
 
     private static func estimatedWeight(of matched: SequenceCheckpointMatchedStep) -> Int {
-        var total = 320 + matched.processAncestorPIDs.count * 16
+        // Mandatory keys, UUID, finite JSON Double date and signed Int32 PID.
+        // Optional ancestry fields are charged precisely when v2 emits them;
+        // all their non-default values remain unchanged in the actual wire.
+        var total = 160
+        if matched.processParentPID != 0 { total = saturatingWeightAdd(total, 40) }
+        if matched.processParentWasTracked { total = saturatingWeightAdd(total, 40) }
+        if !matched.processAncestorPIDs.isEmpty {
+            total = saturatingWeightAdd(total, 40)
+            total = saturatingWeightAdd(total, saturatingWeightMultiply(matched.processAncestorPIDs.count, 12))
+        }
         total = saturatingWeightAdd(total, escapedJSONWeight(matched.stepID))
-        total = saturatingWeightAdd(total, escapedJSONWeight(matched.filePath ?? ""))
-        total = saturatingWeightAdd(
-            total,
-            escapedJSONWeight(matched.networkDestination ?? "")
-        )
+        if let path = matched.filePath {
+            total = saturatingWeightAdd(total, 24)
+            total = saturatingWeightAdd(total, escapedJSONWeight(path))
+        }
+        if let destination = matched.networkDestination {
+            total = saturatingWeightAdd(total, 32)
+            total = saturatingWeightAdd(total, escapedJSONWeight(destination))
+        }
+        return total
+    }
+
+    /// Preserve the v1 admission bound during recovery. Reinterpreting legacy
+    /// expanded bytes using the cheaper v2 estimate would bypass the old state
+    /// contract before semantic validation/migration had completed.
+    static func estimatedLegacySemanticStateWeight(
+        partialBuckets: [SequenceCheckpointPartialBucket],
+        pendingBuckets: [SequenceCheckpointPendingBucket]
+    ) -> Int {
+        func matchedWeight(_ matched: SequenceCheckpointMatchedStep) -> Int {
+            var total = saturatingWeightAdd(320, saturatingWeightMultiply(matched.processAncestorPIDs.count, 16))
+            for text in [matched.stepID, matched.filePath ?? "", matched.networkDestination ?? ""] {
+                total = saturatingWeightAdd(total, escapedJSONWeight(text))
+            }
+            return total
+        }
+        var total = semanticStateBaseWeight
+        for bucket in partialBuckets where !bucket.partials.isEmpty {
+            total = saturatingWeightAdd(total, estimatedBucketOverhead(ruleID: bucket.ruleID))
+            for partial in bucket.partials {
+                var weight = saturatingWeightAdd(280, escapedJSONWeight(partial.ruleID))
+                weight = saturatingWeightAdd(weight, escapedJSONWeight(partial.correlationKey ?? ""))
+                for matched in partial.matchedSteps { weight = saturatingWeightAdd(weight, matchedWeight(matched)) }
+                total = saturatingWeightAdd(total, weight)
+            }
+        }
+        for bucket in pendingBuckets where !bucket.steps.isEmpty {
+            total = saturatingWeightAdd(total, estimatedBucketOverhead(ruleID: bucket.ruleID))
+            for pending in bucket.steps {
+                var weight = 420
+                for text in [pending.ruleID, pending.ruleID, pending.stepID, pending.stepID] {
+                    weight = saturatingWeightAdd(weight, escapedJSONWeight(text))
+                }
+                total = saturatingWeightAdd(total, saturatingWeightAdd(weight, matchedWeight(pending.matched)))
+            }
+        }
         return total
     }
 
@@ -159,6 +211,11 @@ enum SequenceCheckpointCodec {
     private static func saturatingWeightAdd(_ lhs: Int, _ rhs: Int) -> Int {
         guard lhs >= 0, rhs >= 0, lhs <= Int.max - rhs else { return Int.max }
         return lhs + rhs
+    }
+
+    private static func saturatingWeightMultiply(_ lhs: Int, _ rhs: Int) -> Int {
+        guard lhs >= 0, rhs >= 0, rhs == 0 || lhs <= Int.max / rhs else { return Int.max }
+        return lhs * rhs
     }
 
     static func ruleFingerprint(_ rules: [SequenceRule]) throws -> String {
@@ -320,6 +377,16 @@ enum SequenceCheckpointCodec {
     }
 
     static func semanticDigest(of payload: SequenceCheckpointPayload) throws -> String {
+        if payload.schemaVersion == SequenceCheckpointPayload.currentSchemaVersion {
+            var data = Data("MacCrab.SequenceState.v2\u{0}".utf8)
+            data.append(try canonicalEncoder().encode(SequenceCheckpointWireV2(payload).semantic))
+            return sha256Hex(data)
+        }
+        guard payload.schemaVersion == SequenceCheckpointPayload.legacySchemaVersion else {
+            throw SequenceCheckpointError.unsupportedSchemaVersion(payload.schemaVersion)
+        }
+        // Keep the historical digest byte-for-byte for validating the existing
+        // v1 carrier. The distinct v2 digest forces a truthful migration write.
         let semantic = SemanticState(
             schemaVersion: payload.schemaVersion,
             ruleFingerprint: payload.ruleFingerprint,
@@ -391,6 +458,8 @@ enum SequenceCheckpointCodec {
         }
         do {
             return try JSONDecoder().decode(SequenceCheckpointPayload.self, from: payloadData)
+        } catch let error as SequenceCheckpointError {
+            throw error
         } catch {
             throw SequenceCheckpointError.invalidPayload(error.localizedDescription)
         }
@@ -933,9 +1002,15 @@ enum SequenceCheckpointValidator {
         maximumPendingPerRule: Int,
         now: Date
     ) throws -> ValidatedSequenceCheckpoint {
-        guard payload.schemaVersion == SequenceCheckpointPayload.currentSchemaVersion else {
+        guard payload.schemaVersion == SequenceCheckpointPayload.currentSchemaVersion
+                || payload.schemaVersion == SequenceCheckpointPayload.legacySchemaVersion else {
             throw SequenceCheckpointError.unsupportedSchemaVersion(payload.schemaVersion)
         }
+        let isLegacy = payload.schemaVersion == SequenceCheckpointPayload.legacySchemaVersion
+        let schemaPartialLimit = isLegacy
+            ? SequenceCheckpointLimits.legacyMaximumTotalPartialMatches
+            : SequenceCheckpointLimits.maximumTotalPartialMatches
+        let effectivePartialLimit = min(maximumPartialMatches, schemaPartialLimit)
         guard rules.count <= SequenceCheckpointLimits.maximumRules else {
             throw SequenceCheckpointError.invalidPayload("too many active rules")
         }
@@ -955,9 +1030,12 @@ enum SequenceCheckpointValidator {
                 )
             }
         }
-        let semanticWeight = SequenceCheckpointCodec.estimatedSemanticStateWeight(
-            partialBuckets: payload.partialBuckets,
-            pendingBuckets: payload.pendingBuckets
+        let estimator = isLegacy
+            ? SequenceCheckpointCodec.estimatedLegacySemanticStateWeight
+            : SequenceCheckpointCodec.estimatedSemanticStateWeight
+        let semanticWeight = estimator(
+            payload.partialBuckets,
+            payload.pendingBuckets
         )
         guard semanticWeight <= SequenceCheckpointCodec.maximumSemanticStateWeight else {
             throw SequenceCheckpointError.invalidPayload(
@@ -1010,9 +1088,9 @@ enum SequenceCheckpointValidator {
                 bucket.partials.count,
                 field: "partial count"
             )
-            guard totalPartialCount <= maximumPartialMatches else {
+            guard totalPartialCount <= effectivePartialLimit else {
                 throw SequenceCheckpointError.invalidPayload(
-                    "global partial count \(totalPartialCount) exceeds cap \(maximumPartialMatches)"
+                    "global partial count \(totalPartialCount) exceeds cap \(effectivePartialLimit)"
                 )
             }
 
@@ -1061,7 +1139,8 @@ enum SequenceCheckpointValidator {
                 try validatePartialSemantics(
                     partial,
                     rule: rule,
-                    matchedByStepID: matchedByStepID
+                    matchedByStepID: matchedByStepID,
+                    isLegacy: isLegacy
                 )
                 guard !triggerSatisfied(
                     rule.trigger,
@@ -1087,7 +1166,7 @@ enum SequenceCheckpointValidator {
             }
         }
 
-        guard payload.evictionOrder.count <= maximumPartialMatches else {
+        guard payload.evictionOrder.count <= effectivePartialLimit else {
             throw SequenceCheckpointError.invalidPayload(
                 "eviction order exceeds the global partial cap"
             )
@@ -1240,7 +1319,8 @@ enum SequenceCheckpointValidator {
     private static func validatePartialSemantics(
         _ partial: SequenceCheckpointPartial,
         rule: SequenceRule,
-        matchedByStepID: [String: SequenceCheckpointMatchedStep]
+        matchedByStepID: [String: SequenceCheckpointMatchedStep],
+        isLegacy: Bool
     ) throws {
         let matchedIDs = Set(matchedByStepID.keys)
         let initialCandidates: [SequenceCheckpointMatchedStep]
@@ -1349,12 +1429,18 @@ enum SequenceCheckpointValidator {
                 )
             }
         case .none:
-            let prefix = "\(rule.id):"
-            guard let key = partial.correlationKey,
-                  key.hasPrefix(prefix),
-                  UUID(uuidString: String(key.dropFirst(prefix.count))) != nil else {
+            if isLegacy {
+                let prefix = "\(rule.id):"
+                guard let key = partial.correlationKey,
+                      key.hasPrefix(prefix),
+                      UUID(uuidString: String(key.dropFirst(prefix.count))) != nil else {
+                    throw SequenceCheckpointError.invalidPayload(
+                        "partial \(partial.id) has an invalid legacy independent correlation key"
+                    )
+                }
+            } else if partial.correlationKey != nil {
                 throw SequenceCheckpointError.invalidPayload(
-                    "partial \(partial.id) has an invalid independent correlation key"
+                    "partial \(partial.id) has a noncanonical independent correlation key"
                 )
             }
         }

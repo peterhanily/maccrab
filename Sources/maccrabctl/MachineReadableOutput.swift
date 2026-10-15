@@ -5,12 +5,17 @@ func cliFailure(_ message: String, code: Int32 = 1) -> Never {
     exit(code)
 }
 
-func printCLIJSON<T: Encodable>(_ value: T) throws {
+/// Shared by the actual stdout path and its serialization contract tests.
+func encodeCLIJSON<T: Encodable>(_ value: T) throws -> Data {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     encoder.keyEncodingStrategy = .convertToSnakeCase
     encoder.dateEncodingStrategy = .iso8601
-    let data = try encoder.encode(value)
+    return try encoder.encode(value)
+}
+
+func printCLIJSON<T: Encodable>(_ value: T) throws {
+    let data = try encodeCLIJSON(value)
     print(String(decoding: data, as: UTF8.self))
 }
 

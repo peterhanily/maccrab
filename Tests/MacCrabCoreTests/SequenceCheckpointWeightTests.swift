@@ -44,16 +44,21 @@ struct SequenceCheckpointWeightTests {
         }
         let partialBuckets = [SequenceCheckpointPartialBucket(ruleID: ruleID, partials: partials)]
         let pendingBuckets = [SequenceCheckpointPendingBucket(ruleID: ruleID, steps: pending)]
-        let payload = SequenceCheckpointPayload(schemaVersion: 1, capturedAt: base,
-            ruleFingerprint: String(repeating: "a", count: 64), sourceGeneration: UInt64.max,
-            partialBuckets: partialBuckets, pendingBuckets: pendingBuckets,
-            evictionOrder: partials.map(\.id), pendingEvictionOrder: pending.map {
-                SequenceCheckpointPendingIdentity(ruleID: $0.ruleID, stepID: $0.stepID, eventID: $0.matched.eventID)
-            })
-        let estimate = SequenceCheckpointCodec.estimatedSemanticStateWeight(
-            partialBuckets: partialBuckets, pendingBuckets: pendingBuckets)
-        #expect(try encoder.encode(payload).count <= estimate,
-                "The bound must cover duplicated identifiers, order arrays, numeric and record overhead")
+        for version in [SequenceCheckpointPayload.legacySchemaVersion, SequenceCheckpointPayload.currentSchemaVersion] {
+            let payload = SequenceCheckpointPayload(schemaVersion: version, capturedAt: base,
+                ruleFingerprint: String(repeating: "a", count: 64), sourceGeneration: UInt64.max,
+                partialBuckets: partialBuckets, pendingBuckets: pendingBuckets,
+                evictionOrder: partials.map(\.id), pendingEvictionOrder: pending.map {
+                    SequenceCheckpointPendingIdentity(ruleID: $0.ruleID, stepID: $0.stepID, eventID: $0.matched.eventID)
+                })
+            let estimate = version == SequenceCheckpointPayload.legacySchemaVersion
+                ? SequenceCheckpointCodec.estimatedLegacySemanticStateWeight(
+                    partialBuckets: partialBuckets, pendingBuckets: pendingBuckets)
+                : SequenceCheckpointCodec.estimatedSemanticStateWeight(
+                    partialBuckets: partialBuckets, pendingBuckets: pendingBuckets)
+            #expect(try encoder.encode(payload).count <= estimate,
+                    "Each version's real wire must fit its identifier, FIFO, numeric and record bound")
+        }
     }
 
     @Test("Ordinary ASCII avoids sixfold charging while controls and Unicode keep conservative allowance")
@@ -66,6 +71,8 @@ struct SequenceCheckpointWeightTests {
         #expect(SequenceCheckpointCodec.estimatedBucketOverhead(ruleID: unicode) - overhead == unicode.utf8.count * 6)
         #expect(SequenceCheckpointCodec.maximumSemanticStateWeight == 7_864_320)
         #expect(SequenceCheckpointCodec.maximumFileBytes == 8_388_608)
-        #expect(SequenceCheckpointPayload.currentSchemaVersion == 1)
+        #expect(SequenceCheckpointPayload.currentSchemaVersion == 2)
+        #expect(SequenceCheckpointLimits.maximumTotalPartialMatches == 13_000)
+        #expect(SequenceCheckpointCodec.maximumUncompressedBytes == 33_554_432)
     }
 }

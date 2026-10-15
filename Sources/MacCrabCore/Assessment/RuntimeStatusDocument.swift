@@ -6,6 +6,11 @@ public struct RuntimeStatusDocument: Codable, Sendable {
     public let schemaVersion: Int
     public let sourceDirectory: String
     public let observedAt: Date
+    /// The same read-entry instant as observedAt, without the whole-second
+    /// precision loss of a legacy ISO8601 JSON date encoder. Optional only for
+    /// decoding older schema-1 documents; new reads always supply this value.
+    /// Consumers must not infer subsecond ordering from a missing value.
+    public let observedAtUnix: TimeInterval?
     public let liveness: String
     public let heartbeatWrittenAt: Date?
     public let engineIdentity: EngineTelemetryIdentity?
@@ -56,6 +61,7 @@ public struct RuntimeStatusDocument: Codable, Sendable {
             alerts = try await store.count()
         }
         return .init(schemaVersion: 1, sourceDirectory: directory, observedAt: now,
+                     observedAtUnix: now.timeIntervalSince1970,
                      liveness: lite == nil ? "unavailable" : (fresh && identity != nil ? "fresh" : "stale_or_unknown"),
                      heartbeatWrittenAt: written, engineIdentity: identity,
                      bootPhase: fresh ? lite?["boot_phase"] as? String : nil,

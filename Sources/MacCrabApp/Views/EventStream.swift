@@ -37,12 +37,9 @@ struct EventStream: View {
     /// process / event-id context entirely; the user had to re-type
     /// the search term that V2 already had in hand. Default is empty
     /// so existing direct-mount call sites stay unchanged.
-    /// `firstFilterRun` is true on the very first body→.task(id: filterText)
-    /// fire when initialFilterText is non-empty. Used to skip the
-    /// 300 ms debounce on that first run so the prefilled filter
-    /// lands instantly. After the first run it's set to false and
-    /// subsequent keystroke-driven debounce semantics apply.
-    @State private var firstFilterRun: Bool
+    /// Only a subsequent edit to a nonempty search needs debounce. Initial
+    /// empty/prefilled loads, clearing search and range/category changes do not.
+    @State private var lastRequestedFilter: String?
 
     /// Optional centring timestamp set by an "Investigate in Events"
     /// click on an alert / trace. When non-nil, the EventStream
@@ -63,7 +60,6 @@ struct EventStream: View {
         self.appState = appState
         self.querySession = querySession
         self._filterText = State(initialValue: initialFilterText)
-        self._firstFilterRun = State(initialValue: !initialFilterText.isEmpty)
         self.initialCenterTime = initialCenterTime
         self.centerHalfWindowSeconds = centerHalfWindowSeconds
     }
@@ -119,6 +115,7 @@ struct EventStream: View {
     /// covers that path. Backed by `event_aggregates` rolled up by the daemon's
     /// 6-hourly sweep; only summary fields (no per-event detail).
     @State private var aggregateRows: [EventStore.AggregateRow] = []
+    @State private var aggregateRefreshTick: UInt64 = 0
     /// v1.8.0 polish: SQL-side histogram bin counts. Re-queried whenever
     /// the time range, category filter, or refresh tick changes — the
     /// previous filteredCache-derived path was broken on high-volume
@@ -145,7 +142,7 @@ struct EventStream: View {
 
     /// Composite key forcing the .task(id:) to re-run on either input change.
     private var aggregateInputsKey: String {
-        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")|\(appState.eventReadsDeferred)|\(querySession.sourceEpoch)"
+        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")|\(appState.eventReadsDeferred)|\(querySession.sourceEpoch)|\(aggregateRefreshTick)"
     }
 
     /// `filterCategory` bridged to the Core enum so `loadEvents` can push
@@ -551,7 +548,9 @@ struct EventStream: View {
 
                 Button {
                     Task {
-                        await querySession.loadEvents(currentQuery())
+                        await querySession.loadEvents(currentQuery(), isPresented: !isAggregateMode)
+                        guard !Task.isCancelled else { return }
+                        if isAggregateMode { aggregateRefreshTick &+= 1 }
                         recomputeFilter()
                     }
                 } label: {
@@ -913,9 +912,13 @@ struct EventStream: View {
             // the old query's table before debounce or an asynchronous read.
             filteredCache = []
             selectedEventID = nil
+            guard !isAggregateMode else {
+                querySession.deactivateExactPresentation()
+                return
+            }
             guard !appState.eventReadsDeferred else { return }
-            let debounce = !firstFilterRun
-            firstFilterRun = false
+            let debounce = Self.shouldDebounce(previousFilter: lastRequestedFilter, nextFilter: filterText)
+            lastRequestedFilter = filterText
             await querySession.loadEvents(currentQuery(), debounce: debounce)
             guard !Task.isCancelled else { return }
             // Explicit queries refresh even a paused stream.
@@ -999,6 +1002,11 @@ struct EventStream: View {
         .onChange(of: filterCategory) { _ in recomputeFilter() }
         .onChange(of: timeRange) { _ in recomputeFilter() }
         .onChange(of: sortOrder) { _ in recomputeFilter() }
+    }
+
+    static func shouldDebounce(previousFilter: String?, nextFilter: String) -> Bool {
+        guard let previousFilter else { return false }
+        return !nextFilter.isEmpty && previousFilter != nextFilter
     }
 }
 

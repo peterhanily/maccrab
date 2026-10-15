@@ -266,7 +266,7 @@ public actor SequenceEngine {
     // MARK: - Internal Tracking Types
 
     /// Records a single matched step within an in-flight sequence.
-    struct MatchedStep: Sendable, Equatable {
+    struct MatchedStep: SequenceStepBinding {
         let stepId: String
         let eventId: UUID
         let timestamp: Date
@@ -298,8 +298,8 @@ public actor SequenceEngine {
         let id: UUID
         let ruleId: String
         let createdAt: Date
-        var matchedSteps: [String: MatchedStep]   // stepId -> matched event info
-        let correlationKey: String?                // shared value binding steps together
+        var matchedSteps: SequenceMatchedSteps<MatchedStep>
+        let correlationKey: String?                // nil only for independent .none states
         var checkpointWeight: Int
 
         /// Timestamp of the most recently matched step.
@@ -433,7 +433,7 @@ public actor SequenceEngine {
     /// calls then decremented the counter for one stored partial, driving it
     /// negative and permanently disabling the global cap. The dictionary has at
     /// most one bucket per sequence rule, so deriving the count is bounded by the
-    /// rule corpus size rather than the (10,000-item) partial pool size.
+    /// rule corpus size rather than the bounded partial pool size.
     private var totalPartialCount: Int {
         partialMatches.values.reduce(into: 0) { $0 += $1.count }
     }
@@ -507,13 +507,11 @@ public actor SequenceEngine {
     /// partials seed and complete rapidly without ever hitting the live cap.
     private static let evictionQueueStaleSlack = 256
 
-    /// Constructor bounds are defensive because this initializer is public.
-    /// The upper bound leaves headroom for both the 80%-capacity multiplication
-    /// and eviction-reference slack; the lower bound prevents a malformed
-    /// negative/zero cap from disabling every multi-event sequence.
+    /// Explicit provisional logical-state ceiling, independent of the unchanged
+    /// canonical checkpoint-byte budget. A larger requested cap cannot silently
+    /// expand this policy. Resource suitability still requires runtime evidence.
     private static let minimumPartialMatchLimit = 1
-    private static let maximumPartialMatchLimit =
-        (Int.max - evictionQueueStaleSlack) / 8
+    private static let maximumPartialMatchLimit = SequenceCheckpointLimits.maximumTotalPartialMatches
     private static let defaultSweepInterval: TimeInterval = 1.0
 
     /// Cumulative partial matches dropped by the count or semantic-weight cap. Read via
@@ -560,13 +558,14 @@ public actor SequenceEngine {
     ///     correlation checks.
     ///   - maxPartialMatches: Upper bound on total in-flight partial matches
     ///     across all rules. Oldest are evicted when exceeded. Values outside
-    ///     the arithmetic-safe range are clamped. Defaults to 10000.
+    ///     1...13,000 range are clamped. Defaults to 13,000; the independent
+    ///     checkpoint-byte limit can bind sooner, with visible loss reporting.
     ///   - sweepInterval: How often (seconds) to scan for expired partial
     ///     matches. NaN, infinity, and negative values fall back to 1 second;
     ///     zero intentionally requests a sweep on every evaluation.
     public init(
         lineage: ProcessLineage,
-        maxPartialMatches: Int = 10_000,
+        maxPartialMatches: Int = 13_000,
         sweepInterval: TimeInterval = 1.0
     ) {
         self.lineage = lineage
@@ -584,7 +583,7 @@ public actor SequenceEngine {
     /// the public initializer above and its fixed 1,024-waiter ceiling.
     init(
         lineage: ProcessLineage,
-        maxPartialMatches: Int = 10_000,
+        maxPartialMatches: Int = 13_000,
         sweepInterval: TimeInterval = 1.0,
         mutationWaiterLimit: Int
     ) {
@@ -1795,6 +1794,43 @@ public actor SequenceEngine {
         let sweepInterval: TimeInterval
     }
 
+    /// Exact representation counts plus inline type sizes, not retained heap or
+    /// RSS estimates. Strings/ancestor arrays and checkpoint copies still need
+    /// native resource measurement before this policy can be release-qualified.
+    struct PartialRepresentationDiagnostics: Sendable {
+        let partialCount: Int
+        let emptyBindings: Int
+        let inlineSingleBindings: Int
+        let dictionaryBindings: Int
+        let totalMatchedSteps: Int
+        let matchedStepStride: Int
+        let containerStride: Int
+        let dictionaryStride: Int
+        let partialStride: Int
+    }
+
+    func partialRepresentationDiagnostics() -> PartialRepresentationDiagnostics {
+        var empty = 0
+        var single = 0
+        var multiple = 0
+        var matchedSteps = 0
+        for partial in partialMatches.values.joined() {
+            matchedSteps += partial.matchedSteps.count
+            if partial.matchedSteps.isEmpty { empty += 1 }
+            else if partial.matchedSteps.isInlineSingle { single += 1 }
+            else { multiple += 1 }
+        }
+        return PartialRepresentationDiagnostics(
+            partialCount: totalPartialCount, emptyBindings: empty,
+            inlineSingleBindings: single, dictionaryBindings: multiple,
+            totalMatchedSteps: matchedSteps,
+            matchedStepStride: MemoryLayout<MatchedStep>.stride,
+            containerStride: MemoryLayout<SequenceMatchedSteps<MatchedStep>>.stride,
+            dictionaryStride: MemoryLayout<[String: MatchedStep]>.stride,
+            partialStride: MemoryLayout<PartialMatch>.stride
+        )
+    }
+
     struct MutationLeaseDiagnostics: Sendable {
         let held: Bool
         let waiterCount: Int
@@ -2318,7 +2354,7 @@ public actor SequenceEngine {
                 )
             }
             let values = bucket.partials.map { record in
-                let matchedSteps = Dictionary(uniqueKeysWithValues: record.matchedSteps.map {
+                let matchedSteps = SequenceMatchedSteps(uniqueKeysWithValues: record.matchedSteps.map {
                     ($0.stepID, Self.runtimeMatchedStep($0))
                 })
                 let partial = PartialMatch(
@@ -2326,7 +2362,10 @@ public actor SequenceEngine {
                     ruleId: record.ruleID,
                     createdAt: record.createdAt,
                     matchedSteps: matchedSteps,
-                    correlationKey: record.correlationKey,
+                    // Legacy v1 nonce shape was validated above before this
+                    // schema-v2 normalization. Independent identity is the
+                    // unchanged partial UUID, never a merged correlation key.
+                    correlationKey: rule.correlationType == .none ? nil : record.correlationKey,
                     checkpointWeight: 0
                 )
                 return Self.weightedPartial(partial, rule: rule)
@@ -2675,6 +2714,23 @@ public actor SequenceEngine {
                 )
             }
 
+            // Independent partial UUIDs remain unique per logical state,
+            // not stable event identities. Remember only this event's unexpired
+            // resident bindings before advancing: a replay must not seed them again.
+            // Taking this snapshot AFTER Phase 1 would also suppress a genuine
+            // new unordered seed merely because it advanced another partial.
+            // No completed/evicted-event history is retained, and distinct event
+            // UUIDs or distinct steps remain independent sequence candidates.
+            var residentUncorrelatedStepIDs = Set<String>()
+            if rule.correlationType == .none {
+                for partial in partialMatches[ruleId] ?? []
+                    where now.timeIntervalSince(partial.createdAt) <= rule.window {
+                    for matched in partial.matchedSteps.values where matched.eventId == event.id {
+                        residentUncorrelatedStepIDs.insert(matched.stepId)
+                    }
+                }
+            }
+
             // --- Phase 1: Try to advance existing partial matches ---
             var advancedPartials: [(Int, PartialMatch)] = []  // (index, updated partial)
             var completedIndices: Set<Int> = []
@@ -2761,8 +2817,7 @@ public actor SequenceEngine {
                 let matched = eventMatchedStep(step)
                 let correlationKey = generateCorrelationKey(
                     rule.correlationType,
-                    matched: matched,
-                    ruleId: rule.id
+                    matched: matched
                 )
                 if (rule.correlationType == .filePath
                         || rule.correlationType == .networkEndpoint),
@@ -2773,12 +2828,18 @@ public actor SequenceEngine {
                     continue
                 }
 
-                // Avoid creating a duplicate partial if this event already started
-                // one for the same rule with the same correlation key in this evaluation.
-                let alreadyStarted = partialMatches[ruleId]?.contains { partial in
-                    partial.correlationKey == correlationKey
-                    && partial.matchedSteps[step.id]?.eventId == event.id
-                } == true
+                // A .none key carries no correlation constraint, so key equality
+                // cannot establish the identity of an already-resident binding.
+                // Other correlation modes keep their existing admission policy.
+                let alreadyStarted: Bool
+                if rule.correlationType == .none {
+                    alreadyStarted = residentUncorrelatedStepIDs.contains(step.id)
+                } else {
+                    alreadyStarted = partialMatches[ruleId]?.contains { partial in
+                        partial.correlationKey == correlationKey
+                        && partial.matchedSteps[step.id]?.eventId == event.id
+                    } == true
+                }
                 guard !alreadyStarted else { continue }
 
                 var newPartial = PartialMatch(
@@ -3115,8 +3176,7 @@ public actor SequenceEngine {
     /// correlation value can advance the same partial match.
     private func generateCorrelationKey(
         _ type: CorrelationType,
-        matched: MatchedStep,
-        ruleId: String
+        matched: MatchedStep
     ) -> String? {
         switch type {
         case .processSame:
@@ -3132,8 +3192,9 @@ public actor SequenceEngine {
         case .networkEndpoint:
             return matched.networkDest
         case .none:
-            // Each partial match is independent -- use a unique key.
-            return "\(ruleId):\(UUID().uuidString)"
+            // Every partial still receives its own UUID. No additional random
+            // String is needed for a mode whose correlation check always passes.
+            return nil
         }
     }
 

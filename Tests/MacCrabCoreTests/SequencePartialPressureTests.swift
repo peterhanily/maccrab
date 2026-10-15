@@ -37,7 +37,7 @@ struct SequencePartialPressureTests {
 
     private func matched(_ step: String, at timestamp: Date, path: String? = nil) -> SequenceCheckpointMatchedStep {
         SequenceCheckpointMatchedStep(stepID: step, eventID: UUID(), timestamp: timestamp,
-            processPID: 41, processParentPID: 1, processParentWasTracked: false,
+            processPID: 41, processParentPID: 0, processParentWasTracked: false,
             processAncestorPIDs: [], filePath: path, networkDestination: nil)
     }
 
@@ -149,9 +149,9 @@ struct SequencePartialPressureTests {
         #expect(restored.partialCount == capacity)
         await expectZero(engine)
         // The canonical checkpoint projection omits semantically irrelevant
-        // lineage for this file-path rule: its parent PID is zero, even though
-        // restore itself preserves the template's parent PID of one. Pressure
-        // must preserve the complete canonical records, not the raw template.
+        // lineage for this file-path rule. The template uses canonical parent
+        // PID zero so its compact-wire weight is the runtime's actual charge.
+        // Pressure must preserve complete canonical records, not just counts.
         let baselineCapture = try await capture(engine)
         let baseline = baselineCapture.partialBuckets.flatMap(\.partials)
         try #require(baseline.count == capacity)

@@ -52,6 +52,9 @@ public struct V2DetectionWorkspace: View {
     /// `contains(q)` per row per keystroke.
     @State private var rulesHaystack: [String: String] = [:]
     @State private var filteredRules: [V2MockRule] = []
+    @State private var rulesRevision = UUID()
+    @StateObject private var loads = V2DetectionLoadSession()
+    @StateObject private var ruleFilter = V2DetectionRuleFilter()
     /// Debounced query — driven by ruleQuery via .task(id:). Pre-fix
     /// the filter ran inline in body, so every keystroke re-filtered
     /// the loaded rules synchronously on @MainActor. Now the filter result
@@ -104,6 +107,11 @@ public struct V2DetectionWorkspace: View {
                 set: { state.ruleSearchQuery = $0 })
     }
 
+    private var selectedTab: V2WorkspaceTab { state.selectedTabs[.detection] ?? .detectionRules }
+    private var loadKey: V2DetectionLoadSession.Key {
+        .init(provider: ObjectIdentifier(state.provider), tab: .init(selectedTab), tick: state.refreshTick)
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             V2WorkspaceTabStrip(
@@ -136,7 +144,8 @@ public struct V2DetectionWorkspace: View {
         // The .task(id:) cancellation semantics mean fast typing
         // discards in-flight filter computations from prior
         // keystrokes — only the last one's result lands.
-        .task(id: state.ruleSearchQuery) {
+        .task(id: "\(rulesRevision):\(state.ruleSearchQuery)") {
+            let revision = rulesRevision
             let q = state.ruleSearchQuery
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
@@ -147,47 +156,36 @@ public struct V2DetectionWorkspace: View {
             // Snapshot current rules + haystack on the actor.
             let snapshot = self.rules
             let haystack = self.rulesHaystack
-            let result: [V2MockRule] = await Task.detached(priority: .userInitiated) {
-                if q.isEmpty { return snapshot }
-                // Fall back to an inline field concat when the precomputed
-                // haystack hasn't been built yet (it's populated late in the
-                // rules-load task, after extensions()/mcpServers()). Without
-                // this fallback an early search runs against an empty haystack
-                // and returns zero matches until the next ~5s refresh tick —
-                // i.e. the filter looks broken. Mirrors the haystack formula.
-                return snapshot.filter { rule in
-                    let h = haystack[rule.id]
-                        ?? V2DetectionWorkspace.ruleSearchHaystack(for: rule)
-                    return h.contains(q)
-                }
-            }.value
-            await MainActor.run {
-                self.debouncedRuleQuery = q
-                self.filteredRules = result
-            }
+            guard let result = await ruleFilter.filter(rules: snapshot, haystack: haystack, query: q),
+                  !Task.isCancelled, rulesRevision == revision,
+                  state.ruleSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == q else { return }
+            self.debouncedRuleQuery = q
+            self.filteredRules = result
         }
-        .task(id: "\(state.provider.mode):\(state.refreshTick)") {
-            // v1.12.6 Wave 9P: write each piece of @State as soon as
-            // its await resolves. Pre-9P all four fields were gated
-            // behind one trailing MainActor.run after four awaits —
-            // and `rules()` alone reads the compiled-rule JSON files
-            // + parses each, which can exceed the 5s refreshTick on
-            // cold cache. Same shape as Wave 9G in V2Intelligence.
-            //
-            // Filter handling: if there's no active filter query, the
-            // rule table renders the full list as soon as rules load —
-            // the haystack is only needed for filtered queries. If a
-            // filter IS active, filteredRules updates again once the
-            // detached haystack build completes.
-            let r = await state.provider.rules()
-            await MainActor.run {
+        .task(id: loadKey) {
+            let provider = state.provider
+            let tab = selectedTab
+            guard let snapshot = await loads.load(tab: .init(tab), provider: provider),
+                  !Task.isCancelled,
+                  ObjectIdentifier(state.provider) == ObjectIdentifier(provider),
+                  selectedTab == tab else { return }
+            switch snapshot {
+            case .rules(let snapshot):
+                let r = snapshot.rules
                 self.rules = r
+                self.rulesHaystack = snapshot.haystack
+                self.compositeRuleLabels = snapshot.compositeLabels
+                self.userDisabledRuleIDs = snapshot.disabledOverrideIDs
+                // Filter immediately after this snapshot; no browser scan,
+                // MCP configuration or EventStore query gates rule rendering.
+                ruleFilter.invalidate()
+                self.rulesRevision = UUID()
                 // C6: re-point the open inspector at the fresh rule so a
                 // mute/disable/severity change (or an external edit) reflects
                 // in its status chip + action labels on the next refresh tick.
                 self.resyncSelectedRule(from: r)
                 // Default (no filter): show all rules immediately.
-                if self.debouncedRuleQuery.isEmpty {
+                if state.ruleSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.filteredRules = r
                 }
                 // Cross-workspace deep-link: alerts → rule.
@@ -200,49 +198,14 @@ public struct V2DetectionWorkspace: View {
                         break
                     }
                 }
-            }
-
-            let x = await state.provider.extensions()
-            await MainActor.run { self.extensions = x }
-
-            let m = await state.provider.mcpServers()
-            await MainActor.run { self.mcpServers = m }
-
-            // Wave-3 recorder: durable AI-agent sessions.
-            let sess = await state.provider.agentSessions(limit: 50)
-            await MainActor.run { self.agentSessions = sess }
-
-            // Live AI-Guard tile metrics (appState.aiSessions snapshot).
-            await appState.refreshAgentLineage()
-
-            // Composite (sequence + graph) rule labels — for the
-            // empty-table explanation when an alert deep-links a
-            // non-single-event detection id.
-            let comp = await state.provider.compositeRuleLabels()
-            await MainActor.run { self.compositeRuleLabels = comp }
-
-            // Precompute the lowercase haystack so the filter is a
-            // single string `contains` per row instead of rebuilding the
-            // field concat + lowercase per row per keystroke. Detached so
-            // the string work doesn't block main.
-            let haystack = await Task.detached(priority: .userInitiated) {
-                // uniquingKeysWith (not uniqueKeysWithValues): a duplicate rule id
-                // across single-event/sequence/graph/built-in sets must NOT trap
-                // the app on a rules refresh — keep the first.
-                Dictionary(r.map { rule -> (String, String) in
-                    let h = V2DetectionWorkspace.ruleSearchHaystack(for: rule)
-                    return (rule.id, h)
-                }, uniquingKeysWith: { first, _ in first })
-            }.value
-            await MainActor.run {
-                self.rulesHaystack = haystack
-                // Re-apply filter if one is active.
-                let q = self.debouncedRuleQuery
-                if !q.isEmpty {
-                    self.filteredRules = r.filter { (haystack[$0.id] ?? "").contains(q) }
-                }
+            case .browser(let rows): self.extensions = rows
+            case .mcp(let rows): self.mcpServers = rows
+            case .agents(let rows):
+                self.agentSessions = rows
+                await appState.refreshAgentLineage()
             }
         }
+        .onDisappear { loads.invalidate(); ruleFilter.invalidate() }
         // Cross-workspace intent — Overview's "Create rule" quick
         // action bumps presentNewRuleTick after navigating here.
         .onChange(of: state.presentNewRuleTick) { _ in
@@ -654,7 +617,6 @@ public struct V2DetectionWorkspace: View {
                 }
             )
         }
-        .task { refreshUserDisabledRuleIDs() }
     }
 
     private var rulesStatsRow: some View {

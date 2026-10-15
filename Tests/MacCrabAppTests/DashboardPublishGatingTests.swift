@@ -42,41 +42,41 @@ struct DashboardPublishGatingTests {
     /// SwiftUI transaction. Counting the publisher rather than the stored values
     /// is the point: assigning an equal value still emits.
     private func countingChanges(
-        on state: AppState, _ body: () -> Void
-    ) -> Int {
+        on state: AppState, _ body: () async -> Void
+    ) async -> Int {
         var count = 0
         let token = state.objectWillChange.sink { _ in count += 1 }
-        body()
+        await body()
         token.cancel()
         return count
     }
 
     @Test("A rule-telemetry refresh over an unchanged snapshot publishes nothing")
-    func telemetryRefreshIsIdempotent() throws {
+    func telemetryRefreshIsIdempotent() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let state = AppState(engineSource: .init(directory: directory.path),
                              startBackgroundWork: false)
 
         // First refresh establishes the baseline and is allowed to publish.
-        state.refreshRuleTelemetry()
+        await state.refreshRuleTelemetry()
 
         // The engine rewrites this snapshot every 30 s; at a 5 s poll these are
         // the five ticks that previously republished identical values.
-        let emissions = countingChanges(on: state) {
-            for _ in 0..<5 { state.refreshRuleTelemetry() }
+        let emissions = await countingChanges(on: state) {
+            for _ in 0..<5 { await state.refreshRuleTelemetry() }
         }
         #expect(emissions == 0,
                 "an unchanged snapshot must not dirty the view tree")
     }
 
     @Test("A changed rule-telemetry snapshot still publishes")
-    func telemetryChangePublishes() throws {
+    func telemetryChangePublishes() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let state = AppState(engineSource: .init(directory: directory.path),
                              startBackgroundWork: false)
-        state.refreshRuleTelemetry()
+        await state.refreshRuleTelemetry()
 
         // A gate that never republishes would be worse than the bug: the rule
         // browser would freeze at whatever it first read. Encode the real type
@@ -96,8 +96,8 @@ struct DashboardPublishGatingTests {
             to: directory.appendingPathComponent("rule_telemetry.json")
         )
 
-        let emissions = countingChanges(on: state) {
-            state.refreshRuleTelemetry()
+        let emissions = await countingChanges(on: state) {
+            await state.refreshRuleTelemetry()
         }
         #expect(emissions > 0,
                 "a genuinely new snapshot must still reach the view")
@@ -132,14 +132,15 @@ struct DashboardPublishGatingTests {
             source.range(of: "func refreshRuleTelemetry()"),
             "refreshRuleTelemetry moved"
         )
-        let window = String(source[body.lowerBound...].prefix(900))
+        let end = try #require(source[body.lowerBound...].range(of: "/// Refresh the AI agent-lineage"))
+        let window = String(source[body.lowerBound..<end.lowerBound])
         #expect(window.contains("if ruleTelemetry != context.statsByID"),
                 "the telemetry dictionary write must be equality-gated")
         #expect(window.contains("if ruleTelemetryFreshness != context.freshness.rawValue"),
                 "the freshness write must be equality-gated")
         // load() must still run every tick: freshness decays on wall time, so an
         // mtime early-return would pin a stopped engine at "current" forever.
-        #expect(window.contains("RuleTelemetryContext.load(directory: dataDir)"),
+        #expect(window.contains("RuleTelemetryContext.load(directory: directory)"),
                 "freshness must keep being recomputed each tick")
     }
 

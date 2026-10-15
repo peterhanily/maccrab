@@ -897,8 +897,21 @@ final class AppState: ObservableObject, EventQueryReading {
     /// snapshot at `<dataDir>/rule_telemetry.json`. The rebuilt
     /// `RuleBrowser` reads these to show fire-count, last-fired, and
     /// mean-exec-ms columns on each rule row.
-    func refreshRuleTelemetry() {
-        let context = RuleTelemetryContext.load(directory: dataDir)
+    private var ruleTelemetryRefreshGeneration = UUID()
+
+    func refreshRuleTelemetry() async {
+        guard !Task.isCancelled else { return }
+        let directory = dataDir
+        let generation = UUID()
+        ruleTelemetryRefreshGeneration = generation
+        let readerGeneration = storeGeneration
+        let pollGeneration = pollingGeneration
+        let context = await Task.detached(priority: .userInitiated) {
+            RuleTelemetryContext.load(directory: directory)
+        }.value
+        guard !Task.isCancelled, generation == ruleTelemetryRefreshGeneration,
+              readerGeneration == storeGeneration, pollGeneration == pollingGeneration,
+              directory == dataDir else { return }
         // Publish only what actually changed. `load` still runs every tick so
         // freshness keeps decaying on wall time with a stopped engine; only the
         // redundant @Published writes are removed. RuleStats is Hashable, so
@@ -934,6 +947,7 @@ final class AppState: ObservableObject, EventQueryReading {
         let snapshot = await Task.detached(priority: .userInitiated) {
             AgentLineageService.readSnapshot(at: path_)
         }.value
+        guard !Task.isCancelled else { return }
         guard let snapshot else {
             // Silently keep the previous list — flickering to "no
             // sessions" between polls is worse than slightly-stale data.
@@ -977,6 +991,7 @@ final class AppState: ObservableObject, EventQueryReading {
             // zero between polls.
             return
         }
+        guard !Task.isCancelled else { return }
         threatIntelIOCs = iocs
         threatIntelStats = ThreatIntelStats(
             hashes: iocs.hashes.count,
@@ -1208,6 +1223,8 @@ final class AppState: ObservableObject, EventQueryReading {
     // MARK: Private
 
     private var pollTimer: AnyCancellable?
+    private let refreshCoordinator = DashboardRefreshCoordinator()
+    private var pollingGeneration: UInt64 = 0
     /// nil until the first `updateStats()` sample primes it — see
     /// `eventsPerSecondFrom` (deep-audit fix for the first-poll rate spike).
     /// v1.22.0 (item 7): `previousEventCount` now holds the previous heartbeat
@@ -1267,6 +1284,12 @@ final class AppState: ObservableObject, EventQueryReading {
     /// a stale handle pinned to the wrong dir.
     private var cachedAlertStore: AlertStore?
     private var cachedEventStore: EventStore?
+    private var cachedEventReaderIdentity: EngineTelemetryIdentity?
+    private var cachedEventReaderAllowsIdleRetention = true
+    private var certifiedEventReaderFileIdentity: EventReaderFileIdentity?
+    private var eventReaderRetention = EventReaderIdleRetention()
+    private var eventReaderCertificationTask: Task<Void, Never>?
+    private var eventReaderExpiryTask: Task<Void, Never>?
     private var cachedTraceStore: TraceStore?
     /// v1.9 PR-5 audit (B3): the dashboard owns attribution_overrides.db
     /// at the user-writable support path. Daemon reads it for stats.
@@ -1284,14 +1307,6 @@ final class AppState: ObservableObject, EventQueryReading {
     /// path change (rare — daemon dir migration).
     private var cachedAlertStorePath: String?
     private var cachedEventStorePath: String?
-    /// v1.21.5 (WAL-pin fix): when the cached read-only events.db connection was
-    /// opened. A read-only connection that has read once holds a WAL read-mark;
-    /// if it then goes idle it pins the writer's (sysext's) WAL, blocking
-    /// checkpoint truncation so the -wal sidecar grows unbounded (observed:
-    /// 512 MB, driving the engine to 100% CPU). Recycling the connection on a
-    /// bounded age releases the stale mark, so the pin can last at most this
-    /// long and the WAL stays bounded. Reopen cost (an FTS5 quick_check) is thus
-    /// amortized to at most once per interval, not per access.
 
     // MARK: - v1.9 PR-4: Agent traces dashboard surface
 
@@ -1388,9 +1403,7 @@ final class AppState: ObservableObject, EventQueryReading {
         eventReadsDeferred = deferred
         storeGeneration &+= 1
         for session in visibleEventQuerySessions { session.synchronizeSourceEpoch() }
-        cachedEventStore?.retireReadOnlyReads()
-        cachedEventStore = nil
-        cachedEventStorePath = nil
+        discardCachedEventReader()
         return deferred
     }
 
@@ -1402,8 +1415,7 @@ final class AppState: ObservableObject, EventQueryReading {
         storeGeneration &+= 1
         for session in visibleEventQuerySessions { session.synchronizeSourceEpoch() }
         cachedAlertStore = nil
-        cachedEventStore?.retireReadOnlyReads()
-        cachedEventStore = nil
+        discardCachedEventReader()
         cachedTraceStore = nil
         cachedAlertStorePath = nil
         cachedEventStorePath = nil
@@ -1477,19 +1489,22 @@ final class AppState: ObservableObject, EventQueryReading {
         // v1.12.0 fix: open the SQLite stores off-MainActor BEFORE
         // the first refresh() runs. Pre-fix, init's `Task { await
         // refresh() }` hopped to @MainActor and called alertStore() /
-        // eventStore() synchronously — each runs AlertStore.init /
-        // EventStore.init + SchemaMigrator.quickCheck on @MainActor.
+        // eventStore() synchronously, putting filesystem/SQLite open work on
+        // @MainActor. Current read-only opens skip migrations and quick_check.
         // On a 962 MB events.db with FTS5 that's multi-second beachball
         // before the dashboard window can paint or accept input.
-        Task.detached(priority: .userInitiated) { [weak self] in
+        // Reserve the same single-flight slot used by later timer ticks so
+        // a slow initial open cannot race a second main-actor store open.
+        refreshCoordinator.request { [weak self] in
             guard let self else { return }
             await self.warmUpStoresOffMain()
-            await self.refresh()
+            guard !Task.isCancelled, self.pollTimer != nil else { return }
+            await self.refreshOnce()
         }
     }
 
-    /// Construct AlertStore + EventStore on a background Task so the
-    /// SQLite open / schema migration / quick_check don't block main.
+    /// Construct read-only stores on background tasks so filesystem/SQLite
+    /// open work does not block main. These opens do not migrate or quick_check.
     /// Once cached, all subsequent `alertStore()` / `eventStore()`
     /// calls on @MainActor short-circuit on the cache (path-change
     /// detection only).
@@ -1497,8 +1512,13 @@ final class AppState: ObservableObject, EventQueryReading {
         refreshHeartbeat()
         let deferEvents = reconcileEventReadDeferral(engineSource.defersEventReads())
         let generation = storeGeneration
+        let warmupPollingGeneration = pollingGeneration
         let alertDir = dataDir
         let eventDir = dataDir
+        let shouldOpenEvent = !deferEvents && eventReaderRetention.acceptsReads
+            && cachedEventStore == nil
+        let openedEventIdentity = shouldOpenEvent
+            ? EventReaderEngineIdentity.read(directory: eventDir) : nil
         // Wave 9A.1 (v1.12.6 RC2): dashboard opens both stores read-only.
         // Mutation paths (suppress / unsuppress / delete) route through
         // the inbox file-IPC channel per v1.10.1; the direct
@@ -1513,7 +1533,7 @@ final class AppState: ObservableObject, EventQueryReading {
             try? AlertStore(directory: alertDir, forceReadOnly: true)
         }.value
         async let eventResult: EventStore? = Task.detached(priority: .userInitiated) {
-            guard !deferEvents else { return nil }
+            guard shouldOpenEvent else { return nil }
             return try? EventStore(
                 directory: eventDir,
                 forceReadOnly: true,
@@ -1521,7 +1541,9 @@ final class AppState: ObservableObject, EventQueryReading {
             )
         }.value
         let (alert, event) = await (alertResult, eventResult)
-        guard generation == storeGeneration else {
+        guard generation == storeGeneration,
+              warmupPollingGeneration == pollingGeneration, pollTimer != nil,
+              !Task.isCancelled else {
             event?.retireReadOnlyReads()
             return
         }
@@ -1529,9 +1551,15 @@ final class AppState: ObservableObject, EventQueryReading {
             cachedAlertStore = store
             cachedAlertStorePath = alertDir
         }
-        if let store = event {
+        if let store = event, eventReaderRetention.acceptsReads, cachedEventStore == nil {
             cachedEventStore = store
             cachedEventStorePath = eventDir
+            cachedEventReaderIdentity = openedEventIdentity
+            cachedEventReaderAllowsIdleRetention = true
+        } else {
+            // A foreground read may already have opened its own handle while
+            // warmup awaited. Never replace that cache or its admitted readers.
+            event?.retireReadOnlyReads()
         }
     }
 
@@ -1542,6 +1570,8 @@ final class AppState: ObservableObject, EventQueryReading {
     /// hammering SQLite for updates nobody is looking at.
     func startPolling() {
         guard pollTimer == nil else { return }
+        resumeEventReaderAdmission()
+        pollingGeneration &+= 1
         // Deep-audit fix: honor the "Poll detection engine every N seconds"
         // setting (pollIntervalSeconds) rather than a hardcoded 10 s, so the
         // menubar/notifier DB poll matches the cadence the V2 dashboard already
@@ -1553,7 +1583,7 @@ final class AppState: ObservableObject, EventQueryReading {
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
-                Task { @MainActor in await self.refresh() }
+                self.requestPollingRefresh()
             }
     }
 
@@ -1700,16 +1730,34 @@ final class AppState: ObservableObject, EventQueryReading {
     func stopPolling() {
         pollTimer?.cancel()
         pollTimer = nil
-        // Release the cached read-only events.db connection when polling stops.
-        // rc.41 note: with read transactions now bounded to milliseconds
-        // (EventStore.withVerifiedExactReadSnapshot + chunked journal scan), an
-        // idle connection holds no WAL read-mark — this release is no longer
-        // load-bearing for WAL truncation. It stays because dropping a
-        // connection the UI is not using remains free, and it keeps the file
-        // handle count honest while the window is backgrounded. The getter
-        // transparently reopens on next use.
-        cachedEventStore?.retireReadOnlyReads()
-        cachedEventStore = nil
+        pollingGeneration &+= 1
+        refreshCoordinator.cancel()
+        if eventReaderRetention.acceptsReads {
+            let identity = EventReaderEngineIdentity.read(directory: dataDir)
+            if let identity { reconcileEngineIdentity(identity) }
+            // Close admission BEFORE awaiting the actor. This includes reads
+            // already queued on it, not merely a snapshot of actor activity.
+            // Invalidate publication now; synchronize UI sessions on resume so
+            // backgrounding does not itself launch replacement view queries.
+            storeGeneration &+= 1
+            let token = eventReaderRetention.closeAdmission(now: ProcessInfo.processInfo.systemUptime)
+            if let token, let store = cachedEventStore, let path = cachedEventStorePath,
+               let identity, identity == cachedEventReaderIdentity,
+               cachedEventReaderAllowsIdleRetention,
+               let fileIdentity = EventReaderFileIdentity.read(directory: path) {
+                let generation = storeGeneration
+                eventReaderCertificationTask = Task { @MainActor [weak self] in
+                    let idle = await store.permitsIdleReadOnlyRetention()
+                    self?.completeEventReaderCertification(
+                        store, path: path, generation: generation, token: token,
+                        fileIdentity: fileIdentity, idle: idle)
+                }
+            } else {
+                // Active/queued reads, missing identity or a bad clock retain
+                // the old permanent-retirement behavior, never an unretire.
+                discardCachedEventReader()
+            }
+        }
         // NOTE: the ClickFix clipboard bridge is deliberately NOT stopped here.
         // It's process-lifetime (started once at launch by the AppDelegate), so
         // ClickFix keeps watching the clipboard whenever the menubar app is
@@ -1725,9 +1773,113 @@ final class AppState: ObservableObject, EventQueryReading {
     /// the getter opens, so the idle-release path can be verified deterministically
     /// without the getter's live directory probing.
     func primeCachedEventStoreForTesting(_ store: EventStore) {
+        discardCachedEventReader()
         cachedEventStore = store
+        cachedEventStorePath = dataDir
+        cachedEventReaderIdentity = EventReaderEngineIdentity.read(directory: dataDir)
+        cachedEventReaderAllowsIdleRetention = true
     }
+
+    func waitForEventReaderCertificationForTesting() async {
+        await eventReaderCertificationTask?.value
+    }
+    func resumeEventReaderForTesting() { resumeEventReaderAdmission() }
+    func discardEventReaderForTesting() { discardCachedEventReader() }
+    var eventReaderAdmissionsForTesting: Int { eventReaderRetention.admittedReadCount }
     #endif
+
+    private func discardCachedEventReader() {
+        eventReaderRetention.invalidate()
+        eventReaderCertificationTask?.cancel()
+        eventReaderCertificationTask = nil
+        eventReaderExpiryTask?.cancel()
+        eventReaderExpiryTask = nil
+        cachedEventStore?.retireReadOnlyReads()
+        cachedEventStore = nil
+        cachedEventStorePath = nil
+        cachedEventReaderIdentity = nil
+        cachedEventReaderAllowsIdleRetention = true
+        certifiedEventReaderFileIdentity = nil
+    }
+
+    private func resumeEventReaderAdmission() {
+        let wasPaused = !eventReaderRetention.acceptsReads
+        if wasPaused {
+            // A ready replacement engine can appear while the dashboard is
+            // paused, before its next poll. Unknown/stale identity disables
+            // reuse, but never prevents opening a fresh historical reader.
+            let identity = EventReaderEngineIdentity.read(directory: dataDir)
+            if let identity { reconcileEngineIdentity(identity) }
+            reconcileEventReadDeferral(engineSource.defersEventReads())
+            if identity == nil || identity != cachedEventReaderIdentity
+                || certifiedEventReaderFileIdentity == nil
+                || EventReaderFileIdentity.read(directory: dataDir) != certifiedEventReaderFileIdentity {
+                discardCachedEventReader()
+            }
+        }
+        let reusable = eventReaderRetention.resume(now: ProcessInfo.processInfo.systemUptime)
+        eventReaderCertificationTask?.cancel()
+        eventReaderCertificationTask = nil
+        eventReaderExpiryTask?.cancel()
+        eventReaderExpiryTask = nil
+        if !reusable { discardCachedEventReader() }
+        if wasPaused {
+            for session in visibleEventQuerySessions { session.synchronizeSourceEpoch() }
+        }
+    }
+
+    private func completeEventReaderCertification(
+        _ store: EventStore, path: String, generation: UInt64,
+        token: EventReaderIdleRetention.Pause, fileIdentity: EventReaderFileIdentity, idle: Bool
+    ) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard !Task.isCancelled, cachedEventStore === store,
+              cachedEventStorePath == path, path == dataDir,
+              EventReaderFileIdentity.read(directory: path) == fileIdentity,
+              generation == storeGeneration, pollTimer == nil,
+              eventReaderRetention.certify(token, idle: idle, now: now) else {
+            if cachedEventStore === store { discardCachedEventReader() }
+            else { store.retireReadOnlyReads() }
+            return
+        }
+        eventReaderCertificationTask = nil
+        certifiedEventReaderFileIdentity = fileIdentity
+        // Deadline is measured from pause, NOT from the possibly delayed
+        // certificate. Resume also checks it, even if main is slow to wake.
+        let remaining = token.deadline - now
+        eventReaderExpiryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(ceil(remaining * 1_000_000_000))) }
+            catch { return }
+            guard let self, self.eventReaderRetention.matches(token) else { return }
+            self.discardCachedEventReader()
+        }
+    }
+
+    private struct EventReaderLease {
+        let id: UUID
+        let store: EventStore
+    }
+
+    /// The only owner that hands the cached store to query code. No await may
+    /// occur before registration; every caller releases with defer, including
+    /// the resolver that receives a handle rather than invoking it directly.
+    private func beginEventReaderLease() throws -> EventReaderLease {
+        try Task.checkCancellation()
+        guard eventReaderRetention.acceptsReads else { throw CancellationError() }
+        let store = try eventStore()
+        guard let id = eventReaderRetention.admit() else { throw CancellationError() }
+        return EventReaderLease(id: id, store: store)
+    }
+
+    private func finishEventReaderLease(
+        _ lease: EventReaderLease, successful: Bool, mayRetainIdle: Bool = true
+    ) {
+        eventReaderRetention.finish(lease.id)
+        if !mayRetainIdle, cachedEventStore === lease.store {
+            cachedEventReaderAllowsIdleRetention = false
+        }
+        if !successful, cachedEventStore === lease.store { discardCachedEventReader() }
+    }
 
     /// Get or create cached alert store.
     /// v1.9 hot-fix: probe both system + user paths and pick whichever
@@ -1765,25 +1917,14 @@ final class AppState: ObservableObject, EventQueryReading {
             throw CancellationError()
         }
         let chosen = dataDir
-        // v1.12.0 fix: see alertStore() — reopen only on path change,
-        // not every 30s. FTS5 quick_check on a 962 MB events.db blocks
-        // main thread for seconds.
-        // v1.21.6-rc.41: the v1.21.5 60-second age recycle is REMOVED — it was
-        // making the WAL pin it claimed to fix. A connection with no open
-        // transaction holds no WAL read-mark, so recycling an idle connection
-        // released nothing; what the forced re-open actually did was guarantee
-        // a COLD store whose next read re-verified the entire retained journal
-        // — for minutes, inside a read transaction — once per minute, on top of
-        // burning 99-109% CPU. The real fix bounds the transaction instead
-        // (EventStore.withVerifiedExactReadSnapshot + the chunked journal
-        // scan), after which a warm cached connection is exactly what keeps
-        // reads cheap: its index refreshes append-only. The idle release in
-        // stopPolling stays — dropping the reference when the UI goes quiet
-        // remains correct and free.
+        // Keep the same authenticated index while foregrounded. A short
+        // background reuse requires the separate no-reader/no-transaction
+        // certificate; this is not age-based recycling of active readers.
         if let store = cachedEventStore, cachedEventStorePath == chosen {
             return store
         }
-        cachedEventStore = nil   // path changed: release before reopening
+        discardCachedEventReader() // path changed: permanently retire before reopening
+        let openedIdentity = EventReaderEngineIdentity.read(directory: chosen)
         // Wave 9A.1 (v1.12.6 RC2): dashboard event store is read-only.
         let store = try EventStore(
             directory: chosen,
@@ -1792,6 +1933,8 @@ final class AppState: ObservableObject, EventQueryReading {
         )
         cachedEventStore = store
         cachedEventStorePath = chosen
+        cachedEventReaderIdentity = openedIdentity
+        cachedEventReaderAllowsIdleRetention = true
         return store
     }
 
@@ -2328,7 +2471,17 @@ final class AppState: ObservableObject, EventQueryReading {
         UserDefaults.standard.set(true, forKey: "fdaBannerDismissedByUser")
     }
 
+    private func requestPollingRefresh() {
+        guard pollTimer != nil else { return }
+        refreshCoordinator.request { [weak self] in await self?.refreshOnce() }
+    }
+
     func refresh() async {
+        await refreshCoordinator.run { [weak self] in await self?.refreshOnce() }
+    }
+
+    private func refreshOnce() async {
+        guard !Task.isCancelled else { return }
         // Check daemon connectivity: DB exists + has data = connected
         // Also check for WAL file which indicates active writer (daemon)
         let dbPath = dataDir + "/events.db"
@@ -2438,8 +2591,11 @@ final class AppState: ObservableObject, EventQueryReading {
 
         // Incremental: only fetch new data since last poll
         await loadAlertsIncremental()
+        guard !Task.isCancelled else { return }
         await loadEventsIncremental()
+        guard !Task.isCancelled else { return }
         await updateStats()
+        guard !Task.isCancelled else { return }
         // v1.4.3 fail-loud: refresh storage-error and heartbeat state
         // from sysext-written snapshot files so the Overview banners
         // and statusbar icon react within one poll cycle.
@@ -2447,8 +2603,11 @@ final class AppState: ObservableObject, EventQueryReading {
         refreshHeartbeat()
         refreshRuleTamper()
         await refreshThreatIntelStats()
+        guard !Task.isCancelled else { return }
         await refreshAgentLineage()
-        refreshRuleTelemetry()
+        guard !Task.isCancelled else { return }
+        await refreshRuleTelemetry()
+        guard !Task.isCancelled else { return }
         maybeKickWatchdog()
 
         // Rules rarely change — load once, BUT only latch on a SUCCESSFUL load.
@@ -2556,7 +2715,10 @@ final class AppState: ObservableObject, EventQueryReading {
         guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return nil }
         let generation = storeGeneration
         do {
-            let store = try eventStore()
+            let lease = try beginEventReaderLease()
+            var successful = false
+            defer { finishEventReaderLease(lease, successful: successful) }
+            let store = lease.store
             let raw: [Event]
             var exactOwnership: ExactEventQuerySnapshot?
             var searchOwnership: EventSearchSnapshot?
@@ -2603,6 +2765,7 @@ final class AppState: ObservableObject, EventQueryReading {
                                                 nextCursor: next, coverageWarning: warning)
             withExtendedLifetime(exactOwnership) {}
             withExtendedLifetime(searchOwnership) {}
+            successful = true
             return result
         } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
             return nil
@@ -2676,7 +2839,10 @@ final class AppState: ObservableObject, EventQueryReading {
                              pageSize: Int) async throws -> EventQuerySession.Page? {
         guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return nil }
         let generation = storeGeneration
-        let store = try eventStore()
+        let lease = try beginEventReaderLease()
+        var successful = false
+        defer { finishEventReaderLease(lease, successful: successful) }
+        let store = lease.store
         let page = try await store.exactEventsPageSnapshot(before: cursor, category: query.category, pageSize: pageSize)
         guard generation == storeGeneration else { throw CancellationError() }
         try Task.checkCancellation()
@@ -2685,6 +2851,7 @@ final class AppState: ObservableObject, EventQueryReading {
         let result = EventQuerySession.Page(events: rows.map { eventToViewModel($0) },
                                             nextCursor: reachedStart ? nil : page.nextCursor)
         withExtendedLifetime(page) {}
+        successful = true
         return result
     }
 
@@ -3103,6 +3270,7 @@ final class AppState: ObservableObject, EventQueryReading {
     // MARK: Incremental Loading
 
     private func loadAlertsIncremental() async {
+        guard !Task.isCancelled else { return }
         // Mirror loadEventsIncremental: skip the prepend during search so the
         // relevance-ordered LIKE results stay intact between poll ticks.
         if alertSearchActive { return }
@@ -3110,7 +3278,7 @@ final class AppState: ObservableObject, EventQueryReading {
         do {
             let store = try alertStore()
             let newAlerts = try await store.alerts(since: lastAlertTimestamp, limit: 100)
-            guard generation == storeGeneration else { return }
+            guard generation == storeGeneration, !Task.isCancelled else { return }
             let existingIDs = Set(dashboardAlerts.map { $0.id })
             let overlay = suppressedIDs
             let newViewModels = newAlerts
@@ -3164,6 +3332,7 @@ final class AppState: ObservableObject, EventQueryReading {
     }
 
     func loadEventsIncremental() async {
+        guard !Task.isCancelled else { return }
         guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return }
         let sessions = visibleEventQuerySessions
         for session in sessions { session.pollTick() }
@@ -3176,12 +3345,15 @@ final class AppState: ObservableObject, EventQueryReading {
         guard eventsWorkspaceVisible else { return }
         let generation = storeGeneration
         do {
-            let store = try eventStore()
+            let lease = try beginEventReaderLease()
+            var successful = false
+            defer { finishEventReaderLease(lease, successful: successful) }
+            let store = lease.store
             let snapshot = try await store.exactEventsSnapshot(
                 since: lastEventTimestamp,
                 limit: 200
             )
-            guard generation == storeGeneration else { return }
+            guard generation == storeGeneration, !Task.isCancelled else { return }
             guard snapshot.isComplete else {
                 eventSearchCoverageWarning =
                     "Incremental event evidence is incomplete."
@@ -3201,6 +3373,7 @@ final class AppState: ObservableObject, EventQueryReading {
             }
             for session in sessions { session.receiveIncremental(newViewModels, epoch: generation) }
             withExtendedLifetime(snapshot) {}
+            successful = true
         } catch {}
     }
 
@@ -3236,9 +3409,13 @@ final class AppState: ObservableObject, EventQueryReading {
         guard let uuid = UUID(uuidString: id) else { return nil }
         let generation = storeGeneration
         do {
-            let store = try eventStore()
+            let lease = try beginEventReaderLease()
+            var successful = false
+            defer { finishEventReaderLease(lease, successful: successful) }
+            let store = lease.store
             let snapshot = try await store.exactEventSnapshot(id: uuid)
             guard generation == storeGeneration, !Task.isCancelled else { return nil }
+            successful = true
             return snapshot
         } catch {
             return nil
@@ -3250,10 +3427,16 @@ final class AppState: ObservableObject, EventQueryReading {
     /// absent; this preserves user data without an implicit migration.
     func fetchEvidence(alertId: String) async -> [Event] {
         let generation = storeGeneration
+        let lease = try? beginEventReaderLease()
+        // The legacy resolver intentionally swallows read errors. Without an
+        // error receipt its handle is not eligible for idle reuse. Do not
+        // interrupt another window's active read merely because the outcome is
+        // unknown; stopPolling will retire this exact cache without reuse.
+        defer { if let lease { finishEventReaderLease(lease, successful: true, mayRetainIdle: false) } }
         let evidence = await AlertEvidenceResolver.evidenceFor(
             alertId: alertId,
             alertStore: try? alertStore(),
-            legacyEventStore: try? eventStore()
+            legacyEventStore: lease?.store
         )
         guard generation == storeGeneration, !Task.isCancelled else { return [] }
         return evidence
@@ -3277,9 +3460,13 @@ final class AppState: ObservableObject, EventQueryReading {
     func readEventAggregates(sinceDay: String, category: MacCrabCore.EventCategory?) async throws -> [EventStore.AggregateRow]? {
         guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return nil }
         let generation = storeGeneration
-        let rows = try await eventStore().aggregates(sinceDay: sinceDay, category: category)
+        let lease = try beginEventReaderLease()
+        var successful = false
+        defer { finishEventReaderLease(lease, successful: successful) }
+        let rows = try await lease.store.aggregates(sinceDay: sinceDay, category: category)
         guard generation == storeGeneration else { throw CancellationError() }
         try Task.checkCancellation()
+        successful = true
         return rows
     }
 
@@ -3309,7 +3496,10 @@ final class AppState: ObservableObject, EventQueryReading {
         guard !reconcileEventReadDeferral(engineSource.defersEventReads()) else { return nil }
         let generation = storeGeneration
         do {
-            let snapshot = try await eventStore().histogramSnapshot(spanSeconds: spanSeconds, stepSeconds: stepSeconds,
+            let lease = try beginEventReaderLease()
+            var successful = false
+            defer { finishEventReaderLease(lease, successful: successful) }
+            let snapshot = try await lease.store.histogramSnapshot(spanSeconds: spanSeconds, stepSeconds: stepSeconds,
                                                                    endingAt: endingAt, category: category)
             guard generation == storeGeneration else { throw CancellationError() }
             try Task.checkCancellation()
@@ -3319,6 +3509,7 @@ final class AppState: ObservableObject, EventQueryReading {
                 warning = "Histogram covers only the provable retained \(seconds)-second interval and has "
                     + "\(snapshot.gaps.total) evidence gaps; missing bins are unknown, not zero."
             }
+            successful = true
             return .init(bins: snapshot.bins.map { ($0.start, $0.count) }, effectiveSince: snapshot.effectiveSince,
                          effectiveUntil: snapshot.effectiveUntil, coverageWarning: warning)
         } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
@@ -3468,6 +3659,7 @@ final class AppState: ObservableObject, EventQueryReading {
         let now = Date()
         if now.timeIntervalSince(lastSecurityScoreUpdate) >= 300 {
             let result = await SecurityScorer().calculate()
+            guard !Task.isCancelled else { return }
             securityScore = result.totalScore
             securityGrade = result.grade
             securityFactors = result.factors

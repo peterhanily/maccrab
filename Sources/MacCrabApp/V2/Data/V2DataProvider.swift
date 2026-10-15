@@ -52,18 +52,28 @@ public struct V2BrowserInventoryCoverage: Sendable, Equatable {
     }
 }
 
+/// Per-call provenance for the alert list. Failure and cancellation cannot be
+/// mistaken for a successful empty read, even when another consumer refreshes.
+public enum V2AlertsReadSnapshot: Sendable {
+    case success([V2MockAlert])
+    case failed(String)
+    case cancelled
+
+    /// Compatibility for callers that do not present an all-clear state.
+    public var rows: [V2MockAlert] {
+        if case .success(let rows) = self { return rows }
+        return []
+    }
+}
+
 @MainActor
 public protocol V2DataProvider: AnyObject {
     var mode: V2DataSourceMode { get }
     var lastErrorDescription: String? { get }
 
-    /// Non-nil when the LAST `alerts(since:limit:)` call FAILED. A failed read
-    /// returns `[]` — byte-for-byte the same shape as a quiet machine — so any
-    /// consumer that renders an "all clear" empty state MUST consult this
-    /// first. Deliberately separate from `lastErrorDescription`: that slot is
-    /// shared across every surface and is never cleared by a successful read,
-    /// so gating an empty state on it would strand the panel forever after one
-    /// transient failure. This one is cleared by the next successful read.
+    /// Legacy last-read diagnostic. Consumers presenting an all-clear must use
+    /// `alertsSnapshot` instead: another consumer can overwrite this shared
+    /// diagnostic while a workspace is awaiting its own read.
     var alertsReadError: String? { get }
 
     /// Diagnostic — which DB directory (if any) the live provider opened.
@@ -74,6 +84,7 @@ public protocol V2DataProvider: AnyObject {
     var ruleTelemetryContext: RuleTelemetryContext? { get }
 
     func alerts(since: Date, limit: Int) async -> [V2MockAlert]
+    func alertsSnapshot(since: Date, limit: Int) async -> V2AlertsReadSnapshot
     func events(limit: Int) async -> [V2MockEvent]
     func campaigns(since: Date, limit: Int) async -> [V2MockCampaign]
     func traces(limit: Int) async -> [V2MockTrace]
@@ -302,6 +313,19 @@ public struct V2OverviewKPIs: Sendable, Equatable {
 // MARK: - Convenience defaults
 
 extension V2DataProvider {
+    /// Only explicit mock data can use the array-only compatibility default.
+    /// Live implementations must bind errors to their own read, not a shared
+    /// last-error slot that another concurrent consumer can overwrite.
+    public func alertsSnapshot(since: Date, limit: Int) async -> V2AlertsReadSnapshot {
+        guard !Task.isCancelled else { return .cancelled }
+        guard mode == .mock else {
+            return .failed("This data source does not provide a live alert read result.")
+        }
+        let rows = await alerts(since: since, limit: limit)
+        guard !Task.isCancelled else { return .cancelled }
+        return .success(rows)
+    }
+
     public var ruleTelemetryContext: RuleTelemetryContext? { nil }
     public var suppressionReadError: String? { nil }
     public func submitMutation(_ request: V2MutationRequest) async -> V2MutationSubmission {

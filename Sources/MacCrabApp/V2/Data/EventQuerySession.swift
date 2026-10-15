@@ -83,6 +83,25 @@ final class EventQuerySession: ObservableObject {
         queryLoaded = false
     }
 
+    /// The exact-row table is not presented in aggregate mode. Retire only its
+    /// query/page receipts and presentation, not the independent aggregate or
+    /// histogram operation (whose SwiftUI task may already have started).
+    func deactivateExactPresentation() {
+        queryGeneration &+= 1
+        pageGeneration &+= 1
+        query = nil
+        queryLoaded = false
+        retryNeeded = false
+        events = []
+        cursor = nil
+        hasMoreEvents = false
+        eventSearchActive = false
+        eventSearchCoverageWarning = nil
+        isLoading = false
+        isLoadingOlderEvents = false
+        presentationResetTick &+= 1
+    }
+
     func synchronizeSourceEpoch() {
         guard sourceEpoch != reader.eventQueryEpoch else { return }
         invalidatePendingReads()
@@ -108,8 +127,13 @@ final class EventQuerySession: ObservableObject {
         generation == queryGeneration && acceptsEpoch(epoch)
     }
 
-    func loadEvents(_ next: Query, limit: Int = 500, debounce: Bool = false) async {
+    func loadEvents(_ next: Query, limit: Int = 500, debounce: Bool = false,
+                    isPresented: Bool = true) async {
         guard !Task.isCancelled else { return }
+        guard isPresented else {
+            deactivateExactPresentation()
+            return
+        }
         synchronizeSourceEpoch()
         queryGeneration &+= 1
         pageGeneration &+= 1

@@ -63,7 +63,8 @@ struct SequenceCheckpointPendingIdentity: Codable, Sendable, Equatable, Hashable
 /// emitted in deterministic order by SequenceEngine; no JSON dictionary order
 /// participates in the semantic digest.
 struct SequenceCheckpointPayload: Codable, Sendable, Equatable {
-    static let currentSchemaVersion = 1
+    static let legacySchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     let schemaVersion: Int
     let capturedAt: Date
@@ -344,6 +345,10 @@ enum SequenceCheckpointError: Error, LocalizedError, Equatable {
 }
 
 enum SequenceCheckpointLimits {
+    /// Explicit diagnostic capacity contract. Byte, pending and persistence
+    /// budgets remain independent hard limits; this is not a no-loss promise.
+    static let maximumTotalPartialMatches = 13_000
+    static let legacyMaximumTotalPartialMatches = 10_000
     static let maximumRules = 4_096
     static let maximumRuleFingerprintBytes = 8 * 1_024 * 1_024
     static let maximumSingleRuleFingerprintBytes = 4 * 1_024 * 1_024
