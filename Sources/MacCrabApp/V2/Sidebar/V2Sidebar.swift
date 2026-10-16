@@ -11,27 +11,28 @@ struct V2Sidebar: View {
 
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
+    let availableWidth: CGFloat
     let onProtectionTap: () -> Void
 
     @AppStorage("v2.sidebar.width")     private var storedWidth: Double = 220
     @AppStorage("v2.sidebar.collapsed") private var collapsed: Bool = false
+    @State private var dragStartWidth: CGFloat?
     // Density toggle (Settings › Appearance). Gates which workspaces show in the
     // sidebar; defaults to .advanced so upgrades keep the full surface.
     @AppStorage(UIMode.storageKey)      private var uiModeRaw: String = UIMode.advanced.rawValue
     private var currentUIMode: UIMode { UIMode(rawValue: uiModeRaw) ?? .advanced }
 
-    private let collapsedWidth: CGFloat = 56
-    private let minWidth: CGFloat = 180
-    private let maxWidth: CGFloat = 360
-
-    init(state: V2DashboardState, appState: AppState, onProtectionTap: @escaping () -> Void) {
+    init(state: V2DashboardState, appState: AppState, availableWidth: CGFloat = 1180,
+         onProtectionTap: @escaping () -> Void) {
         self.state = state
         self.appState = appState
+        self.availableWidth = availableWidth
         self.onProtectionTap = onProtectionTap
     }
 
     private var resolvedWidth: CGFloat {
-        collapsed ? collapsedWidth : CGFloat(min(max(storedWidth, minWidth), maxWidth))
+        V2SidebarWidthPolicy.rendered(stored: storedWidth, collapsed: collapsed,
+                                      availableWidth: availableWidth)
     }
 
     public var body: some View {
@@ -132,6 +133,8 @@ struct V2Sidebar: View {
             }
         }
         .frame(width: resolvedWidth)
+        .onChange(of: collapsed) { _ in dragStartWidth = nil }
+        .onDisappear { dragStartWidth = nil }
     }
 
     // MARK: - Hidden-workspace affordance
@@ -192,9 +195,13 @@ struct V2Sidebar: View {
             .gesture(
                 DragGesture()
                     .onChanged { value in
-                        let new = CGFloat(storedWidth) + value.translation.width
-                        storedWidth = Double(min(max(new, minWidth), maxWidth))
+                        let start = dragStartWidth ?? resolvedWidth
+                        if dragStartWidth == nil { dragStartWidth = start }
+                        storedWidth = V2SidebarWidthPolicy.resized(
+                            startWidth: start, translation: value.translation.width,
+                            availableWidth: availableWidth)
                     }
+                    .onEnded { _ in dragStartWidth = nil }
             )
             // v1.18.1: the drag-only handle was invisible to VoiceOver and
             // unreachable by keyboard. Expose it as an adjustable element —
@@ -202,10 +209,11 @@ struct V2Sidebar: View {
             .accessibilityElement()
             .accessibilityLabel(String(localized: "sidebar.ax.resize",
                                        defaultValue: "Sidebar width"))
-            .accessibilityValue("\(Int(storedWidth))")
+            .accessibilityValue("\(Int(resolvedWidth))")
             .accessibilityAdjustableAction { direction in
-                let step: Double = direction == .increment ? 20 : -20
-                storedWidth = Double(min(max(CGFloat(storedWidth + step), minWidth), maxWidth))
+                let step: CGFloat = direction == .increment ? 20 : -20
+                storedWidth = V2SidebarWidthPolicy.resized(
+                    startWidth: resolvedWidth, translation: step, availableWidth: availableWidth)
             }
     }
 

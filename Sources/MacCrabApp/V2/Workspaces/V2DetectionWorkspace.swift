@@ -1276,16 +1276,18 @@ public struct V2DetectionWorkspace: View {
     // MARK: - Browser
 
     private var browserTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(String(localized: "ui.V2DetectionWorkspace.browser.extensions.across.chrome.firefox.brave.edge", defaultValue: "Browser extensions across Chrome, Firefox, Brave, Edge, and Arc. Risk score factors permission breadth, dangerous APIs, and dev-mode/unpacked status. Click a row for the full permission set and a risk-score breakdown."))
-                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
-                if let coverage = state.provider.browserInventoryCoverage,
-                   !coverage.complete {
-                    browserInventoryCoverageWarning(coverage)
-                }
-                browserSummaryRow
-                HStack(alignment: .top, spacing: 0) {
+        // Like Rules, the inspector overlays the viewport instead of taking
+        // 340 pt from the table. Its close control stays outside the scroller.
+        ZStack(alignment: .topTrailing) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(String(localized: "ui.V2DetectionWorkspace.browser.extensions.across.chrome.firefox.brave.edge", defaultValue: "Browser extensions across Chrome, Firefox, Brave, Edge, and Arc. Risk score factors permission breadth, dangerous APIs, and dev-mode/unpacked status. Click a row for the full permission set and a risk-score breakdown."))
+                        .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                    if let coverage = state.provider.browserInventoryCoverage,
+                       !coverage.complete {
+                        browserInventoryCoverageWarning(coverage)
+                    }
+                    browserSummaryRow
                     V2DataTable(
                         columns: [
                             V2DataColumn(id: "name", title: "Extension", width: .flexible(min: 200),
@@ -1321,13 +1323,16 @@ public struct V2DetectionWorkspace: View {
                         searchPrompt: "Filter extensions…"
                     )
                     .frame(minHeight: 320, maxHeight: .infinity)
-                    if let ext = selectedExtension {
-                        extensionInspector(ext)
-                    }
                 }
+                .padding(16)
             }
-            .padding(16)
+            if let ext = selectedExtension {
+                extensionInspector(ext)
+                    .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
+                    .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
+            }
         }
+        .animation(V2Motion.inspectorPresent(reduceMotion: reduceMotion), value: selectedExtension?.id)
     }
 
     private func browserInventoryCoverageWarning(
@@ -1518,16 +1523,16 @@ public struct V2DetectionWorkspace: View {
     // MARK: - MCP
 
     private var mcpTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // Deep-audit fix: the old copy claimed "tool inflation and
-                // unsigned new servers raise trust scores" — a scoring model
-                // that isn't implemented (trust is a simple heuristic:
-                // /tmp-launched servers are flagged, everything else is Known).
-                // Describe what's actually shown instead of promising a feature.
-                Text(String(localized: "ui.V2DetectionWorkspace.mcp.servers.configured.for.the.ai.coding", defaultValue: "MCP servers configured for the AI coding tools on this device (Claude Code, Cursor, Continue, VS Code, Windsurf). A server launched from a temp directory is flagged for review; click a row for details."))
-                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
-                HStack(alignment: .top, spacing: 0) {
+        ZStack(alignment: .topTrailing) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Deep-audit fix: the old copy claimed "tool inflation and
+                    // unsigned new servers raise trust scores" — a scoring model
+                    // that isn't implemented (trust is a simple heuristic:
+                    // /tmp-launched servers are flagged, everything else is Known).
+                    // Describe what's actually shown instead of promising a feature.
+                    Text(String(localized: "ui.V2DetectionWorkspace.mcp.servers.configured.for.the.ai.coding", defaultValue: "MCP servers configured for the AI coding tools on this device (Claude Code, Cursor, Continue, VS Code, Windsurf). A server launched from a temp directory is flagged for review; click a row for details."))
+                        .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                     // Deep-audit fix: every column is now click-to-sort (sortKey),
                     // the table has a filter box (searchPrompt), and rows are
                     // selectable into an inspector — pre-fix this was a read-only
@@ -1570,13 +1575,16 @@ public struct V2DetectionWorkspace: View {
                         searchPrompt: "Filter MCP servers…"
                     )
                     .frame(minHeight: 280, maxHeight: .infinity)
-                    if let mcp = selectedMCP {
-                        mcpInspector(mcp)
-                    }
                 }
+                .padding(16)
             }
-            .padding(16)
+            if let mcp = selectedMCP {
+                mcpInspector(mcp)
+                    .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
+                    .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
+            }
         }
+        .animation(V2Motion.inspectorPresent(reduceMotion: reduceMotion), value: selectedMCP?.id)
     }
 
     /// Inspector for a selected MCP server. Surfaces the fields the

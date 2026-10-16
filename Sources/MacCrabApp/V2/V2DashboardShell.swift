@@ -47,13 +47,13 @@ struct V2DashboardShell: View {
         ZStack(alignment: .top) {
             V2Theme.canvasBackground.ignoresSafeArea()
 
-            HStack(spacing: 0) {
-                V2Sidebar(state: state, appState: appState, onProtectionTap: {
+            V2SidebarContentLayout(sidebar: { availableWidth in
+                V2Sidebar(state: state, appState: appState, availableWidth: availableWidth, onProtectionTap: {
                     state.goto(V2NavigationDestination(
                         workspace: .system, tab: .systemHealth
                     ))
                 })
-
+            }, content: {
                 VStack(spacing: 0) {
                     V2CommandBar(state: state)
 
@@ -80,7 +80,7 @@ struct V2DashboardShell: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            })
 
             if state.paletteOpen {
                 paletteOverlay
