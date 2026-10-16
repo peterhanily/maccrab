@@ -91,4 +91,27 @@ struct V2DataTableSelectionTests {
         let out = V2DataTable<Item>.toggledSelectAll(current: [7], displayedIDs: [])
         #expect(out == [7])
     }
+
+    @Test("header checkbox preserves the old subset oracle, including duplicates and off-screen selections")
+    func displayedSelectionMatchesSubsetOracle() {
+        let populations = [[], [1], [1, 1], [1, 2], [2, 1, 2], [1, 2, 3]]
+        let selections: [Set<Int>] = [[], [1], [2], [1, 2], [1, 2, 3], [99], [1, 2, 99]]
+        for ids in populations {
+            let items = ids.map { Item(id: $0) }
+            for selected in selections {
+                let expected = !ids.isEmpty && Set(ids).isSubset(of: selected)
+                let actual = V2DataTable<Item>.allDisplayedSelected(items: items, selected: selected)
+                #expect(actual == expected, "IDs \(ids), selected \(selected)")
+            }
+        }
+    }
+
+    @Test("header checkbox recomputes from current rows and selection, with no retained result")
+    func displayedSelectionTracksReplacement() {
+        let items = ordered.map { Item(id: $0) }
+        #expect(V2DataTable<Item>.allDisplayedSelected(items: items, selected: Set(ordered)))
+        #expect(!V2DataTable<Item>.allDisplayedSelected(items: items, selected: [1, 2]))
+        #expect(V2DataTable<Item>.allDisplayedSelected(items: Array(items.prefix(2)), selected: [1, 2, 99]))
+        #expect(!V2DataTable<Item>.allDisplayedSelected(items: [], selected: Set(ordered)))
+    }
 }

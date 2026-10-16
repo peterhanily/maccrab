@@ -66,15 +66,22 @@ import Foundation
 // Task.sleep(...)`, so a cancelled sleep (slow CI, parallel test
 // contention) left the monitor running and polluted later test state.
 // Each test now routes through `withStartedMonitor` and the stop is in
-// the guaranteed-cleanup path.
-private func withStartedMonitor(
-    start: () async -> Void,
-    stop: () async -> Void,
+// the guaranteed-cleanup path. Shared only within the test target so its
+// error/cleanup behavior can be tested without starting a native collector.
+func withStartedMonitor(
+    start: () async throws -> Void,
+    stop: () async -> Bool,
     body: @escaping @Sendable () async throws -> Void
 ) async throws {
-    await start()
-    let bodyResult = await Task { try await body() }.result
-    await stop()
+    let bodyResult: Result<Void, Error>
+    do {
+        try await start()
+        bodyResult = await Task { try await body() }.result
+    } catch {
+        bodyResult = .failure(error)
+    }
+    let stopped = await stop()
+    #expect(stopped, "monitor cleanup did not complete within its deadline")
     _ = try bodyResult.get()
 }
 
@@ -94,7 +101,7 @@ struct EDRMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = EDRMonitor(pollInterval: 60)
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -110,7 +117,7 @@ struct ClipboardMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = ClipboardMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -123,7 +130,7 @@ struct USBMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = USBMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -136,7 +143,7 @@ struct MCPMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = MCPMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -149,7 +156,7 @@ struct NetworkCollectorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let collector = NetworkCollector()
-        try await withStartedMonitor(start: { await collector.start() }, stop: { _ = await collector.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await collector.start() }, stop: { await collector.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -162,7 +169,7 @@ struct SystemPolicyMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = SystemPolicyMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -220,7 +227,7 @@ struct SDRDeviceMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = SDRDeviceMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -233,7 +240,7 @@ struct EventTapMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = EventTapMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -246,7 +253,7 @@ struct FSEventsCollectorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let collector = FSEventsCollector()
-        try await withStartedMonitor(start: { await collector.start() }, stop: { _ = await collector.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await collector.start() }, stop: { await collector.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -259,7 +266,7 @@ struct TCCMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = TCCMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }

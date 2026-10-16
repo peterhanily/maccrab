@@ -300,32 +300,30 @@ struct OTLPReceiverLoopbackTests {
 
     @Test("Receiver starts only once; second start throws .alreadyRunning")
     func doubleStartThrows() async throws {
-        // Use a high random port to avoid colliding with anything else
-        // running on the dev host. Bind failure is itself a test-only
-        // failure mode, so we tolerate (re-throw) it explicitly.
+        // Keep the real native bind/readiness contract. A collision or any
+        // other startup error fails after bounded cleanup, never silently
+        // passes without reaching the double-start assertions.
         let port = UInt16.random(in: 49152...65500)
         let receiver = OTLPReceiver(port: port)
-        do {
-            try await receiver.start()
-        } catch {
-            // Bind failure on a random port is rare but legal in CI;
-            // the rest of this test depends on a successful first bind,
-            // so we treat it as inconclusive rather than a fail.
-            return
+        try await withStartedMonitor(start: { try await receiver.start() }, stop: {
+            let shutdown = await receiver.stop(joinTimeoutSeconds: 1.0)
+            #expect(shutdown.activeListeners == 0)
+            #expect(shutdown.readyListeners == 0)
+            #expect(shutdown.listenersConserved)
+            #expect(shutdown.connectionsConserved)
+            #expect(shutdown.bodyTasksConserved)
+            #expect(shutdown.callbackTasksConserved)
+            return shutdown.cleanlyStopped
+        }) {
+            #expect(await receiver.isRunning)
+            await #expect(throws: OTLPReceiverError.alreadyRunning) {
+                try await receiver.start()
+            }
         }
-        await #expect(throws: OTLPReceiverError.alreadyRunning) {
-            try await receiver.start()
-        }
-        let shutdown = await receiver.stop(joinTimeoutSeconds: 1.0)
+        let shutdown = await receiver.lifecycleSnapshot()
         #expect(shutdown.cleanlyStopped)
         #expect(shutdown.listenersAccepted == 1)
         #expect(shutdown.listenersCompleted == 1)
-        #expect(shutdown.activeListeners == 0)
-        #expect(shutdown.readyListeners == 0)
-        #expect(shutdown.listenersConserved)
-        #expect(shutdown.connectionsConserved)
-        #expect(shutdown.bodyTasksConserved)
-        #expect(shutdown.callbackTasksConserved)
     }
 
     @Test("Initial metrics are all zero")

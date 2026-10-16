@@ -221,6 +221,12 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
             : current.union(displayed)
     }
 
+    /// Same subset semantics as a displayed-ID set, without allocating one.
+    /// An empty table is never checked; off-screen selections are irrelevant.
+    static func allDisplayedSelected(items: [Item], selected: Set<Item.ID>) -> Bool {
+        !items.isEmpty && items.allSatisfy { selected.contains($0.id) }
+    }
+
     private var isMulti: Bool { multiSelection != nil }
 
     private func isChecked(_ item: Item) -> Bool {
@@ -228,8 +234,8 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
     }
 
     private var allDisplayedChecked: Bool {
-        guard let m = multiSelection, !displayCache.isEmpty else { return false }
-        return Set(displayCache.map(\.id)).isSubset(of: m.wrappedValue)
+        guard let m = multiSelection else { return false }
+        return Self.allDisplayedSelected(items: displayCache, selected: m.wrappedValue)
     }
 
     private func toggleCheck(_ item: Item) {
@@ -348,18 +354,19 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
     }
 
     private var headerRow: some View {
-        HStack(spacing: 0) {
+        let allChecked = allDisplayedChecked
+        return HStack(spacing: 0) {
             if isMulti {
                 Button { toggleSelectAllDisplayed() } label: {
-                    Image(systemName: allDisplayedChecked ? "checkmark.square.fill" : "square")
-                        .foregroundStyle(allDisplayedChecked ? V2Theme.brand : V2Theme.mutedText)
+                    Image(systemName: allChecked ? "checkmark.square.fill" : "square")
+                        .foregroundStyle(allChecked ? V2Theme.brand : V2Theme.mutedText)
                         .scaledSystem(14)
                         .frame(width: 36)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help(allDisplayedChecked ? "Deselect all rows" : "Select all rows")
-                .accessibilityLabel(allDisplayedChecked ? "Deselect all rows" : "Select all rows")
+                .help(allChecked ? "Deselect all rows" : "Select all rows")
+                .accessibilityLabel(allChecked ? "Deselect all rows" : "Select all rows")
             }
             ForEach(columns.indices, id: \.self) { idx in
                 let col = columns[idx]

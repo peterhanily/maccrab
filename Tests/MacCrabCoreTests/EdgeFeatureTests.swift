@@ -196,7 +196,7 @@ struct BrowserExtensionMonitorTests {
     func lifecycle() async {
         let monitor = BrowserExtensionMonitor(pollInterval: 999)
         await monitor.start()
-        await monitor.stop()
+        #expect(await monitor.stopAndJoin(deadline: 2.0))
     }
 }
 
@@ -279,7 +279,7 @@ struct UltrasonicMonitorTests {
     func lifecycle() async {
         let monitor = UltrasonicMonitor(pollInterval: 9999)
         await monitor.start()
-        await monitor.stop()
+        #expect(await monitor.stopAndJoin(deadline: 2.0))
     }
 
     @Test("Double start is idempotent")
@@ -287,7 +287,7 @@ struct UltrasonicMonitorTests {
         let monitor = UltrasonicMonitor(pollInterval: 9999)
         await monitor.start()
         await monitor.start()  // Should not crash or spawn extra tasks
-        await monitor.stop()
+        #expect(await monitor.stopAndJoin(deadline: 2.0))
     }
 
     @Test("Events stream is accessible as nonisolated property")

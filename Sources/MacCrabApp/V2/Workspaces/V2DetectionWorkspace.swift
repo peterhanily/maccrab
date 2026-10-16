@@ -36,6 +36,27 @@ func aiToolRollup(_ sessions: [AgentSessionSnapshot]) -> [AIToolRollupRow] {
         .sorted { ($0.events, $0.llmCalls, $0.tool) > ($1.events, $1.llmCalls, $1.tool) }
 }
 
+/// Presentation-only totals for the loaded population, independent of search.
+/// Keep catalog membership and all row counts exactly as the previous separate
+/// filters/reduce, but visit each row once without intermediate arrays.
+struct V2DetectionRuleStatistics {
+    private(set) var builtinCount = 0
+    private(set) var sigmaCount = 0
+    private(set) var enabled = 0
+    private(set) var custom = 0
+    private(set) var firedRecently = 0
+
+    init(_ rules: [V2MockRule]) {
+        for rule in rules {
+            if BuiltinRuleCatalog.byId[rule.id] != nil { builtinCount += 1 }
+            else { sigmaCount += 1 }
+            if rule.isEnabled { enabled += 1 }
+            if rule.isCustom { custom += 1 }
+            firedRecently += rule.firesLastWeek
+        }
+    }
+}
+
 public struct V2DetectionWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
@@ -608,25 +629,21 @@ public struct V2DetectionWorkspace: View {
         // its two distinct sources: Sigma-compatible rules (single-event YAML
         // + sequence + graph) vs the hardcoded maccrab.* built-in detections,
         // identified by membership in BuiltinRuleCatalog.
-        let builtinCount = rules.filter { BuiltinRuleCatalog.byId[$0.id] != nil }.count
-        let sigmaCount = rules.count - builtinCount
-        let enabled = rules.filter { $0.isEnabled }.count
-        let custom = rules.filter { $0.isCustom }.count
-        let firedRecently = rules.reduce(0) { $0 + $1.firesLastWeek }
+        let stats = V2DetectionRuleStatistics(rules)
         let currentTelemetry = presentation.isCurrent(for: presentationIdentity)
             && state.provider.ruleTelemetryContext?.current == true
         return HStack(spacing: 12) {
-            metricCard(title: "Rules loaded", value: "\(sigmaCount)",
+            metricCard(title: "Rules loaded", value: "\(stats.sigmaCount)",
                        trend: rules.isEmpty ? "no rules"
-                            : "+\(builtinCount) built-in · \(enabled) enabled",
+                            : "+\(stats.builtinCount) built-in · \(stats.enabled) enabled",
                        trendKind: rules.isEmpty ? .neutral : .info,
                        icon: "shield.lefthalf.filled", iconColor: V2Theme.dataAccent)
-            metricCard(title: "Custom rules", value: "\(custom)",
-                       trend: custom == 0 ? "none yet" : "user-authored",
+            metricCard(title: "Custom rules", value: "\(stats.custom)",
+                       trend: stats.custom == 0 ? "none yet" : "user-authored",
                        trendKind: .neutral,
                        icon: "wrench.and.screwdriver.fill", iconColor: V2Theme.aiAccent)
             metricCard(title: String(localized: "rules.matches.boot", defaultValue: "Recorded matches (boot)"),
-                       value: currentTelemetry ? "\(firedRecently)" : "—",
+                       value: currentTelemetry ? "\(stats.firedRecently)" : "—",
                        trend: currentTelemetry
                             ? String(localized: "rules.matches.scope", defaultValue: "Single-event rule telemetry")
                             : String(localized: "rules.coverage.unknown", defaultValue: "Coverage unknown"),
