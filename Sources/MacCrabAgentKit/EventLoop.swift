@@ -673,8 +673,9 @@ enum EventLoop {
             var enrichedEvent = await state.enricher.enrich(event)
             stageAwaits.record(.enricher, startedAt: stageStartedNanos)
 
-            // YARA enrichment for file events (Phase 3)
-            if enrichedEvent.eventCategory == .file {
+            // Skip a no-op actor hop for non-creation file events. The shared
+            // predicate does not replace YARA's actor-owned availability gates.
+            if YARAEnricher.isEligibleEvent(enrichedEvent) {
                 enrichedEvent = await state.yaraEnricher.enrich(enrichedEvent)
             }
             // Network consumers below must all see the same recovered hostname.

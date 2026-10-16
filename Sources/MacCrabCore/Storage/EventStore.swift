@@ -6303,11 +6303,13 @@ public actor EventStore {
     private var journalIndexStageNanoseconds: [String: UInt64] = [:]
     private var journalIndexStagesComplete = false
 
-    /// Refresh cost, for the heartbeat and for tests.
+    /// Refresh cost and current locator ownership, sampled on this actor without
+    /// rebuilding the index. Locator capacity is not part of pipeline leases.
     public func journalIndexRefreshDiagnostics() -> (
         refreshes: UInt64, slowRefreshes: UInt64, lastNanoseconds: UInt64,
         fullRebuilds: UInt64, appendRefreshes: UInt64,
-        stagesNanoseconds: [String: UInt64], stagesComplete: Bool
+        stagesNanoseconds: [String: UInt64], stagesComplete: Bool,
+        locatorAllocatedBytes: Int64
     ) {
         (
             journalIndexRefreshesTotal,
@@ -6316,7 +6318,8 @@ public actor EventStore {
             journalIndexFullRebuildsTotal,
             journalIndexAppendRefreshesTotal,
             journalIndexStageNanoseconds,
-            journalIndexStagesComplete
+            journalIndexStagesComplete,
+            journalLocatorAllocatedBytes()
         )
     }
 

@@ -176,6 +176,15 @@ public actor YARAEnricher {
 
     // MARK: - Enrichment
 
+    /// Pure event-shape gate shared with callers that can avoid a no-op actor
+    /// hop. Eligibility is not availability: configuration, trusted paths and
+    /// all scan limits remain actor-owned checks in ``enrich(_:)``.
+    public nonisolated static func isEligibleEvent(_ event: Event) -> Bool {
+        event.eventCategory == .file
+            && (event.eventAction == "create" || event.eventType == .creation)
+            && event.file != nil
+    }
+
     /// Enrich a file event with YARA scan results.
     ///
     /// The event is scanned only when **all** of the following conditions hold:
@@ -194,8 +203,7 @@ public actor YARAEnricher {
         guard enabled else { return event }
 
         // Gate: must be a file-creation event with a file payload.
-        guard event.eventCategory == .file,
-              event.eventAction == "create" || event.eventType == .creation,
+        guard Self.isEligibleEvent(event),
               let fileInfo = event.file else {
             return event
         }

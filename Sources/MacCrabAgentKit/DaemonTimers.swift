@@ -4986,6 +4986,9 @@ enum DaemonTimers {
                     Int64(clamping: journalIndexDiagnostics.appendRefreshes),
                 "last_stages_ns": journalIndexDiagnostics.stagesNanoseconds,
                 "last_stages_complete": journalIndexDiagnostics.stagesComplete,
+                // Fixed-width locator backing capacity, not total heap/RSS.
+                // Included in the same actor snapshot as the refresh counters.
+                "locator_allocated_bytes": journalIndexDiagnostics.locatorAllocatedBytes,
             ]
 
             // v1.22.0 (item 6, measurement): per-owner live-memory pressure.

@@ -2588,41 +2588,38 @@ public actor SequenceEngine {
         for ruleId in candidateRuleIds {
             guard let rule = rules[ruleId], rule.enabled else { continue }
 
-            // Filter at STEP granularity. Replaying every step of a rule merely
-            // because one step gained evidence can duplicate an independent
-            // seed/advance mutation for this same event.
-            let eligibleSteps = rule.steps.filter { step in
-                guard step.logsourceCategory == category else { return false }
-                guard let dependencyFilter else { return true }
-                let stepDependencyMask = heavyDependencyMasks[ruleId]?[step.id]
+            // Preserve rule-step order and STEP-granularity replay eligibility,
+            // but materialize only the matching plan, not an intermediate array
+            // of eligible steps. A miss allocates no step array, and a replay
+            // resolves each relevant step's dependency mask only once.
+            let ruleDependencyMasks = heavyDependencyMasks[ruleId]
+            var matchingSteps: [SequenceStep] = []
+            var countedEvaluation = false
+            for step in rule.steps where step.logsourceCategory == category {
+                let stepDependencyMask = ruleDependencyMasks?[step.id]
                     ?? HeavyEnrichmentRuleCoverage.dependencyMask(
                         predicates: step.predicates,
                         conditionTree: step.conditionTree
                     )
-                return !stepDependencyMask.intersection(dependencyFilter).isEmpty
-            }
-            guard !eligibleSteps.isEmpty else { continue }
+                if let dependencyFilter,
+                   stepDependencyMask.intersection(dependencyFilter).isEmpty { continue }
 
-            // corr-detection #272: this rule was dispatched for evaluation
-            // (its category matched this event and it is enabled). Count it so a
-            // sequence rule that is loaded+enabled but never actually exercised
-            // is distinguishable from one that fires.
-            ruleStats[ruleId, default: SequenceRuleStats(ruleId: ruleId)].evaluationCount &+= 1
-
-            // Find which steps of this rule match the event's category AND predicates.
-            let matchingSteps = eligibleSteps.filter { step in
-                let stepDependencyMask = heavyDependencyMasks[ruleId]?[step.id]
-                    ?? HeavyEnrichmentRuleCoverage.dependencyMask(
-                        predicates: step.predicates,
-                        conditionTree: step.conditionTree
-                    )
-                return evaluateStepPredicates(
+                // Count an enabled, eligible rule exactly once, even when all
+                // eligible steps fail predicates or have unresolved evidence.
+                // Unrelated component replay must not count or seed this rule.
+                if !countedEvaluation {
+                    ruleStats[ruleId, default: SequenceRuleStats(ruleId: ruleId)].evaluationCount &+= 1
+                    countedEvaluation = true
+                }
+                if evaluateStepPredicates(
                     step,
                     against: event,
                     dependencyMask: stepDependencyMask,
                     unresolvedMask: unresolvedMask,
                     memo: fieldMemo
-                )
+                ) {
+                    matchingSteps.append(step)
+                }
             }
 
             guard !matchingSteps.isEmpty else { continue }

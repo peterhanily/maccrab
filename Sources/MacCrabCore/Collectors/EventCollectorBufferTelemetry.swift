@@ -84,7 +84,10 @@ public enum EventPipelineSource: Int, CaseIterable, Sendable, Hashable {
 
 /// Source identity must survive inside the downstream bounded stream because
 /// `.bufferingNewest` returns the OLD evicted element, not the new offer.
-public struct EventPipelineEnvelope: Sendable {
+/// Immutable reference slots avoid retaining an inline Event-sized allocation
+/// for every high-water queue slot after a burst drains. The Event remains a
+/// value: producer/consumer mutation of a copy cannot mutate this payload.
+public final class EventPipelineEnvelope: Sendable {
     public let source: EventPipelineSource
     public let event: Event
 

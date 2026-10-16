@@ -54,6 +54,9 @@ struct JournalIndexRefreshCostTests {
         _ = try await store.exactEventsSnapshot(since: .distantPast, limit: 10)
         let first = await store.journalIndexRefreshDiagnostics()
         #expect(first.refreshes > 0, "a read must record an index refresh")
+        let allocated = await store.journalLocatorAllocatedBytes()
+        #expect(first.locatorAllocatedBytes == allocated)
+        #expect(first.locatorAllocatedBytes > 0)
 
         _ = try await store.exactEventsSnapshot(since: .distantPast, limit: 10)
         let second = await store.journalIndexRefreshDiagnostics()
@@ -62,11 +65,35 @@ struct JournalIndexRefreshCostTests {
             "every read records its refresh cost, including the cheap early-return path"
         )
         #expect(second.lastNanoseconds > 0, "the measured duration must be retained")
+        #expect(second.locatorAllocatedBytes == first.locatorAllocatedBytes,
+                "a warm read must report the same retained locator capacity")
     }
 
     @Test("the slow threshold is a named constant, not a magic number")
     func slowThresholdIsNamed() {
         #expect(EventStore.journalIndexSlowRefreshNanoseconds == 250_000_000)
+    }
+
+    @Test("ownership sampling does not build or refresh the journal index")
+    func ownershipSamplingIsReadOnly() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("maccrab-idxownership-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = try EventStore(directory: dir.path)
+        let before = await store.journalIndexRefreshDiagnostics()
+        let allocated = await store.journalLocatorAllocatedBytes()
+        let after = await store.journalIndexRefreshDiagnostics()
+        #expect(before.locatorAllocatedBytes == allocated)
+        #expect(after.locatorAllocatedBytes == allocated)
+        #expect(allocated >= 0)
+        #expect(after.refreshes == before.refreshes)
+        #expect(after.fullRebuilds == before.fullRebuilds)
+        #expect(after.appendRefreshes == before.appendRefreshes)
+        #expect(after.lastNanoseconds == before.lastNanoseconds)
+        #expect(after.stagesNanoseconds == before.stagesNanoseconds)
+        #expect(after.stagesComplete == before.stagesComplete)
     }
 
     @Test("a small store does not trip the slow-refresh counter")
