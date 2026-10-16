@@ -6295,6 +6295,8 @@ public actor EventStore {
     /// signature: before rc.45 a reader on an expiring journal took the full
     /// rebuild essentially every time, and nothing measured it.
     private var journalIndexFullRebuildsTotal: UInt64 = 0
+    /// Incremental refreshes, including expiry-only compaction with zero
+    /// appended blocks. Keep the existing diagnostic field name for readers.
     private var journalIndexAppendRefreshesTotal: UInt64 = 0
     private var journalIndexLastRefreshNanoseconds: UInt64 = 0
     private var journalIndexLastSlowLogUptimeNanoseconds: UInt64 = 0
@@ -6495,21 +6497,26 @@ public actor EventStore {
         //
         // Now an advanced minimum is handled by evicting the expired entries
         // (`compactJournalIndex(below:)`) and continuing with the append scan.
-        // Appendability is judged by the tail advancing, which is the property
-        // the scan actually depends on — `scanLowerBound` is
-        // `journalIndexedMaximumBlockID`. The reconciliation below still holds
-        // because the compaction recomputes `journalIndexedBlockCount` from the
-        // surviving blocks, so `blockCount - journalIndexedBlockCount` is
-        // exactly the number of appended blocks the scan will see.
+        // A stable tail with an advanced minimum is also eligible: expiry may
+        // commit without an append. That new case must reconcile the complete
+        // surviving count and both boundaries after compaction; an interior
+        // removal or uncertain survivor set instead requires a full rebuild.
+        // The existing bounded tail scan still runs (zero rows for expiry-only)
+        // and its scanned-count/topology checks remain authoritative.
+        let minimumAdvanced = (minimumBlockID ?? 0)
+            > (journalIndexedMinimumBlockID ?? 0)
+        let expiryOnlyRefresh = minimumAdvanced
+            && maximumBlockID == journalIndexedMaximumBlockID
         var appendOnlyRefresh = journalIndexLoaded
             && journalIndexedBlockCount > 0
             && !journalIndexOverflowed
             && (minimumBlockID ?? 0) >= (journalIndexedMinimumBlockID ?? 0)
-            && (maximumBlockID ?? 0) > (journalIndexedMaximumBlockID ?? 0)
+            && ((maximumBlockID ?? 0) > (journalIndexedMaximumBlockID ?? 0)
+                || expiryOnlyRefresh)
         if appendOnlyRefresh,
            let minimumBlockID,
-           minimumBlockID > (journalIndexedMinimumBlockID ?? 0) {
-            // Expiry happened alongside the appends. Evict, then continue; if
+           minimumAdvanced {
+            // Expiry happened, with or without appends. Evict, then continue; if
             // the index cannot be compacted safely, fall back to a full rebuild.
             if !compactJournalIndex(below: minimumBlockID) {
                 appendOnlyRefresh = false
@@ -6519,6 +6526,14 @@ public actor EventStore {
                 // lower bound that no longer exists.
                 appendOnlyRefresh = false
             }
+        }
+        if appendOnlyRefresh, expiryOnlyRefresh,
+           (journalIndexedBlockCount != blockCount
+            || journalIndexedMinimumBlockID != minimumBlockID
+            || journalIndexedMaximumBlockID != maximumBlockID) {
+            // A raised minimum alone does not prove all removals formed a
+            // prefix. Never reuse locators for an unaccounted interior gap.
+            appendOnlyRefresh = false
         }
         if !appendOnlyRefresh {
             journalBaseLocations.removeAll(keepingCapacity: false)
@@ -10755,24 +10770,28 @@ public actor EventStore {
         }
     }
 
+    // Keep ownership selection on the small schema inventory. The outer IN
+    // supplies DBSTAT's name-equality constraint, so unrelated B-trees are not
+    // walked. Preserve LIKE semantics (including its underscore wildcard) and
+    // use set membership so an index matching both clauses is charged once.
+    nonisolated static let projectionPhysicalBytesSQL = """
+        SELECT COALESCE(SUM(pgsize), 0)
+        FROM dbstat
+        WHERE name IN (
+            SELECT name FROM sqlite_master
+            WHERE name = 'events'
+               OR name LIKE 'events_fts%'
+               OR (type = 'index' AND tbl_name = 'events')
+        )
+        """
+
     /// Exact live allocation owned by the interactive projection: the content
     /// table, every index whose tbl_name is events, and all full-detail FTS5
     /// shadow tables/indexes. Freelist pages are not projection-owned and are
     /// charged separately by the whole-family admission boundary.
     private func projectionPhysicalBytes() throws -> Int64 {
         projectionDBStatProbeCount &+= 1
-        let statement = try prepare(
-            """
-            SELECT COALESCE(SUM(pgsize), 0)
-            FROM dbstat
-            WHERE name = 'events'
-               OR name LIKE 'events_fts%'
-               OR name IN (
-                    SELECT name FROM sqlite_master
-                    WHERE type = 'index' AND tbl_name = 'events'
-               )
-            """
-        )
+        let statement = try prepare(Self.projectionPhysicalBytesSQL)
         defer { sqlite3_finalize(statement) }
         guard sqlite3_step(statement) == SQLITE_ROW else {
             throw EventStoreError.stepFailed(

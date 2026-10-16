@@ -853,13 +853,17 @@ public actor RollingCausalGraph {
         }
         let processNode = makeProcessNode(from: event.process, agent: event.agent)
         var processEntity = try processNode.toEntity(source: "rolling_graph")
+        // One immutable event, one pure semantic classification. Both the
+        // suppression decision and retained file node must use the same kind;
+        // no path result survives this call or crosses an enrichment replay.
+        let observedFileKind = event.file.map { Self.inferFileKind(path: $0.path) }
 
         // High-rate ordinary file callbacks used to suppress their file node
         // and edge but still upsert the same process entity once per event.
         // Suppress that last physical row only when the event carries neither
         // a graph-relevant file nor any independent anchor/lineage evidence.
-        if !probe, event.category == .file, let file = event.file {
-            let kind = Self.inferFileKind(path: file.path)
+        if !probe, event.category == .file, let file = event.file,
+           let kind = observedFileKind {
             let processCanAnchor = AnchorDetector.processOnlyAnchor(
                 processNode: processNode,
                 policy: policy
@@ -960,8 +964,7 @@ public actor RollingCausalGraph {
         // 4. File event.
         var fileNode: FileNode?
         var persistenceNode: PersistenceNode?
-        if let fileObs = event.file {
-            let inferredKind = Self.inferFileKind(path: fileObs.path)
+        if let fileObs = event.file, let inferredKind = observedFileKind {
             if Self.fileObservationIsRelevant(
                 path: fileObs.path,
                 kind: inferredKind,

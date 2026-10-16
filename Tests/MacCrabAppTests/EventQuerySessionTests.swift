@@ -180,9 +180,15 @@ struct EventQuerySessionTests {
         #expect(session.isLoading)
         if cancelOld { pending.cancel() }
         reader.result = .init(events: [newest], nextCursor: nil)
-        await session.loadEvents(query("new"))
+        let previousGeneration = session.readiness.generation
+        let replacement = Task { await session.loadEvents(query("new")) }
+        defer { replacement.cancel() }
+        let admitted = await waitUntil { session.readiness.generation != previousGeneration }
+        try #require(admitted)
+        // The bounded lane cannot start the new backend until the old read
+        // actually returns, even when its cancellation is noncooperative.
         reader.finish("delayed", with: .init(events: [old], nextCursor: nil))
-        await pending.value
+        await pending.value; await replacement.value
         #expect(session.events.map(\.id) == [newest.id])
         #expect(!session.isLoading)
     }
@@ -199,13 +205,19 @@ struct EventQuerySessionTests {
         defer { pending.cancel(); reader.releasePending() }
         let suspended = await waitUntil { reader.pendingPage != nil }
         try #require(suspended)
+        var replacementTask: Task<Void, Never>?
+        defer { replacementTask?.cancel() }
         if replaceQuery {
             reader.result = .init(events: [replacement], nextCursor: nil)
-            await session.loadEvents(query("replacement"))
+            let previousGeneration = session.readiness.generation
+            replacementTask = Task { await session.loadEvents(query("replacement")) }
+            let admitted = await waitUntil { session.readiness.generation != previousGeneration }
+            try #require(admitted)
         } else { pending.cancel() }
         reader.pendingPage?.resume(returning: .init(events: [older], nextCursor: nil))
         reader.pendingPage = nil
         await pending.value
+        await replacementTask?.value
         #expect(session.events.map(\.id) == [replaceQuery ? replacement.id : original.id])
         #expect(!session.isLoadingOlderEvents)
     }

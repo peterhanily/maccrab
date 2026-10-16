@@ -106,25 +106,30 @@ struct EventStreamQueryPolicyTests {
     @Test("Exact-only deactivation preserves independent summary reads; full invalidation does not",
           arguments: [false, true])
     func summaryGenerationsAreIndependent(fullInvalidation: Bool) async {
-        let reader = Reader()
-        let aggregateGate = DashboardReadTestGate()
-        let histogramGate = DashboardReadTestGate()
-        reader.aggregateGate = aggregateGate
-        reader.histogramGate = histogramGate
-        defer { aggregateGate.release(); histogramGate.release() }
-        let session = EventQuerySession(reader: reader)
-        let aggregates = Task { await session.fetchAggregates(sinceDay: "2023-11-14", category: nil) }
-        let histogram = Task { await session.fetchHistogramBins(spanSeconds: 60, stepSeconds: 10,
-            endingAt: Date(timeIntervalSince1970: 1_700_000_000), category: nil) }
-        await aggregateGate.waitUntilPaused()
-        await histogramGate.waitUntilPaused()
-        if fullInvalidation { session.invalidatePendingReads() }
-        else { session.deactivateExactPresentation() }
-        aggregateGate.release()
-        histogramGate.release()
-        #expect(await aggregates.value.count == (fullInvalidation ? 0 : 1))
-        #expect(await histogram.value.count == (fullInvalidation ? 0 : 1))
-        #expect(session.eventHistogramCoverageWarning == (fullInvalidation ? nil : "synthetic histogram coverage"))
+        // Summary modes deliberately share one backend lane; test each mode's
+        // independent presentation receipt without demanding overlapping work.
+        for useHistogram in [false, true] {
+            let reader = Reader(), gate = DashboardReadTestGate()
+            if useHistogram { reader.histogramGate = gate }
+            else { reader.aggregateGate = gate }
+            defer { gate.release() }
+            let session = EventQuerySession(reader: reader)
+            let result = Task { () -> Int in
+                if useHistogram {
+                    return await session.fetchHistogramBins(spanSeconds: 60, stepSeconds: 10,
+                        endingAt: Date(timeIntervalSince1970: 1_700_000_000), category: nil).count
+                }
+                return await session.fetchAggregates(sinceDay: "2023-11-14", category: nil).count
+            }
+            await gate.waitUntilPaused()
+            if fullInvalidation { session.invalidatePendingReads() }
+            else { session.deactivateExactPresentation() }
+            gate.release()
+            #expect(await result.value == (fullInvalidation ? 0 : 1))
+            if useHistogram {
+                #expect(session.eventHistogramCoverageWarning == (fullInvalidation ? nil : "synthetic histogram coverage"))
+            }
+        }
     }
 
     @Test("Only a subsequent nonempty text edit is debounced")

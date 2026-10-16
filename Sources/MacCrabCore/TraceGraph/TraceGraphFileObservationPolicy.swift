@@ -94,12 +94,13 @@ public enum TraceGraphFileObservationPolicy {
         untrustedContent: Bool
     ) -> Bool {
         if untrustedContent { return true }
-        if let path, ESCollector.isCredentialReadPath(path) { return true }
         switch kind {
         case .credentialFile, .launchAgent, .launchDaemon, .loginItem, .shellProfile:
             return true
         case .script, .binary, .plist, .browserDownload, .packageFile, .projectFile, .unknown:
-            return false
+            // Only otherwise-irrelevant kinds need the broader sensitive-OPEN
+            // allowlist. This is the same pure Boolean decision as before.
+            return path.map { ESCollector.isCredentialReadPath($0) } ?? false
         }
     }
 
@@ -116,11 +117,11 @@ public enum TraceGraphFileObservationPolicy {
         hasProcessLineage: Bool,
         processCanAnchor: Bool
     ) -> Bool {
-        !isRelevant(path: path, kind: kind, untrustedContent: untrustedContent)
-            && !hasAgent
+        !hasAgent
             && !hasNetwork
             && !hasProcessLineage
             && !processCanAnchor
+            && !isRelevant(path: path, kind: kind, untrustedContent: untrustedContent)
     }
 
     /// Necessary (not sufficient) raw-callback conditions for EventLoop to

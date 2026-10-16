@@ -38,7 +38,8 @@ final class EventQuerySession: ObservableObject {
         let coverageWarning: String?
     }
 
-    /// A window retains one presentation, not views, tasks or database leases.
+    /// A window retains one presentation, not views or database leases. At most
+    /// two bounded backend flights can finish across ordinary page navigation.
     /// The time-range label is separate from its moving `since` bound.
     struct PresentationKey: Equatable {
         let range: String
@@ -89,6 +90,45 @@ final class EventQuerySession: ObservableObject {
     private var presentationKey: PresentationKey?
     private var lastSuccessAt: Date?
     private let now: () -> Date
+    private struct ExactReadKey: Equatable {
+        let epoch: UInt64
+        let query: Query
+        let limit: Int
+        let cursor: PaginationCursor?
+        let presentation: PresentationKey?
+
+        func mayFinishBefore(_ next: Self) -> Bool {
+            epoch == next.epoch && presentation == next.presentation
+                && query.filter == next.query.filter && query.until == next.query.until
+                && query.category == next.query.category
+                && query.acceptsIncremental == next.query.acceptsIncremental
+                && next.query.since >= query.since
+        }
+    }
+    private enum AuxiliaryReadKey: Equatable {
+        case aggregates(epoch: UInt64, sinceDay: String, category: MacCrabCore.EventCategory?)
+        case histogram(epoch: UInt64, span: TimeInterval, step: Int, end: Date,
+                       category: MacCrabCore.EventCategory?)
+
+        func mayFinishBefore(_ next: Self) -> Bool {
+            switch (self, next) {
+            case let (.aggregates(a, day, category), .aggregates(b, nextDay, nextCategory)):
+                return a == b && day == nextDay && category == nextCategory
+            case let (.histogram(a, span, step, end, category),
+                      .histogram(b, nextSpan, nextStep, nextEnd, nextCategory)):
+                return a == b && span == nextSpan && step == nextStep
+                    && category == nextCategory && nextEnd >= end
+            default: return false
+            }
+        }
+    }
+    private enum AuxiliaryResult {
+        case aggregates([EventStore.AggregateRow]?)
+        case histogram(Histogram?)
+    }
+    private let exactReads = EventReadFlight<ExactReadKey, Page?>()
+    private let auxiliaryReads = EventReadFlight<AuxiliaryReadKey, AuxiliaryResult>()
+    private var acceptsBackendReads = true
     static let retainedRowLimit = 500
     static let retainedPayloadLimit = 4 * 1024 * 1024
     static let retainedLifetime: TimeInterval = 60
@@ -99,6 +139,39 @@ final class EventQuerySession: ObservableObject {
         source = reader.engineSource
         sourceEpoch = reader.eventQueryEpoch
     }
+
+    /// Actual window close/background, never ordinary workspace disappearance.
+    /// Existing Core cancellation and reader retirement remain authoritative.
+    func cancelBackendReads() {
+        acceptsBackendReads = false
+        exactReads.cancel()
+        auxiliaryReads.cancel()
+        invalidatePendingReads()
+    }
+
+    func resumeBackendReads() {
+        guard !acceptsBackendReads else { return }
+        acceptsBackendReads = true
+        synchronizeSourceEpoch()
+        // Visible EventStream restarts through its existing query task. There
+        // is no hidden read, timer or task spawned by this method.
+        retryTick &+= 1
+    }
+
+    func reconcileBackendContext() {
+        synchronizeSourceEpoch()
+        if source != reader.engineSource || reader.eventReadsDeferred {
+            exactReads.cancel()
+            auxiliaryReads.cancel()
+            invalidatePendingReads()
+        }
+    }
+
+    #if DEBUG
+    var backendWaitersForTesting: (exact: Int, auxiliary: Int) {
+        (exactReads.waiterCountForTesting, auxiliaryReads.waiterCountForTesting)
+    }
+    #endif
 
     /// A detached database read may outlive the requesting view. Invalidate its
     /// receipt as well as cancelling the SwiftUI task that requested it.
@@ -158,9 +231,10 @@ final class EventQuerySession: ObservableObject {
     }
 
     /// The exact-row table is not presented in aggregate mode. Retire only its
-    /// query/page receipts and presentation, not the independent aggregate or
-    /// histogram operation (whose SwiftUI task may already have started).
+    /// query/page receipts, backend and presentation, not the independent
+    /// aggregate operation (whose SwiftUI task may already have started).
     func deactivateExactPresentation() {
+        exactReads.cancel()
         queryGeneration &+= 1
         pageGeneration &+= 1
         query = nil
@@ -182,6 +256,8 @@ final class EventQuerySession: ObservableObject {
 
     func synchronizeSourceEpoch() {
         guard sourceEpoch != reader.eventQueryEpoch else { return }
+        exactReads.cancel()
+        auxiliaryReads.cancel()
         invalidatePendingReads()
         sourceEpoch = reader.eventQueryEpoch
         presentationResetTick &+= 1
@@ -199,7 +275,7 @@ final class EventQuerySession: ObservableObject {
     }
 
     private func acceptsEpoch(_ epoch: UInt64) -> Bool {
-        !Task.isCancelled && epoch == sourceEpoch && epoch == reader.eventQueryEpoch
+        acceptsBackendReads && !Task.isCancelled && epoch == sourceEpoch && epoch == reader.eventQueryEpoch
             && source == reader.engineSource && !reader.eventReadsDeferred
     }
 
@@ -209,11 +285,16 @@ final class EventQuerySession: ObservableObject {
 
     func loadEvents(_ next: Query, limit: Int = 500, debounce: Bool = false,
                     isPresented: Bool = true, presentationKey nextKey: PresentationKey? = nil) async {
-        guard !Task.isCancelled else { return }
+        guard acceptsBackendReads, !Task.isCancelled else { return }
         guard isPresented else {
             deactivateExactPresentation()
             return
         }
+        // A true mode change, unlike workspace departure, invalidates the old
+        // aggregate operation even when the chart is hidden in the new mode.
+        auxiliaryReads.cancel { if case .aggregates = $0 { return true }; return false }
+        aggregateGeneration &+= 1
+        aggregateReadiness.invalidate()
         synchronizeSourceEpoch()
         let retainRows = canPresentCached(next, key: nextKey)
         queryGeneration &+= 1
@@ -257,7 +338,14 @@ final class EventQuerySession: ObservableObject {
                 if generation == queryGeneration { readiness.complete(.unavailable, for: readyTicket) }
                 return
             }
-            guard let page = try await reader.readEventQuery(next, limit: limit) else {
+            let readKey = ExactReadKey(epoch: epoch, query: next, limit: limit,
+                                       cursor: nil, presentation: nextKey)
+            let reader = reader
+            let result = try await exactReads.read(key: readKey,
+                cancelExisting: { !$0.mayFinishBefore(readKey) },
+                isCurrent: { [weak self] in self?.accepts(generation, epoch: epoch) == true },
+                operation: { [reader] in try await reader.readEventQuery(next, limit: limit) })
+            guard let page = result else {
                 if accepts(generation, epoch: epoch) {
                     retryNeeded = true
                     eventSearchCoverageWarning = "Event read is temporarily deferred. It will retry on the next refresh."
@@ -299,7 +387,17 @@ final class EventQuerySession: ObservableObject {
         isLoadingOlderEvents = true
         defer { if pageToken == pageGeneration { isLoadingOlderEvents = false } }
         do {
-            guard let page = try await reader.readOlderEventQuery(before: cursor, query: query, pageSize: pageSize),
+            let readKey = ExactReadKey(epoch: epoch, query: query, limit: pageSize,
+                                       cursor: cursor, presentation: presentationKey)
+            let reader = reader
+            let result = try await exactReads.read(key: readKey,
+                cancelExisting: { !$0.mayFinishBefore(readKey) },
+                isCurrent: { [weak self] in
+                    self?.accepts(generation, epoch: epoch) == true && self?.pageGeneration == pageToken
+                }, operation: { [reader] in
+                    try await reader.readOlderEventQuery(before: cursor, query: query, pageSize: pageSize)
+                })
+            guard let page = result,
                   accepts(generation, epoch: epoch), pageToken == pageGeneration else { return }
             let existing = Set(events.map(\.id))
             events.append(contentsOf: page.events.filter { !existing.contains($0.id) })
@@ -356,7 +454,8 @@ final class EventQuerySession: ObservableObject {
     }
 
     func fetchAggregates(sinceDay: String, category: MacCrabCore.EventCategory?) async -> [EventStore.AggregateRow] {
-        guard !Task.isCancelled else { return [] }
+        guard acceptsBackendReads, !Task.isCancelled else { return [] }
+        exactReads.cancel()
         synchronizeSourceEpoch()
         aggregateGeneration &+= 1
         let token = aggregateGeneration
@@ -369,7 +468,16 @@ final class EventQuerySession: ObservableObject {
             }
         }
         do {
-            let result = try await reader.readEventAggregates(sinceDay: sinceDay, category: category)
+            let key = AuxiliaryReadKey.aggregates(epoch: epoch, sinceDay: sinceDay, category: category)
+            let reader = reader
+            let value = try await auxiliaryReads.read(key: key,
+                cancelExisting: { !$0.mayFinishBefore(key) },
+                isCurrent: { [weak self] in
+                    self?.aggregateGeneration == token && self?.acceptsEpoch(epoch) == true
+                }, operation: { [reader] in
+                    .aggregates(try await reader.readEventAggregates(sinceDay: sinceDay, category: category))
+                })
+            guard case .aggregates(let result) = value else { throw CancellationError() }
             guard token == aggregateGeneration, acceptsEpoch(epoch) else { return [] }
             guard let rows = result else {
                 eventAggregateCoverageWarning = "Daily summaries are temporarily deferred."
@@ -391,7 +499,7 @@ final class EventQuerySession: ObservableObject {
 
     func fetchHistogramBins(spanSeconds: TimeInterval, stepSeconds: Int, endingAt: Date,
                             category: MacCrabCore.EventCategory?, isVisible: Bool = true) async -> [(Date, Int)] {
-        guard !Task.isCancelled else { return [] }
+        guard acceptsBackendReads, !Task.isCancelled else { return [] }
         synchronizeSourceEpoch()
         histogramGeneration &+= 1
         let token = histogramGeneration
@@ -401,10 +509,23 @@ final class EventQuerySession: ObservableObject {
         eventHistogramEffectiveUntil = nil
         // Hiding the chart also invalidates an in-flight read, so its old
         // coverage interval cannot return after the hidden task completes.
-        guard isVisible, !reader.eventReadsDeferred else { return [] }
+        guard isVisible, !reader.eventReadsDeferred else {
+            auxiliaryReads.cancel { if case .histogram = $0 { return true }; return false }
+            return []
+        }
         do {
-            guard let result = try await reader.readEventHistogram(spanSeconds: spanSeconds, stepSeconds: stepSeconds,
-                                                                  endingAt: endingAt, category: category),
+            let key = AuxiliaryReadKey.histogram(epoch: epoch, span: spanSeconds, step: stepSeconds,
+                                                end: endingAt, category: category)
+            let reader = reader
+            let value = try await auxiliaryReads.read(key: key,
+                cancelExisting: { !$0.mayFinishBefore(key) },
+                isCurrent: { [weak self] in
+                    self?.histogramGeneration == token && self?.acceptsEpoch(epoch) == true
+                }, operation: { [reader] in
+                    .histogram(try await reader.readEventHistogram(spanSeconds: spanSeconds,
+                        stepSeconds: stepSeconds, endingAt: endingAt, category: category))
+                })
+            guard case .histogram(let result) = value, let result,
                   token == histogramGeneration, acceptsEpoch(epoch) else { return [] }
             eventHistogramCoverageWarning = result.coverageWarning
             eventHistogramEffectiveSince = result.effectiveSince

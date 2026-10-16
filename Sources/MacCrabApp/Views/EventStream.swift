@@ -158,7 +158,7 @@ struct EventStream: View {
 
     /// Composite key forcing the .task(id:) to re-run on either input change.
     private var aggregateInputsKey: String {
-        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")|\(appState.eventReadsDeferred)|\(querySession.sourceEpoch)|\(aggregateRefreshTick)"
+        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")|\(appState.eventReadsDeferred)|\(querySession.sourceEpoch)|\(querySession.retryTick)|\(aggregateRefreshTick)"
     }
 
     /// `filterCategory` bridged to the Core enum so `loadEvents` can push

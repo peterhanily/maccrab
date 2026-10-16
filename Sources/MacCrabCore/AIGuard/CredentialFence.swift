@@ -231,13 +231,30 @@ public struct CredentialFence: Sendable {
         return owned.contains { path.contains($0) }
     }
 
-    /// Custom additional paths (user-configurable).
-    private let customPaths: [SensitivePath]
+    /// Configuration is immutable for this fence. Fold each pattern once,
+    /// retaining its original precedence and Foundation matching semantics.
+    /// The public SensitivePath representation remains unchanged.
+    private struct MatchingPath: Sendable {
+        let pattern: String
+        let type: CredentialType
+        let kind: MatchKind
+
+        init(_ source: SensitivePath) {
+            pattern = source.pattern.lowercased()
+            type = source.type
+            kind = source.kind
+        }
+    }
+
+    private static let defaultMatchingPaths = defaultPaths.map { MatchingPath($0) }
+    private let matchingPaths: [MatchingPath]
 
     // MARK: - Initialization
 
     public init(customPaths: [SensitivePath] = []) {
-        self.customPaths = customPaths
+        matchingPaths = customPaths.isEmpty
+            ? Self.defaultMatchingPaths
+            : Self.defaultMatchingPaths + customPaths.map { MatchingPath($0) }
     }
 
     // MARK: - Public API
@@ -245,12 +262,9 @@ public struct CredentialFence: Sendable {
     /// Check if a file path accesses sensitive credentials.
     /// Returns the credential type if it matches, nil if safe.
     public func checkAccess(filePath: String) -> CredentialType? {
-        if customPaths.isEmpty {
-            return Self.defaultCredentialType(filePath: filePath)
-        }
         return Self.matchCredential(
             filePath: filePath,
-            sensitivePaths: Self.defaultPaths + customPaths
+            sensitivePaths: matchingPaths
         )
     }
 
@@ -259,7 +273,7 @@ public struct CredentialFence: Sendable {
     /// Keeping this as the one implementation prevents a second credential
     /// allowlist from drifting as the built-in corpus evolves.
     static func defaultCredentialType(filePath: String) -> CredentialType? {
-        matchCredential(filePath: filePath, sensitivePaths: defaultPaths)
+        matchCredential(filePath: filePath, sensitivePaths: defaultMatchingPaths)
     }
 
     /// Broader privacy boundary for path-bearing AgentLineage snapshots.
@@ -293,7 +307,7 @@ public struct CredentialFence: Sendable {
 
     private static func matchCredential(
         filePath: String,
-        sensitivePaths: [SensitivePath]
+        sensitivePaths: [MatchingPath]
     ) -> CredentialType? {
         let path = filePath.lowercased()
         let filename = (path as NSString).lastPathComponent
@@ -325,7 +339,7 @@ public struct CredentialFence: Sendable {
         if path.contains("/system/library/keychains/") { return nil }
 
         for sensitive in sensitivePaths {
-            let pattern = sensitive.pattern.lowercased()
+            let pattern = sensitive.pattern
             switch sensitive.kind {
             case .exactFilename:
                 if filename == pattern { return sensitive.type }

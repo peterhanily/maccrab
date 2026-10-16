@@ -67,8 +67,9 @@ struct V2DashboardShell: View {
                         // do not add a redundant .id(currentWorkspace).
                         // Switching cases can still recreate view-local
                         // @State. Bounded presentation models belong to this
-                        // window; hidden workspaces do not retain live views,
-                        // run timers or keep database read transactions open.
+                        // window; hidden workspaces do not retain live views or
+                        // poll. An already-owned Events verification may finish
+                        // within its deadline under Core's normal read lifecycle.
                         workspaceContent
                             .transition(V2Motion.workspaceTransition(reduceMotion: reduceMotion))
                     }
@@ -108,6 +109,8 @@ struct V2DashboardShell: View {
             // A restored window can appear while another app is active, before
             // any activity change notification arrives.
             state.setWindowActivity(controlActiveState)
+            if controlActiveState == .inactive { eventQuerySession.cancelBackendReads() }
+            else { eventQuerySession.resumeBackendReads() }
             await state.connectLiveData()
             guard !Task.isCancelled, refreshAppearanceID == appearanceID else { return }
             state.startAutoRefresh()
@@ -116,6 +119,7 @@ struct V2DashboardShell: View {
             // Invalidate an in-flight connect even before SwiftUI delivers task
             // cancellation; an older appearance cannot restart this window.
             refreshAppearanceID = nil
+            eventQuerySession.cancelBackendReads()
             state.stopAutoRefresh()
         }
         // Upgrade-handoff recovery: when the sysext finishes (re)booting
@@ -126,8 +130,11 @@ struct V2DashboardShell: View {
         // at probe time) until a manual restart. Edge-gated in the state, so
         // a steady stream of "ready" heartbeats triggers nothing.
         .onChange(of: appState.heartbeat?.engineIdentity) { identity in
+            eventQuerySession.reconcileBackendContext()
             Task { await state.onEngineIdentity(identity) }
         }
+        .onChange(of: appState.eventQueryEpoch) { _ in eventQuerySession.reconcileBackendContext() }
+        .onChange(of: appState.eventReadsDeferred) { _ in eventQuerySession.reconcileBackendContext() }
         .onChange(of: appState.heartbeat?.bootPhase) { newPhase in
             Task { await state.onSysextBootPhase(newPhase) }
         }
@@ -138,8 +145,11 @@ struct V2DashboardShell: View {
         .onChange(of: controlActiveState) { activity in
             let becameActive = state.setWindowActivity(activity)
             if activity == .inactive {
+                eventQuerySession.cancelBackendReads()
                 alertsPresentation.pause()
                 detectionPresentation.leave()
+            } else {
+                eventQuerySession.resumeBackendReads()
             }
             guard becameActive,
                   state.provider.mode != .live || state.provider.lastErrorDescription != nil
