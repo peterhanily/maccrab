@@ -1538,7 +1538,12 @@ ATTESTATION_EOF
         # lands at 184344. The line has walked 183756 -> 184112 -> 184256 ->
         # 184292 across rc5..rc9, so one MiB is a few candidates of room, not a
         # reset of the ratchet. Shrink before raising this again.
-        APP_FOOTPRINT_BUDGET_KIB=185344
+        # 2026-10-16, v1.22.6-rc.7: 185344 -> 186368 (181 -> 182 MiB),
+        # explicitly approved for bounded dashboard presentation/readiness code.
+        # The first signed RC7 measured 185620 KiB after existing payload and
+        # symbol trimming. This changes only installed-app size; CPU, memory,
+        # write-rate, detection and free-disk acceptance limits are unchanged.
+        APP_FOOTPRINT_BUDGET_KIB=186368
         APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)
         case "$APP_FOOTPRINT_KIB" in
             ''|*[!0-9]*)
