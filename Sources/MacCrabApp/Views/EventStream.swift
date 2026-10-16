@@ -813,10 +813,14 @@ struct EventStream: View {
             UIContentReadinessMarker(readiness: contentReadinessForDisplay)
                 .padding(.horizontal)
                 .fixedSize(horizontal: false, vertical: true)
-            if !isAggregateMode && querySession.showingCachedEvents && !presentedEvents.isEmpty {
-                Text(querySession.isLoading
-                     ? "Showing cached events while refreshing."
-                     : "Showing cached events; the latest read has not completed successfully.")
+            if !isAggregateMode {
+                let refreshingNotice = Text("Showing cached events while refreshing.")
+                let incompleteNotice = Text("Showing cached events; the latest read has not completed successfully.")
+                StableNoticeText(
+                    reservedMessages: [refreshingNotice, incompleteNotice],
+                    visibleIndex: querySession.showingCachedEvents && !presentedEvents.isEmpty
+                        ? (querySession.isLoading ? 0 : 1) : nil
+                )
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.horizontal)

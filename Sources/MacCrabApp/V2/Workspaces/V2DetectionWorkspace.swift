@@ -836,7 +836,7 @@ public struct V2DetectionWorkspace: View {
                             : "Rule disabled. Activate to enable.")
                     }
                 },
-                V2DataColumn(id: "title", title: "Rule", width: .flexible(min: 240),
+                V2DataColumn(id: "title", title: "Rule", width: .flexible(min: 160),
                              sortKey: { .text($0.title) }) { r in
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 6) {
@@ -1534,7 +1534,7 @@ public struct V2DetectionWorkspace: View {
                     // dead end (selection: .constant(nil), no sort, no filter).
                     V2DataTable(
                         columns: [
-                            V2DataColumn(id: "name", title: "Server", width: .flexible(min: 180),
+                            V2DataColumn(id: "name", title: "Server", width: .flexible(min: 140),
                                          sortKey: { .text($0.name) }) { m in
                                 V2TableCellText(m.name)
                             },

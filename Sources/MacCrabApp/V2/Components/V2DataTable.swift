@@ -104,6 +104,11 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
     /// Xcode 27's @State macro (TN3211), re-introducing the empty-frame flash
     /// the init seed fixes (and pre-release-audit PASS-L2 flags the combo).
     @State private var displayCache: [Item]
+    #if DEBUG
+    /// Optional inert geometry observation in private hosting fixtures only.
+    /// A background never participates in the header's proposed size.
+    var headerCellProbeForTesting: ((Int) -> AnyView)? = nil
+    #endif
 
     public init(
         columns: [V2DataColumn<Item>],
@@ -262,31 +267,38 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                 filterField(prompt)
                 Divider().background(V2Theme.panelBorder)
             }
-            headerRow
-            Divider().background(V2Theme.panelBorder)
-            ScrollView {
-                // Pre-fix there was no empty branch at all: a table with no rows
-                // rendered its column headers over nothing, so "there is no
-                // data" and "your filter matched nothing" both read as a broken
-                // panel — and filtering to zero results gave no feedback and no
-                // way back. One branch here covers all 11 call sites.
-                if displayCache.isEmpty {
-                    emptyRows
-                } else {
-                    LazyVStack(spacing: 0) {
-                        ForEach(displayCache) { item in
-                            Row(
-                                columns: columns,
-                                item: item,
-                                isSelected: selection?.id == item.id,
-                                isChecked: isChecked(item),
-                                showsCheckbox: isMulti,
-                                onSelectRow: { selection = $0 },
-                                onToggleCheck: { toggleCheck($0) }
-                            )
+            ScrollView(.vertical) {
+                LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    Section {
+                        if displayCache.isEmpty {
+                            emptyRows
+                        } else {
+                            ForEach(displayCache) { item in
+                                Row(
+                                    columns: columns,
+                                    item: item,
+                                    isSelected: selection?.id == item.id,
+                                    isChecked: isChecked(item),
+                                    showsCheckbox: isMulti,
+                                    onSelectRow: { selection = $0 },
+                                    onToggleCheck: { toggleCheck($0) }
+                                )
+                            }
+                        }
+                    } header: {
+                        VStack(spacing: 0) {
+                            headerRow
+                            Divider().background(V2Theme.panelBorder)
+                        }
+                        // A pinned header covers scrolling rows. Preserve
+                        // the normal canvas -> panel -> header tint without
+                        // letting row text bleed through the translucent wash.
+                        .background {
+                            V2Theme.canvasBackground.overlay(V2Theme.panelBackground)
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .v2Panel(padding: 0)
@@ -370,7 +382,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
             }
             ForEach(columns.indices, id: \.self) { idx in
                 let col = columns[idx]
-                Self.cell(width: col.width, alignment: col.alignment) {
+                let header = Self.cell(width: col.width, alignment: col.alignment) {
                     if col.sortKey != nil {
                         Button { toggleSort(col.id) } label: {
                             HStack(spacing: 3) {
@@ -395,8 +407,14 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                             .textCase(.uppercase)
                     }
                 }
+                #if DEBUG
+                header.background { headerCellProbeForTesting?(idx) }
+                #else
+                header
+                #endif
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
         .background(V2Theme.sidebarBackground.opacity(0.6))
@@ -434,6 +452,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                 onSelectRow(item)
             } label: {
                 cells
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 10)
                     .padding(.horizontal, 12)
                     .background(background)
@@ -470,7 +489,9 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(isChecked ? "Deselect row" : "Select row")
                 Button { onSelectRow(item) } label: {
-                    cells.contentShape(Rectangle())
+                    cells
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .combine)

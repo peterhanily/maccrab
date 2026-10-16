@@ -159,14 +159,17 @@ struct V2AlertsWorkspace: View {
     }
 
     private func listReadStatus(isEmpty: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let cachedNotice = Text("Cached alert snapshot — refreshing is required before this list is current.")
+        return VStack(alignment: .leading, spacing: 6) {
             UIContentReadinessMarker(readiness: presentation.readiness(for: presentationContext)
                 .forDisplayedContent(isEmpty: isEmpty))
                 .frame(height: 18)
-            if presentation.hasSnapshot(for: presentationContext), !presentation.isFresh(for: presentationContext) {
-                Text("Cached alert snapshot — refreshing is required before this list is current.")
-                    .font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
-            }
+            StableNoticeText(
+                reservedMessages: [cachedNotice],
+                visibleIndex: presentation.hasSnapshot(for: presentationContext)
+                    && !presentation.isFresh(for: presentationContext) ? 0 : nil
+            )
+            .font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
             if let error = presentation.error(for: presentationContext) {
                 HStack(alignment: .top) {
                     Text("Couldn’t read alerts (\(error)). This is not an all-clear.")
@@ -1805,11 +1808,11 @@ struct V2AlertsWorkspace: View {
                                      sortKey: { .number(Double($0.severity.sortOrder)) }) { a in
                             V2StatusChip(a.severity.label, kind: a.severity.chipKind)
                         },
-                        V2DataColumn(id: "title", title: "Alert", width: .flexible(min: 240),
+                        V2DataColumn(id: "title", title: "Alert", width: .flexible(min: 160),
                                      sortKey: { .text($0.title) }) { a in
                             V2TableCellText(a.title)
                         },
-                        V2DataColumn(id: "rule", title: "Rule", width: .flexible(min: 160),
+                        V2DataColumn(id: "rule", title: "Rule", width: .flexible(min: 140),
                                      sortKey: { .text($0.ruleId) }) { a in
                             V2TableCellText(a.ruleId, primary: false, mono: true)
                         },

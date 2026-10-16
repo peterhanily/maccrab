@@ -71,10 +71,12 @@ struct V2DashboardShell: View {
                         // poll. An already-owned Events verification may finish
                         // within its deadline under Core's normal read lifecycle.
                         workspaceContent
-                            .transition(V2Motion.workspaceTransition(reduceMotion: reduceMotion))
+                            .transition(.identity)
                     }
-                    .animation(V2Motion.navigation(reduceMotion: reduceMotion),
-                               value: state.currentWorkspace)
+                    // Swap the page immediately instead of cross-fading two
+                    // data-heavy trees. Only workspace changes clear this
+                    // animation; inspector, palette and toast motion stay local.
+                    .animation(nil, value: state.currentWorkspace)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

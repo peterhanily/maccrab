@@ -691,7 +691,7 @@ public struct V2IntelligenceWorkspace: View {
             }
             V2DataTable(
                 columns: [
-                    V2DataColumn(id: "name", title: "Feed", width: .flexible(min: 220),
+                    V2DataColumn(id: "name", title: "Feed", width: .flexible(min: 150),
                                  sortKey: { .text($0.name) }) { f in
                         V2TableCellText(f.name)
                     },
