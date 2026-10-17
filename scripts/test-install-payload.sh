@@ -170,6 +170,166 @@ for linked_entry in main cli sysext; do
 done
 pass "privileged mode normalization rejects linked app/CLI/sysext executables"
 
+# External CLI links are not inside the app's normalized tree. Exercise the
+# same helpers used by both installer branches without running the installer,
+# invoking a CLI, or accessing either real prefix. Existing directories and
+# executable targets must keep their metadata; only new carriers become 0755.
+cli_target_fingerprint() {
+    /usr/bin/stat -f '%d:%i:%p:%u:%g:%f:%z:%m:%c' "$1"
+    /usr/bin/shasum -a 256 "$1"
+    /bin/ls -lde "$1"
+}
+assert_cli_link() {
+    local cli_link="$1" cli_target="$2"
+    [ -L "$cli_link" ] \
+        && [ "$(/usr/bin/readlink "$cli_link")" = "$cli_target" ] \
+        && [ "$(/usr/bin/stat -f '%Lp' "$cli_link")" = 755 ] \
+        || fail "CLI link has the wrong type, target or no-follow mode: $cli_link"
+}
+for cli_mask in 077 022; do
+    CLI_CASE="$TMP_ROOT/external-cli-$cli_mask"
+    CLI_APP_BIN="$CLI_CASE/app-bin"
+    /bin/mkdir -p "$CLI_APP_BIN"
+    for cli in maccrabctl maccrab-mcp; do
+        printf 'inert %s target; never execute\n' "$cli" > "$CLI_APP_BIN/$cli"
+        /bin/chmod 0700 "$CLI_APP_BIN/$cli"
+    done
+    CLI_CTL_BEFORE=$(cli_target_fingerprint "$CLI_APP_BIN/maccrabctl")
+    CLI_MCP_BEFORE=$(cli_target_fingerprint "$CLI_APP_BIN/maccrab-mcp")
+    (
+        umask "$cli_mask"
+        CLI_PREFIX="$CLI_CASE/new-prefix/nested"
+        maccrab_prepare_cli_directory "$CLI_PREFIX/bin" || fail "new CLI directory refused"
+        for created in "$CLI_CASE/new-prefix" "$CLI_PREFIX" "$CLI_PREFIX/bin"; do
+            [ "$(/usr/bin/stat -f '%Lp' "$created")" = 755 ] \
+                || fail "new CLI directory inherited restrictive umask $cli_mask"
+        done
+        for cli in maccrabctl maccrab-mcp; do
+            maccrab_install_cli_link "$CLI_APP_BIN/$cli" "$CLI_PREFIX/bin/$cli" \
+                || fail "PREFIX CLI link failed under umask $cli_mask"
+            assert_cli_link "$CLI_PREFIX/bin/$cli" "$CLI_APP_BIN/$cli"
+        done
+        [ "$(umask)" = "0$cli_mask" ] || fail "CLI helpers changed caller umask"
+
+        CLI_EXISTING="$CLI_CASE/existing-prefix"
+        /bin/mkdir -p "$CLI_EXISTING/bin"
+        /bin/chmod 0710 "$CLI_EXISTING"
+        /bin/chmod 0750 "$CLI_EXISTING/bin"
+        maccrab_prepare_cli_directory "$CLI_EXISTING/bin" || fail "existing CLI directory refused"
+        [ "$(/usr/bin/stat -f '%Lp' "$CLI_EXISTING")" = 710 ] \
+            && [ "$(/usr/bin/stat -f '%Lp' "$CLI_EXISTING/bin")" = 750 ] \
+            || fail "CLI directory preparation changed existing permissions"
+
+        for refresh in missing stale loose unrelated; do
+            CLI_BREW="$CLI_CASE/homebrew-$refresh/bin"
+            /bin/mkdir -p "$CLI_BREW"
+            /bin/chmod 0750 "$CLI_BREW"
+            for cli in maccrabctl maccrab-mcp; do
+                case "$refresh" in
+                    stale) /bin/ln -s "$CLI_CASE/Caskroom/maccrab/old/$cli" "$CLI_BREW/$cli" ;;
+                    loose) printf 'old loose CLI\n' > "$CLI_BREW/$cli" ;;
+                    unrelated) /bin/ln -s "$CLI_APP_BIN/$cli" "$CLI_BREW/$cli"; /bin/chmod -h 0700 "$CLI_BREW/$cli" ;;
+                esac
+            done
+            CLI_BREW_BEFORE=$(/usr/bin/find "$CLI_BREW" -type l -exec /usr/bin/stat -f '%i:%Lp:%N' {} \;)
+            maccrab_refresh_homebrew_cli_links "$CLI_APP_BIN" "$CLI_BREW" \
+                || fail "Homebrew $refresh refresh failed under umask $cli_mask"
+            [ "$(/usr/bin/stat -f '%Lp' "$CLI_BREW")" = 750 ] \
+                || fail "Homebrew refresh changed an existing directory mode"
+            if [ "$refresh" = unrelated ]; then
+                [ "$(/usr/bin/find "$CLI_BREW" -type l -exec /usr/bin/stat -f '%i:%Lp:%N' {} \;)" = "$CLI_BREW_BEFORE" ] \
+                    || fail "Homebrew refresh replaced an unrelated working alias"
+            else
+                for cli in maccrabctl maccrab-mcp; do
+                    assert_cli_link "$CLI_BREW/$cli" "$CLI_APP_BIN/$cli"
+                done
+            fi
+        done
+    )
+    [ "$(cli_target_fingerprint "$CLI_APP_BIN/maccrabctl")" = "$CLI_CTL_BEFORE" ] \
+        && [ "$(cli_target_fingerprint "$CLI_APP_BIN/maccrab-mcp")" = "$CLI_MCP_BEFORE" ] \
+        || fail "external link installation changed executable bytes or metadata"
+done
+pass "both external CLI branches normalize fresh links under umask 077/022 without changing targets or existing directories"
+
+CLI_NEGATIVE="$TMP_ROOT/external-cli-negative"
+/bin/mkdir -p "$CLI_NEGATIVE/real/bin" "$CLI_NEGATIVE/target-directory"
+printf 'unchanged sentinel\n' > "$CLI_NEGATIVE/target-directory/sentinel"
+/bin/ln -s "$CLI_NEGATIVE/real" "$CLI_NEGATIVE/redirected-prefix"
+/bin/mkdir "$CLI_NEGATIVE/bin-parent"
+/bin/ln -s "$CLI_NEGATIVE/real/bin" "$CLI_NEGATIVE/bin-parent/bin"
+for redirected in "$CLI_NEGATIVE/redirected-prefix/bin" "$CLI_NEGATIVE/redirected-prefix/new/bin" "$CLI_NEGATIVE/bin-parent/bin"; do
+    if maccrab_prepare_cli_directory "$redirected"; then
+        fail "CLI directory preparation accepted a redirected path"
+    fi
+    if maccrab_install_cli_link "$CLI_APP_BIN/maccrabctl" "$redirected/maccrabctl"; then
+        fail "CLI link installation accepted a redirected directory"
+    fi
+    if maccrab_refresh_homebrew_cli_links "$CLI_APP_BIN" "$redirected"; then
+        fail "Homebrew refresh accepted a redirected directory"
+    fi
+done
+[ ! -e "$CLI_NEGATIVE/real/new" ] && [ ! -e "$CLI_NEGATIVE/real/bin/maccrabctl" ] \
+    || fail "redirected CLI preparation mutated its destination"
+for bad_target in directory symlink non-executable; do
+    CLI_BAD_TARGET="$CLI_NEGATIVE/$bad_target"
+    case "$bad_target" in
+        directory) /bin/mkdir "$CLI_BAD_TARGET" ;;
+        symlink) /bin/ln -s "$CLI_APP_BIN/maccrabctl" "$CLI_BAD_TARGET" ;;
+        non-executable) printf 'inert\n' > "$CLI_BAD_TARGET"; /bin/chmod 0600 "$CLI_BAD_TARGET" ;;
+    esac
+    if maccrab_install_cli_link "$CLI_BAD_TARGET" "$CLI_NEGATIVE/real/bin/maccrabctl"; then
+        fail "CLI installation accepted $bad_target executable"
+    fi
+done
+/bin/mkdir "$CLI_NEGATIVE/real/bin/maccrabctl"
+if maccrab_install_cli_link "$CLI_APP_BIN/maccrabctl" "$CLI_NEGATIVE/real/bin/maccrabctl"; then
+    fail "CLI installation accepted a destination directory"
+fi
+/bin/rmdir "$CLI_NEGATIVE/real/bin/maccrabctl"
+/usr/bin/mkfifo "$CLI_NEGATIVE/real/bin/maccrabctl"
+if maccrab_install_cli_link "$CLI_APP_BIN/maccrabctl" "$CLI_NEGATIVE/real/bin/maccrabctl"; then
+    fail "CLI installation accepted a destination FIFO"
+fi
+/bin/rm "$CLI_NEGATIVE/real/bin/maccrabctl"
+# A directory symlink is a replaceable alias, not a destination to enter.
+/bin/ln -s "$CLI_NEGATIVE/target-directory" "$CLI_NEGATIVE/real/bin/maccrabctl"
+maccrab_install_cli_link "$CLI_APP_BIN/maccrabctl" "$CLI_NEGATIVE/real/bin/maccrabctl" \
+    || fail "CLI installation failed to replace a directory symlink without following it"
+assert_cli_link "$CLI_NEGATIVE/real/bin/maccrabctl" "$CLI_APP_BIN/maccrabctl"
+[ "$(/bin/cat "$CLI_NEGATIVE/target-directory/sentinel")" = 'unchanged sentinel' ] \
+    && [ "$(/usr/bin/find "$CLI_NEGATIVE/target-directory" -mindepth 1 -maxdepth 1 | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 1 ] \
+    || fail "CLI replacement entered its old symlink target"
+for link_failure in normalize false-success publish; do
+    CLI_PRIOR=$(/usr/bin/stat -f '%i:%Lp' "$CLI_NEGATIVE/real/bin/maccrabctl")
+    if (
+        case "$link_failure" in
+            normalize) maccrab_normalize_cli_link_mode() { return 1; } ;;
+            false-success) maccrab_normalize_cli_link_mode() { return 0; } ;;
+            publish) maccrab_publish_cli_link() { return 1; } ;;
+        esac
+        umask 077
+        maccrab_install_cli_link "$CLI_APP_BIN/maccrabctl" "$CLI_NEGATIVE/real/bin/maccrabctl"
+    ); then
+        fail "CLI installation swallowed $link_failure failure"
+    fi
+    [ "$(/usr/bin/stat -f '%i:%Lp' "$CLI_NEGATIVE/real/bin/maccrabctl")" = "$CLI_PRIOR" ] \
+        || fail "$link_failure replaced the prior working alias"
+    assert_cli_link "$CLI_NEGATIVE/real/bin/maccrabctl" "$CLI_APP_BIN/maccrabctl"
+done
+[ -z "$(/usr/bin/find "$CLI_NEGATIVE/real/bin" -name '.maccrab-cli.*' -print)" ] \
+    || fail "CLI installation retained failed private staging directories"
+[ "$(cli_target_fingerprint "$CLI_APP_BIN/maccrabctl")" = "$CLI_CTL_BEFORE" ] \
+    || fail "negative CLI fixtures changed executable bytes or metadata"
+for cli_wiring in \
+        'maccrab_prepare_cli_directory "$PREFIX/bin"' \
+        'maccrab_install_cli_link "$APP_BIN/$cli" "$PREFIX/bin/$cli"' \
+        'maccrab_refresh_homebrew_cli_links "$APP_BIN" "/opt/homebrew/bin"'; do
+    /usr/bin/grep -qF "$cli_wiring" "$SCRIPT_DIR/install.sh" \
+        || fail "installer does not use reviewed external CLI helper: $cli_wiring"
+done
+pass "CLI helpers refuse redirected carriers/invalid types and preserve prior aliases on normalization or publication failure"
+
 RECOVERY_UID=$(/usr/bin/id -u)
 for recovery_point in before-first-rename after-first-rename after-second-rename; do
     RECOVERY_ROOT="$TMP_ROOT/recovery-$recovery_point"

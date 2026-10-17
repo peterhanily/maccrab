@@ -141,6 +141,85 @@ maccrab_normalize_app_modes() {
     fi
 }
 
+# External CLI carriers are outside the normalized app. Create only missing
+# directories with explicit traversal bits; never chmod an existing prefix or
+# follow a redirected directory (including a symlink in an ancestor).
+maccrab_prepare_cli_directory() {
+    local directory="${1%/}"
+    [ -n "$directory" ] || directory=/
+    case "$directory" in /*) ;; *) return 1 ;; esac
+    [ ! -L "$directory" ] || return 1
+    if [ ! -e "$directory" ]; then
+        maccrab_prepare_cli_directory "$(/usr/bin/dirname "$directory")" || return 1
+        /bin/mkdir -m 0755 "$directory" || return 1
+    fi
+    [ -d "$directory" ] \
+        && [ "$(cd "$directory" && /bin/pwd -P)" = "$directory" ]
+}
+
+# Fixed command, separately named solely for hermetic failure-injection tests.
+# chmod -h changes the link itself, never the signed executable it points at.
+maccrab_normalize_cli_link_mode() {
+    /bin/chmod -h 0755 "$1"
+}
+
+maccrab_publish_cli_link() {
+    /bin/mv -fh "$1" "$2"
+}
+
+maccrab_install_cli_link() (
+    local executable="$1" link="$2" directory name work
+    case "$executable" in /*) ;; *) return 1 ;; esac
+    [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
+    directory="$(/usr/bin/dirname "$link")"
+    name="$(/usr/bin/basename "$link")"
+    case "$name" in maccrabctl|maccrab-mcp) ;; *) return 1 ;; esac
+    [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+    cd "$directory" || return 1
+    [ "$(/bin/pwd -P)" = "$directory" ] || return 1
+    # Operate relative to the checked working directory. Existing symlinks,
+    # including dangling ones, are replaced rather than traversed; directories
+    # and special entries are not CLI replacement candidates.
+    if [ ! -L "$name" ] && [ -e "$name" ] && [ ! -f "$name" ]; then
+        return 1
+    fi
+    work=$(/usr/bin/mktemp -d .maccrab-cli.XXXXXX) || return 1
+    trap '/bin/rm -f "$work/link"; /bin/rmdir "$work"' EXIT
+    /bin/ln -s "$executable" "$work/link" || return 1
+    maccrab_normalize_cli_link_mode "$work/link" || return 1
+    [ -L "$work/link" ] \
+        && [ "$(/usr/bin/readlink "$work/link")" = "$executable" ] \
+        && [ "$(/usr/bin/stat -f '%Lp' "$work/link")" = 755 ] || return 1
+    if [ ! -L "$name" ] && [ -e "$name" ] && [ ! -f "$name" ]; then
+        return 1
+    fi
+    # BSD mv -h does not descend into an existing directory symlink. Until
+    # this rename, any prior CLI entry remains available if preparation fails.
+    maccrab_publish_cli_link "$work/link" "$name" || return 1
+    [ -L "$name" ] \
+        && [ "$(/usr/bin/readlink "$name")" = "$executable" ] \
+        && [ "$(/usr/bin/stat -f '%Lp' "$name")" = 755 ]
+)
+
+# Keep the Homebrew refresh policy separate from permission normalization:
+# unrelated working aliases remain untouched, while missing, loose or stale
+# cask-installed CLIs follow the same no-follow link path as PREFIX/bin.
+maccrab_refresh_homebrew_cli_links() {
+    local app_bin="$1" bin_directory="$2" cli link target
+    [ -d "$bin_directory" ] && [ ! -L "$bin_directory" ] \
+        && [ "$(cd "$bin_directory" && /bin/pwd -P)" = "$bin_directory" ] || return 1
+    for cli in maccrabctl maccrab-mcp; do
+        if [ -x "$app_bin/$cli" ]; then
+            link="$bin_directory/$cli"
+            target=$(/usr/bin/readlink "$link" 2>/dev/null || echo "")
+            if [ ! -e "$link" ] || [[ "$target" == *"/Caskroom/maccrab/"* ]] || \
+                    { [ -f "$link" ] && [ ! -L "$link" ]; }; then
+                maccrab_install_cli_link "$app_bin/$cli" "$link" || return 1
+            fi
+        fi
+    done
+}
+
 # One indirection keeps the rename transaction fault-injectable without putting
 # a configurable executable path on the privileged install surface. Tests that
 # source this script may replace the function; an executed installer always
@@ -469,14 +548,15 @@ fi
 # so the user's terminal `maccrabctl` always tracks the running
 # MacCrab.app version (including Sparkle in-place upgrades).
 APP_BIN="/Applications/MacCrab.app/Contents/Resources/bin"
-mkdir -p "$PREFIX/bin"
+maccrab_prepare_cli_directory "$PREFIX/bin" \
+    || error "CLI directory is redirected, invalid, or could not be created: $PREFIX/bin"
 
 if [ -x "$APP_BIN/maccrabctl" ]; then
     info "Linking CLI binaries from $APP_BIN to $PREFIX/bin..."
     for cli in maccrabctl maccrab-mcp; do
         if [ -x "$APP_BIN/$cli" ]; then
-            rm -f "$PREFIX/bin/$cli"
-            ln -s "$APP_BIN/$cli" "$PREFIX/bin/$cli"
+            maccrab_install_cli_link "$APP_BIN/$cli" "$PREFIX/bin/$cli" \
+                || error "Could not install readable CLI link: $PREFIX/bin/$cli"
         fi
     done
 else
@@ -508,19 +588,10 @@ fi
 # a symlink to the current in-app CLI so `which maccrabctl` returns
 # a current binary regardless of which $PREFIX we wrote to.
 if [ "$(uname -m)" = "arm64" ] && [ -d "/opt/homebrew/bin" ] && [ -x "$APP_BIN/maccrabctl" ]; then
-    for cli in maccrabctl maccrab-mcp; do
-        if [ -x "$APP_BIN/$cli" ] && [ "/opt/homebrew/bin" != "$PREFIX/bin" ]; then
-            link="/opt/homebrew/bin/$cli"
-            target=$(readlink "$link" 2>/dev/null || echo "")
-            # Replace if missing OR if it's a stale brew-cask path
-            if [ ! -e "$link" ] || [[ "$target" == *"/Caskroom/maccrab/"* ]] || \
-               { [ -f "$link" ] && ! [ -L "$link" ]; }; then
-                rm -f "$link"
-                ln -s "$APP_BIN/$cli" "$link"
-                info "Refreshed stale /opt/homebrew/bin/$cli → in-app CLI"
-            fi
-        fi
-    done
+    if [ "/opt/homebrew/bin" != "$PREFIX/bin" ]; then
+        maccrab_refresh_homebrew_cli_links "$APP_BIN" "/opt/homebrew/bin" \
+            || error "Could not refresh readable Homebrew CLI links."
+    fi
 fi
 
 echo ""

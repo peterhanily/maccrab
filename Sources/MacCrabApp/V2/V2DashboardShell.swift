@@ -10,6 +10,7 @@ struct V2DashboardShell: View {
     @StateObject private var eventQuerySession: EventQuerySession
     @StateObject private var alertsPresentation = V2AlertsPresentationModel()
     @StateObject private var detectionPresentation = V2DetectionPresentation()
+    @StateObject private var tableHosts = V2TableHostCache()
     @State private var noticesExpanded = false
     @State private var refreshAppearanceID: UUID?
     @ObservedObject var appState: AppState
@@ -43,6 +44,19 @@ struct V2DashboardShell: View {
         }
     }
 
+    private var rulesTableIdentity: V2DetectionPresentation.Identity {
+        .init(provider: ObjectIdentifier(state.provider), directory: state.engineSource.directory,
+              epoch: appState.eventQueryEpoch)
+    }
+
+    private var alertsTableContext: V2AlertsPresentationContext {
+        .init(query: .init(providerID: ObjectIdentifier(state.provider), timeRange: state.alertTimeRange,
+                           windowStart: state.pendingAlertsWindow?.start,
+                           windowEnd: state.pendingAlertsWindow?.end),
+              directory: state.provider.dataDir,
+              engine: appState.heartbeat?.engineIdentity.map(V2AlertsPresentationContext.Engine.init))
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             V2Theme.canvasBackground.ignoresSafeArea()
@@ -67,8 +81,10 @@ struct V2DashboardShell: View {
                         // do not add a redundant .id(currentWorkspace).
                         // Switching cases can still recreate view-local
                         // @State. Bounded presentation models belong to this
-                        // window; hidden workspaces do not retain live views or
-                        // poll. An already-owned Events verification may finish
+                        // window; hidden workspaces do not retain page views or
+                        // poll. Only two bounded, detached pure tables may be
+                        // reused; their old bindings/actions are revoked.
+                        // An already-owned Events verification may finish
                         // within its deadline under Core's normal read lifecycle.
                         workspaceContent
                             .transition(.identity)
@@ -121,6 +137,7 @@ struct V2DashboardShell: View {
             // Invalidate an in-flight connect even before SwiftUI delivers task
             // cancellation; an older appearance cannot restart this window.
             refreshAppearanceID = nil
+            tableHosts.removeAll()
             eventQuerySession.cancelBackendReads()
             state.stopAutoRefresh()
         }
@@ -132,10 +149,27 @@ struct V2DashboardShell: View {
         // at probe time) until a manual restart. Edge-gated in the state, so
         // a steady stream of "ready" heartbeats triggers nothing.
         .onChange(of: appState.heartbeat?.engineIdentity) { identity in
+            tableHosts.evictDetached(disqualifyActive: false)
             eventQuerySession.reconcileBackendContext()
             Task { await state.onEngineIdentity(identity) }
         }
-        .onChange(of: appState.eventQueryEpoch) { _ in eventQuerySession.reconcileBackendContext() }
+        .onChange(of: appState.eventQueryEpoch) { _ in
+            tableHosts.evictDetached(disqualifyActive: false)
+            eventQuerySession.reconcileBackendContext()
+        }
+        .onChange(of: rulesTableIdentity) { _ in tableHosts.evictDetached(slot: .rules, disqualifyActive: false) }
+        .onChange(of: alertsTableContext) { _ in tableHosts.evictDetached(slot: .openAlerts, disqualifyActive: false) }
+        .onChange(of: state.ruleSearchQuery) { _ in tableHosts.evictDetached(slot: .rules, disqualifyActive: false) }
+        .onChange(of: state.alertSearchQuery) { _ in tableHosts.evictDetached(slot: .openAlerts, disqualifyActive: false) }
+        .onChange(of: state.alertSeverityFilter) { _ in tableHosts.evictDetached(slot: .openAlerts, disqualifyActive: false) }
+        .onChange(of: detectionPresentation.revision) { _ in tableHosts.evictDetached(slot: .rules, disqualifyActive: false) }
+        .onChange(of: alertsPresentation.rows) { _ in tableHosts.evictDetached(slot: .openAlerts, disqualifyActive: false) }
+        .onChange(of: detectionPresentation.canRetainTable(for: rulesTableIdentity)) { allowed in
+            if !allowed { tableHosts.evictDetached(slot: .rules, disqualifyActive: false) }
+        }
+        .onChange(of: alertsPresentation.canRetainTable(for: alertsTableContext)) { allowed in
+            if !allowed { tableHosts.evictDetached(slot: .openAlerts, disqualifyActive: false) }
+        }
         .onChange(of: appState.eventReadsDeferred) { _ in eventQuerySession.reconcileBackendContext() }
         .onChange(of: appState.heartbeat?.bootPhase) { newPhase in
             Task { await state.onSysextBootPhase(newPhase) }
@@ -147,6 +181,7 @@ struct V2DashboardShell: View {
         .onChange(of: controlActiveState) { activity in
             let becameActive = state.setWindowActivity(activity)
             if activity == .inactive {
+                tableHosts.evictDetached()
                 eventQuerySession.cancelBackendReads()
                 alertsPresentation.pause()
                 detectionPresentation.leave()
@@ -184,11 +219,13 @@ struct V2DashboardShell: View {
     private var workspaceContent: some View {
         switch state.currentWorkspace {
         case .overview:      V2OverviewWorkspace(state: state, appState: appState)
-        case .alerts:        V2AlertsWorkspace(state: state, appState: appState, presentation: alertsPresentation)
+        case .alerts:        V2AlertsWorkspace(state: state, appState: appState, presentation: alertsPresentation,
+                                               tableHosts: tableHosts)
         case .events:        V2EventsWorkspace(state: state, appState: appState, querySession: eventQuerySession)
         case .investigation: V2InvestigationWorkspace(state: state, appState: appState)
         case .forensics:     V2ForensicsWorkspace(state: state, appState: appState)
-        case .detection:     V2DetectionWorkspace(state: state, appState: appState, presentation: detectionPresentation)
+        case .detection:     V2DetectionWorkspace(state: state, appState: appState, presentation: detectionPresentation,
+                                                  tableHosts: tableHosts)
         case .prevention:    V2PreventionWorkspace(state: state)
         case .intelligence:  V2IntelligenceWorkspace(state: state)
         case .system:        V2SystemWorkspace(state: state, sysextManager: sysextManager)

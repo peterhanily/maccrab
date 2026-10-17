@@ -67,6 +67,14 @@ final class V2AlertsPresentationModel: ObservableObject {
         context == expected && hasSnapshot
     }
 
+    /// Exposes the existing hidden-snapshot admission without rescanning every
+    /// string on each table body update. A separate bounded host lifetime does
+    /// not make this cached snapshot current or change its retention budget.
+    func canRetainTable(for expected: V2AlertsPresentationContext) -> Bool {
+        context == expected && hasSnapshot && retainable && !rows.isEmpty
+            && expected.directory != nil && expected.engine != nil
+    }
+
     func isFresh(for expected: V2AlertsPresentationContext) -> Bool {
         context == expected && isFresh
     }

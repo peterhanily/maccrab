@@ -604,6 +604,7 @@ struct EventStream: View {
                 Text(String(localized: "events.title", defaultValue: "Events"))
                     .font(.title2)
                     .fontWeight(.bold)
+                    .contentReadiness(contentReadinessForDisplay)
 
                 Text("\(isAggregateMode ? presentedAggregates.count : presentedEvents.count)")
                     .font(.caption)
@@ -810,9 +811,6 @@ struct EventStream: View {
                 .accessibilityLabel(Text(warning))
             }
 
-            UIContentReadinessMarker(readiness: contentReadinessForDisplay)
-                .padding(.horizontal)
-                .fixedSize(horizontal: false, vertical: true)
             if !isAggregateMode {
                 let refreshingNotice = Text("Showing cached events while refreshing.")
                 let incompleteNotice = Text("Showing cached events; the latest read has not completed successfully.")

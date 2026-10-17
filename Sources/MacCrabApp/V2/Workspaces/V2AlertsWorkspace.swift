@@ -12,6 +12,55 @@ private struct V2AlertsWorkspaceLoadContext: Hashable {
     let tab: V2WorkspaceTab
 }
 
+/// Full row values and presentation inputs, not an ID-only/content-hash cache.
+/// Read readiness remains outside the pure table and is never cached as fresh.
+struct V2OpenAlertsTableCacheKey: Equatable {
+    let context: V2AlertsPresentationContext
+    let epoch: UInt64
+    let query: String
+    let severity: V2Severity?
+    let rows: [V2MockAlert]
+    let selection: V2MockAlert?
+    let multiSelection: Set<String>
+
+    var hasBoundedTransientInputs: Bool {
+        selection == nil && multiSelection.isEmpty && query.utf8.count <= 8 * 1_024
+    }
+}
+
+/// Useful read notices only. A successful read needs no diagnostic success row;
+/// cached snapshots and explicit errors already have their own visible notices.
+enum V2AlertReadNotice: Equatable {
+    case loading, partial, deferred, unavailable, failed
+
+    static func resolve(phase: UIContentReadiness.Phase, hasSnapshot: Bool, hasError: Bool) -> Self? {
+        guard !hasSnapshot, !hasError else { return nil }
+        switch phase {
+        case .loadedEmpty, .loadedNonempty: return nil
+        case .loading, .refreshingCached: return .loading
+        case .partial: return .partial
+        case .deferred: return .deferred
+        case .unavailable: return .unavailable
+        case .failed: return .failed
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .loading:
+            return String(localized: "alerts.loading", defaultValue: "Loading alerts…")
+        case .partial:
+            return String(localized: "alerts.readPartial", defaultValue: "Alert data is incomplete. This is not an all-clear.")
+        case .deferred:
+            return String(localized: "alerts.readDeferred", defaultValue: "Waiting to read alerts. This is not an all-clear.")
+        case .unavailable:
+            return String(localized: "alerts.readUnavailable", defaultValue: "Alert data is not available yet. This is not an all-clear.")
+        case .failed:
+            return String(localized: "alerts.readFailed", defaultValue: "Couldn’t read alerts. This is not an all-clear.")
+        }
+    }
+}
+
 struct V2AlertsWorkspace: View {
     // v1.11.1 (audit perf LOW): hoisted formatter for the JSON-export
     // path so we don't pay ~0.5 ms per alert row to instantiate one.
@@ -20,6 +69,7 @@ struct V2AlertsWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
     @ObservedObject var presentation: V2AlertsPresentationModel
+    private weak var tableHosts: V2TableHostCache?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selected: V2MockAlert?
     @State private var suppressionRows: [V2SuppressionEntry] = []
@@ -51,10 +101,12 @@ struct V2AlertsWorkspace: View {
     /// confirmation dialog gates the action.
     private let bulkSuppressConfirmThreshold = 5
 
-    init(state: V2DashboardState, appState: AppState, presentation: V2AlertsPresentationModel) {
+    init(state: V2DashboardState, appState: AppState, presentation: V2AlertsPresentationModel,
+         tableHosts: V2TableHostCache? = nil) {
         self.state = state
         self.appState = appState
         self.presentation = presentation
+        self.tableHosts = tableHosts
     }
 
     /// Bind to the workspace-state-owned filter so a navigation
@@ -158,12 +210,21 @@ struct V2AlertsWorkspace: View {
         }
     }
 
-    private func listReadStatus(isEmpty: Bool) -> some View {
+    private func listReadStatus(readiness: UIContentReadiness) -> some View {
         let cachedNotice = Text("Cached alert snapshot — refreshing is required before this list is current.")
+        let notice = V2AlertReadNotice.resolve(
+            phase: readiness.phase,
+            hasSnapshot: presentation.hasSnapshot(for: presentationContext),
+            hasError: presentation.error(for: presentationContext) != nil
+        )
         return VStack(alignment: .leading, spacing: 6) {
-            UIContentReadinessMarker(readiness: presentation.readiness(for: presentationContext)
-                .forDisplayedContent(isEmpty: isEmpty))
-                .frame(height: 18)
+            if let notice {
+                if notice == .loading {
+                    ProgressView(notice.text).controlSize(.small)
+                } else {
+                    Text(notice.text).font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
+                }
+            }
             StableNoticeText(
                 reservedMessages: [cachedNotice],
                 visibleIndex: presentation.hasSnapshot(for: presentationContext)
@@ -677,6 +738,8 @@ struct V2AlertsWorkspace: View {
         // (show the table). Based on the full un-suppressed population,
         // not the filtered `visible`.
         let hasOpenAlerts = alerts.contains { !$0.suppressed }
+        let readiness = presentation.readiness(for: presentationContext)
+            .forDisplayedContent(isEmpty: visible.isEmpty)
         // v1.12.9: inspector floats over the table's right edge
         // instead of pushing the table leftward. Pre-fix, an HStack
         // [table | inspector] forced the table + 340 pt inspector +
@@ -693,8 +756,8 @@ struct V2AlertsWorkspace: View {
         return ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 16) {
                 daemonStaleBanner
-                listReadStatus(isEmpty: visible.isEmpty)
-                timeRangeChips
+                listReadStatus(readiness: readiness)
+                timeRangeChips(readiness: readiness)
                 if let window = state.pendingAlertsWindow {
                     histogramWindowBanner(window)
                 }
@@ -728,7 +791,7 @@ struct V2AlertsWorkspace: View {
     /// Chips drive `state.alertTimeRange` which the .task(id:) reload
     /// re-fetches on. Default 7d matches the campaigns empty-state
     /// copy promise.
-    private var timeRangeChips: some View {
+    private func timeRangeChips(readiness: UIContentReadiness? = nil) -> some View {
         HStack(spacing: 6) {
             ForEach(["24h", "7d", "30d", "all"], id: \.self) { key in
                 let label: String = {
@@ -761,6 +824,7 @@ struct V2AlertsWorkspace: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(label) time range")
                 .accessibilityAddTraits(on ? [.isSelected] : [])
+                .contentReadiness(on ? readiness : nil)
             }
             Spacer()
         }
@@ -936,16 +1000,50 @@ struct V2AlertsWorkspace: View {
     /// Alerts table for the Open tab. Takes the already-computed `visible`
     /// rows so they aren't recomputed for the table on top of what
     /// `searchBarMemoized` already computed for its bulk-suppress badge.
+    @ViewBuilder
     private func alertsTableMemoized(items: [V2MockAlert]) -> some View {
         // Multi-select: the checkbox column drives `selectedAlertIds` for
         // selective bulk-suppress; a row-body click still sets `selected` so
         // the inspector keeps opening as before.
-        V2DataTable(
-            columns: alertsTableColumns,
-            items: items,
-            selection: $selected,
-            multiSelection: $selectedAlertIds
+        let key = V2OpenAlertsTableCacheKey(
+            context: presentationContext, epoch: appState.eventQueryEpoch,
+            query: state.alertSearchQuery, severity: state.alertSeverityFilter,
+            rows: items, selection: selected, multiSelection: selectedAlertIds
         )
+        // These cheap publication guards reject an old binding before the
+        // replacement root's graph update, without comparing every alert for
+        // every visible row's selection getter.
+        let generation = presentation.readiness.generation
+        let fresh = presentation.isFresh
+        let hasSnapshot = presentation.hasSnapshot
+        // These local selections reset on page remount, so a selected table
+        // cannot produce an exact detached hit. Do not retain its extra values.
+        let retainable = presentation.canRetainTable(for: key.context)
+            && key.hasBoundedTransientInputs
+        if let tableHosts {
+            V2CachedTableHost(cache: tableHosts, slot: .openAlerts, key: key,
+                              scope: V2TableHostScope(provider: key.context.query.providerID,
+                                                     directory: key.context.directory, epoch: key.epoch,
+                                                     engine: key.context.engine),
+                              retainable: retainable,
+                              isCurrent: {
+                state.currentWorkspace == .alerts && selectedTab == .alertsOpen
+                    && presentationContext == key.context && appState.eventQueryEpoch == key.epoch
+                    && state.alertSearchQuery == key.query && state.alertSeverityFilter == key.severity
+                    && selected == key.selection && selectedAlertIds == key.multiSelection
+                    && presentation.readiness.generation == generation
+                    && presentation.isFresh == fresh && presentation.hasSnapshot == hasSnapshot
+            }) { lease in
+                V2DataTable(
+                    columns: Self.alertsTableColumns, items: items,
+                    selection: lease.binding(slot: .selection, $selected, fallback: nil),
+                    multiSelection: lease.binding(slot: .multiSelection, $selectedAlertIds, fallback: [])
+                )
+            }
+        } else {
+            V2DataTable(columns: Self.alertsTableColumns, items: items,
+                        selection: $selected, multiSelection: $selectedAlertIds)
+        }
     }
 
     /// Bulk-suppress target set: the checked subset when the operator has
@@ -959,7 +1057,7 @@ struct V2AlertsWorkspace: View {
     /// Shared column definitions used by `alertsTableMemoized(items:)`.
     /// Building these inline per body re-eval allocated 6 V2DataColumn
     /// structs + their label closures on every keystroke.
-    private var alertsTableColumns: [V2DataColumn<V2MockAlert>] {
+    private static var alertsTableColumns: [V2DataColumn<V2MockAlert>] {
         [
             V2DataColumn(id: "sev", title: "Severity", width: .fixed(96),
                          sortKey: { .number(Double($0.severity.sortOrder)) }) { a in
@@ -1537,7 +1635,7 @@ struct V2AlertsWorkspace: View {
                 // Campaigns still lack per-call error provenance. Even with a
                 // reporting daemon, an empty response must not claim all-clear.
                 daemonStaleBanner
-                timeRangeChips
+                timeRangeChips()
                 if !campaigns.isEmpty {
                     campaignsToolbar
                 }
@@ -1771,10 +1869,21 @@ struct V2AlertsWorkspace: View {
     }
 
     private var historyTab: some View {
-        ScrollView {
+        // Keep suppressed and the four newest non-suppressed rows disjoint.
+        // Calculate the displayed population once for both the table and its
+        // readiness projection, before attaching metadata to the range chip.
+        let suppressed = self.alerts.filter { $0.suppressed }
+        let resolved = self.alerts
+            .filter { !$0.suppressed }
+            .sorted { $0.timestamp > $1.timestamp }
+            .prefix(4)
+        let history = suppressed + resolved
+        let readiness = presentation.readiness(for: presentationContext)
+            .forDisplayedContent(isEmpty: history.isEmpty)
+        return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 daemonStaleBanner
-                timeRangeChips
+                timeRangeChips(readiness: readiness)
                 // An Overview histogram bar tap narrows `self.alerts` to a
                 // single [start, end] window in reload(); that same window
                 // applies to the History tab. Surface the same banner + clear
@@ -1786,22 +1895,7 @@ struct V2AlertsWorkspace: View {
                 Text(String(localized: "ui.V2AlertsWorkspace.resolved.suppressed.alerts.from.the.recent.retention", defaultValue: "Resolved + suppressed alerts from the recent retention window. Right-click a row for Unsuppress and Delete actions, or use the inspector buttons."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
-                // v1.18.1: dedupe — a suppressed alert inside the last 4
-                // used to appear in both halves, giving the ForEach
-                // duplicate ids (undefined Table diffing + console warnings).
-                let suppressed = self.alerts.filter { $0.suppressed }
-                // v1.21.4: the "Resolved" rows are the 4 *most recent*
-                // non-suppressed alerts. Pre-fix used `self.alerts.suffix(4)`
-                // on an unsorted array, so the rows were whatever happened
-                // to sit at the array tail — not the newest alerts. Filtering
-                // to non-suppressed also makes them disjoint from `suppressed`
-                // by construction (so the old id-dedup is no longer needed).
-                let resolved = self.alerts
-                    .filter { !$0.suppressed }
-                    .sorted { $0.timestamp > $1.timestamp }
-                    .prefix(4)
-                let history = suppressed + resolved
-                listReadStatus(isEmpty: history.isEmpty)
+                listReadStatus(readiness: readiness)
                 V2DataTable(
                     columns: [
                         V2DataColumn(id: "sev", title: "Severity", width: .fixed(96),

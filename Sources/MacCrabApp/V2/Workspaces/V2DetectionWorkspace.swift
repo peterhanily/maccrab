@@ -57,10 +57,31 @@ struct V2DetectionRuleStatistics {
     }
 }
 
+/// Exact immutable table inputs. Transient read readiness is deliberately not
+/// part of the identity: it is freshly rendered and guarded on every action.
+struct V2RulesTableCacheKey: Equatable {
+    let identity: V2DetectionPresentation.Identity
+    let engine: V2AlertsPresentationContext.Engine?
+    let query: String
+    let rows: [V2MockRule]
+    let selection: V2MockRule?
+    let disabledOverrideIDs: Set<String>
+
+    var hasBoundedTransientInputs: Bool { selection == nil && query.utf8.count <= 8 * 1_024 }
+}
+
+private struct V2RuleTableSeverityRequest {
+    let rule: V2MockRule
+    let severityRaw: String?
+}
+
 public struct V2DetectionWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
     @ObservedObject private var presentation: V2DetectionPresentation
+    // The window owns the cache. A cached action must never form a back-edge
+    // through a captured workspace value to that owner.
+    private weak var tableHosts: V2TableHostCache?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedRule: V2MockRule?
     /// Non-rule tabs retain their existing selected-tab request session.
@@ -107,10 +128,12 @@ public struct V2DetectionWorkspace: View {
               epoch: appState.eventQueryEpoch)
     }
 
-    init(state: V2DashboardState, appState: AppState, presentation: V2DetectionPresentation) {
+    init(state: V2DashboardState, appState: AppState, presentation: V2DetectionPresentation,
+         tableHosts: V2TableHostCache? = nil) {
         self.state = state
         self.appState = appState
         self.presentation = presentation
+        self.tableHosts = tableHosts
     }
 
     /// Lowercased search haystack for one rule — id + title (= the alert
@@ -536,17 +559,27 @@ public struct V2DetectionWorkspace: View {
     /// without opening the YAML). Sequence/Graph rules render a plain chip.
     @ViewBuilder
     private func severityControl(for r: V2MockRule) -> some View {
+        Self.ruleSeverityControl(for: r, isCurrent: presentation.isCurrent(for: presentationIdentity)) { request in
+            Task { await setSeverityOverride(request.rule, severityRaw: request.severityRaw) }
+        }
+    }
+
+    /// Pure cell content. Cached cells hold only immutable rows and revocable
+    /// action boxes, never the entire workspace or its ObservedObjects.
+    @ViewBuilder
+    private static func ruleSeverityControl(for r: V2MockRule, isCurrent: Bool,
+                                           setSeverity: @escaping (V2RuleTableSeverityRequest) -> Void) -> some View {
         if r.category == "Sequence" || r.category == "Graph" {
             V2StatusChip(r.severity.label, kind: r.severity.chipKind)
         } else {
             Menu {
-                Button(String(localized: "ax.chip.critical", defaultValue: "Critical")) { Task { await setSeverityOverride(r, severityRaw: "critical") } }
-                Button(String(localized: "settings.high", defaultValue: "High"))     { Task { await setSeverityOverride(r, severityRaw: "high") } }
-                Button(String(localized: "settings.medium", defaultValue: "Medium"))   { Task { await setSeverityOverride(r, severityRaw: "medium") } }
-                Button(String(localized: "settings.low", defaultValue: "Low"))      { Task { await setSeverityOverride(r, severityRaw: "low") } }
-                Button(String(localized: "severity.info", defaultValue: "Info"))     { Task { await setSeverityOverride(r, severityRaw: "informational") } }
+                Button(String(localized: "ax.chip.critical", defaultValue: "Critical")) { setSeverity(.init(rule: r, severityRaw: "critical")) }
+                Button(String(localized: "settings.high", defaultValue: "High"))     { setSeverity(.init(rule: r, severityRaw: "high")) }
+                Button(String(localized: "settings.medium", defaultValue: "Medium"))   { setSeverity(.init(rule: r, severityRaw: "medium")) }
+                Button(String(localized: "settings.low", defaultValue: "Low"))      { setSeverity(.init(rule: r, severityRaw: "low")) }
+                Button(String(localized: "severity.info", defaultValue: "Info"))     { setSeverity(.init(rule: r, severityRaw: "informational")) }
                 Divider()
-                Button(String(localized: "ui.V2DetectionWorkspace.default", defaultValue: "Default"))  { Task { await setSeverityOverride(r, severityRaw: nil) } }
+                Button(String(localized: "ui.V2DetectionWorkspace.default", defaultValue: "Default")) { setSeverity(.init(rule: r, severityRaw: nil)) }
             } label: {
                 HStack(spacing: 3) {
                     V2StatusChip(r.severity.label, kind: r.severity.chipKind)
@@ -556,7 +589,7 @@ public struct V2DetectionWorkspace: View {
                 }
             }
             .menuStyle(.borderlessButton)
-            .disabled(!presentation.isCurrent(for: presentationIdentity))
+            .disabled(!isCurrent)
             .menuIndicator(.hidden)
             .fixedSize()
             .help(String(localized: "ui.V2DetectionWorkspace.change.this.rule.s.effective.severity", defaultValue: "Change this rule's effective severity"))
@@ -571,9 +604,9 @@ public struct V2DetectionWorkspace: View {
         // float over the rightmost ~340 pt of the rules table.
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 16) {
-                UIContentReadinessMarker(readiness: presentation.readiness(for: presentationIdentity, query: state.ruleSearchQuery))
                 Text(presentation.status(for: presentationIdentity, query: state.ruleSearchQuery))
                     .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                    .contentReadiness(presentation.readiness(for: presentationIdentity, query: state.ruleSearchQuery))
                 rulesStatsRow
                 if !state.ruleChanges.entries.isEmpty { requestedRuleChanges }
                 rulesSearchBar
@@ -788,12 +821,70 @@ public struct V2DetectionWorkspace: View {
         .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
     }
 
+    @ViewBuilder
     private var rulesTable: some View {
         // The window model retains only the matching query/revision result;
         // empty queries need no filter task, and unchanged search membership
         // is rebased to fresh telemetry without a blank/debounce each poll.
         let items = debouncedRuleQuery.isEmpty ? rules : filteredRules
-        return V2DataTable(
+        let key = V2RulesTableCacheKey(
+            identity: presentationIdentity,
+            engine: appState.heartbeat?.engineIdentity.map(V2AlertsPresentationContext.Engine.init),
+            query: state.ruleSearchQuery, rows: items, selection: selectedRule,
+            disabledOverrideIDs: userDisabledRuleIDs
+        )
+        let revision = presentation.revision
+        let current = presentation.isCurrent(for: key.identity)
+        // Local selection resets on the ordinary page remount. Keeping its
+        // table would never be an exact reattach hit and could retain an older
+        // row outside the admitted snapshot. Oversized queries render normally
+        // but do not add an unbounded string to the detached cache key.
+        let retainable = presentation.canRetainTable(for: key.identity)
+            && key.hasBoundedTransientInputs
+            && key.disabledOverrideIDs == presentation.snapshot(for: key.identity)?.disabledOverrideIDs
+        if let tableHosts {
+            V2CachedTableHost(cache: tableHosts, slot: .rules, key: key,
+                              scope: V2TableHostScope(provider: key.identity.provider,
+                                                     directory: key.identity.directory, epoch: key.identity.epoch,
+                                                     engine: key.engine),
+                              retainable: retainable,
+                              isCurrent: {
+                state.currentWorkspace == .detection && selectedTab == .detectionRules
+                    && presentationIdentity == key.identity
+                    && appState.heartbeat?.engineIdentity.map(V2AlertsPresentationContext.Engine.init) == key.engine
+                    && presentation.revision == revision && state.ruleSearchQuery == key.query
+                    && selectedRule == key.selection && userDisabledRuleIDs == key.disabledOverrideIDs
+            }) { lease in
+                let toggle = lease.action(slot: .primary) { [weak lease] (rule: V2MockRule) in
+                    Task {
+                        guard let lease, lease.isActive, presentation.isCurrent(for: key.identity) else { return }
+                        await toggleRuleDisabled(rule)
+                    }
+                }
+                let severity = lease.action(slot: .secondary) { [weak lease] (request: V2RuleTableSeverityRequest) in
+                    Task {
+                        guard let lease, lease.isActive, presentation.isCurrent(for: key.identity) else { return }
+                        await setSeverityOverride(request.rule, severityRaw: request.severityRaw)
+                    }
+                }
+                Self.rulesTableContent(
+                    items: items, selection: lease.binding(slot: .selection, $selectedRule, fallback: nil),
+                    isCurrent: current, toggle: toggle, setSeverity: severity
+                )
+            }
+        } else {
+            Self.rulesTableContent(items: items, selection: $selectedRule, isCurrent: current,
+                                   toggle: { rule in Task { await toggleRuleDisabled(rule) } },
+                                   setSeverity: { request in
+                Task { await setSeverityOverride(request.rule, severityRaw: request.severityRaw) }
+            })
+        }
+    }
+
+    private static func rulesTableContent(items: [V2MockRule], selection: Binding<V2MockRule?>,
+                                          isCurrent: Bool, toggle: @escaping (V2MockRule) -> Void,
+                                          setSeverity: @escaping (V2RuleTableSeverityRequest) -> Void) -> some View {
+        V2DataTable(
             columns: [
                 V2DataColumn(id: "on", title: "On", width: .fixed(50),
                              sortKey: { .number($0.isEnabled ? 0 : 1) }) { r in
@@ -816,7 +907,7 @@ public struct V2DetectionWorkspace: View {
                         // toggleRuleDisabled routes builtin/user rules correctly
                         // and toasts the outcome.
                         Button {
-                            Task { await toggleRuleDisabled(r) }
+                            toggle(r)
                         } label: {
                             Image(systemName: r.isEnabled ? "circle.fill" : "circle")
                                 .foregroundStyle(r.isEnabled ? V2Theme.healthy : V2Theme.tertiaryText)
@@ -829,7 +920,7 @@ public struct V2DetectionWorkspace: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .disabled(!presentation.isCurrent(for: presentationIdentity))
+                        .disabled(!isCurrent)
                         .help(r.isEnabled ? "Enabled — click to disable" : "Disabled — click to enable")
                         .accessibilityLabel(r.isEnabled
                             ? "Rule enabled. Activate to disable."
@@ -854,7 +945,7 @@ public struct V2DetectionWorkspace: View {
                 },
                 V2DataColumn(id: "sev", title: "Severity", width: .fixed(110),
                              sortKey: { .number(Double($0.severity.sortOrder)) }) { r in
-                    severityControl(for: r)
+                    ruleSeverityControl(for: r, isCurrent: isCurrent, setSeverity: setSeverity)
                 },
                 V2DataColumn(id: "mitre", title: "MITRE", width: .fixed(110),
                              sortKey: { .text($0.mitre.first ?? "") }) { r in
@@ -875,7 +966,7 @@ public struct V2DetectionWorkspace: View {
                 },
             ],
             items: items,
-            selection: $selectedRule
+            selection: selection
         )
     }
 

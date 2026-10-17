@@ -70,6 +70,17 @@ final class V2DetectionPresentation: ObservableObject {
         identity == key ? snapshot : nil
     }
 
+    /// Pure host-retention eligibility, not a freshness claim. Admission has
+    /// already enforced the existing row/field/search-byte bounds in prepare.
+    /// The table cache additionally expires its hosts; it must not extend this
+    /// model's last successful read beyond the existing 120-second horizon.
+    func canRetainTable(for key: Identity, now: Date = Date()) -> Bool {
+        guard identity == key, let snapshot, !snapshot.rules.isEmpty,
+              let completedAt else { return false }
+        let age = now.timeIntervalSince(completedAt)
+        return age.isFinite && age >= 0 && age <= 120
+    }
+
     func rows(for key: Identity, query: String) -> [V2MockRule] {
         guard identity == key, let snapshot else { return [] }
         let normalized = Self.normalizedQuery(query)
