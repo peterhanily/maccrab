@@ -14,6 +14,9 @@ struct V2TableHostScope: Equatable {
 /// Register callbacks once while constructing a table, not from a cell body.
 @MainActor
 final class V2TableAttachmentLease {
+    /// Opaque equality generation of the existing complete table input key.
+    /// It is diagnostic-only, never emitted or used to authorize an action.
+    let inputRevision: UUID
     enum ActionSlot: Hashable { case primary, secondary }
     enum BindingSlot: Hashable { case selection, multiSelection }
 
@@ -36,7 +39,10 @@ final class V2TableAttachmentLease {
     private var actions: [ActionSlot: any Revocable] = [:]
     private var bindings: [BindingSlot: any Revocable] = [:]
 
-    init(isCurrent: @escaping @MainActor () -> Bool) { current = isCurrent }
+    init(inputRevision: UUID = UUID(), isCurrent: @escaping @MainActor () -> Bool) {
+        self.inputRevision = inputRevision
+        current = isCurrent
+    }
     var isActive: Bool { current?() == true }
 
     func action<Input>(slot: ActionSlot, _ callback: @escaping @MainActor (Input) -> Void) -> (Input) -> Void {
@@ -79,6 +85,20 @@ final class V2TableHostExpiry {
     deinit { cancellation?() }
 }
 
+/// Observe actual native host layout only; do not request extra layout work or
+/// infer row realization, screen visibility, first paint or read freshness.
+@MainActor
+private final class V2LayoutObservedTableHost: NSHostingView<AnyView> {
+    var afterLayout: (@MainActor () -> Void)?
+    override func layout() {
+        // A synchronous root replacement during super.layout must not make
+        // that old layout complete a newly armed input's observation.
+        let observation = afterLayout
+        super.layout()
+        observation?()
+    }
+}
+
 /// Window-owned, fixed two-slot native table cache. No provider, store, query,
 /// page task or model is owned here. The caller must supply the complete
 /// immutable table input and its existing model's retention-budget decision.
@@ -90,8 +110,10 @@ final class V2TableHostCache: ObservableObject {
         fileprivate let id: UUID
     }
     typealias ScheduleExpiry = @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> V2TableHostExpiry
+    typealias NativeLayoutObserver = @MainActor (V2TableAttachmentLease) -> Void
     @MainActor private final class Entry {
-        let host: NSHostingView<AnyView>
+        let host: V2LayoutObservedTableHost
+        var inputRevision = UUID()
         var matches: (Any) -> Bool
         let matchesScope: (Any) -> Bool
         let contentType: ObjectIdentifier
@@ -104,7 +126,7 @@ final class V2TableHostCache: ObservableObject {
         weak var container: NSView?
         init<Key: Equatable, Scope: Equatable, Content: View>(key: Key, scope: Scope, content: Content.Type,
             deadline: TimeInterval, retainable: Bool) {
-            host = NSHostingView(rootView: AnyView(EmptyView()))
+            host = V2LayoutObservedTableHost(rootView: AnyView(EmptyView()))
             matches = { ($0 as? Key) == key }
             matchesScope = { ($0 as? Scope) == scope }
             contentType = ObjectIdentifier(content)
@@ -112,6 +134,7 @@ final class V2TableHostCache: ObservableObject {
             self.retainable = retainable
         }
         func revoke() {
+            host.afterLayout = nil
             lease?.revoke()
             lease = nil
             attachment = nil
@@ -193,7 +216,8 @@ final class V2TableHostCache: ObservableObject {
     /// Every update installs a new lease and current root/environment.
     func attach<Key: Equatable, Scope: Equatable, Content: View>(slot: Slot, key: Key, scope: Scope, retainable: Bool,
         isCurrent: @escaping @MainActor () -> Bool, environment: EnvironmentValues,
-        to container: NSView, content: @MainActor (V2TableAttachmentLease) -> Content) -> Attachment? {
+        to container: NSView, onNativeLayout: NativeLayoutObserver? = nil,
+        content: @MainActor (V2TableAttachmentLease) -> Content) -> Attachment? {
         guard isCurrent() else {
             if let old = entries[slot], old.container === container, let attachment = old.attachment {
                 detach(attachment)
@@ -203,18 +227,27 @@ final class V2TableHostCache: ObservableObject {
         let instant = now()
         let validClock = instant.isFinite && instant >= 0 && (instant + 120).isFinite && instant + 120 > instant
         let canRetain = retainable && validClock
+        var retainedInputChanged = false
         if let old = entries[slot] {
             let compatible = old.contentType == ObjectIdentifier(Content.self) && old.matchesScope(scope)
             let activeUpdate = old.container === container && old.attachment != nil
-            let detachedHit = canRetain && old.retainable && instant < old.deadline && old.matches(key)
+            // Reuse the bounded retention comparison for timing, at most once.
+            // No full payload comparison for an unobserved active update or
+            // oversized/expired/ineligible content. Unknown equality rotates
+            // diagnostic correlation conservatively, never claims continuity.
+            let comparisonAllowed = compatible && canRetain && old.retainable && instant < old.deadline
+            let sameInput: Bool? = comparisonAllowed && (!activeUpdate || onNativeLayout != nil)
+                ? old.matches(key) : nil
+            let detachedHit = comparisonAllowed && sameInput == true
             if !compatible || (!activeUpdate && !detachedHit) { remove(slot) }
+            else { retainedInputChanged = sameInput != true }
         }
         // Only one host in this window may be attached, including old/new
         // representables that briefly overlap during a conditional swap.
         for otherSlot in Slot.allCases {
             guard let old = entries[otherSlot], let attachment = old.attachment else { continue }
             if otherSlot != slot || old.container !== container { detach(attachment) }
-            else { old.lease?.revoke(); old.lease = nil }
+            else { old.host.afterLayout = nil; old.lease?.revoke(); old.lease = nil }
         }
         let entry: Entry
         if let cached = entries[slot] { entry = cached }
@@ -232,11 +265,12 @@ final class V2TableHostCache: ObservableObject {
                 }
             }
         }
+        if retainedInputChanged { entry.inputRevision = UUID() }
         entry.matches = { ($0 as? Key) == key }
         // Pressure/model invalidation and age never regain eligibility from a
         // normal active update. The next detach discards that allocation.
         entry.retainable = !entry.retentionBlocked && canRetain && instant < entry.deadline
-        let lease = V2TableAttachmentLease(isCurrent: isCurrent)
+        let lease = V2TableAttachmentLease(inputRevision: entry.inputRevision, isCurrent: isCurrent)
         let root = content(lease).environment(\.self, environment)
         guard lease.isActive else { lease.revoke(); remove(slot); return nil }
         entry.host.rootView = AnyView(root)
@@ -247,6 +281,22 @@ final class V2TableHostCache: ObservableObject {
         entry.attachment = attachment
         entry.container = container
         if entry.host.superview !== container { container.addSubview(entry.host) }
+        if let onNativeLayout {
+            // Arm only after the root/frame/attachment are installed. Weak
+            // ownership and revocation keep detached or obsolete roots inert.
+            entry.host.afterLayout = { [weak host = entry.host, weak lease] in
+                guard let host, let lease, lease.isActive, host.window != nil,
+                      let viewport = host.superview?.bounds,
+                      viewport.width.isFinite, viewport.height.isFinite,
+                      viewport.width > 0, viewport.height > 0,
+                      host.bounds.width.isFinite, host.bounds.height.isFinite,
+                      host.bounds.width > 0, host.bounds.height > 0 else { return }
+                // One accepted native boundary per root. Clear first so a
+                // synchronous observer cannot produce reentrant diagnostics.
+                host.afterLayout = nil
+                onNativeLayout(lease)
+            }
+        }
         return attachment
     }
 }
@@ -262,6 +312,7 @@ struct V2CachedTableHost<Key: Equatable, Scope: Equatable, Content: View>: NSVie
     let scope: Scope
     let retainable: Bool
     let isCurrent: @MainActor () -> Bool
+    var onNativeLayout: V2TableHostCache.NativeLayoutObserver? = nil
     @ViewBuilder let content: @MainActor (V2TableAttachmentLease) -> Content
 
     @MainActor final class Coordinator {
@@ -283,7 +334,8 @@ struct V2CachedTableHost<Key: Equatable, Scope: Equatable, Content: View>: NSVie
             return
         }
         context.coordinator.attachment = cache.attach(slot: slot, key: key, scope: scope, retainable: retainable,
-            isCurrent: isCurrent, environment: context.environment, to: view, content: content)
+            isCurrent: isCurrent, environment: context.environment, to: view,
+            onNativeLayout: onNativeLayout, content: content)
     }
     static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
         if let attachment = coordinator.attachment { coordinator.cache.detach(attachment) }

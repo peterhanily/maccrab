@@ -373,7 +373,12 @@ struct V2AlertsWorkspace: View {
     private func requestReload() -> Task<Void, Never> {
         let context = loadContext
         let provider = state.provider
-        return loadCoordinator.request(context: context) { ticket in
+        // Inactivity pauses the inner presentation read without disappearing
+        // this workspace. The next active tick must replace its old outer
+        // consumer, not join a cancelled read and lose that refresh. Do not
+        // put this token in .task(id:): pausing alone must not issue a read.
+        let lifecycle = isAlertList ? presentation.pauseGeneration : nil
+        return loadCoordinator.request(context: context, lifecycle: lifecycle) { ticket in
             await loadSnapshot(provider: provider, context: context, ticket: ticket)
         }
     }
@@ -418,6 +423,7 @@ struct V2AlertsWorkspace: View {
             auxiliaryLoaded = true
             return
         }
+        let timingTicket = context.tab == .alertsOpen ? state.currentVisitTimingTicket(for: .alerts) : nil
         await presentation.refresh(context: context.presentation, isCurrent: {
             // Open and History share the same backend population. Switching
             // between them may join this read; it must not inherit the old
@@ -427,8 +433,16 @@ struct V2AlertsWorkspace: View {
         }, fetch: { since, limit in
             await provider.alertsSnapshot(since: since, limit: limit)
         })
-        guard loadCoordinator.accepts(ticket, context: loadContext),
-              presentation.isFresh(for: context.presentation) else { return }
+        guard loadCoordinator.accepts(ticket, context: loadContext) else { return }
+        if let timingTicket, state.currentVisitTimingTicket(for: .alerts) == timingTicket {
+            state.visitTiming.readFinishedWithoutSnapshot(
+                phase: presentation.readiness(for: context.presentation).phase,
+                hasSnapshot: presentation.hasSnapshot(for: context.presentation),
+                observedLiveRead: state.didProbeLiveData && provider.mode == .live
+                    && provider.dataDir == state.engineSource.directory,
+                for: timingTicket)
+        }
+        guard presentation.isFresh(for: context.presentation) else { return }
         let a = presentation.rows(for: context.presentation)
         if let selection = selected { selected = a.first { $0.id == selection.id } }
         // If navigation requested a specific alert, select it only from this
@@ -1016,6 +1030,20 @@ struct V2AlertsWorkspace: View {
         let generation = presentation.readiness.generation
         let fresh = presentation.isFresh
         let hasSnapshot = presentation.hasSnapshot
+        let timing = state.visitTiming
+        let timingTicket = presentation.hasSnapshot(for: key.context)
+            ? state.currentVisitTimingTicket(for: .alerts) : nil
+        let freshness: V2VisitTiming.Freshness = presentation.isFresh(for: key.context) ? .fresh : .cached
+        let content: V2VisitTiming.Content = presentation.readiness(for: key.context).phase == .partial
+            ? .partial : (items.isEmpty ? .empty : .nonempty)
+        let layoutObserver: V2TableHostCache.NativeLayoutObserver? = timingTicket.map { ticket in
+            { [weak timing, weak state = state] lease in
+                guard state?.currentVisitTimingTicket(for: .alerts) == ticket else { return }
+                _ = timing?.nativeTableDidLayout(.init(tableRevision: lease.inputRevision,
+                    modelRevision: generation, freshness: freshness, content: content), for: ticket,
+                    activeAttachment: lease.isActive, positiveViewport: true)
+            }
+        }
         // These local selections reset on page remount, so a selected table
         // cannot produce an exact detached hit. Do not retain its extra values.
         let retainable = presentation.canRetainTable(for: key.context)
@@ -1033,7 +1061,13 @@ struct V2AlertsWorkspace: View {
                     && selected == key.selection && selectedAlertIds == key.multiSelection
                     && presentation.readiness.generation == generation
                     && presentation.isFresh == fresh && presentation.hasSnapshot == hasSnapshot
-            }) { lease in
+            }, onNativeLayout: layoutObserver) { lease in
+                let _ = timingTicket.map { ticket in
+                    if lease.isActive, state.currentVisitTimingTicket(for: .alerts) == ticket {
+                        timing.readAccepted(.init(tableRevision: lease.inputRevision, modelRevision: generation,
+                            freshness: freshness, content: content), for: ticket)
+                    }
+                }
                 V2DataTable(
                     columns: Self.alertsTableColumns, items: items,
                     selection: lease.binding(slot: .selection, $selected, fallback: nil),

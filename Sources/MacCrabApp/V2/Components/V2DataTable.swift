@@ -186,6 +186,23 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
             filterQuery: filterQuery, sortColumnId: sortColumnId, sortAscending: sortAscending)
     }
 
+    /// Without a local transform, the accepted input already IS the displayed
+    /// snapshot. Routing it through onChange -> @State leaves a later graph
+    /// update showing the previous population/payload. Keep the existing cache
+    /// for actual local filtering/sorting, without resetting any table state.
+    static func displayedSnapshot(items: [Item], cached: @autoclosure () -> [Item],
+                                  filterQuery: String, sortColumnId: String?) -> [Item] {
+        // Do not read @State at all on the default path; even an unused eager
+        // read would subscribe that body to the subsequent cache update.
+        if filterQuery.trimmingCharacters(in: .whitespaces).isEmpty && sortColumnId == nil { return items }
+        return cached()
+    }
+
+    private var displayedItems: [Item] {
+        Self.displayedSnapshot(items: items, cached: displayCache,
+                               filterQuery: filterQuery, sortColumnId: sortColumnId)
+    }
+
     // MARK: - Multi-select (pure selection algebra)
 
     /// Pure selection-set update for multi-select mode. A plain click toggles
@@ -240,7 +257,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
 
     private var allDisplayedChecked: Bool {
         guard let m = multiSelection else { return false }
-        return Self.allDisplayedSelected(items: displayCache, selected: m.wrappedValue)
+        return Self.allDisplayedSelected(items: displayedItems, selected: m.wrappedValue)
     }
 
     private func toggleCheck(_ item: Item) {
@@ -248,7 +265,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
         let result = Self.updatedMultiSelection(
             current: m.wrappedValue,
             tapped: item.id,
-            orderedIDs: displayCache.map(\.id),
+            orderedIDs: displayedItems.map(\.id),
             anchor: selectionAnchor,
             rangeSelect: NSEvent.modifierFlags.contains(.shift))
         m.wrappedValue = result.selection
@@ -258,7 +275,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
     private func toggleSelectAllDisplayed() {
         guard let m = multiSelection else { return }
         m.wrappedValue = Self.toggledSelectAll(
-            current: m.wrappedValue, displayedIDs: displayCache.map(\.id))
+            current: m.wrappedValue, displayedIDs: displayedItems.map(\.id))
     }
 
     public var body: some View {
@@ -270,10 +287,10 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
             ScrollView(.vertical) {
                 LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                     Section {
-                        if displayCache.isEmpty {
+                        if displayedItems.isEmpty {
                             emptyRows
                         } else {
-                            ForEach(displayCache) { item in
+                            ForEach(displayedItems) { item in
                                 Row(
                                     columns: columns,
                                     item: item,

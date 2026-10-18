@@ -198,8 +198,17 @@ public struct V2DetectionWorkspace: View {
             let tab = selectedTab
             if tab == .detectionRules {
                 let identity = presentationIdentity
+                let timingTicket = state.currentVisitTimingTicket(for: .detection)
                 await presentation.refresh(identity: identity, query: state.ruleSearchQuery, provider: provider)
                 guard !Task.isCancelled, identity == presentationIdentity, selectedTab == tab else { return }
+                if let timingTicket, state.currentVisitTimingTicket(for: .detection) == timingTicket {
+                    state.visitTiming.readFinishedWithoutSnapshot(
+                        phase: presentation.readiness(for: identity, query: state.ruleSearchQuery).phase,
+                        hasSnapshot: presentation.snapshot(for: identity) != nil,
+                        observedLiveRead: state.didProbeLiveData && provider.mode == .live
+                            && provider.dataDir == state.engineSource.directory,
+                        for: timingTicket)
+                }
                 localDisabledRuleIDs = nil
                 let r = rules
                 resyncSelectedRule(from: r)
@@ -835,6 +844,22 @@ public struct V2DetectionWorkspace: View {
         )
         let revision = presentation.revision
         let current = presentation.isCurrent(for: key.identity)
+        let phase = presentation.phase
+        let timing = state.visitTiming
+        // A pending filter or initial offline placeholder is not accepted
+        // empty data. Capture only metadata, never rows, in the layout callback.
+        let timingTicket = presentation.hasFilteredResult(for: key.identity, query: key.query)
+            ? state.currentVisitTimingTicket(for: .detection) : nil
+        let freshness: V2VisitTiming.Freshness = current ? .fresh : .cached
+        let content: V2VisitTiming.Content = items.isEmpty ? .empty : .nonempty
+        let layoutObserver: V2TableHostCache.NativeLayoutObserver? = timingTicket.map { ticket in
+            { [weak timing, weak state = state] lease in
+                guard state?.currentVisitTimingTicket(for: .detection) == ticket else { return }
+                _ = timing?.nativeTableDidLayout(.init(tableRevision: lease.inputRevision,
+                    modelRevision: revision, freshness: freshness, content: content), for: ticket,
+                    activeAttachment: lease.isActive, positiveViewport: true)
+            }
+        }
         // Local selection resets on the ordinary page remount. Keeping its
         // table would never be an exact reattach hit and could retain an older
         // row outside the admitted snapshot. Oversized queries render normally
@@ -852,9 +877,16 @@ public struct V2DetectionWorkspace: View {
                 state.currentWorkspace == .detection && selectedTab == .detectionRules
                     && presentationIdentity == key.identity
                     && appState.heartbeat?.engineIdentity.map(V2AlertsPresentationContext.Engine.init) == key.engine
-                    && presentation.revision == revision && state.ruleSearchQuery == key.query
+                    && presentation.revision == revision && presentation.phase == phase
+                    && state.ruleSearchQuery == key.query
                     && selectedRule == key.selection && userDisabledRuleIDs == key.disabledOverrideIDs
-            }) { lease in
+            }, onNativeLayout: layoutObserver) { lease in
+                let _ = timingTicket.map { ticket in
+                    if lease.isActive, state.currentVisitTimingTicket(for: .detection) == ticket {
+                        timing.readAccepted(.init(tableRevision: lease.inputRevision, modelRevision: revision,
+                            freshness: freshness, content: content), for: ticket)
+                    }
+                }
                 let toggle = lease.action(slot: .primary) { [weak lease] (rule: V2MockRule) in
                     Task {
                         guard let lease, lease.isActive, presentation.isCurrent(for: key.identity) else { return }

@@ -1262,6 +1262,10 @@ final class AppState: ObservableObject, EventQueryReading {
     /// won the load.
     private var rulesCacheDirMtime: Date?
     private var rulesCacheDirPath: String?
+    private var ruleSnapshotRequestGeneration = UUID()
+    #if DEBUG
+    var ruleSnapshotAcceptedForTesting: Bool { rulesLoaded_cached }
+    #endif
     private var lastAlertTimestamp: Date = .distantPast
     private var lastEventTimestamp: Date = .distantPast
     private var lastSecurityScoreUpdate: Date = .distantPast
@@ -2670,7 +2674,6 @@ final class AppState: ObservableObject, EventQueryReading {
         // "Protection degraded"). Retry each poll until rules actually load.
         if !rulesLoaded_cached {
             await loadRules()
-            if rulesLoaded > 0 { rulesLoaded_cached = true }
         }
     }
 
@@ -2924,32 +2927,60 @@ final class AppState: ObservableObject, EventQueryReading {
         return result
     }
 
-    func loadRules() async {
+    @discardableResult
+    func loadRules(
+        readSnapshot: @escaping @Sendable (AppRuleSnapshotRequest) throws -> AppRuleSnapshot = {
+            try AppRuleSnapshotReader.read($0)
+        }
+    ) async -> Bool {
+        guard !Task.isCancelled else { return false }
         // Compiled rules describe the selected engine only. A missing corpus
         // must not be replaced with another daemon or a development checkout.
-        let candidates = [dataDir + "/compiled_rules"]
-
-        for dir in candidates {
-            if let files = try? FileManager.default.contentsOfDirectory(atPath: dir),
-               files.contains(where: { $0.hasSuffix(".json") }) {
-                // v1.11.1 (audit perf MEDIUM): mtime gate. If the
-                // dir we'd load from is the same one we last loaded
-                // AND its mtime is unchanged, the parsed `rules`
-                // array is still authoritative — skip the full-directory
-                // contentsOfDirectory + JSONDecoder.decode pass.
-                let mtime = (try? FileManager.default.attributesOfItem(atPath: dir))?[.modificationDate] as? Date
-                if dir == rulesCacheDirPath, let mtime, mtime == rulesCacheDirMtime, !rules.isEmpty {
-                    return
-                }
-                rules = loadRulesFromDir(dir, files: files)
-                rulesLoaded = rules.count
-                rulesCacheDirPath = dir
-                rulesCacheDirMtime = mtime
-                return
-            }
+        let directory = dataDir
+        let requestGeneration = UUID()
+        ruleSnapshotRequestGeneration = requestGeneration
+        let capturedStoreGeneration = storeGeneration
+        let capturedPollingGeneration = pollingGeneration
+        let request = AppRuleSnapshotRequest(
+            directory: directory + "/compiled_rules", cachedDirectory: rulesCacheDirPath,
+            cachedModificationDate: rulesCacheDirMtime, hasCachedRows: !rules.isEmpty)
+        let worker = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let snapshot = try readSnapshot(request)
+            try Task.checkCancellation()
+            return snapshot
         }
-        rulesLoaded = 0
-        rules = []
+        let snapshot: AppRuleSnapshot
+        do {
+            snapshot = try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: { worker.cancel() }
+        } catch {
+            return false
+        }
+        guard !Task.isCancelled, !worker.isCancelled,
+              requestGeneration == ruleSnapshotRequestGeneration,
+              directory == dataDir, capturedStoreGeneration == storeGeneration,
+              capturedPollingGeneration == pollingGeneration else { return false }
+
+        // Commit only an accepted snapshot. In particular, a cancelled await
+        // must not latch success merely because older display rows still exist.
+        switch snapshot {
+        case .unchanged:
+            if !rules.isEmpty { rulesLoaded_cached = true }
+            return !rules.isEmpty
+        case .loaded(let rows, let mtime):
+            rules = rows
+            rulesLoaded = rows.count
+            rulesCacheDirPath = request.directory
+            rulesCacheDirMtime = mtime
+            if !rows.isEmpty { rulesLoaded_cached = true }
+            return !rows.isEmpty
+        case .missing:
+            rulesLoaded = 0
+            rules = []
+            return false
+        }
     }
 
     func unsuppressAlert(_ alertId: String) async {
@@ -3665,23 +3696,6 @@ final class AppState: ObservableObject, EventQueryReading {
         case .authentication: return .authentication
         case .tcc: return .tcc
         case .registry: return .registry
-        }
-    }
-
-    private func loadRulesFromDir(_ dir: String, files: [String]) -> [RuleViewModel] {
-        let decoder = JSONDecoder()
-        return files.compactMap { file -> RuleViewModel? in
-            guard file.hasSuffix(".json") else { return nil }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: dir + "/" + file)),
-                  let rule = try? decoder.decode(CompiledRule.self, from: data) else { return nil }
-            return RuleViewModel(
-                id: rule.id,
-                title: rule.title,
-                level: rule.level.rawValue,
-                tags: rule.tags,
-                description: rule.description,
-                enabled: rule.enabled
-            )
         }
     }
 

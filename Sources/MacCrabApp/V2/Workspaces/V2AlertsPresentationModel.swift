@@ -58,6 +58,9 @@ final class V2AlertsPresentationModel: ObservableObject {
     private var retainable = false
     private var current: UUID?
     private var task: Task<Void, Never>?
+    /// Only a real pause changes this token. Ordinary reads/readiness updates
+    /// must not make timer requests restart a healthy occupied backend read.
+    private(set) var pauseGeneration = UUID()
 
     func rows(for expected: V2AlertsPresentationContext) -> [V2MockAlert] {
         context == expected ? rows : []
@@ -164,6 +167,7 @@ final class V2AlertsPresentationModel: ObservableObject {
     /// Kept snapshots are explicitly stale. An unknown source/engine identity
     /// cannot justify reuse after a navigation or foreground boundary.
     func pause() {
+        pauseGeneration = UUID()
         task?.cancel()
         // The running task owns clearing its slot after the backend unwinds.
         isFresh = false

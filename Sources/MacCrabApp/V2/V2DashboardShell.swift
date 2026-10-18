@@ -127,6 +127,7 @@ struct V2DashboardShell: View {
             // A restored window can appear while another app is active, before
             // any activity change notification arrives.
             state.setWindowActivity(controlActiveState)
+            state.beginInitialVisitTiming(epoch: appState.eventQueryEpoch, deferred: appState.eventReadsDeferred)
             if controlActiveState == .inactive { eventQuerySession.cancelBackendReads() }
             else { eventQuerySession.resumeBackendReads() }
             await state.connectLiveData()
@@ -137,6 +138,7 @@ struct V2DashboardShell: View {
             // Invalidate an in-flight connect even before SwiftUI delivers task
             // cancellation; an older appearance cannot restart this window.
             refreshAppearanceID = nil
+            state.stopVisitTiming(.windowClosed)
             tableHosts.removeAll()
             eventQuerySession.cancelBackendReads()
             state.stopAutoRefresh()
@@ -154,9 +156,11 @@ struct V2DashboardShell: View {
             Task { await state.onEngineIdentity(identity) }
         }
         .onChange(of: appState.eventQueryEpoch) { _ in
+            state.reconcileVisitTimingBackend(epoch: appState.eventQueryEpoch, deferred: appState.eventReadsDeferred)
             tableHosts.evictDetached(disqualifyActive: false)
             eventQuerySession.reconcileBackendContext()
         }
+        .onChange(of: state.visitTimingContext) { _ in state.reconcileVisitTimingContext() }
         .onChange(of: rulesTableIdentity) { _ in tableHosts.evictDetached(slot: .rules, disqualifyActive: false) }
         .onChange(of: alertsTableContext) { _ in tableHosts.evictDetached(slot: .openAlerts, disqualifyActive: false) }
         .onChange(of: state.ruleSearchQuery) { _ in tableHosts.evictDetached(slot: .rules, disqualifyActive: false) }
@@ -170,7 +174,10 @@ struct V2DashboardShell: View {
         .onChange(of: alertsPresentation.canRetainTable(for: alertsTableContext)) { allowed in
             if !allowed { tableHosts.evictDetached(slot: .openAlerts, disqualifyActive: false) }
         }
-        .onChange(of: appState.eventReadsDeferred) { _ in eventQuerySession.reconcileBackendContext() }
+        .onChange(of: appState.eventReadsDeferred) { _ in
+            state.reconcileVisitTimingBackend(epoch: appState.eventQueryEpoch, deferred: appState.eventReadsDeferred)
+            eventQuerySession.reconcileBackendContext()
+        }
         .onChange(of: appState.heartbeat?.bootPhase) { newPhase in
             Task { await state.onSysextBootPhase(newPhase) }
         }

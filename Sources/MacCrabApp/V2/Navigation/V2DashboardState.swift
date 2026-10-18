@@ -10,6 +10,7 @@
 import SwiftUI
 import Combine
 import MacCrabCore
+import os
 
 @MainActor
 public final class V2DashboardState: ObservableObject {
@@ -111,6 +112,7 @@ public final class V2DashboardState: ObservableObject {
     public func setForegroundActive(_ active: Bool) {
         let wasActive = foregroundActive
         foregroundActive = active
+        if !active { stopVisitTiming(.windowInactive) }
         if active && !wasActive { refreshTick &+= 1 }
     }
     /// Last sysext bootPhase seen, to edge-detect the non-ready→ready
@@ -121,6 +123,26 @@ public final class V2DashboardState: ObservableObject {
     private var lastBootPhase: String? = nil
     private var lastEngineIdentity: EngineTelemetryIdentity?
     private var providerProbeGeneration: UInt64 = 0
+    private struct ProviderConsumer {
+        let cancelled: OSAllocatedUnfairLock<Bool>
+        let initial: Bool
+        let completion: CheckedContinuation<Void, Never>
+    }
+    private struct ProviderProbe {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+    private var providerConsumers: [UUID: ProviderConsumer] = [:]
+    private var providerProbe: ProviderProbe?
+
+    #if DEBUG
+    // Inert lifecycle fixtures replace only the external open/heartbeat/retire
+    // boundaries. The connection and adoption logic below is still exercised.
+    var providerFactoryForTesting: (@MainActor (V2EngineSource) async -> (any V2DataProvider)?)?
+    var providerDeferralForTesting: (@MainActor () -> Bool)?
+    var providerRetirementForTesting: (@MainActor (any V2DataProvider) -> Void)?
+    var providerWillDeliverForTesting: (@MainActor () -> Void)?
+    #endif
 
     /// Refresh cadence in seconds. Aligned with v1
     /// `pollIntervalSeconds` AppStorage so toggling either side
@@ -183,8 +205,44 @@ public final class V2DashboardState: ObservableObject {
 
     public let engineSource: V2EngineSource
 
-    public init(engineSource: V2EngineSource = .session) {
+    // Diagnostic-only: none of this state is published or gates product work.
+    let visitTiming: V2VisitTiming
+    enum VisitTimingContext: Equatable {
+        case rules(query: String)
+        case alerts(range: String, query: String, severity: V2Severity?, window: V2TimeWindow?)
+
+        var workspace: V2VisitTiming.Workspace {
+            switch self {
+            case .rules: return .detection
+            case .alerts: return .alerts
+            }
+        }
+    }
+    // One private value, never logged. Context changes cannot complete the
+    // earlier visit, even before the table has an accepted input revision.
+    private var acceptedVisitTimingContext: VisitTimingContext?
+    private var initialVisitTimingConsidered = false
+    private var timingHealthyProvider: ObjectIdentifier?
+    private var timingBackendContext: (epoch: UInt64, deferred: Bool)?
+
+    var visitTimingContext: VisitTimingContext? {
+        switch currentTab() {
+        case .detectionRules where currentWorkspace == .detection:
+            return .rules(query: ruleSearchQuery)
+        case .alertsOpen where currentWorkspace == .alerts:
+            return .alerts(range: alertTimeRange, query: alertSearchQuery,
+                           severity: alertSeverityFilter, window: pendingAlertsWindow)
+        default: return nil
+        }
+    }
+
+    public convenience init(engineSource: V2EngineSource = .session) {
+        self.init(engineSource: engineSource, visitTiming: V2VisitTiming())
+    }
+
+    init(engineSource: V2EngineSource, visitTiming: V2VisitTiming) {
         self.engineSource = engineSource
+        self.visitTiming = visitTiming
         // Restore last workspace, else default to Overview.
         let raw = UserDefaults.standard.string(forKey: Self.workspaceKey) ?? V2Workspace.overview.rawValue
         self.currentWorkspace = V2Workspace(rawValue: raw) ?? .overview
@@ -219,80 +277,256 @@ public final class V2DashboardState: ObservableObject {
         ))
     }
 
-    deinit { autoRefreshTask?.cancel() }
+    deinit {
+        autoRefreshTask?.cancel()
+        providerProbe?.task.cancel()
+        for consumer in providerConsumers.values { consumer.completion.resume() }
+    }
+
+    // MARK: - Per-visit diagnostics
+
+    /// The restored first page is considered once. A prior accepted deep link
+    /// (even one already completed) must not be restarted by the shell task.
+    func beginInitialVisitTiming(epoch: UInt64, deferred: Bool) {
+        reconcileVisitTimingBackend(epoch: epoch, deferred: deferred)
+        guard !initialVisitTimingConsidered else { return }
+        initialVisitTimingConsidered = true
+        beginVisitTimingIfSupported()
+    }
+
+    private func beginVisitTimingIfSupported() {
+        guard foregroundActive, let context = visitTimingContext else { return }
+        acceptedVisitTimingContext = context
+        visitTiming.begin(context.workspace)
+        noteHealthyProviderForVisitTiming()
+    }
+
+    func stopVisitTiming(_ reason: V2VisitTiming.Stop) {
+        for workspace: V2VisitTiming.Workspace in [.detection, .alerts] {
+            if let ticket = visitTiming.currentTicket(for: workspace) {
+                visitTiming.stop(reason, for: ticket)
+            }
+        }
+        acceptedVisitTimingContext = nil
+    }
+
+    func reconcileVisitTimingContext() {
+        guard let acceptedVisitTimingContext,
+              acceptedVisitTimingContext != visitTimingContext else { return }
+        stopVisitTiming(.contextChanged)
+    }
+
+    /// Pure body/callback lookup. A filter setter can run before the shell's
+    /// onChange; never attribute that new input to the preceding visit while
+    /// waiting for its diagnostic retirement. This does not gate product work.
+    func currentVisitTimingTicket(for workspace: V2VisitTiming.Workspace) -> V2VisitTiming.Ticket? {
+        guard let context = acceptedVisitTimingContext, context == visitTimingContext,
+              context.workspace == workspace else { return nil }
+        return visitTiming.currentTicket(for: workspace)
+    }
+
+    /// AppState advances its event epoch on both entry to and exit from startup
+    /// deferral. Those initial bookkeeping edges are not a failed cold visit.
+    /// A later source epoch/invalidation cannot finish the preceding visit.
+    func reconcileVisitTimingBackend(epoch: UInt64, deferred: Bool) {
+        let previous = timingBackendContext
+        timingBackendContext = (epoch, deferred)
+        guard let previous,
+              previous.epoch != epoch || previous.deferred != deferred else { return }
+        if !didProbeLiveData && timingHealthyProvider == nil { return }
+        if previous.deferred && !deferred { return }
+        stopVisitTiming(deferred ? .readDeferred : .contextChanged)
+    }
+
+    private var hasTimingHealthyProvider: Bool {
+        timingHealthyProvider == ObjectIdentifier(provider)
+            && provider.mode == .live && provider.dataDir == engineSource.directory
+            && provider.lastErrorDescription == nil
+    }
+
+    private func noteHealthyProviderForVisitTiming() {
+        guard hasTimingHealthyProvider, let context = acceptedVisitTimingContext,
+              context == visitTimingContext,
+              let ticket = visitTiming.currentTicket(for: context.workspace) else { return }
+        visitTiming.providerReady(for: ticket)
+    }
 
     // MARK: - Live data
 
-    /// Try to open the on-disk MacCrabCore stores. If any DB exists,
-    /// flips `provider` to a `V2LiveDataProvider`. Idempotent — safe
-    /// to call repeatedly (e.g. after the user installs the daemon).
+    private func providerOpener() -> @MainActor (V2EngineSource) async -> (any V2DataProvider)? {
+        #if DEBUG
+        if let providerFactoryForTesting { return providerFactoryForTesting }
+        #endif
+        return { source in await V2LiveDataProvider(source: source) }
+    }
+
+    private func providerReadsDeferred() -> Bool {
+        #if DEBUG
+        if let providerDeferralForTesting { return providerDeferralForTesting() }
+        #endif
+        return engineSource.defersEventReads()
+    }
+
+    private func providerRetirer() -> @MainActor ((any V2DataProvider)?) -> Void {
+        #if DEBUG
+        if let providerRetirementForTesting {
+            return { candidate in
+                if let candidate { providerRetirementForTesting(candidate) }
+            }
+        }
+        #endif
+        return { ($0 as? V2LiveDataProvider)?.retireEventReads() }
+    }
+
+    private func retireProvider(_ candidate: (any V2DataProvider)?) {
+        providerRetirer()(candidate)
+    }
+
+    /// Equivalent launch, ready-edge and focus requests share one occupied
+    /// store-open operation. Only a true lifecycle/engine change invalidates it.
     public func connectLiveData() async {
-        guard !deferProviderDuringStartup() else { return }
-        providerProbeGeneration &+= 1
-        let generation = providerProbeGeneration
-        let probed = await V2LiveDataProvider(source: engineSource)
-        guard generation == providerProbeGeneration,
-              !deferProviderDuringStartup() else {
-            probed?.retireEventReads()
-            return
-        }
-        // Record that the probe ran BEFORE acting on its result, so any surface
-        // gated on didProbeLiveData flips exactly once, in the same main-actor
-        // step that swaps the provider.
-        didProbeLiveData = true
-        if let live = probed {
-            (provider as? V2LiveDataProvider)?.retireEventReads()
-            self.provider = live
-            finishStartupRecoveryIfHealthy()
-            let dir = live.dataDir.map { " (\($0))" } ?? ""
-            showToast(V2Toast(
-                kind: .success,
-                title: "Live data connected",
-                detail: "Reading from on-disk MacCrabCore stores\(dir)"
-            ))
-        } else {
-            showToast(V2Toast(
-                kind: .info,
-                title: "No daemon data found",
-                detail: "Start or approve the daemon, then try again",
-                displayFor: 4
-            ))
-        }
+        await requestProvider(initial: true, force: false)
     }
 
     /// Reopen this session's stores after startup or an observed engine restart.
     /// Automatic recovery cannot change source directories. A generation guard
     /// prevents an older asynchronous probe from replacing a newer provider.
     public func reconnectLiveDataIfStale(force: Bool = false) async {
-        guard !deferProviderDuringStartup() else { return }
-        providerProbeGeneration &+= 1
-        let generation = providerProbeGeneration
+        await requestProvider(initial: false, force: force)
+    }
+
+    private func requestProvider(initial: Bool, force: Bool) async {
+        guard !Task.isCancelled, !deferProviderDuringStartup() else { return }
         if force {
-            (provider as? V2LiveDataProvider)?.retireEventReads()
+            stopVisitTiming(.contextChanged)
+            timingHealthyProvider = nil
+            invalidateProviderProbe()
+            retireProvider(provider)
             provider = V2OfflineDataProvider()
             paletteAlerts = []; paletteRules = []; paletteTraces = []
         }
-        let reprobed = await V2LiveDataProvider(source: engineSource)
-        guard generation == providerProbeGeneration,
-              !deferProviderDuringStartup() else {
-            reprobed?.retireEventReads()
+        let generation = providerProbeGeneration
+        let id = UUID()
+        let cancelled = OSAllocatedUnfairLock(initialState: false)
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { completion in
+                guard !Task.isCancelled, generation == providerProbeGeneration,
+                      !cancelled.withLock({ $0 }) else {
+                    completion.resume()
+                    return
+                }
+                providerConsumers[id] = ProviderConsumer(cancelled: cancelled, initial: initial,
+                                                         completion: completion)
+                startProviderProbeIfNeeded()
+            }
+        } onCancel: { [weak self] in
+            // Cancellation may arrive off-main immediately before delivery.
+            // Mark it synchronously; actor cleanup is not the acceptance guard.
+            cancelled.withLock { $0 = true }
+            Task { @MainActor [weak self] in self?.cancelProviderConsumer(id) }
+        }
+    }
+
+    private func cancelProviderConsumer(_ id: UUID) {
+        guard let consumer = providerConsumers.removeValue(forKey: id) else { return }
+        consumer.completion.resume()
+        if providerConsumers.isEmpty { providerProbe?.task.cancel() }
+    }
+
+    private func removeCancelledProviderConsumers() {
+        for (id, consumer) in providerConsumers where consumer.cancelled.withLock({ $0 }) {
+            cancelProviderConsumer(id)
+        }
+    }
+
+    private func invalidateProviderProbe() {
+        providerProbeGeneration &+= 1
+        providerProbe?.task.cancel()
+        let obsolete = providerConsumers
+        providerConsumers.removeAll()
+        for consumer in obsolete.values { consumer.completion.resume() }
+        // Keep the occupied slot until a non-cooperative open actually returns.
+        // New-epoch callers wait here; they do not create parallel open tasks.
+    }
+
+    private func startProviderProbeIfNeeded() {
+        removeCancelledProviderConsumers()
+        guard providerProbe == nil, !providerConsumers.isEmpty,
+              !deferProviderDuringStartup() else { return }
+        let id = UUID(), generation = providerProbeGeneration
+        let source = engineSource, open = providerOpener(), retire = providerRetirer()
+        let worker = Task { @MainActor [weak self] in
+            let candidate = Task.isCancelled ? nil : await open(source)
+            // Neither the source/open nor retirement closure retains state.
+            // A cancelled last caller can release its window while I/O unwinds.
+            guard let self else { retire(candidate); return }
+            self.finishProviderProbe(id: id, generation: generation, candidate: candidate, retire: retire)
+        }
+        providerProbe = ProviderProbe(id: id, task: worker)
+    }
+
+    private func finishProviderProbe(
+        id: UUID, generation: UInt64, candidate: (any V2DataProvider)?,
+        retire: @MainActor ((any V2DataProvider)?) -> Void
+    ) {
+        guard providerProbe?.id == id else { retire(candidate); return }
+        providerProbe = nil
+        #if DEBUG
+        providerWillDeliverForTesting?()
+        #endif
+        removeCancelledProviderConsumers()
+        guard generation == providerProbeGeneration, !Task.isCancelled,
+              !providerConsumers.isEmpty, !deferProviderDuringStartup() else {
+            retire(candidate)
+            startProviderProbeIfNeeded()
             return
         }
+
+        let consumers = providerConsumers
+        providerConsumers.removeAll()
+        defer { for consumer in consumers.values { consumer.completion.resume() } }
+        let initial = consumers.values.contains { $0.initial && !$0.cancelled.withLock({ $0 }) }
+        guard consumers.values.contains(where: { !$0.cancelled.withLock({ $0 }) }) else {
+            retire(candidate)
+            return
+        }
+        // A completed current-source probe is observable exactly once. A
+        // cancelled, superseded or startup-deferred completion cannot adopt.
         didProbeLiveData = true
-        guard let live = reprobed else { return }
-        if Self.shouldAdoptReprobe(
+        guard let live = candidate else {
+            if !hasTimingHealthyProvider { stopVisitTiming(.readUnavailable) }
+            if initial {
+                showToast(V2Toast(kind: .info, title: "No daemon data found",
+                                  detail: "Start or approve the daemon, then try again", displayFor: 4))
+            }
+            return
+        }
+        guard live.mode == .live, live.dataDir == engineSource.directory else {
+            if !hasTimingHealthyProvider { stopVisitTiming(.readUnavailable) }
+            retire(live)
+            return
+        }
+        if initial || Self.shouldAdoptReprobe(
             currentMode: provider.mode,
             currentDir: provider.dataDir,
             currentDegraded: provider.lastErrorDescription != nil,
             reprobeDir: live.dataDir,
             reprobeDegraded: live.lastErrorDescription != nil
         ) {
-            (provider as? V2LiveDataProvider)?.retireEventReads()
+            if hasTimingHealthyProvider, provider !== live { stopVisitTiming(.contextChanged) }
+            timingHealthyProvider = nil
+            retireProvider(provider)
             self.provider = live
         } else {
-            live.retireEventReads()
+            retire(live)
         }
         finishStartupRecoveryIfHealthy()
+        if !hasTimingHealthyProvider { stopVisitTiming(.readFailed) }
+        if initial {
+            let dir = live.dataDir.map { " (\($0))" } ?? ""
+            showToast(V2Toast(kind: .success, title: "Live data connected",
+                              detail: "Reading from on-disk MacCrabCore stores\(dir)"))
+        }
     }
 
     /// Adopt a recovered provider only for the current source. A healthy
@@ -309,6 +543,7 @@ public final class V2DashboardState: ObservableObject {
 
     public func onEngineIdentity(_ identity: EngineTelemetryIdentity?) async {
         let changed = Self.updateEngineIdentity(&lastEngineIdentity, next: identity)
+        if changed { stopVisitTiming(.contextChanged) }
         guard !deferProviderDuringStartup() else { return }
         if changed {
             providerDeferredForStartup = true
@@ -325,18 +560,22 @@ public final class V2DashboardState: ObservableObject {
         if provider.mode == .live, provider.dataDir == engineSource.directory,
            provider.lastErrorDescription == nil {
             providerDeferredForStartup = false
+            timingHealthyProvider = ObjectIdentifier(provider)
+            noteHealthyProviderForVisitTiming()
         }
     }
 
     @discardableResult
     private func deferProviderDuringStartup() -> Bool {
-        guard engineSource.defersEventReads() else { return false }
+        guard providerReadsDeferred() else { return false }
+        if timingHealthyProvider != nil { stopVisitTiming(.readDeferred) }
+        timingHealthyProvider = nil
         // Pending recovery can coexist with an in-flight probe and an offline
         // provider. Every observed startup must invalidate that earlier probe.
         providerDeferredForStartup = true
-        providerProbeGeneration &+= 1
+        invalidateProviderProbe()
         if provider.mode != .offline {
-            (provider as? V2LiveDataProvider)?.retireEventReads()
+            retireProvider(provider)
             provider = V2OfflineDataProvider()
             paletteAlerts = []; paletteRules = []; paletteTraces = []
         }
@@ -350,7 +589,7 @@ public final class V2DashboardState: ObservableObject {
     // refreshTick, keeping periodic background workspace queries paused.
     func resumeProviderAfterStartup() async {
         guard providerDeferredForStartup, !startupRecoveryInFlight,
-              !Task.isCancelled, !engineSource.defersEventReads() else { return }
+              !Task.isCancelled, !providerReadsDeferred() else { return }
         startupRecoveryInFlight = true
         defer { startupRecoveryInFlight = false }
         await reconnectLiveDataIfStale()
@@ -391,9 +630,11 @@ public final class V2DashboardState: ObservableObject {
     }
 
     public func disconnectLiveData() {
-        providerProbeGeneration &+= 1
+        stopVisitTiming(.contextChanged)
+        timingHealthyProvider = nil
+        invalidateProviderProbe()
         providerDeferredForStartup = false
-        (provider as? V2LiveDataProvider)?.retireEventReads()
+        retireProvider(provider)
         #if DEBUG
         self.provider = V2MockDataProvider()
         showToast(V2Toast(kind: .info, title: "Switched to sample data"))
@@ -520,6 +761,9 @@ public final class V2DashboardState: ObservableObject {
     // MARK: - Internals
 
     private func applyDestination(_ destination: V2NavigationDestination) {
+        let previousTimingContext = visitTimingContext
+        let isFirstAcceptedVisit = !initialVisitTimingConsidered
+        initialVisitTimingConsidered = true
         if currentWorkspace != destination.workspace {
             currentWorkspace = destination.workspace
         }
@@ -531,6 +775,13 @@ public final class V2DashboardState: ObservableObject {
             selectedEntities[key] = entityId
         }
         applyFilters(destination.filters, in: destination.workspace, tab: destination.tab)
+        // Start at app-accepted navigation, after synchronous destination
+        // application. This is deliberately not an OS input-dispatch timestamp.
+        // Entity-only/no-op navigation and ordinary refreshes never restart it.
+        if visitTimingContext != previousTimingContext || isFirstAcceptedVisit {
+            if visitTimingContext == nil { stopVisitTiming(.contextChanged) }
+            else { beginVisitTimingIfSupported() }
+        }
     }
 
     private func applyFilters(_ filters: [String: String], in workspace: V2Workspace, tab: V2WorkspaceTab?) {

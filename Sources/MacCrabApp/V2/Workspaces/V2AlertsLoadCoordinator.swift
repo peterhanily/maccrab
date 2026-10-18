@@ -10,6 +10,7 @@ final class V2AlertsLoadCoordinator<Context: Equatable>: ObservableObject {
     struct Ticket: Equatable {
         let id: UUID
         let context: Context
+        let lifecycle: UUID?
     }
 
     private var current: Ticket?
@@ -18,11 +19,12 @@ final class V2AlertsLoadCoordinator<Context: Equatable>: ObservableObject {
     @discardableResult
     func request(
         context: Context,
+        lifecycle: UUID? = nil,
         operation: @escaping @MainActor (Ticket) async -> Void
     ) -> Task<Void, Never> {
-        if current?.context == context, let task { return task }
+        if current?.context == context, current?.lifecycle == lifecycle, let task { return task }
         task?.cancel()
-        let ticket = Ticket(id: UUID(), context: context)
+        let ticket = Ticket(id: UUID(), context: context, lifecycle: lifecycle)
         current = ticket
         let next = Task { @MainActor [weak self] in
             defer {
