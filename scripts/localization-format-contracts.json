@@ -25,12 +25,6 @@
         "type": "@"
       }
     ],
-    "alerts.readFailedBody": [
-      {
-        "expression": "readError",
-        "type": "@"
-      }
-    ],
     "ax.appearance.tooltip": [
       {
         "expression": "schemeName",

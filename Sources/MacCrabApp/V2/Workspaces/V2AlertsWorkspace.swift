@@ -50,13 +50,13 @@ enum V2AlertReadNotice: Equatable {
         case .loading:
             return String(localized: "alerts.loading", defaultValue: "Loading alerts…")
         case .partial:
-            return String(localized: "alerts.readPartial", defaultValue: "Alert data is incomplete. This is not an all-clear.")
+            return String(localized: "alerts.readPartial", defaultValue: "Alert data is incomplete.")
         case .deferred:
-            return String(localized: "alerts.readDeferred", defaultValue: "Waiting to read alerts. This is not an all-clear.")
+            return String(localized: "alerts.readDeferred", defaultValue: "Waiting for alert data…")
         case .unavailable:
-            return String(localized: "alerts.readUnavailable", defaultValue: "Alert data is not available yet. This is not an all-clear.")
+            return String(localized: "alerts.readUnavailable", defaultValue: "Alert data is unavailable.")
         case .failed:
-            return String(localized: "alerts.readFailed", defaultValue: "Couldn’t read alerts. This is not an all-clear.")
+            return String(localized: "alerts.readFailed", defaultValue: "Couldn’t load alerts.")
         }
     }
 }
@@ -211,7 +211,7 @@ struct V2AlertsWorkspace: View {
     }
 
     private func listReadStatus(readiness: UIContentReadiness) -> some View {
-        let cachedNotice = Text("Cached alert snapshot — refreshing is required before this list is current.")
+        let cachedNotice = Text(String(localized: "alerts.cachedNotice", defaultValue: "Showing saved alerts. Refresh needed."))
         let notice = V2AlertReadNotice.resolve(
             phase: readiness.phase,
             hasSnapshot: presentation.hasSnapshot(for: presentationContext),
@@ -222,7 +222,13 @@ struct V2AlertsWorkspace: View {
                 if notice == .loading {
                     ProgressView(notice.text).controlSize(.small)
                 } else {
-                    Text(notice.text).font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
+                    HStack {
+                        Text(notice.text).font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
+                        Spacer()
+                        Button(String(localized: "common.retry", defaultValue: "Retry")) {
+                            Task { await reload() }
+                        }
+                    }
                 }
             }
             StableNoticeText(
@@ -233,10 +239,15 @@ struct V2AlertsWorkspace: View {
             .font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
             if let error = presentation.error(for: presentationContext) {
                 HStack(alignment: .top) {
-                    Text("Couldn’t read alerts (\(error)). This is not an all-clear.")
-                        .font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(V2AlertReadNotice.failed.text)
+                        DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                            Text(error).textSelection(.enabled)
+                        }
+                    }
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
                     Spacer()
-                    Button("Retry") { Task { await reload() } }
+                    Button(String(localized: "common.retry", defaultValue: "Retry")) { Task { await reload() } }
                 }
             }
         }
@@ -721,10 +732,10 @@ struct V2AlertsWorkspace: View {
                 }
                 .frame(width: 38, height: 38)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "alerts.daemonStaleTitle", defaultValue: "Protection is not confirmed — alert data may be incomplete"))
+                    Text(String(localized: "alerts.daemonStaleTitle", defaultValue: "Protection status unconfirmed"))
                         .scaledSystem(13, weight: .semibold)
                         .foregroundStyle(V2Theme.primaryText)
-                    Text(String(localized: "alerts.daemonStaleDetail", defaultValue: "The engine is starting, not reporting, or needs attention. Review System health; an empty list does not confirm that no threats are present."))
+                    Text(String(localized: "alerts.daemonStaleDetail", defaultValue: "Alert data may be incomplete. Review System health."))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -780,7 +791,7 @@ struct V2AlertsWorkspace: View {
                 if daemonReporting && presentation.isFresh(for: presentationContext) && !hasOpenAlerts {
                     V2EmptyState(
                         title: String(localized: "alerts.emptyOpenTitle", defaultValue: "No open alerts"),
-                        body: String(localized: "alerts.emptyOpenBody", defaultValue: "No unsuppressed alerts appear in the selected time range. The engine is reporting active monitoring."),
+                        body: String(localized: "alerts.emptyOpenBody", defaultValue: "No unsuppressed alerts in this time range."),
                         icon: "checkmark.shield"
                     )
                     .frame(minHeight: 280)
@@ -1679,14 +1690,15 @@ struct V2AlertsWorkspace: View {
                     }
                 } else if auxiliaryContext == loadContext && auxiliaryLoaded {
                     V2EmptyState(
-                        title: "No campaign rows available",
-                        body: "This campaign reader does not distinguish an empty result from a read failure. This is not an all-clear.",
+                        title: String(localized: "alerts.campaignsUnavailable", defaultValue: "Campaign data unavailable"),
+                        body: String(localized: "alerts.campaignsIncomplete", defaultValue: "No campaign data to display. The read may be incomplete."),
                         icon: "flame"
                     )
                     .frame(minHeight: 280)
                     .v2Panel()
+                    Button(String(localized: "common.retry", defaultValue: "Retry")) { Task { await reload() } }
                 } else {
-                    Text("Loading campaign rows…")
+                    Text(String(localized: "alerts.loadingCampaigns", defaultValue: "Loading campaigns…"))
                         .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                 }
                 if !suppressedCampaigns.isEmpty {
@@ -2011,7 +2023,7 @@ struct V2AlertsWorkspace: View {
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                 if auxiliaryContext != loadContext || !auxiliaryLoaded {
-                    Text("Loading suppression state…")
+                    Text(String(localized: "alerts.loadingSuppressions", defaultValue: "Loading suppressions…"))
                         .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                 }
                 // B6: only assert "no active suppressions" when the engine is

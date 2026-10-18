@@ -869,27 +869,27 @@ public struct V2IntelligenceWorkspace: View {
                 packageScanRow
                 if packages.isEmpty {
                     // Three distinct empty states: scanning, scanned-but-empty
-                    // (a legit "no packages on this machine" result), and
+                    // (no returned rows, not proof of complete coverage), and
                     // never-scanned. Pre-fix a completed scan that found zero
                     // packages fell through to "No package scan yet", telling
                     // the operator to run a scan they had already run.
                     Group {
                         if packageScanInProgress {
                             V2EmptyState(
-                                title: "Scanning installed packages…",
-                                body: "Querying npm, PyPI, Homebrew, and Cargo registries for the packages installed on this machine. The first scan can take 30-90 seconds depending on how many packages you have.",
+                                title: String(localized: "intelligence.packagesScanning", defaultValue: "Scanning packages…"),
+                                body: String(localized: "intelligence.packagesScanningDetail", defaultValue: "Checking installed packages against npm, PyPI, Homebrew, and Cargo."),
                                 icon: "magnifyingglass.circle"
                             )
                         } else if packageLastScannedAt != nil {
                             V2EmptyState(
-                                title: "Scan complete — no packages found",
-                                body: "MacCrab found no npm, PyPI, Homebrew, or Cargo packages installed on this machine, so there's nothing to check for freshness. Install packages with one of those managers and re-scan.",
-                                icon: "checkmark.circle"
+                                title: String(localized: "intelligence.packagesEmpty", defaultValue: "No package data returned"),
+                                body: String(localized: "intelligence.packagesEmptyDetail", defaultValue: "This scan returned no package data. Coverage may be incomplete."),
+                                icon: "tray"
                             )
                         } else {
                             V2EmptyState(
-                                title: "No package scan yet",
-                                body: "Click \"Run scan\" above to query the npm, PyPI, Homebrew, and Cargo registries for the packages installed on this machine. Slopsquatting, dependency-confusion, and freshly-published-malicious-package indicators all surface here.",
+                                title: String(localized: "intelligence.packagesNotScanned", defaultValue: "No package scan yet"),
+                                body: String(localized: "intelligence.packagesNotScannedDetail", defaultValue: "Enable Package freshness, then choose Run scan. Package names are sent to registries."),
                                 icon: "shippingbox"
                             )
                         }
@@ -924,7 +924,11 @@ public struct V2IntelligenceWorkspace: View {
                     .padding(.trailing, 4)
             }
             V2ActionButton(
-                packageScanInProgress ? "Scanning…" : (packages.isEmpty ? "Run scan" : "Re-scan"),
+                packageScanInProgress
+                    ? String(localized: "intelligence.packagesScanningAction", defaultValue: "Scanning…")
+                    : (packages.isEmpty
+                        ? String(localized: "intelligence.packagesScanAction", defaultValue: "Run scan")
+                        : String(localized: "intelligence.packagesRescanAction", defaultValue: "Re-scan")),
                 icon: "magnifyingglass.circle",
                 style: .primary,
                 disabled: packageScanInProgress || !enrichPackageFreshness

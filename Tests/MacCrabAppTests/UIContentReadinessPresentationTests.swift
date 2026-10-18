@@ -46,8 +46,8 @@ struct UIContentReadinessPresentationTests {
         }
         #expect(detection.contains("Text(presentation.status(for: presentationIdentity, query: state.ruleSearchQuery))\n                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)\n                    .contentReadiness(presentation.readiness(for: presentationIdentity, query: state.ruleSearchQuery))"))
         #expect(events.contains("defaultValue: \"Events\"))\n                    .font(.title2)\n                    .fontWeight(.bold)\n                    .contentReadiness(contentReadinessForDisplay)"))
-        #expect(events.contains("ProgressView(\"Loading events…\")"))
-        #expect(events.contains("Showing cached events; the latest read has not completed successfully."))
+        #expect(events.contains("ProgressView(EventReadNotice.loading.text)"))
+        #expect(events.contains("localized: \"events.cachedIncomplete\""))
         #expect(alerts.components(separatedBy: "timeRangeChips(readiness: readiness)").count - 1 == 2)
         #expect(alerts.components(separatedBy: "timeRangeChips()").count - 1 == 1)
         #expect(alerts.contains(".contentReadiness(on ? readiness : nil)"))
@@ -55,8 +55,9 @@ struct UIContentReadinessPresentationTests {
         #expect(alerts.contains(".forDisplayedContent(isEmpty: visible.isEmpty)"))
         #expect(alerts.contains(".forDisplayedContent(isEmpty: history.isEmpty)"))
         #expect(alerts.contains("ProgressView(notice.text)"))
-        #expect(alerts.contains("Cached alert snapshot — refreshing is required before this list is current."))
-        #expect(alerts.contains("Couldn’t read alerts (\\(error)). This is not an all-clear."))
+        #expect(alerts.contains("localized: \"alerts.cachedNotice\""))
+        #expect(alerts.contains("Text(V2AlertReadNotice.failed.text)"))
+        #expect(alerts.contains("Text(error).textSelection(.enabled)"))
         #expect(alerts.contains("if daemonReporting && presentation.isFresh(for: presentationContext) && !hasOpenAlerts"))
     }
 

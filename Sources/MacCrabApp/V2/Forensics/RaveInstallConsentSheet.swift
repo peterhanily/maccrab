@@ -77,7 +77,7 @@ struct RaveInstallConsentSheet: View {
             }
 
             if loading {
-                ProgressView("Verifying catalog…")
+                ProgressView(String(localized: "rave.install.verifyingCatalog", defaultValue: "Verifying catalog…"))
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 20)
             } else if let loadError {

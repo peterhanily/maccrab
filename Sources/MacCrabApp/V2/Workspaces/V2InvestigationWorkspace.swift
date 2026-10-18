@@ -2139,8 +2139,8 @@ struct V2InvestigationWorkspace: View {
             VStack(alignment: .leading, spacing: 16) {
                 if analyzed.isEmpty {
                     V2EmptyState(
-                        title: "No AI investigation summary yet",
-                        body: "MacCrab can add one structured LLM investigation after a HIGH or CRITICAL alert is stored. The detection engine uses the backend configured in Settings → AI Backend (local Ollama is recommended). Trigger a qualifying alert to see its advisory analysis here.",
+                        title: String(localized: "investigation.aiSummaryUnavailable", defaultValue: "No AI summaries available"),
+                        body: String(localized: "investigation.aiSummaryGuidance", defaultValue: "Advisory summaries for stored HIGH or CRITICAL alerts appear here. Configure the engine’s AI backend in Settings."),
                         icon: "brain.head.profile"
                     )
                     .v2Panel()

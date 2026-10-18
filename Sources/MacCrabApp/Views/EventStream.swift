@@ -9,6 +9,44 @@ import MacCrabCore
 
 // MARK: - EventStream
 
+/// Presentation copy only. A missing/partial read must not look like an empty
+/// successful query. The existing readiness/source guards remain authoritative.
+enum EventReadNotice: Equatable {
+    case loading, partial, deferred, unavailable, failed
+
+    static func resolve(phase: UIContentReadiness.Phase, hasWarning: Bool) -> Self? {
+        switch phase {
+        case .loading, .refreshingCached: return .loading
+        case .partial: return .partial
+        case .deferred: return .deferred
+        case .unavailable: return .unavailable
+        case .failed: return .failed
+        case .loadedEmpty, .loadedNonempty: return hasWarning ? .partial : nil
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .loading: return String(localized: "events.loading", defaultValue: "Loading events…")
+        case .partial: return String(localized: "events.readPartial", defaultValue: "Event results are incomplete.")
+        case .deferred: return String(localized: "events.readDeferred", defaultValue: "Waiting for event data…")
+        case .unavailable: return String(localized: "events.readUnavailable", defaultValue: "Event data is unavailable.")
+        case .failed: return String(localized: "events.readFailed", defaultValue: "Couldn’t load events.")
+        }
+    }
+
+    var canRetry: Bool { self != .loading }
+
+    static func warning(phase: UIContentReadiness.Phase) -> Self {
+        switch phase {
+        case .failed: return .failed
+        case .deferred: return .deferred
+        case .unavailable: return .unavailable
+        default: return .partial
+        }
+    }
+}
+
 enum TimeRange: String, CaseIterable {
     case lastHour = "Last Hour"
     case last24h = "Last 24 Hours"
@@ -280,20 +318,26 @@ struct EventStream: View {
     @ViewBuilder
     private var aggregateTable: some View {
         if presentedAggregates.isEmpty {
+            let notice = EventReadNotice.resolve(phase: contentReadinessForDisplay.phase,
+                                                hasWarning: querySession.eventAggregateCoverageWarning != nil)
             VStack(spacing: 12) {
                 Spacer()
                 Image(systemName: "tray")
                     .scaledSystem(48)
                     .foregroundColor(.secondary.opacity(0.5))
                     .accessibilityHidden(true)
-                Text(String(
-                    localized: "events.noAggregates",
-                    defaultValue: "No aggregated events for this range — the daemon's daily roll-up runs every 6 hours"
-                ))
-                .font(.headline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
+                if notice == .loading {
+                    ProgressView(EventReadNotice.loading.text)
+                } else {
+                    Text(notice?.text ?? String(localized: "events.noAggregates", defaultValue: "No daily summaries for this time range."))
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                    if notice?.canRetry == true {
+                        Button(String(localized: "common.retry", defaultValue: "Retry")) { Task { await reloadEvents() } }
+                    }
+                }
                 Spacer()
             }
             .frame(maxWidth: .infinity)
@@ -597,6 +641,15 @@ struct EventStream: View {
         }
     }
 
+    @MainActor
+    private func reloadEvents() async {
+        await querySession.loadEvents(currentQuery(), isPresented: !isAggregateMode,
+                                      presentationKey: presentationKey)
+        guard !Task.isCancelled else { return }
+        if isAggregateMode { aggregateRefreshTick &+= 1 }
+        recomputeFilter()
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Toolbar
@@ -642,13 +695,7 @@ struct EventStream: View {
                     .frame(width: 200)
 
                 Button {
-                    Task {
-                        await querySession.loadEvents(currentQuery(), isPresented: !isAggregateMode,
-                                                      presentationKey: presentationKey)
-                        guard !Task.isCancelled else { return }
-                        if isAggregateMode { aggregateRefreshTick &+= 1 }
-                        recomputeFilter()
-                    }
+                    Task { await reloadEvents() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -780,7 +827,7 @@ struct EventStream: View {
                         .accessibilityHidden(true)
                     Text(String(
                         localized: "events.aggregateModeBanner",
-                        defaultValue: "Showing daily summaries — exact event details are available only for the retained interval"
+                        defaultValue: "Daily summaries. Exact event details are limited to retained data."
                     ))
                     .font(.caption)
                     .foregroundColor(.accentColor)
@@ -796,24 +843,28 @@ struct EventStream: View {
                 : (querySession.eventSearchCoverageWarning
                     ?? (showHistogram
                         ? querySession.eventHistogramCoverageWarning : nil)) {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                        .accessibilityHidden(true)
-                    Text(warning)
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                    Spacer()
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .accessibilityHidden(true)
+                        // Keep the consequence visible; only diagnostic detail
+                        // is collapsed, never the incomplete-data warning.
+                        Text(EventReadNotice.warning(phase: contentReadinessForDisplay.phase).text)
+                        Spacer()
+                    }
+                    DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                        Text(warning).textSelection(.enabled)
+                    }
                 }
+                .font(.caption).foregroundColor(.orange)
                 .padding(.horizontal)
                 .padding(.vertical, 6)
                 .background(Color.orange.opacity(0.08))
-                .accessibilityLabel(Text(warning))
             }
 
             if !isAggregateMode {
-                let refreshingNotice = Text("Showing cached events while refreshing.")
-                let incompleteNotice = Text("Showing cached events; the latest read has not completed successfully.")
+                let refreshingNotice = Text(String(localized: "events.cachedRefreshing", defaultValue: "Showing saved events. Refreshing…"))
+                let incompleteNotice = Text(String(localized: "events.cachedIncomplete", defaultValue: "Showing saved events. Latest data is not confirmed."))
                 StableNoticeText(
                     reservedMessages: [refreshingNotice, incompleteNotice],
                     visibleIndex: querySession.showingCachedEvents && !presentedEvents.isEmpty
@@ -828,21 +879,24 @@ struct EventStream: View {
             if isAggregateMode {
                 aggregateTable
             } else if presentedEvents.isEmpty {
+                let notice = EventReadNotice.resolve(phase: contentReadinessForDisplay.phase,
+                                                    hasWarning: querySession.eventSearchCoverageWarning != nil)
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "list.bullet.rectangle")
                         .scaledSystem(48)
                         .foregroundColor(.secondary.opacity(0.5))
                         .accessibilityHidden(true)
-                    if querySession.isLoading {
-                        ProgressView("Loading events…")
+                    if notice == .loading {
+                        ProgressView(EventReadNotice.loading.text)
+                    } else {
+                        Text(notice?.text ?? String(localized: "events.noMatch", defaultValue: "No events matching current filters"))
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                        if notice?.canRetry == true {
+                            Button(String(localized: "common.retry", defaultValue: "Retry")) { Task { await reloadEvents() } }
+                        }
                     }
-                    Text(querySession.isLoading ? "Reading the selected event query"
-                         : (querySession.eventSearchCoverageWarning != nil
-                            ? "Event results are not fully available"
-                            : String(localized: "events.noMatch", defaultValue: "No events matching current filters")))
-                        .font(.headline)
-                        .foregroundColor(.secondary)
                     if filterCategory != nil || !filterText.isEmpty {
                         Button(String(localized: "events.clearFilters", defaultValue: "Clear Filters")) {
                             filterCategory = nil

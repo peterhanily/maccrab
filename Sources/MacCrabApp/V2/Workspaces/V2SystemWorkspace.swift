@@ -660,10 +660,18 @@ public struct V2SystemWorkspace: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .scaledSystem(13, weight: .semibold)
-                Text(String(localized: "ui.final.lifecycleDetail", defaultValue: "\(impact) Offered \(timers.offeredHandlersTotal ?? 0), accepted \(timers.acceptedHandlersTotal ?? 0), completed \(timers.completedHandlersTotal ?? 0), in flight \(timers.inFlightHandlers ?? 0) of \(timers.maximumInFlightHandlers ?? 0), rejected \(timers.rejectedHandlersTotal ?? 0) (closed \(timers.closedRejectedHandlersTotal ?? 0), overload shed \(timers.overloadShedHandlersTotal ?? 0)), coalesced \(timers.coalescedHandlersTotal ?? 0), lossless inline fallback \(timers.inlineFallbackHandlersTotal ?? 0). Accepted conservation \(timers.conservesAcceptedHandlers.map { String($0) } ?? "unknown"); offered conservation \(timers.conservesOfferedHandlers.map { String($0) } ?? "unknown"). Current in-flight \(workLabel) work is normal when both conservation ledgers hold."))
+                Text(impact)
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
+                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                    Text(String(localized: "ui.final.lifecycleDetail", defaultValue: "\(impact) Offered \(timers.offeredHandlersTotal ?? 0), accepted \(timers.acceptedHandlersTotal ?? 0), completed \(timers.completedHandlersTotal ?? 0), in flight \(timers.inFlightHandlers ?? 0) of \(timers.maximumInFlightHandlers ?? 0), rejected \(timers.rejectedHandlersTotal ?? 0) (closed \(timers.closedRejectedHandlersTotal ?? 0), overload shed \(timers.overloadShedHandlersTotal ?? 0)), coalesced \(timers.coalescedHandlersTotal ?? 0), lossless inline fallback \(timers.inlineFallbackHandlersTotal ?? 0). Accepted conservation \(timers.conservesAcceptedHandlers.map { String($0) } ?? "unknown"); offered conservation \(timers.conservesOfferedHandlers.map { String($0) } ?? "unknown"). Current in-flight \(workLabel) work is normal when both conservation ledgers hold."))
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .font(V2Theme.meta())
             }
             Spacer()
         }
@@ -693,13 +701,21 @@ public struct V2SystemWorkspace: View {
                     defaultValue: "Agent Trace receiver feature degraded"
                 ))
                     .scaledSystem(13, weight: .semibold)
-                Text(String(
-                    localized: "system.otlpLifecycleDegradedDetail",
-                    defaultValue: "The loopback OTLP receiver rejected unauthenticated/self-reported input, broke or incompletely reported an ownership ledger, retained work after sealing, left a lifecycle operation in progress, or did not stop cleanly. Kernel-backed detection is unaffected. Listeners: accepted \(lifecycle.listenersAcceptedTotal ?? 0), completed \(lifecycle.listenersCompletedTotal ?? 0), active \(lifecycle.activeListeners ?? 0), ready \(lifecycle.readyListeners ?? 0), rejected after seal \(lifecycle.listenersRejectedAfterSealTotal ?? 0), conserving \(lifecycle.listenersConserved.map { String($0) } ?? "unknown"). Connections: accepted \(lifecycle.connectionsAcceptedTotal ?? 0), completed \(lifecycle.connectionsCompletedTotal ?? 0), active \(lifecycle.activeConnections ?? 0), rejected after seal \(lifecycle.connectionsRejectedAfterSealTotal ?? 0), rejected at capacity \(lifecycle.connectionsRejectedAtCapacityTotal ?? 0), conserving \(lifecycle.connectionsConserved.map { String($0) } ?? "unknown"). Body tasks: accepted \(lifecycle.bodyTasksAcceptedTotal ?? 0), completed \(lifecycle.bodyTasksCompletedTotal ?? 0), cancelled \(lifecycle.bodyTasksCancelledTotal ?? 0), rejected \(lifecycle.bodyTasksRejectedTotal ?? 0), in flight \(lifecycle.bodyTasksInFlight ?? 0) of \(lifecycle.maximumBodyTasks ?? 0), conserving \(lifecycle.bodyTasksConserved.map { String($0) } ?? "unknown"). Callback tasks: accepted \(lifecycle.callbackTasksAcceptedTotal ?? 0), completed \(lifecycle.callbackTasksCompletedTotal ?? 0), cancelled \(lifecycle.callbackTasksCancelledTotal ?? 0), rejected \(lifecycle.callbackTasksRejectedTotal ?? 0), in flight \(lifecycle.callbackTasksInFlight ?? 0) of \(lifecycle.maximumCallbackTasks ?? 0), conserving \(lifecycle.callbackTasksConserved.map { String($0) } ?? "unknown"). Lifecycle operations in progress \(lifecycle.lifecycleOperationsInProgress ?? 0); cleanly stopped \(lifecycle.cleanlyStopped.map { String($0) } ?? "unknown"), last shutdown clean \(lifecycle.lastShutdownClean.map { String($0) } ?? "not attempted"), shutdown timeouts \(lifecycle.shutdownTimeoutsTotal ?? 0)."
-                ))
+                Text(String(localized: "system.otlpLifecycleSummary", defaultValue: "Agent Trace input or processing is degraded. Check sensor health separately."))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
+                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                    Text(String(
+                        localized: "system.otlpLifecycleDegradedDetail",
+                        defaultValue: "The loopback OTLP receiver rejected unauthenticated/self-reported input, broke or incompletely reported an ownership ledger, retained work after sealing, left a lifecycle operation in progress, or did not stop cleanly. Kernel-backed detection is unaffected. Listeners: accepted \(lifecycle.listenersAcceptedTotal ?? 0), completed \(lifecycle.listenersCompletedTotal ?? 0), active \(lifecycle.activeListeners ?? 0), ready \(lifecycle.readyListeners ?? 0), rejected after seal \(lifecycle.listenersRejectedAfterSealTotal ?? 0), conserving \(lifecycle.listenersConserved.map { String($0) } ?? "unknown"). Connections: accepted \(lifecycle.connectionsAcceptedTotal ?? 0), completed \(lifecycle.connectionsCompletedTotal ?? 0), active \(lifecycle.activeConnections ?? 0), rejected after seal \(lifecycle.connectionsRejectedAfterSealTotal ?? 0), rejected at capacity \(lifecycle.connectionsRejectedAtCapacityTotal ?? 0), conserving \(lifecycle.connectionsConserved.map { String($0) } ?? "unknown"). Body tasks: accepted \(lifecycle.bodyTasksAcceptedTotal ?? 0), completed \(lifecycle.bodyTasksCompletedTotal ?? 0), cancelled \(lifecycle.bodyTasksCancelledTotal ?? 0), rejected \(lifecycle.bodyTasksRejectedTotal ?? 0), in flight \(lifecycle.bodyTasksInFlight ?? 0) of \(lifecycle.maximumBodyTasks ?? 0), conserving \(lifecycle.bodyTasksConserved.map { String($0) } ?? "unknown"). Callback tasks: accepted \(lifecycle.callbackTasksAcceptedTotal ?? 0), completed \(lifecycle.callbackTasksCompletedTotal ?? 0), cancelled \(lifecycle.callbackTasksCancelledTotal ?? 0), rejected \(lifecycle.callbackTasksRejectedTotal ?? 0), in flight \(lifecycle.callbackTasksInFlight ?? 0) of \(lifecycle.maximumCallbackTasks ?? 0), conserving \(lifecycle.callbackTasksConserved.map { String($0) } ?? "unknown"). Lifecycle operations in progress \(lifecycle.lifecycleOperationsInProgress ?? 0); cleanly stopped \(lifecycle.cleanlyStopped.map { String($0) } ?? "unknown"), last shutdown clean \(lifecycle.lastShutdownClean.map { String($0) } ?? "not attempted"), shutdown timeouts \(lifecycle.shutdownTimeoutsTotal ?? 0)."
+                    ))
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .font(V2Theme.meta())
             }
             Spacer()
         }
@@ -716,10 +732,15 @@ public struct V2SystemWorkspace: View {
         let transitionFailed = budget.legacyTransitionMeasurementFailed == true
         let captureDegraded = budget.captureDegraded
         let title = transitionFailed
-            ? "Legacy evidence transition measurement failed"
+            ? String(localized: "system.alertEvidenceMeasurementTitle", defaultValue: "Evidence storage could not be measured")
             : (captureDegraded
-                ? "Alert evidence capture degraded"
-                : "Legacy evidence compatibility reserve active")
+                ? String(localized: "system.alertEvidenceCaptureTitle", defaultValue: "Alert evidence capture degraded")
+                : String(localized: "system.alertEvidenceReserveTitle", defaultValue: "Legacy evidence retained"))
+        let summary = transitionFailed
+            ? String(localized: "system.alertEvidenceMeasurementSummary", defaultValue: "Storage use could not be verified. Review the details before relying on evidence retention.")
+            : (captureDegraded
+                ? String(localized: "system.alertEvidenceCaptureSummary", defaultValue: "Some alert evidence may be incomplete. Review the capture details below.")
+                : String(localized: "system.alertEvidenceReserveSummary", defaultValue: "Older evidence is preserved within a temporary storage allowance until it expires."))
         let liveEvents = mib(budget.eventsFamilyEffectiveCapBytes)
         let liveTotal = mib(budget.eventsAndAlertsTotalCapBytes)
         let steadyEvents = mib(budget.eventsFamilySteadyStateCapBytes)
@@ -744,13 +765,29 @@ public struct V2SystemWorkspace: View {
                 .frame(width: 38, height: 38)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).scaledSystem(13, weight: .semibold)
-                Text(String(
-                    localized: "system.alertEvidenceTransitionDetail",
-                    defaultValue: "Live transition-aware caps: events \(liveEvents), events+alerts \(liveTotal). Steady-state caps after preserved legacy events.db evidence ages out: events \(steadyEvents), events+alerts \(steadyTotal). Current bounded reserve: \(reserve) of maximum \(maximumReserve); legacy evidence rows \(legacyRows), charged \(legacyCharged). \(capture). A single in-flight capture is normal; pending on repeated heartbeats is stuck."
-                ))
+                Text(summary)
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
+                // Measurement and capture can fail independently. Do not hide
+                // a simultaneous evidence gap behind the measurement summary.
+                if transitionFailed && captureDegraded {
+                    Text(String(localized: "system.alertEvidenceCaptureSummary", defaultValue: "Some alert evidence may be incomplete. Review the capture details below."))
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                    Text(String(
+                        localized: "system.alertEvidenceTransitionDetail",
+                        defaultValue: "Live transition-aware caps: events \(liveEvents), events+alerts \(liveTotal). Steady-state caps after preserved legacy events.db evidence ages out: events \(steadyEvents), events+alerts \(steadyTotal). Current bounded reserve: \(reserve) of maximum \(maximumReserve); legacy evidence rows \(legacyRows), charged \(legacyCharged). \(capture). A single in-flight capture is normal; pending on repeated heartbeats is stuck."
+                    ))
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .font(V2Theme.meta())
             }
             Spacer()
         }
@@ -840,9 +877,9 @@ public struct V2SystemWorkspace: View {
         let dirNote = " · " + state.engineSource.directory
         let subtitle: String
         switch state.provider.mode {
-        case .live:    subtitle = String(localized: "system.dataSourceLive", defaultValue: "Reading from MacCrabCore stores\(dirNote)")
-        case .offline: subtitle = String(localized: "system.dataSourceOffline", defaultValue: "No daemon data yet — start or approve the daemon, then click Reconnect")
-        case .mock:    subtitle = String(localized: "system.dataSourceMock", defaultValue: "Sample / mock data (dev build) — start the daemon and click Reconnect")
+        case .live:    subtitle = String(localized: "system.dataSourceConnected", defaultValue: "Reading local engine data. Protection health is shown below.")
+        case .offline: subtitle = String(localized: "system.dataSourceOffline", defaultValue: "No engine data available. Check Engine controls below, then reconnect.")
+        case .mock:    subtitle = String(localized: "system.dataSourceMock", defaultValue: "Showing sample data. Check Engine controls below, then reconnect to read engine data.")
         }
         return HStack(spacing: 12) {
             ZStack {
@@ -864,14 +901,24 @@ public struct V2SystemWorkspace: View {
                 Text(subtitle)
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
-                Text(String(localized: "system.sourceSession", defaultValue: "This session reads one engine directory. Reconnect reopens that same source."))
-                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                 if let err = state.provider.lastErrorDescription {
                     Text(String(localized: "system.lastError", defaultValue: "Last error: \(err)"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.warning)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if isLive {
+                            Text(String(localized: "system.dataSourceLive", defaultValue: "Reading from MacCrabCore stores\(dirNote)"))
+                                .textSelection(.enabled)
+                        }
+                        Text(String(localized: "system.sourceSession", defaultValue: "This session reads one engine directory. Reconnect reopens that same source."))
+                    }
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(V2Theme.meta())
             }
             Spacer()
             if !isLive {
@@ -1121,9 +1168,15 @@ public struct V2SystemWorkspace: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(String(localized: "system.auditSection", defaultValue: "Privileged-change audit trail"))
                 .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
-            Text(String(localized: "system.auditDesc", defaultValue: "Every suppression, config change, rule toggle and prune the engine processed from its privileged inbox — whether it came from this app, from maccrabctl, or from an AI agent over MCP. Newest last; for the full history run: maccrabctl audit"))
+            Text(String(localized: "system.auditSummary", defaultValue: "Recent privileged requests and outcomes, newest last."))
                 .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
-                .fixedSize(horizontal: false, vertical: true)
+            DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                Text(String(localized: "system.auditDesc", defaultValue: "Every suppression, config change, rule toggle and prune the engine processed from its privileged inbox — whether it came from this app, from maccrabctl, or from an AI agent over MCP. Newest last; for the full history run: maccrabctl audit"))
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            .font(V2Theme.meta())
             if let auditStatus {
                 Text(auditStatus)
                     .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
@@ -1399,7 +1452,7 @@ public struct V2SystemWorkspace: View {
                 Text(String(localized: "system.openSettingsTitle", defaultValue: "Open MacCrab Settings"))
                     .scaledSystem(15, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)
-                Text(String(localized: "system.openSettingsDesc", defaultValue: "AI backend, notifications, polling, storage retention, response actions, and integrations all live in the canonical Settings window."))
+                Text(String(localized: "system.openSettingsDesc", defaultValue: "Manage notifications, storage, AI, and response actions."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)

@@ -79,6 +79,25 @@ otherHelper(title: "protocol_identifier")'''
             with self.assertRaisesRegex(ValueError, 'duplicate stringsdict key'):
                 check.parse_plurals(path)
 
+    def test_retry_loading_and_empty_state_copy_are_not_blind_spots(self):
+        source = '''Button("Retry") {}
+ProgressView("Loading items…")
+V2EmptyState(title: "Unavailable", body: "The read is incomplete.", icon: "tray")
+Button(String(localized: "common.retry", defaultValue: "Retry")) {}
+ProgressView(String(localized: "loading", defaultValue: "Loading…"))
+V2EmptyState(title: localizedTitle, body: error, icon: "tray")
+// Button("ignored")
+deviceButton("hand.tap.fill")'''
+        self.assertEqual(check.unlocalized_ui_copy(source), [
+            (1, 'unlocalized Button prose'), (2, 'unlocalized ProgressView prose'),
+            (3, 'unlocalized empty-state title'), (3, 'unlocalized empty-state body')])
+
+    def test_empty_state_localized_and_nested_defaults_are_not_literal_arguments(self):
+        source = '''V2EmptyState(
+    title: String(localized: "title", defaultValue: "An unavailable title"),
+    body: String(localized: "body", defaultValue: "A nested (message)"), icon: "tray")'''
+        self.assertEqual(check.unlocalized_ui_copy(source), [])
+
 
 if __name__ == '__main__':
     unittest.main()

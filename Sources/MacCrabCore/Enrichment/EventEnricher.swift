@@ -670,12 +670,10 @@ public actor EventEnricher {
 
     /// Per-uid cache of resolved user names. On a single-user macOS
     /// workstation almost every event has the same uid, so a tiny
-    /// dictionary collapses the per-event cost to one getpwuid call
-    /// total. Protected by a serial queue rather than the actor's
-    /// executor because callers from `enrich(_:)` are already on the
-    /// actor, but we want the cache to outlive the resolver call
-    /// without forcing more actor hops. Using a class with a lock
-    /// avoids the actor-isolation issue cleanly.
+    /// bounded dictionary avoids repeated getpwuid calls for resident UIDs.
+    /// A lock serializes heavy-worker misses; inline lookups never wait on
+    /// that lock. The cache is separate from the enrichment actor so a slow
+    /// directory-service lookup cannot hold its executor.
     private static let userNameCache = UserNameCache()
 
     fileprivate static func userNameForUid(_ uid: UInt32) -> String {
@@ -683,15 +681,40 @@ public actor EventEnricher {
     }
 }
 
-/// Tiny thread-safe uid → name cache backing `EventEnricher`.
+/// Bounded thread-safe uid → name cache backing `EventEnricher`.
 /// Defined at file scope so it doesn't inherit `EventEnricher`'s
-/// actor isolation — calls into it are cheap, lock-protected reads.
-private final class UserNameCache: @unchecked Sendable {
+/// actor isolation. FIFO eviction changes only memoization: an evicted UID
+/// is resolved normally on its next miss, including previously empty names.
+/// The existing heavy-enrichment plane remains the owner of blocking misses.
+final class UserNameCache: @unchecked Sendable {
+    static let maximumEntries = 256
+
     private var entries: [UInt32: String] = [:]
+    private var insertionOrder: [UInt32] = []
+    private var nextEvictionIndex = 0
+    private let capacity: Int
+    private let resolver: @Sendable (UInt32) -> String
     private let lock = NSLock()
 
+    convenience init() {
+        self.init(capacity: Self.maximumEntries, resolver: { Self.resolveSystemName($0) })
+    }
+
+    /// Internal explicit-resolver seam; tests never contact directory services.
+    /// Smaller capacities exercise the same ring; callers cannot raise its cap.
+    init(capacity: Int = UserNameCache.maximumEntries,
+         resolver: @escaping @Sendable (UInt32) -> String) {
+        self.capacity = max(1, min(capacity, Self.maximumEntries))
+        self.resolver = resolver
+        entries.reserveCapacity(self.capacity)
+        insertionOrder.reserveCapacity(self.capacity)
+    }
+
     func lookup(_ uid: UInt32) -> String? {
-        lock.lock()
+        // Inline event-actor reads must not wait behind directory services.
+        // Busy is a cache miss; the existing bounded heavy-enrichment offer
+        // owns resolution and exposes pending/rejected coverage as before.
+        guard lock.try() else { return nil }
         defer { lock.unlock() }
         return entries[uid]
     }
@@ -703,19 +726,27 @@ private final class UserNameCache: @unchecked Sendable {
             return cached
         }
 
-        // Resolve via libc. `getpwuid` may return nil for daemon /
-        // service uids that don't have a passwd entry; in that case
-        // store "" so we don't re-syscall on the next event. Keep the lock
-        // through getpwuid: libc returns process-global static storage, so
-        // concurrent misses for different UIDs must not race while copying it.
-        let resolved: String
-        if let pw = getpwuid(uid_t(uid)) {
-            resolved = String(cString: pw.pointee.pw_name)
+        // Keep resolution and copying under the same lock: libc getpwuid
+        // returns process-global static storage. Empty strings are cached too.
+        let resolved = resolver(uid)
+        if insertionOrder.count == capacity {
+            entries.removeValue(forKey: insertionOrder[nextEvictionIndex])
+            insertionOrder[nextEvictionIndex] = uid
+            nextEvictionIndex = (nextEvictionIndex + 1) % capacity
         } else {
-            resolved = ""
+            insertionOrder.append(uid)
         }
         entries[uid] = resolved
         return resolved
+    }
+
+    private static func resolveSystemName(_ uid: UInt32) -> String {
+        if let pw = getpwuid(uid_t(uid)) {
+            return String(cString: pw.pointee.pw_name)
+        }
+        // Service UIDs without a passwd entry retain the existing empty-name
+        // semantics, rather than being substituted or treated as a new UID.
+        return ""
     }
 }
 

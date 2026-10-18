@@ -590,7 +590,7 @@
 "appearance.mode" = "Mode";
 "appearance.note" = "Tip: detection, prevention, and response are always on regardless of mode. Only the dashboard navigation changes.";
 "appearance.title" = "Dashboard complexity";
-"events.aggregateModeBanner" = "Showing daily summaries — exact event details are available only for the retained interval";
+"events.aggregateModeBanner" = "Daily summaries. Exact event details are limited to retained data.";
 "events.category" = "Category";
 "events.count" = "Count";
 "events.day" = "Day";
@@ -598,7 +598,7 @@
 "events.histogramShow" = "Show time histogram";
 "events.loadOlder" = "Load older";
 "events.loadOlder.loading" = "Loading…";
-"events.noAggregates" = "No aggregated events for this range — the daemon's daily roll-up runs every 6 hours";
+"events.noAggregates" = "No daily summaries for this time range.";
 "events.path" = "Process Path";
 "events.searchMode" = "Search results — clear to resume live";
 "events.signer" = "Signer";
@@ -997,8 +997,8 @@
 "overview.coverageSummary" = "%lld of %lld enabled sensors healthy";
 "welcome.setup.engineNotReady" = "Protection is not ready yet — review System Extension status and permissions";
 "welcome.setup.fdaUnknown" = "Full Disk Access has not been verified — check again after granting access";
-"alerts.daemonStaleTitle" = "Protection is not confirmed — alert data may be incomplete";
-"alerts.daemonStaleDetail" = "The engine is starting, not reporting, or needs attention. Review System health; an empty list does not confirm that no threats are present.";
+"alerts.daemonStaleTitle" = "Protection status unconfirmed";
+"alerts.daemonStaleDetail" = "Alert data may be incomplete. Review System health.";
 
 "system.startupTitle" = "Protection is starting";
 "system.storageNotReadyTitle" = "Storage needs attention";
@@ -1044,7 +1044,7 @@
 "alerts.confirmDeleteButton" = "Delete";
 "alerts.confirmDeleteMessage" = "“%@” and its snapshotted evidence will be permanently removed from alerts.db. This cannot be undone.";
 "alerts.confirmDeleteTitle" = "Delete this alert permanently?";
-"alerts.emptyOpenBody" = "No unsuppressed alerts appear in the selected time range. The engine is reporting active monitoring.";
+"alerts.emptyOpenBody" = "No unsuppressed alerts in this time range.";
 "alerts.emptyOpenTitle" = "No open alerts";
 "common.refresh" = "Refresh";
 "common.settings" = "Settings";
@@ -1510,8 +1510,8 @@
 "system.daemonStaleTrend" = "no recent heartbeat";
 "system.daemonUptime" = "uptime %@";
 "system.dataSourceLive" = "Reading from MacCrabCore stores%@";
-"system.dataSourceMock" = "Sample / mock data (dev build) — start the daemon and click Reconnect";
-"system.dataSourceOffline" = "No daemon data yet — start or approve the daemon, then click Reconnect";
+"system.dataSourceMock" = "Showing sample data. Check Engine controls below, then reconnect to read engine data.";
+"system.dataSourceOffline" = "No engine data available. Check Engine controls below, then reconnect.";
 "system.dataSourceTitle" = "Data source";
 "system.engineFDA" = "Engine FDA";
 "system.engineFDAGranted" = "Granted";
@@ -1544,7 +1544,7 @@
 "system.metricTruncations" = "Truncations";
 "system.openPrivacySecurity" = "Open Privacy & Security";
 "system.openSettingsButton" = "Open Settings";
-"system.openSettingsDesc" = "AI backend, notifications, polling, storage retention, response actions, and integrations all live in the canonical Settings window.";
+"system.openSettingsDesc" = "Manage notifications, storage, AI, and response actions.";
 "system.openSettingsTitle" = "Open MacCrab Settings";
 "system.permBlockingInvestigate" = "investigate";
 "system.permBlockingMissing" = "Blocking missing";
@@ -1724,7 +1724,7 @@
 "ui.V2DataTable.sort.by" = "Sort by %@";
 "ui.V2DetectionWorkspace.agent.sessions" = "Agent sessions";
 "ui.V2DetectionWorkspace.ai.tools.observed" = "AI tools observed";
-"ui.V2DetectionWorkspace.browser.extensions.across.chrome.firefox.brave.edge" = "Browser extensions across Chrome, Firefox, Brave, Edge, and Arc. Risk score factors permission breadth, dangerous APIs, and dev-mode/unpacked status. Click a row for the full permission set and a risk-score breakdown.";
+"ui.V2DetectionWorkspace.browser.extensions.across.chrome.firefox.brave.edge" = "Review installed browser extensions. Select a row for permissions and risk factors.";
 "ui.V2DetectionWorkspace.change.this.rule.s.effective.severity" = "Change this rule's effective severity";
 "ui.V2DetectionWorkspace.changing.severity.writes.a.user.rule.override" = "Changing severity writes a user-rule override (survives updates). \"Default\" reverts to the bundled value.";
 "ui.V2DetectionWorkspace.clear.rule.filter" = "Clear rule filter";
@@ -1741,7 +1741,7 @@
 "ui.V2DetectionWorkspace.keep.editing" = "Keep editing";
 "ui.V2DetectionWorkspace.last.seen" = "Last seen";
 "ui.V2DetectionWorkspace.llm.calls" = "LLM calls";
-"ui.V2DetectionWorkspace.mcp.servers.configured.for.the.ai.coding" = "MCP servers configured for the AI coding tools on this device (Claude Code, Cursor, Continue, VS Code, Windsurf). A server launched from a temp directory is flagged for review; click a row for details.";
+"ui.V2DetectionWorkspace.mcp.servers.configured.for.the.ai.coding" = "Review configured MCP servers. Servers launched from temporary folders are flagged; select a row for details.";
 "ui.V2DetectionWorkspace.new.rule" = "New rule";
 "ui.V2DetectionWorkspace.no.ai.agent.sessions.recorded.yet.sessions" = "No AI-agent sessions recorded yet. Sessions appear once the engine observes a coding agent (Claude Code, Cursor, …) and its descendant activity.";
 "ui.V2DetectionWorkspace.no.ai.tool.config.references.this.server" = "No AI tool config references this server.";
@@ -1972,3 +1972,43 @@
 "scans.verifyingPlugin" = "Verifying installed plugin…";
 "scans.pluginPreparationError" = "No scan was started. Re-verify or reinstall this plugin before running it. %@";
 "scans.pluginUnavailable" = "No scan was started. This plugin's installed metadata is unavailable. Re-verify or reinstall it before running it.";
+
+/* Concise read status and health guidance. */
+"alerts.loading" = "Loading alerts…";
+"alerts.readPartial" = "Alert data is incomplete.";
+"alerts.readDeferred" = "Waiting for alert data…";
+"alerts.readUnavailable" = "Alert data is unavailable.";
+"alerts.readFailed" = "Couldn’t load alerts.";
+"alerts.cachedNotice" = "Showing saved alerts. Refresh needed.";
+"alerts.campaignsUnavailable" = "Campaign data unavailable";
+"alerts.campaignsIncomplete" = "No campaign data to display. The read may be incomplete.";
+"alerts.loadingCampaigns" = "Loading campaigns…";
+"alerts.loadingSuppressions" = "Loading suppressions…";
+"events.loading" = "Loading events…";
+"events.readPartial" = "Event results are incomplete.";
+"events.readDeferred" = "Waiting for event data…";
+"events.readUnavailable" = "Event data is unavailable.";
+"events.readFailed" = "Couldn’t load events.";
+"events.cachedRefreshing" = "Showing saved events. Refreshing…";
+"events.cachedIncomplete" = "Showing saved events. Latest data is not confirmed.";
+"system.dataSourceConnected" = "Reading local engine data. Protection health is shown below.";
+"system.otlpLifecycleSummary" = "Agent Trace input or processing is degraded. Check sensor health separately.";
+"system.auditSummary" = "Recent privileged requests and outcomes, newest last.";
+"system.alertEvidenceMeasurementTitle" = "Evidence storage could not be measured";
+"system.alertEvidenceCaptureTitle" = "Alert evidence capture degraded";
+"system.alertEvidenceReserveTitle" = "Legacy evidence retained";
+"system.alertEvidenceMeasurementSummary" = "Storage use could not be verified. Review the details before relying on evidence retention.";
+"system.alertEvidenceCaptureSummary" = "Some alert evidence may be incomplete. Review the capture details below.";
+"system.alertEvidenceReserveSummary" = "Older evidence is preserved within a temporary storage allowance until it expires.";
+"rave.install.verifyingCatalog" = "Verifying catalog…";
+"intelligence.packagesScanning" = "Scanning packages…";
+"intelligence.packagesScanningDetail" = "Checking installed packages against npm, PyPI, Homebrew, and Cargo.";
+"intelligence.packagesEmpty" = "No package data returned";
+"intelligence.packagesEmptyDetail" = "This scan returned no package data. Coverage may be incomplete.";
+"intelligence.packagesNotScanned" = "No package scan yet";
+"intelligence.packagesNotScannedDetail" = "Enable Package freshness, then choose Run scan. Package names are sent to registries.";
+"investigation.aiSummaryUnavailable" = "No AI summaries available";
+"investigation.aiSummaryGuidance" = "Advisory summaries for stored HIGH or CRITICAL alerts appear here. Configure the engine’s AI backend in Settings.";
+"intelligence.packagesScanningAction" = "Scanning…";
+"intelligence.packagesScanAction" = "Run scan";
+"intelligence.packagesRescanAction" = "Re-scan";

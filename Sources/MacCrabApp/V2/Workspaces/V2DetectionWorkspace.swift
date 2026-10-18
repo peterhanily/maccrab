@@ -1404,7 +1404,7 @@ public struct V2DetectionWorkspace: View {
         ZStack(alignment: .topTrailing) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text(String(localized: "ui.V2DetectionWorkspace.browser.extensions.across.chrome.firefox.brave.edge", defaultValue: "Browser extensions across Chrome, Firefox, Brave, Edge, and Arc. Risk score factors permission breadth, dangerous APIs, and dev-mode/unpacked status. Click a row for the full permission set and a risk-score breakdown."))
+                    Text(String(localized: "ui.V2DetectionWorkspace.browser.extensions.across.chrome.firefox.brave.edge", defaultValue: "Review installed browser extensions. Select a row for permissions and risk factors."))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                     if let coverage = state.provider.browserInventoryCoverage,
                        !coverage.complete {
@@ -1654,7 +1654,7 @@ public struct V2DetectionWorkspace: View {
                     // that isn't implemented (trust is a simple heuristic:
                     // /tmp-launched servers are flagged, everything else is Known).
                     // Describe what's actually shown instead of promising a feature.
-                    Text(String(localized: "ui.V2DetectionWorkspace.mcp.servers.configured.for.the.ai.coding", defaultValue: "MCP servers configured for the AI coding tools on this device (Claude Code, Cursor, Continue, VS Code, Windsurf). A server launched from a temp directory is flagged for review; click a row for details."))
+                    Text(String(localized: "ui.V2DetectionWorkspace.mcp.servers.configured.for.the.ai.coding", defaultValue: "Review configured MCP servers. Servers launched from temporary folders are flagged; select a row for details."))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                     // Deep-audit fix: every column is now click-to-sort (sortKey),
                     // the table has a filter box (searchPrompt), and rows are

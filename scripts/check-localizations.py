@@ -233,7 +233,7 @@ def parse_plurals(path: Path):
 
 
 def unlocalized_ui_copy(source: str):
-    """Catch visible Text prose even when interpolation precedes the words.
+    """Catch literal UI prose even when interpolation precedes the words.
 
     Dynamic values remain a semantic-review boundary. The known lifecycle
     helper is checked at its call sites because its three arguments are UI copy.
@@ -241,12 +241,12 @@ def unlocalized_ui_copy(source: str):
     """
     clean = strip_swift_comments(source)
     findings = []
-    for match in re.finditer(r'(?<![A-Za-z0-9_])Text\(\s*"', clean):
+    for match in re.finditer(r'(?<![A-Za-z0-9_])(Text|Button|ProgressView)\(\s*"', clean):
         start = clean.index('"', match.start(), match.end())
         segments, _ = swift_literal(clean, start)
         if re.search(r'[A-Za-z]', ''.join(part.get('text', '') for part in segments)):
-            findings.append((clean.count('\n', 0, start) + 1, 'unlocalized Text prose'))
-    for call in re.finditer(r'\blifecycleDegradedBanner\(', clean):
+            findings.append((clean.count('\n', 0, start) + 1, f'unlocalized {match[1]} prose'))
+    for call in re.finditer(r'\b(lifecycleDegradedBanner|V2EmptyState)\(', clean):
         pos, depth = call.end(), 1
         while pos < len(clean) and depth:
             if clean[pos] == '"':
@@ -258,9 +258,11 @@ def unlocalized_ui_copy(source: str):
                 depth -= 1
             pos += 1
         arguments = clean[call.end():pos]
-        for argument in re.finditer(r'\b(title|workLabel|impact):\s*"', arguments):
+        names = 'title|workLabel|impact' if call[1] == 'lifecycleDegradedBanner' else 'title|body'
+        for argument in re.finditer(r'\b(' + names + r'):\s*"', arguments):
             line = clean.count('\n', 0, call.end() + argument.start()) + 1
-            findings.append((line, f'unlocalized lifecycle {argument[1]}'))
+            kind = 'lifecycle' if call[1] == 'lifecycleDegradedBanner' else 'empty-state'
+            findings.append((line, f'unlocalized {kind} {argument[1]}'))
     return findings
 
 

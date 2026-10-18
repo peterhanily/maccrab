@@ -12,9 +12,11 @@
 # Three passes:
 #
 #   PASS 1 — orphan audit
-#     For every Settings @AppStorage that affects daemon behavior, grep
-#     for a sync function that writes the value to disk. Missing sync =
-#     orphan (the v1.6.12 maxDatabaseSizeMB / v1.6.18 webhook patterns).
+#     Classify every literal Settings @AppStorage. Check all seven explicit
+#     storage bindings through session, durable save, reload, and daemon
+#     consumers; classify read-only legacy migration and confirmed manual
+#     pruning separately. Retain named-sync checks for other daemon settings.
+#     Source wiring is not proof of installed-engine application.
 #
 #   PASS 2 — direct-insert audit
 #     No code outside Sources/MacCrabCore/Detection/AlertSink.swift may
@@ -103,119 +105,17 @@ AUDIT_SCOPE="${MACCRAB_AUDIT_SCOPE:-full}"
 # ---------------------------------------------------------------------
 # PASS 1 — orphan audit (Settings @AppStorage → daemon consumer)
 # ---------------------------------------------------------------------
-# Each binding is a (storage-key, sync-function-name) pair. The sync
-# function must exist in SettingsView; that's evidence the value
-# reaches a file the daemon reads. Bindings that AREN'T daemon-relevant
-# (UI-only preferences) are listed in IGNORE so they don't flag.
+# Check the current explicit storage edit path, legacy display migrations and
+# confirmed manual prune separately. The helper also retains the non-storage
+# named-sync checks and refuses unknown literal @AppStorage keys. This is source
+# wiring evidence, not confirmation that an installed engine applied an edit.
 
 section "PASS 1 — Settings → daemon orphan audit"
 
-SETTINGS_FILE="Sources/MacCrabApp/Views/SettingsView.swift"
-if [[ ! -f "$SETTINGS_FILE" ]]; then
-    err "$SETTINGS_FILE missing — can't audit"
+if /usr/bin/python3 -I -B scripts/check-settings-storage-wiring.py --source-root "$REPO_ROOT"; then
+    ok "Settings source wiring and all literal @AppStorage classifications verified"
 else
-    # Bindings that intentionally stay app-side (UI prefs, transient
-    # state, OS-managed login items). Update when adding new ones.
-    UI_ONLY_KEYS=(
-        "pollIntervalSeconds"   # dashboard auto-refresh timer, not daemon
-        "launchAtLogin"         # OS-managed login item, not daemon config
-        "uiMode.storageKey"     # UIMode.storageKey constant (not a string literal — kept for documentation)
-        "forensics.catalogBaseURL" # rave catalog URL, consumed app-side by RaveCatalogClient (forensics is app/CLI/MCP-only, not linked by the sysext)
-        "forensics.retentionDays"  # forensic-scan retention, applied app-side; forensics platform is not linked by the sysext
-    )
-
-    # Bindings that MUST round-trip to the daemon. Each maps to a sync
-    # function that writes a JSON file the sysext reads.
-    declare -a DAEMON_BINDINGS=(
-        "retentionDays:syncStorageOverrides"
-        "maxDatabaseSizeMB:syncStorageOverrides"
-        "retentionWindowDays:syncStorageOverrides"
-        # v1.8.0 storage tiering keys → user_overrides.json (syncStorageOverrides)
-        "storage.eventsHotTierMinutes:syncStorageOverrides"
-        "storage.eventsMaxSizeMB:syncStorageOverrides"
-        "storage.alertsRetentionDays:syncStorageOverrides"
-        "storage.alertsMaxSizeMB:syncStorageOverrides"
-        "storage.evidenceMaxSizeMB:syncStorageOverrides"
-        "storage.campaignsRetentionDays:syncStorageOverrides"
-        "storage.campaignsMaxSizeMB:syncStorageOverrides"
-        # v1.11.0 alert notifications → alert_notifications.json
-        # (was misclassified UI_ONLY pre-v1.12.6 — fixed in Wave 3B)
-        "alertNotifications:syncAlertNotificationConfig"
-        "minAlertSeverity:syncAlertNotificationConfig"
-        "llm.provider:syncLLMConfig"
-        "llm.ollamaURL:syncLLMConfig"
-        "llm.ollamaModel:syncLLMConfig"
-        "llm.openaiURL:syncLLMConfig"
-        "llm.model:syncLLMConfig"
-        "llm.enabled:syncLLMConfig"
-        # The endpoint string stays app-side as the exact consent token, but
-        # changing it must regenerate the daemon config's derived
-        # allow_remote_endpoint flag through syncLLMConfig().
-        "llm.approvedRemoteEndpoint:syncLLMConfig"
-        "webhookSlackURL:syncWebhookConfig"
-        "webhookTeamsURL:syncWebhookConfig"
-        "webhookDiscordURL:syncWebhookConfig"
-        "webhookPagerDutyKey:syncWebhookConfig"
-        "webhookMinSeverity:syncWebhookConfig"
-        # v1.19.1 opt-in network-enrichment privacy flags → user_overrides.json
-        # (top-level camelCase) via syncEnrichmentOverrides() → applyEnrichmentFlags();
-        # DaemonConfig.applyUserOverrides reads them. They DO reach the daemon.
-        "enrich.threatIntel:syncEnrichmentOverrides"
-        "enrich.vulnScan:syncEnrichmentOverrides"
-        "enrich.packageFreshness:syncEnrichmentOverrides"
-        "enrich.certTransparency:syncEnrichmentOverrides"
-        # Agent capability tiers are root-owned runtime state, not AppStorage
-        # bindings. Settings reads appState.agentCapabilities and may only queue
-        # explicit revocations through V2DaemonControl; the paired source guard
-        # in AgentCapabilityDashboardTests prevents the old grant-capable
-        # syncAgentCapabilities()/agentCap* preference path from returning.
-    )
-
-    # Verify each named sync function exists.
-    for binding in "${DAEMON_BINDINGS[@]}"; do
-        key="${binding%%:*}"
-        sync_fn="${binding##*:}"
-        if ! grep -qE "func[[:space:]]+$sync_fn[[:space:]]*\(" "$SETTINGS_FILE"; then
-            err "Settings binding \"$key\" references missing sync function $sync_fn()"
-        fi
-    done
-
-    # Find every @AppStorage in SettingsView and ensure it's in either
-    # IGNORE or DAEMON_BINDINGS. New bindings that aren't classified
-    # are flagged so we don't accidentally ship another orphan.
-    #
-    # v1.12.6 Wave 5C: promoted unclassified-key warn → err. Wave 3B
-    # refreshed DAEMON_BINDINGS to cover every shipped daemon-relevant
-    # key; from this point on, an unclassified key is a wire-the-
-    # orphans regression in the same shape as v1.6.12
-    # (maxDatabaseSizeMB) — silent-green for the operator if it stayed
-    # a warning. Hard-failing means any future contributor adding an
-    # @AppStorage MUST classify it before the release pipeline accepts
-    # the diff.
-    declared_keys=$(grep -oE '@AppStorage\("[^"]+"' "$SETTINGS_FILE" \
-        | sed -E 's/@AppStorage\("([^"]+)"/\1/')
-    pass1_unclassified=0
-    for key in $declared_keys; do
-        # Match against IGNORE list
-        skip=0
-        for ig in "${UI_ONLY_KEYS[@]}"; do
-            if [[ "$key" == "$ig" ]]; then skip=1; break; fi
-        done
-        if [[ $skip -eq 1 ]]; then continue; fi
-        # Match against DAEMON_BINDINGS list
-        in_daemon=0
-        for binding in "${DAEMON_BINDINGS[@]}"; do
-            if [[ "$key" == "${binding%%:*}" ]]; then in_daemon=1; break; fi
-        done
-        if [[ $in_daemon -eq 0 ]]; then
-            err "Unclassified @AppStorage(\"$key\"): add to UI_ONLY_KEYS (UI-only) or DAEMON_BINDINGS (must reach daemon)"
-            pass1_unclassified=$((pass1_unclassified + 1))
-        fi
-    done
-
-    if [[ $pass1_unclassified -eq 0 ]]; then
-        ok "All daemon-bound Settings keys have a sync function (every @AppStorage classified)"
-    fi
+    err "Settings source wiring or classification failed (see helper findings above)"
 fi
 
 # ---------------------------------------------------------------------

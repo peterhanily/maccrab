@@ -1762,7 +1762,13 @@ extension DynamicAIFileEventDemand {
             process = .yes
         }
         if process == .no { return .no }
-        return and(process, and(action.evaluate(facts), path.evaluate(facts.filePath)))
+        // `and` takes ordinary (eager) arguments. Do not classify/standardize
+        // a path for an action that is already impossible, e.g. an OPEN
+        // against mutation-only ProjectBoundary demand. Unknown is NOT false:
+        // its path must still be evaluated because a disproven path yields no.
+        let actionResult = action.evaluate(facts)
+        if actionResult == .no { return .no }
+        return and(process, and(actionResult, path.evaluate(facts.filePath)))
     }
 }
 
@@ -1902,6 +1908,9 @@ public struct FileEventInterestEffectivenessBucket: Sendable, Equatable {
 
 public struct FileEventInterestPolicy: Sendable {
     fileprivate let requirements: [CompiledFileEventRequirement]
+    /// Positive, exhaustive proof established with this immutable policy.
+    /// No rule/custom/graph requirement may use the sparse OPEN facts below.
+    fileprivate let dynamicAIOnly: Bool
     public let failOpenReason: FileEventInterestFailOpenReason?
 
     fileprivate init(
@@ -1909,6 +1918,11 @@ public struct FileEventInterestPolicy: Sendable {
         failOpenReason: FileEventInterestFailOpenReason? = nil
     ) {
         self.requirements = requirements
+        self.dynamicAIOnly = failOpenReason == nil && !requirements.isEmpty
+            && requirements.allSatisfy {
+                if case .dynamicAI = $0 { return true }
+                return false
+            }
         self.failOpenReason = failOpenReason
     }
 
@@ -2462,17 +2476,8 @@ public final class FileEventInterestPolicyRegistry: @unchecked Sendable {
         _ facts: FileEventAdmissionFacts,
         nowUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
     ) -> Bool {
-        let snapshot = state.withLock { locked in
-            let dynamicAI: DynamicAIFileEventDemandSnapshot
-            if case .value(let pid) = facts.processID,
-               let expiry = locked.dynamicAIGrace[pid],
-               nowUptimeNanoseconds <= expiry {
-                dynamicAI = .unknown
-            } else {
-                dynamicAI = locked.dynamicAI
-            }
-            return (locked.policy, dynamicAI, locked.honeyfiles)
-        }
+        let snapshot = admissionSnapshot(
+            processID: facts.processID, nowUptimeNanoseconds: nowUptimeNanoseconds)
         return snapshot.0.shouldAdmit(
             facts,
             dynamicAI: snapshot.1,
@@ -2481,13 +2486,60 @@ public final class FileEventInterestPolicyRegistry: @unchecked Sendable {
         )
     }
 
-    public func diagnose(
-        _ facts: FileEventAdmissionFacts,
-        nowUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
-    ) -> FileEventInterestDecision {
+    /// Worker-only OPEN entry. The ES registry's dynamic-only policy consumes
+    /// source, path, action and PID, never NSString-derived name/directory/ext.
+    /// Keep the full-facts expression lazy, but use it for ANY other policy.
+    /// Policy proof, grace and demand come from one locked snapshot; a policy
+    /// publication cannot pair a new requirement with stale sparse-fact proof.
+    /// Sample evaluation time once, after facts construction, so demand/grace
+    /// expiry is not tested against an earlier pre-construction clock sample.
+    /// Event timestamps and callback-stage admission remain unchanged.
+    func shouldAdmitEndpointSecurityOpen(
+        path: String,
+        processID: Int32?,
+        isPlatformBinary: Bool,
+        fullFacts: @autoclosure () -> FileEventAdmissionFacts,
+        nowUptimeNanoseconds: @autoclosure () -> UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> Bool {
+        let pid: FileEventFact<Int32> = processID.map { .value($0) } ?? .unknown
+        let sparseFacts = FileEventAdmissionFacts(
+            source: .endpointSecurityFile,
+            filePath: .value(path), fileAction: .value(FileAction.open.rawValue),
+            fileSourcePath: .absent, eventType: .value(EventType.change.rawValue),
+            eventAction: .value("open"), processID: pid,
+            isPlatformBinary: .value(String(isPlatformBinary))
+        )
+        // Capture raw grace, not an already time-resolved `.unknown` demand.
         let snapshot = state.withLock { locked in
+            (locked.policy, locked.dynamicAI, locked.honeyfiles,
+             processID.flatMap { locked.dynamicAIGrace[$0] })
+        }
+        guard snapshot.0.dynamicAIOnly else {
+            // The fallback can outlive a publication. Preserve the original
+            // full-facts -> clock -> current registry snapshot ordering.
+            let facts = fullFacts()
+            let evaluatedAt = nowUptimeNanoseconds()
+            return shouldAdmit(facts, nowUptimeNanoseconds: evaluatedAt)
+        }
+        let evaluatedAt = nowUptimeNanoseconds()
+        let dynamicAI: DynamicAIFileEventDemandSnapshot
+        if let graceExpiry = snapshot.3, evaluatedAt <= graceExpiry {
+            dynamicAI = .unknown
+        } else {
+            dynamicAI = snapshot.1
+        }
+        return snapshot.0.shouldAdmit(
+            sparseFacts, dynamicAI: dynamicAI, honeyfiles: snapshot.2,
+            nowUptimeNanoseconds: evaluatedAt
+        )
+    }
+
+    private func admissionSnapshot(
+        processID: FileEventFact<Int32>, nowUptimeNanoseconds: UInt64
+    ) -> (FileEventInterestPolicy, DynamicAIFileEventDemandSnapshot, HoneyfilePathSnapshot) {
+        state.withLock { locked in
             let dynamicAI: DynamicAIFileEventDemandSnapshot
-            if case .value(let pid) = facts.processID,
+            if case .value(let pid) = processID,
                let expiry = locked.dynamicAIGrace[pid],
                nowUptimeNanoseconds <= expiry {
                 dynamicAI = .unknown
@@ -2496,6 +2548,14 @@ public final class FileEventInterestPolicyRegistry: @unchecked Sendable {
             }
             return (locked.policy, dynamicAI, locked.honeyfiles)
         }
+    }
+
+    public func diagnose(
+        _ facts: FileEventAdmissionFacts,
+        nowUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> FileEventInterestDecision {
+        let snapshot = admissionSnapshot(
+            processID: facts.processID, nowUptimeNanoseconds: nowUptimeNanoseconds)
         return snapshot.0.diagnose(
             facts,
             dynamicAI: snapshot.1,

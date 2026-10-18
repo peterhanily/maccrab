@@ -2347,7 +2347,12 @@ def validate_resource_policy(document: Mapping[str, Any], *, source_root: pathli
         int_value(workload.get(key), "public resource workload " + key)
     executors = list_value(workload.get("executors"), "public resource workload executors", nonempty=True)
     if len(executors) != len(RUNTIME_WORKLOAD_EXECUTORS):
-        fail("public resource policy must bind both workload executors")
+        fail(
+            f"public resource policy must bind all {len(RUNTIME_WORKLOAD_EXECUTORS)} "
+            f"current workload executors; found {len(executors)}. "
+            "Remeasure and independently accept the reference with the current workload "
+            "before building a publishable candidate; do not rewrite historical evidence hashes."
+        )
     for relative, row in zip(RUNTIME_WORKLOAD_EXECUTORS, executors):
         row = object_value(row, "public resource executor")
         path = source_root / relative

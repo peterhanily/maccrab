@@ -907,6 +907,8 @@ echo -e "${BOLD}Required local gates${NC}"
 check "Broker fd fuzz (ASan/UBSan)" ./scripts/test-broker-fuzz.sh
 check "Architectural audit (deterministic)" \
     env MACCRAB_AUDIT_SCOPE=deterministic ./scripts/pre-release-audit.sh
+check "Settings storage audit fixtures" /usr/bin/python3 -I -B ./scripts/test-settings-storage-wiring.py
+check "UI clarity source contracts" /usr/bin/python3 -I scripts/test-ui-clarity.py
 check "Release dependency provenance" ./scripts/check-release-dependencies.sh
 check "Release supply-chain fixtures" ./scripts/test-release-supply-chain.sh
 check "Site publisher one-commit fixtures" ./scripts/test-site-release-publish.sh

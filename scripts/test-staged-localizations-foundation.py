@@ -35,10 +35,23 @@ int main(int argc, const char *argv[]) {
     NSDictionary *manifest = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:&error] : nil;
     if (!manifest || error) return 3;
     NSUInteger lookups = 0, formats = 0, controls = 0;
+    NSUInteger plainLookups = 0, plainControls = 0;
     for (NSDictionary *row in manifest[@"rows"]) {
       NSBundle *original = [NSBundle bundleWithPath:row[@"original"]];
       NSBundle *optimized = [NSBundle bundleWithPath:row[@"optimized"]];
       if (!original || !optimized) return 4;
+      // Ordinary tables may contain printf tokens with unrelated signatures.
+      // Look up their exact strings; never pass them to a formatter.
+      for (NSString *key in row[@"plain_keys"]) {
+        NSString *left = [original localizedStringForKey:key value:@"__MISSING_PARITY_KEY__" table:@"Localizable"];
+        NSString *right = [optimized localizedStringForKey:key value:@"__MISSING_PARITY_KEY__" table:@"Localizable"];
+        if ([left isEqualToString:@"__MISSING_PARITY_KEY__"] || ![left isEqualToString:right]) return 10;
+        if ([row[@"positive_control"] boolValue]) {
+          if (![left isEqualToString:@"fixture %lld %@"]) return 11;
+          plainControls++;
+        }
+        plainLookups++;
+      }
       for (NSString *key in row[@"keys"]) {
         NSString *left = [original localizedStringForKey:key value:@"__MISSING_PARITY_KEY__" table:@"Localizable"];
         NSString *right = [optimized localizedStringForKey:key value:@"__MISSING_PARITY_KEY__" table:@"Localizable"];
@@ -59,10 +72,11 @@ int main(int argc, const char *argv[]) {
         }
       }
     }
-    if (controls != 2) return 8;
+    if (controls != 2 || plainControls != 1) return 8;
     NSDictionary *result = @{@"bundle_pairs": @([manifest[@"rows"] count]),
       @"lookup_pairs": @(lookups), @"formatted_pairs": @(formats),
-      @"positive_plural_controls": @(controls)};
+      @"positive_plural_controls": @(controls), @"plain_lookup_pairs": @(plainLookups),
+      @"positive_plain_controls": @(plainControls)};
     NSData *resultData = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingSortedKeys error:&error];
     if (!resultData || error) return 9;
     fwrite(resultData.bytes, 1, resultData.length, stdout);
@@ -74,15 +88,16 @@ int main(int argc, const char *argv[]) {
 
 
 class FoundationLocalizationParity(unittest.TestCase):
-    def test_all_real_plural_keys_and_positive_branch_controls(self):
+    def test_all_real_catalog_keys_and_positive_branch_controls(self):
         source = BASE / 'Sources/MacCrabApp/Resources'
         source_hashes = {}
         with tempfile.TemporaryDirectory(prefix='maccrab-foundation-localization-') as directory:
             root = Path(directory).resolve()
             rows = []
             real_key_count = 0
+            real_plain_key_count = 0
 
-            def bundle_pair(label, locale, strings, dictionary, keys, positive=False):
+            def bundle_pair(label, locale, strings, dictionary, keys, plain_keys, positive=False):
                 pair = []
                 for variant, compact in (('Original', False), ('Optimized', True)):
                     resources = root / (variant + '-' + label + '.bundle') / 'Contents/Resources'
@@ -101,7 +116,7 @@ class FoundationLocalizationParity(unittest.TestCase):
                     # silently selecting English for every locale's lookup.
                     pair.append(str(localized))
                 rows.append({'original': pair[0], 'optimized': pair[1],
-                             'keys': keys, 'positive_control': positive})
+                             'keys': keys, 'plain_keys': plain_keys, 'positive_control': positive})
 
             for locale in sorted(HELPER.LOCALES):
                 tables = {}
@@ -119,14 +134,19 @@ class FoundationLocalizationParity(unittest.TestCase):
                     self.assertEqual(value['count']['NSStringFormatValueTypeKey'], 'lld')
                     self.assertEqual(value['count']['NSStringFormatSpecTypeKey'], 'NSStringPluralRuleType')
                 keys = sorted(decoded)
+                plain_keys = sorted(HELPER.decoded(tables['Localizable.strings'], 'Localizable.strings').keys()
+                                    - decoded.keys())
+                self.assertTrue(plain_keys)
                 real_key_count += len(keys)
-                bundle_pair(locale, locale, tables['Localizable.strings'], tables['Localizable.stringsdict'], keys)
+                real_plain_key_count += len(plain_keys)
+                bundle_pair(locale, locale, tables['Localizable.strings'], tables['Localizable.stringsdict'],
+                            keys, plain_keys)
 
             control = {'parity.control': {'NSStringLocalizedFormatKey': '%1$#@count@', 'count': {
                 'NSStringFormatSpecTypeKey': 'NSStringPluralRuleType', 'NSStringFormatValueTypeKey': 'lld',
                 'one': 'ONE %1$lld %2$@', 'other': 'MANY %1$lld %2$@'}}}
-            bundle_pair('positive-control', 'en', b'"ordinary" = "fixture";',
-                        plistlib.dumps(control), ['parity.control'], positive=True)
+            bundle_pair('positive-control', 'en', b'"ordinary" = "fixture %lld %@";',
+                        plistlib.dumps(control), ['parity.control'], ['ordinary'], positive=True)
             manifest = root / 'manifest.json'
             manifest.write_text(json.dumps({'rows': rows, 'counts': COUNTS}))
             objc, executable = root / 'foundation-parity.m', root / 'foundation-parity'
@@ -146,13 +166,15 @@ class FoundationLocalizationParity(unittest.TestCase):
             self.assertEqual(result['lookup_pairs'], real_key_count + 1)
             self.assertEqual(result['formatted_pairs'], (real_key_count + 1) * len(COUNTS))
             self.assertEqual(result['positive_plural_controls'], 2)
+            self.assertEqual(result['plain_lookup_pairs'], real_plain_key_count + 1)
+            self.assertEqual(result['positive_plain_controls'], 1)
             for path, digest in source_hashes.items():
                 self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
             result.update({'source_tables_unchanged': len(source_hashes), 'real_locales': len(HELPER.LOCALES),
                            'source_table_hashes': {str(path.relative_to(source)): digest
                                                    for path, digest in sorted(source_hashes.items())},
                            'fixture_source_sha256': hashlib.sha256(FIXTURE_SOURCE.encode()).hexdigest(),
-                           'scope': 'private NSBundle lookup and NSString plural formatting parity; no GUI or installed data'})
+                           'scope': 'private NSBundle ordinary/plural lookup and NSString plural formatting parity; ordinary strings are not formatted; no GUI or installed data'})
             print('Foundation localization parity: ' + json.dumps(result, sort_keys=True))
 
 

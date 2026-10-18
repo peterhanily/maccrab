@@ -1836,7 +1836,11 @@ class CandidateQualificationTests(unittest.TestCase):
         ))
         self.assertNotEqual(len(historical_paths), len(qualification.RUNTIME_WORKLOAD_EXECUTORS))
         with mock.patch.object(qualification, "run_checked") as provenance:
-            with self.assertRaisesRegex(qualification.QualificationError, "must bind both workload executors"):
+            with self.assertRaisesRegex(
+                qualification.QualificationError,
+                r"must bind all 4 current workload executors; found 2.*"
+                r"Remeasure and independently accept.*do not rewrite historical evidence hashes",
+            ):
                 qualification.validate_resource_policy(policy, source_root=ROOT)
             provenance.assert_not_called()
         self.assertEqual(path.read_bytes(), original)

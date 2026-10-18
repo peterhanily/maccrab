@@ -965,15 +965,19 @@ public final class ESCollector: @unchecked Sendable {
             if protectedPath ?? (isCredentialReadPath(path) || isAgentContentReadPath(path)) {
                 return false
             }
-            let facts = FileEventAdmissionFacts.endpointSecurity(
+            return !dynamicAIRegistry.shouldAdmitEndpointSecurityOpen(
                 path: path,
-                fileAction: .open,
-                eventAction: "open",
-                eventType: .change,
                 processID: processID,
-                isPlatformBinary: isPlatformBinary
+                isPlatformBinary: isPlatformBinary,
+                fullFacts: FileEventAdmissionFacts.endpointSecurity(
+                    path: path,
+                    fileAction: .open,
+                    eventAction: "open",
+                    eventType: .change,
+                    processID: processID,
+                    isPlatformBinary: isPlatformBinary
+                )
             )
-            return !dynamicAIRegistry.shouldAdmit(facts)
 
         case ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue:
             guard closeModified else { return true }
