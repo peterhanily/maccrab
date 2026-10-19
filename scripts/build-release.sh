@@ -1543,7 +1543,14 @@ ATTESTATION_EOF
         # The first signed RC7 measured 185620 KiB after existing payload and
         # symbol trimming. This changes only installed-app size; CPU, memory,
         # write-rate, detection and free-disk acceptance limits are unchanged.
-        APP_FOOTPRINT_BUDGET_KIB=186368
+        # 2026-10-19, v1.22.6-rc.12: 186368 -> 187392 (182 -> 183 MiB),
+        # explicitly approved for installed disk size only. The first signed
+        # RC12 measured 186572 KiB, 264 KiB above installed RC11, which had only
+        # 60 KiB of headroom. Existing local/debug stripping was verified;
+        # measured lossless resource alternatives did not clear the old cap.
+        # CPU, memory, write-rate, detection and free-disk limits are unchanged.
+        # BEGIN INSTALLED_APP_FOOTPRINT_GATE
+        APP_FOOTPRINT_BUDGET_KIB=187392
         APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)
         case "$APP_FOOTPRINT_KIB" in
             ''|*[!0-9]*)
@@ -1558,6 +1565,8 @@ ATTESTATION_EOF
         fi
         APP_FOOTPRINT_MARGIN_KIB=$((APP_FOOTPRINT_BUDGET_KIB - APP_FOOTPRINT_KIB))
         echo "    ✓ installed app footprint ${APP_FOOTPRINT_KIB} KiB (budget: ${APP_FOOTPRINT_BUDGET_KIB} KiB, margin: ${APP_FOOTPRINT_MARGIN_KIB} KiB / $((APP_FOOTPRINT_MARGIN_KIB * 100 / APP_FOOTPRINT_BUDGET_KIB))%)"
+
+        # END INSTALLED_APP_FOOTPRINT_GATE
 
         # NOTE on stapling the .app bundle (intentionally NOT done): we validated
         # it and it does NOT work for this app. Even after a standalone app

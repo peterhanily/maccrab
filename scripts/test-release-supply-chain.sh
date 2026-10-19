@@ -507,12 +507,62 @@ if /usr/bin/grep -E 'strip -S -x .*\|\|[[:space:]]*true' \
     exit 1
 fi
 for footprint_marker in \
-        'APP_FOOTPRINT_BUDGET_KIB=186368' \
+        'APP_FOOTPRINT_BUDGET_KIB=187392' \
         'APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)' \
         'APP_FOOTPRINT_KIB" -gt "$APP_FOOTPRINT_BUDGET_KIB'; do
     /usr/bin/grep -Fq "$footprint_marker" "$PROJECT_DIR/scripts/build-release.sh" \
         || { echo "  ✗ installed-app footprint release gate is incomplete" >&2; exit 1; }
 done
+# Execute the exact production footprint decision with an inert du replacement.
+# No app, signing identity, filesystem measurement or release stage is invoked.
+/usr/bin/python3 -I -B - "$PROJECT_DIR/scripts/build-release.sh" <<'FOOTPRINT_FIXTURES'
+from pathlib import Path
+import subprocess
+import sys
+
+source = Path(sys.argv[1]).read_text()
+begin, end = '# BEGIN INSTALLED_APP_FOOTPRINT_GATE', '# END INSTALLED_APP_FOOTPRINT_GATE'
+assert source.count(begin) == source.count(end) == 1, 'missing/duplicate footprint gate'
+gate = source.split(begin, 1)[1].split(end, 1)[0]
+probe = '/usr/bin/du -sk "$APP"'
+assert gate.count(probe) == 1, 'missing/duplicate footprint measurement'
+gate = gate.replace(probe, 'fixture_du -sk "$APP"')
+prefix = '''set -euo pipefail
+fixture_du() {
+    [ "$#" = 2 ] && [ "$1" = -sk ] && [ "$2" = "$APP" ] || return 98
+    printf '%s\\n' "$FIXTURE_DU_OUTPUT"
+    return "$FIXTURE_DU_STATUS"
+}
+'''
+
+def run(measurement, du_status='0', inherited_budget='999999999'):
+    environment = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+                   'APP': '/fixture/MacCrab.app',
+                   'FIXTURE_DU_OUTPUT': measurement,
+                   'FIXTURE_DU_STATUS': du_status,
+                   'APP_FOOTPRINT_BUDGET_KIB': inherited_budget}
+    return subprocess.run(['/bin/bash', '-c', prefix + gate],
+                          stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True, timeout=5, env=environment)
+
+for size, margin in ((187391, 1), (187392, 0)):
+    result = run(str(size) + '\t/fixture/MacCrab.app')
+    assert result.returncode == 0 and not result.stderr, 'valid boundary refused'
+    assert f'budget: 187392 KiB, margin: {margin} KiB' in result.stdout, 'incorrect fixed cap/margin'
+
+result = run('187393\t/fixture/MacCrab.app')
+assert result.returncode != 0 and 'exceeds the fixed 187392 KiB' in result.stderr, 'over-cap accepted'
+# A hostile inherited cap must neither enlarge nor shrink the approved limit.
+result = run('187392\t/fixture/MacCrab.app', inherited_budget='1')
+assert result.returncode == 0 and 'budget: 187392 KiB' in result.stdout, 'inherited cap overrides policy'
+for invalid in ('', 'unknown', '-1', '187392.0', '187392x', '187392\n1'):
+    result = run(invalid)
+    assert result.returncode != 0 and 'could not measure' in result.stderr, 'invalid measurement accepted'
+result = run('187392\t/fixture/MacCrab.app', du_status='23')
+assert result.returncode == 23 and 'installed app footprint' not in result.stdout, 'failed du accepted'
+print('11 installed-footprint boundary and failure controls passed')
+FOOTPRINT_FIXTURES
+pass "installed-app footprint boundaries, malformed measurements and fixed policy are enforced"
 [ "$(/usr/bin/grep -cF 'verify_bare_tool_runtime "$APP" "post-sign"' \
         "$PROJECT_DIR/scripts/build-release.sh")" = 1 ] \
     || { echo "  ✗ signed-app bare-tool execution probe is missing or duplicated" >&2; exit 1; }

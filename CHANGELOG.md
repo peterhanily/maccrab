@@ -19,6 +19,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   reject persistence overrides in the source guard.
 
 ### Changed
+- Increase only the installed-app disk-size budget from 182 to 183 MiB with
+  explicit approval after the first signed RC12 measured 182.20 MiB.
+  CPU, memory, write-rate, detection and free-disk limits are unchanged.
+  Exercise the actual footprint gate at and around its boundary, including
+  invalid measurements, failed measurement commands and inherited overrides.
 - Bind phase evidence to command, source bytes and explicit test executable;
   refuse overwritten receipts, changed inputs, zero-test selections and failed
   framework summaries. Require the tested executable to match its successful
