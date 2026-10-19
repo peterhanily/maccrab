@@ -393,6 +393,88 @@ for expected_swift in 'build' 'build --build-tests' 'test --skip-build --no-para
     grep -q "^${expected_swift}$" "$ci_ok/swift.log" \
         || fail "successful tag hook omitted swift $expected_swift"
 done
+# The real CI check() wrapper, not just the supervisor's unit tests, must bind
+# the native replay to its successful build. Read only this owned fixture's
+# single native receipt; all negative controls mutate in-memory copies.
+/usr/bin/python3 -I - "$ci_ok" <<'CI_RECEIPT_LINK_ORACLE'
+import copy
+import json
+from pathlib import Path
+import sys
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+def successful(record, phase):
+    require(isinstance(record, dict), phase + ": missing receipt")
+    require(type(record.get("schema_version")) is int and record["schema_version"] == 2,
+            phase + ": schema")
+    require(record.get("phase") == phase and record.get("status") == "PASSED"
+            and type(record.get("exit_code")) is int and record["exit_code"] == 0
+            and record.get("inputs_unchanged") is True
+            and isinstance(record.get("completed_at"), str) and bool(record["completed_at"])
+            and not any(key in record for key in ("identity_error", "cleanup_error", "descendants_after_exit")),
+            phase + ": not successful")
+    before, after = record.get("inputs_before"), record.get("inputs_after")
+    require(isinstance(before, dict) and before == after, phase + ": inputs changed")
+    return before
+
+def linked_native_receipt(record):
+    inputs = successful(record, "Swift test suite")
+    argv = record.get("argv", [])
+    require(argv[:2] == ["swift", "test"] and len(argv) == 4
+            and set(argv[2:]) == {"--skip-build", "--no-parallel"}, "native replay argv")
+    link = inputs.get("build_receipt")
+    require(isinstance(link, dict), "missing build link")
+    build = link.get("document")
+    built_inputs = successful(build, "Swift build tests")
+    require(build.get("argv") == ["swift", "build", "--build-tests"], "build argv")
+    require(inputs.get("source") == built_inputs.get("source")
+            and isinstance(inputs.get("source"), dict), "build source mismatch")
+    artifacts = inputs.get("artifacts")
+    require(isinstance(artifacts, list) and bool(artifacts), "missing native artifacts")
+    require(build.get("output_artifacts") == artifacts, "build output mismatch")
+
+fixture = Path(sys.argv[1]).resolve()
+owned_tmp = fixture / "tmp"
+receipts = list(owned_tmp.glob("maccrab-ci-evidence.*/*-swift-test-suite.json"))
+require(len(receipts) == 1, "expected exactly one owned native test receipt")
+path = receipts[0]
+require(not path.is_symlink() and path.resolve().is_relative_to(owned_tmp), "redirected fixture receipt")
+record = json.loads(path.read_text())
+linked_native_receipt(record)
+require(record["inputs_before"]["source"].get("root") == str(fixture), "receipt names another fixture")
+
+# When changing nested data, keep the native before/after copies equal so the
+# mutation reaches the intended link check instead of failing incidentally.
+cases = (
+    ("native", "schema_version", True, "Swift test suite: schema"),
+    ("native", "status", "FAILED", "Swift test suite: not successful"),
+    ("native", "inputs_after", {}, "Swift test suite: inputs changed"),
+    ("native", "argv", ["swift", "test", "--no-parallel"], "native replay argv"),
+    ("input", "build_receipt", None, "missing build link"),
+    ("input", "artifacts", [], "missing native artifacts"),
+    ("build", "schema_version", True, "Swift build tests: schema"),
+    ("build", "status", "FAILED", "Swift build tests: not successful"),
+    ("build", "inputs_after", {}, "Swift build tests: inputs changed"),
+    ("build", "argv", ["swift", "build"], "build argv"),
+    ("build", "output_artifacts", [], "build output mismatch"),
+)
+for target, key, value, expected_error in cases:
+    changed = copy.deepcopy(record)
+    targets = [changed] if target == "native" else [changed[side] for side in ("inputs_before", "inputs_after")]
+    if target == "build":
+        targets = [item["build_receipt"]["document"] for item in targets]
+    for item in targets:
+        item[key] = copy.deepcopy(value)
+    try:
+        linked_native_receipt(changed)
+    except ValueError as error:
+        require(str(error) == expected_error, "receipt mutation failed for unrelated reason: " + expected_error)
+    else:
+        raise SystemExit("receipt oracle accepted mutation: " + expected_error)
+CI_RECEIPT_LINK_ORACLE
 grep -q 'ALL CHECKS PASSED' "$ci_ok/output.log" \
     || fail "tag hook exited zero without terminal CI success"
 if find "$ci_ok" -maxdepth 1 -name '.maccrab-ci-release.*' | grep -q .; then

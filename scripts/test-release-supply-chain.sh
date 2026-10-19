@@ -614,9 +614,53 @@ fi
 /usr/bin/grep -q '^SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1$' \
     "$PROJECT_DIR/scripts/ci-local.sh" \
     || { echo "  ✗ local CI no longer bounds Swift Testing concurrency" >&2; exit 1; }
-/usr/bin/grep -q 'check "Swift test suite" swift test --no-parallel' \
-    "$PROJECT_DIR/scripts/ci-local.sh" \
-    || { echo "  ✗ local CI no longer explicitly serializes Swift Testing" >&2; exit 1; }
+# Parse the actual invocation, not adjacent substrings. The test phase must
+# replay the already-built binary serially, without filters or shell fallbacks.
+# These mutation checks inspect owned strings only; they never execute CI.
+/usr/bin/python3 -I - "$PROJECT_DIR/scripts/ci-local.sh" <<'CI_COMMAND_ORACLE'
+from pathlib import Path
+import re
+import shlex
+import sys
+
+def suite_command(text):
+    commands = []
+    for line in text.splitlines():
+        if re.match(r'^\s*check\s+(["\x27])Swift test suite\1(?:\s|$)', line):
+            commands.append(shlex.split(line, comments=True, posix=True))
+    if len(commands) != 1:
+        raise ValueError("expected exactly one active Swift test suite command")
+    command = commands[0]
+    if (command[:4] != ["check", "Swift test suite", "swift", "test"]
+            or len(command) != 6
+            or set(command[4:]) != {"--skip-build", "--no-parallel"}):
+        raise ValueError("Swift suite must replay the built binary serially without filtering")
+    return command
+
+suite_command(Path(sys.argv[1]).read_text())
+fixture = 'check "Swift test suite" swift test --skip-build --no-parallel'
+for valid in (fixture, "  check 'Swift test suite'  swift test --no-parallel --skip-build # fixture"):
+    suite_command(valid)
+mutations = {
+    "missing skip-build": fixture.replace(" --skip-build", ""),
+    "missing serial flag": fixture.replace(" --no-parallel", ""),
+    "parallel override": fixture + " --parallel",
+    "filtered suite": fixture + " --filter OneTest",
+    "different package": fixture + " --package-path Other",
+    "duplicate flag": fixture + " --no-parallel",
+    "commented only": "# " + fixture,
+    "duplicate invocation": fixture + "\n" + fixture,
+    "comment-only flag": fixture.replace(" --no-parallel", " # --no-parallel"),
+    "failure laundering": fixture + " || true",
+    "different executable": fixture.replace(" swift test ", " other test "),
+}
+for label, text in mutations.items():
+    try:
+        suite_command(text)
+    except ValueError:
+        continue
+    raise SystemExit("CI command oracle accepted mutation: " + label)
+CI_COMMAND_ORACLE
 
 for evidence_marker in \
         provisioning_profile_sha256 \
