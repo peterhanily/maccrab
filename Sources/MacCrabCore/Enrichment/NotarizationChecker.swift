@@ -144,11 +144,20 @@ public actor NotarizationChecker {
         maximumAssessmentDemand = 128
         monotonicNow = { Foundation.ProcessInfo.processInfo.systemUptime }
         assessmentRunner = { path in
-            await Task.detached(priority: .utility) {
+            // spctl can take a second or more; up to `maxConcurrent` waits must
+            // not each park a cooperative-pool thread that every actor shares.
+            await BlockingWorkOffload.perform(on: Self.assessmentQueue) {
                 Self.runSpctl(binaryPath: path)
-            }.value
+            }
         }
     }
+
+    /// Concurrent so the existing slot limiter, not the queue, bounds work.
+    private static let assessmentQueue = DispatchQueue(
+        label: "com.maccrab.notarization.spctl",
+        qos: .utility,
+        attributes: .concurrent
+    )
 
     /// Deterministic seam for concurrency, replacement, and overload tests.
     /// Internal so production callers cannot substitute the trust assessor.

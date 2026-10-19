@@ -173,7 +173,7 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         // so it runs on its own thread rather than a cooperative-pool thread;
         // the task remains the joinable, cancellable owner.
         self.readTask = Task.detached { [weak self] in
-            await CollectorBlockingIO.runOnDedicatedThread(
+            await BlockingWorkOffload.runOnDedicatedThread(
                 name: "com.maccrab.unified-log.reader"
             ) { cancellation in
                 Self.readLoop(
@@ -270,7 +270,7 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         continuation: AsyncStream<Event>.Continuation,
         logger: Logger,
         deliveryTelemetry: EventCollectorBufferTelemetry,
-        cancellation: CollectorCancellationFlag
+        cancellation: BlockingWorkCancellation
     ) {
         // Read all available data in a loop. The `log` tool outputs one JSON
         // object per line, sometimes preceded by a `[` or followed by `,`.

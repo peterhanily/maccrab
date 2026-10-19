@@ -444,7 +444,7 @@ public actor DNSCollector {
         into buffer: CaptureReadBuffer,
         length: Int
     ) async -> CaptureRead {
-        await CollectorBlockingIO.perform(on: captureReadQueue) {
+        await BlockingWorkOffload.perform(on: captureReadQueue) {
             let bytes = Darwin.read(descriptor, buffer.pointer, length)
             return CaptureRead(bytes: bytes, error: bytes < 0 ? errno : 0)
         }

@@ -2,13 +2,13 @@ import Foundation
 import Testing
 @testable import MacCrabCore
 
-/// Blocking collector I/O must not occupy Swift cooperative-pool threads.
+/// Blocking work must not occupy Swift cooperative-pool threads.
 /// No collector, process or device is opened; bodies block on semaphores.
-@Suite("Collector blocking I/O stays off the cooperative pool", .serialized)
-struct CollectorBlockingIOTests {
+@Suite("Blocking work stays off the cooperative pool", .serialized)
+struct BlockingWorkOffloadTests {
     @Test("dedicated-thread work returns its result on the named thread")
     func dedicatedThreadResult() async {
-        let name = await CollectorBlockingIO.runOnDedicatedThread(
+        let name = await BlockingWorkOffload.runOnDedicatedThread(
             name: "com.maccrab.test.blocking-reader"
         ) { _ in Thread.current.name ?? "" }
         #expect(name == "com.maccrab.test.blocking-reader")
@@ -18,7 +18,7 @@ struct CollectorBlockingIOTests {
     func cancellationForwarded() async {
         let started = DispatchSemaphore(value: 0)
         let task = Task.detached {
-            await CollectorBlockingIO.runOnDedicatedThread(name: "com.maccrab.test.cancel") { flag in
+            await BlockingWorkOffload.runOnDedicatedThread(name: "com.maccrab.test.cancel") { flag in
                 started.signal()
                 let deadline = Date().addingTimeInterval(5)
                 while !flag.isCancelled, Date() < deadline { usleep(1_000) }
@@ -34,7 +34,7 @@ struct CollectorBlockingIOTests {
     func cancelledBeforeStart() async {
         let task = Task.detached {
             withUnsafeCurrentTask { $0?.cancel() }
-            return await CollectorBlockingIO.runOnDedicatedThread(name: "com.maccrab.test.precancel") {
+            return await BlockingWorkOffload.runOnDedicatedThread(name: "com.maccrab.test.precancel") {
                 $0.isCancelled
             }
         }
@@ -44,7 +44,7 @@ struct CollectorBlockingIOTests {
     @Test("single blocking calls run on the requested serial queue")
     func performOnQueue() async {
         let queue = DispatchQueue(label: "com.maccrab.test.perform")
-        let value = await CollectorBlockingIO.perform(on: queue) { () -> Int in
+        let value = await BlockingWorkOffload.perform(on: queue) { () -> Int in
             dispatchPrecondition(condition: .onQueue(queue))
             return 42
         }
@@ -58,7 +58,7 @@ struct CollectorBlockingIOTests {
         let entered = DispatchSemaphore(value: 0)
         let owners = (0..<readers).map { index in
             Task.detached {
-                await CollectorBlockingIO.runOnDedicatedThread(name: "com.maccrab.test.reader-\(index)") { _ in
+                await BlockingWorkOffload.runOnDedicatedThread(name: "com.maccrab.test.reader-\(index)") { _ in
                     entered.signal()
                     release.wait()
                     return index
