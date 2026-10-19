@@ -169,13 +169,21 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         let fileHandle = pipe.fileHandleForReading
         let deliveryTelemetry = self.deliveryTelemetry
 
+        // The reader blocks in `availableData` for the collector's lifetime,
+        // so it runs on its own thread rather than a cooperative-pool thread;
+        // the task remains the joinable, cancellable owner.
         self.readTask = Task.detached { [weak self] in
-            Self.readLoop(
-                fileHandle: fileHandle,
-                continuation: continuation,
-                logger: log,
-                deliveryTelemetry: deliveryTelemetry
-            )
+            await CollectorBlockingIO.runOnDedicatedThread(
+                name: "com.maccrab.unified-log.reader"
+            ) { cancellation in
+                Self.readLoop(
+                    fileHandle: fileHandle,
+                    continuation: continuation,
+                    logger: log,
+                    deliveryTelemetry: deliveryTelemetry,
+                    cancellation: cancellation
+                )
+            }
             self?.readerExited()
         }
     }
@@ -261,13 +269,14 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         fileHandle: FileHandle,
         continuation: AsyncStream<Event>.Continuation,
         logger: Logger,
-        deliveryTelemetry: EventCollectorBufferTelemetry
+        deliveryTelemetry: EventCollectorBufferTelemetry,
+        cancellation: CollectorCancellationFlag
     ) {
         // Read all available data in a loop. The `log` tool outputs one JSON
         // object per line, sometimes preceded by a `[` or followed by `,`.
         var residual = Data()
 
-        while !Task.isCancelled {
+        while !cancellation.isCancelled {
             // v1.7.9: outer autoreleasepool wraps the per-CHUNK body so
             // `fileHandle.availableData` (autoreleased NSConcreteData,
             // typically 16 KB per call) drains every iteration. v1.7.7

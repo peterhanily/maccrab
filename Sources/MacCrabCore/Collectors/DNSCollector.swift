@@ -394,11 +394,16 @@ public actor DNSCollector {
                 allocatedLength = connection.bufferLength
             }
             guard let buffer else { return }
-            let bytesRead = read(connection.descriptor, buffer, connection.bufferLength)
+            let captured = await readCapture(
+                descriptor: connection.descriptor,
+                into: CaptureReadBuffer(pointer: buffer),
+                length: connection.bufferLength
+            )
+            let bytesRead = captured.bytes
             if bytesRead < 0 {
-                if errno == EINTR { continue }
-                if errno == EAGAIN { continue }
-                let reason = "BPF read failed (errno \(errno)); retrying capture"
+                if captured.error == EINTR { continue }
+                if captured.error == EAGAIN { continue }
+                let reason = "BPF read failed (errno \(captured.error)); retrying capture"
                 sampleKernelStatistics()
                 binding.stop { _ = Darwin.close($0) }
                 telemetry.availability(.unavailable(reason: reason))
@@ -411,6 +416,37 @@ public actor DNSCollector {
             forEachCapturedDNS(in: UnsafeRawBufferPointer(start: buffer, count: bytesRead)) {
                 telemetry.yielded(continuation.yield($0))
             }
+        }
+    }
+
+    /// A BPF read blocks for up to its one-second timeout. It is issued on this
+    /// serial queue so the capture task waits for it suspended, instead of
+    /// parking a cooperative-pool thread for the collector's lifetime.
+    private static let captureReadQueue = DispatchQueue(
+        label: "com.maccrab.dns.bpf-read",
+        qos: .default
+    )
+
+    /// The capture loop awaits each read before it touches, resizes or frees
+    /// the buffer, so exactly one thread uses it at a time.
+    private struct CaptureReadBuffer: @unchecked Sendable {
+        let pointer: UnsafeMutableRawPointer
+    }
+
+    private struct CaptureRead: Sendable {
+        let bytes: Int
+        /// `errno` from the reading thread; meaningful only when `bytes < 0`.
+        let error: Int32
+    }
+
+    private static func readCapture(
+        descriptor: Int32,
+        into buffer: CaptureReadBuffer,
+        length: Int
+    ) async -> CaptureRead {
+        await CollectorBlockingIO.perform(on: captureReadQueue) {
+            let bytes = Darwin.read(descriptor, buffer.pointer, length)
+            return CaptureRead(bytes: bytes, error: bytes < 0 ? errno : 0)
         }
     }
 
