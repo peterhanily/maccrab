@@ -115,6 +115,19 @@ enum CommandSanitizer {
     /// - Parameter commandLine: The raw command line string to sanitize.
     /// - Returns: The sanitized command line with credentials redacted.
     static func sanitize(_ commandLine: String) -> String {
+        memo.value(for: commandLine, transform: applyRedactors)
+    }
+
+    /// Process command lines and arguments repeat on every event from that
+    /// process; the redactors below are pure, so their output is replayed.
+    private static let memo = DigestKeyedStringMemo(
+        capacity: 512,
+        maximumInputBytes: 4_096
+    )
+
+    /// Internal (not private) only so the memo parity test can call the suite
+    /// directly as its uncached oracle.
+    static func applyRedactors(_ commandLine: String) -> String {
         var result = commandLine
         let fullRange = { NSRange(result.startIndex..., in: result) }
 

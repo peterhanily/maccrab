@@ -176,10 +176,18 @@ public enum EventPrivacySanitizer {
 
     static func sanitizeString(_ value: String) -> String {
         guard mayContainCredential(value) else { return value }
-        return OTLPAttributeSanitizer.redactCredentialShapes(
-            CommandSanitizer.sanitize(value)
-        )
+        return redactedValues.value(for: value) {
+            OTLPAttributeSanitizer.redactCredentialShapes(
+                CommandSanitizer.sanitize($0)
+            )
+        }
     }
+
+    /// Both redactor suites are pure; repeated hinted fields replay their output.
+    private static let redactedValues = DigestKeyedStringMemo(
+        capacity: 512,
+        maximumInputBytes: 4_096
+    )
 
     package static func mayContainCredential(_ value: String) -> Bool {
         let isLong = value.utf8.count >= 8
