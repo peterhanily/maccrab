@@ -215,11 +215,70 @@ public struct AIToolRegistry: Sendable {
         }
     }
 
+    /// One pattern folded and classified once, in its original order. Every
+    /// field is computed with the exact expressions the former per-call
+    /// matcher evaluated, so precomputation cannot change which tool, if any,
+    /// a path resolves to.
+    private struct MatchPlan: Sendable {
+        let toolType: AIToolType
+        /// The lowercased pattern; substring semantics unless `executableName`.
+        let pattern: String
+        /// Set for a bare `/<name>` executable pattern (AI-12).
+        let executableName: String?
+        /// `/<name>/` for a bare executable pattern.
+        let componentFragment: String
+
+        init(toolType: AIToolType, pattern rawPattern: String) {
+            let pattern = rawPattern.lowercased()
+            self.toolType = toolType
+            self.pattern = pattern
+            if pattern.hasPrefix("/"), !pattern.dropFirst().contains("/") {
+                let name = String(pattern.dropFirst())
+                executableName = name
+                componentFragment = "/\(name)/"
+            } else {
+                executableName = nil
+                componentFragment = ""
+            }
+        }
+
+        /// Match one lowercased pattern against a lowercased executable path.
+        ///
+        /// AI-12: a bare `/<name>` pattern (leading slash, no interior slash) names
+        /// an EXECUTABLE, not a path fragment — but matched with plain `contains` it
+        /// also hit any path component that merely STARTS with that name. `/aider`
+        /// matched `/Users/x/projects/aider-clone/bin/python` and `/openclaw`
+        /// matched `/opt/openclaw-sandbox/node`, promoting an unrelated binary to an
+        /// AI-tool ROOT — which then attributes its entire process subtree to an
+        /// agent that isn't there, and hands 32 ai_safety rules, the credential
+        /// fence and the project boundary a fabricated agent to reason about.
+        ///
+        /// For that shape require a COMPONENT-anchored match: either the basename
+        /// equals the name, or the name appears as a whole `/name/` directory
+        /// component (so Homebrew Cellar / npm-global layouts still resolve). Every
+        /// other pattern keeps the substring semantics it was written with — those
+        /// carry their own boundaries (`.app/`, a trailing `/`, or an interior `-`).
+        func matches(path: String, basename: String) -> Bool {
+            if let executableName {
+                return basename == executableName
+                    || ExactSubstringSearch.contains(path, componentFragment)
+            }
+            return ExactSubstringSearch.contains(path, pattern)
+        }
+    }
+
+    private static func plans(_ table: [(AIToolType, [String])]) -> [MatchPlan] {
+        table.flatMap { toolType, patterns in
+            patterns.map { MatchPlan(toolType: toolType, pattern: $0) }
+        }
+    }
+
+    private static let builtinPlans = plans(builtinPatterns)
     /// Custom patterns loaded from config (user-extensible).
-    private let customPatterns: [(AIToolType, [String])]
+    private let customPlans: [MatchPlan]
 
     public init(customPatterns: [(AIToolType, [String])] = []) {
-        self.customPatterns = customPatterns
+        self.customPlans = Self.plans(customPatterns)
     }
 
     /// Check if an executable path belongs to a known AI coding tool.
@@ -237,49 +296,15 @@ public struct AIToolRegistry: Sendable {
             }
         }
 
-        // Check builtin patterns
-        for (toolType, patterns) in Self.builtinPatterns {
-            for pattern in patterns {
-                if Self.matches(path: path, basename: basename, pattern: pattern.lowercased()) {
-                    return toolType
-                }
-            }
+        // Builtin patterns first, then custom, each in declaration order.
+        for plan in Self.builtinPlans where plan.matches(path: path, basename: basename) {
+            return plan.toolType
         }
-
-        // Check custom patterns
-        for (toolType, patterns) in customPatterns {
-            for pattern in patterns {
-                if Self.matches(path: path, basename: basename, pattern: pattern.lowercased()) {
-                    return toolType
-                }
-            }
+        for plan in customPlans where plan.matches(path: path, basename: basename) {
+            return plan.toolType
         }
 
         return nil
-    }
-
-    /// Match one lowercased pattern against a lowercased executable path.
-    ///
-    /// AI-12: a bare `/<name>` pattern (leading slash, no interior slash) names
-    /// an EXECUTABLE, not a path fragment — but matched with plain `contains` it
-    /// also hit any path component that merely STARTS with that name. `/aider`
-    /// matched `/Users/x/projects/aider-clone/bin/python` and `/openclaw`
-    /// matched `/opt/openclaw-sandbox/node`, promoting an unrelated binary to an
-    /// AI-tool ROOT — which then attributes its entire process subtree to an
-    /// agent that isn't there, and hands 32 ai_safety rules, the credential
-    /// fence and the project boundary a fabricated agent to reason about.
-    ///
-    /// For that shape require a COMPONENT-anchored match: either the basename
-    /// equals the name, or the name appears as a whole `/name/` directory
-    /// component (so Homebrew Cellar / npm-global layouts still resolve). Every
-    /// other pattern keeps the substring semantics it was written with — those
-    /// carry their own boundaries (`.app/`, a trailing `/`, or an interior `-`).
-    private static func matches(path: String, basename: String, pattern: String) -> Bool {
-        if pattern.hasPrefix("/"), !pattern.dropFirst().contains("/") {
-            let name = String(pattern.dropFirst())
-            return basename == name || path.contains("/\(name)/")
-        }
-        return path.contains(pattern)
     }
 
     /// Check if a process is a child of an AI tool by examining its ancestors.

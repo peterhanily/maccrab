@@ -3083,7 +3083,7 @@ public actor SequenceEngine {
         case .equals:
             return lowercasedValues.contains { fieldLower == $0 }
         case .contains:
-            return lowercasedValues.contains { fieldLower.contains($0) }
+            return lowercasedValues.contains { ExactSubstringSearch.contains(fieldLower, $0) }
         case .startswith:
             return lowercasedValues.contains { fieldLower.hasPrefix($0) }
         case .endswith:

@@ -228,7 +228,7 @@ public struct CredentialFence: Sendable {
     /// the credential store at `path` (already lowercased).
     private static func isOwnCredentialStore(binary: String, path: String) -> Bool {
         guard let owned = credentialOwners[binary] else { return false }
-        return owned.contains { path.contains($0) }
+        return owned.contains { ExactSubstringSearch.contains(path, $0) }
     }
 
     /// Configuration is immutable for this fence. Fold each pattern once,
@@ -263,7 +263,7 @@ public struct CredentialFence: Sendable {
     /// Returns the credential type if it matches, nil if safe.
     public func checkAccess(filePath: String) -> CredentialType? {
         return Self.matchCredential(
-            filePath: filePath,
+            lowercasedPath: filePath.lowercased(),
             sensitivePaths: matchingPaths
         )
     }
@@ -273,7 +273,13 @@ public struct CredentialFence: Sendable {
     /// Keeping this as the one implementation prevents a second credential
     /// allowlist from drifting as the built-in corpus evolves.
     static func defaultCredentialType(filePath: String) -> CredentialType? {
-        matchCredential(filePath: filePath, sensitivePaths: defaultMatchingPaths)
+        defaultCredentialType(lowercasedPath: filePath.lowercased())
+    }
+
+    /// Built-in classification of a path its caller has already lowercased,
+    /// so one decision folds the path once.
+    private static func defaultCredentialType(lowercasedPath: String) -> CredentialType? {
+        matchCredential(lowercasedPath: lowercasedPath, sensitivePaths: defaultMatchingPaths)
     }
 
     /// Broader privacy boundary for path-bearing AgentLineage snapshots.
@@ -283,39 +289,44 @@ public struct CredentialFence: Sendable {
     /// owner-side classifier; EventLoop and AgentLineage must delegate here
     /// rather than maintaining parallel substring lists.
     public static func isPrivateAgentLineagePath(_ filePath: String) -> Bool {
-        if defaultCredentialType(filePath: filePath) != nil { return true }
         let path = filePath.lowercased()
-        return path.contains("/.aws/config")
-            || path.contains("/.aws/sso/cache/")
-            || path.contains("/.bw/data.json")
-            || path.contains("/.config/op/")
-            || path.contains("/group containers/2bua8c4s2c.com.agilebits/")
-            || path.contains("/group containers/2bua8c4s2c.com.1password/")
-            || path.contains("/.ssh/authorized_keys")
+        if defaultCredentialType(lowercasedPath: path) != nil { return true }
+        return privateAgentLineageFragments.contains { ExactSubstringSearch.contains(path, $0) }
             || path.hasSuffix("/.gitconfig")
-            || path.contains("/library/application support/google/chrome/")
-            || path.contains("/library/application support/firefox/")
-            || path.contains("/library/application support/bravesoftware/")
-            || path.contains("/library/application support/microsoft edge/")
-            || path.contains("/library/application support/arc/")
-            || path.contains("/library/application support/vivaldi/")
-            || path.contains("/library/application support/com.operasoftware.opera/")
-            || path.contains("/library/safari/")
-            || path.contains("/library/containers/com.apple.safari/")
             || path.hasSuffix("/cookies.binarycookies")
     }
 
+    /// Lowercased fragments for `isPrivateAgentLineagePath`; any one is enough.
+    private static let privateAgentLineageFragments = [
+        "/.aws/config",
+        "/.aws/sso/cache/",
+        "/.bw/data.json",
+        "/.config/op/",
+        "/group containers/2bua8c4s2c.com.agilebits/",
+        "/group containers/2bua8c4s2c.com.1password/",
+        "/.ssh/authorized_keys",
+        "/library/application support/google/chrome/",
+        "/library/application support/firefox/",
+        "/library/application support/bravesoftware/",
+        "/library/application support/microsoft edge/",
+        "/library/application support/arc/",
+        "/library/application support/vivaldi/",
+        "/library/application support/com.operasoftware.opera/",
+        "/library/safari/",
+        "/library/containers/com.apple.safari/",
+    ]
+
+    /// `path` is the caller's lowercased file path.
     private static func matchCredential(
-        filePath: String,
+        lowercasedPath path: String,
         sensitivePaths: [MatchingPath]
     ) -> CredentialType? {
-        let path = filePath.lowercased()
         let filename = (path as NSString).lastPathComponent
 
         // Self / deception exclusion — reading MacCrab's own files or the
         // honey-prompt bait is never a credential-exfil signal. (Honeyfile
         // hits are handled by the dedicated honeyfile_accessed rule.)
-        for frag in Self.selfExclusionFragments where path.contains(frag) {
+        for frag in Self.selfExclusionFragments where ExactSubstringSearch.contains(path, frag) {
             return nil
         }
 
@@ -336,7 +347,7 @@ public struct CredentialFence: Sendable {
         // is public cert-trust config, NOT a credential database. Reading it is
         // not credential theft, yet the `/Library/Keychains/` fragment below
         // matches it as a substring (audit: codesign/security flagged for it).
-        if path.contains("/system/library/keychains/") { return nil }
+        if ExactSubstringSearch.contains(path, "/system/library/keychains/") { return nil }
 
         for sensitive in sensitivePaths {
             let pattern = sensitive.pattern
@@ -352,7 +363,7 @@ public struct CredentialFence: Sendable {
                 // its own leading/trailing slashes where boundary-anchoring is
                 // needed, so a plain contains here is anchored by construction
                 // and can't match mid-component the way a bare token did.
-                if path.contains(pattern) { return sensitive.type }
+                if ExactSubstringSearch.contains(path, pattern) { return sensitive.type }
             }
         }
 
@@ -370,7 +381,11 @@ public struct CredentialFence: Sendable {
     /// are unaffected by this advisory path entirely.
     public func checkAccessDetailed(filePath: String, aiToolName: String, aiToolType: AIToolType? = nil,
                                     accessingBinary: String? = nil) -> (type: CredentialType, description: String)? {
-        guard let credType = checkAccess(filePath: filePath) else { return nil }
+        let lowercasedPath = filePath.lowercased()
+        guard let credType = Self.matchCredential(
+            lowercasedPath: lowercasedPath,
+            sensitivePaths: matchingPaths
+        ) else { return nil }
 
         // AI-07: a NON-AI tool reading the credential store it owns is that
         // tool working, not credential theft — the same principle the
@@ -380,7 +395,7 @@ public struct CredentialFence: Sendable {
         // don't know the accessor keep the previous (stricter) behaviour.
         if let accessingBinary,
            Self.isOwnCredentialStore(binary: accessingBinary.lowercased(),
-                                     path: filePath.lowercased()) {
+                                     path: lowercasedPath) {
             return nil
         }
 

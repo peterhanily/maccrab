@@ -9899,8 +9899,9 @@ public actor EventStore {
     /// candidate prefix. Legacy migration additionally deletes the old wide
     /// row plus its indexes and FTS postings in this same transaction, so that
     /// already-WAL-amplified mutation charge is included rather than hidden
-    /// behind maintenance admission.
-    private func journalBlockTransactionEstimate(
+    /// behind maintenance admission. Internal (not private) only so the
+    /// formation parity test can replay chunking against the real charge.
+    func journalBlockTransactionEstimate(
         payloadBytes: Int,
         eventCount: Int,
         legacyRowMutationBytes: Int64 = 0,
@@ -11315,6 +11316,10 @@ public actor EventStore {
                 var sourceCount = 0
                 var framedBytes = 12
                 var preparedUnique: [PreparedPersistedEvent] = []
+                // Overflow (poison) members of `preparedUnique`, maintained
+                // as it grows instead of re-counting the whole prefix for
+                // every proposed candidate.
+                var preparedUniquePoisonCount = 0
                 // Prefix formation is speculative until COMMIT. A stricter
                 // future-expiry check may roll it back and request a split;
                 // never let those uncommitted UUIDs leak into the durable
@@ -11332,10 +11337,10 @@ public actor EventStore {
                         // EventJournalCodec will actually persist.
                         payloadBytes: nextBytes,
                         eventCount: nextCount,
-                        poisonCount: preparedUnique.reduce(into: 0) {
-                            count, item in
-                            if item.overflow != nil { count += 1 }
-                        } + (prepared.overflow == nil ? 0 : 1)
+                        // The proposed candidate counts even if it later
+                        // proves to be an in-call duplicate.
+                        poisonCount: preparedUniquePoisonCount
+                            + (prepared.overflow == nil ? 0 : 1)
                     )
                     if !preparedUnique.isEmpty, nextEstimate > reserve {
                         break
@@ -11361,6 +11366,9 @@ public actor EventStore {
                     formationDigests[prepared.event.id]
                         = prepared.recordDigest
                     preparedUnique.append(prepared)
+                    if prepared.overflow != nil {
+                        preparedUniquePoisonCount += 1
+                    }
                 }
                 guard sourceCount > 0 else {
                     throw EventStoreError.encodingFailed(

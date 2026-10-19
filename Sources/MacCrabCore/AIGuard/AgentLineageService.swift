@@ -263,13 +263,16 @@ public actor AgentLineageService {
         path: String,
         eventAction: String
     ) -> AgentEvent.Kind? {
-        guard !CredentialFence.isPrivateAgentLineagePath(path) else {
-            return nil
-        }
+        // Both guards are pure and both must pass. The action/extension test
+        // rejects most callbacks for a fraction of the privacy classifier's
+        // cost, so it runs first; nothing is materialized before both pass.
         guard FileInjectionScanner.isEligible(
             path: path,
             eventAction: eventAction
         ) else {
+            return nil
+        }
+        guard !CredentialFence.isPrivateAgentLineagePath(path) else {
             return nil
         }
         switch eventAction.lowercased() {
