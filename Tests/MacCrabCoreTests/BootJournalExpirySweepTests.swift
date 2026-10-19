@@ -70,14 +70,49 @@ struct BootJournalExpirySweepTests {
         let deferring = Script(Array(repeating: .success(10), count: 30) + [.success(0)], secondsPerCall: 3)
         let deferred = try await run(deferring, convergence: { false })
         #expect(deferred.deferredBacklogToRuntime)
-        #expect(deferred.progress.batches == 7)  // first batch at or past 20 s
-        #expect(deferring.calls == 7)
+        #expect(deferred.progress.batches == 20)  // first batch at or past 60 s of work
+        #expect(deferring.calls == 20)
 
         let converging = Script(Array(repeating: .success(10), count: 30) + [.success(0)], secondsPerCall: 3)
         let drained = try await run(converging, convergence: { true })
         #expect(!drained.deferredBacklogToRuntime)
         #expect(drained.progress.batches == 30)
         #expect(drained.progress.expiredEvents == 300)
+    }
+
+    @Test("backpressure waits and failed calls do not spend the successful-work budget")
+    func workBudgetExcludesBackpressure() async throws {
+        let busy = EventStoreError.busy("writer lock")
+        var results: [Result<Int, EventStoreError>] = []
+        for index in 0..<70 {
+            if index % 10 == 5 { results.append(.failure(busy)) }
+            results.append(.success(1))
+        }
+        let script = Script(results, secondsPerCall: 1)
+        let outcome = try await run(script, convergence: { false })
+        #expect(outcome.deferredBacklogToRuntime)
+        #expect(outcome.progress.batches == 60)
+        #expect(outcome.progress.workSeconds == 60)
+        #expect(script.conserved == 6)
+        #expect(outcome.progress.elapsedSeconds == 60 + 6 * 1.25)
+    }
+
+    @Test("an unmeasurable store keeps draining; only a measured in-boundary footprint may defer")
+    func convergenceRule() {
+        struct Unmeasurable: Error {}
+        #expect(BootJournalExpirySweep.storeRequiresConvergence(
+            measureFootprint: { throw Unmeasurable() }, requiresConvergence: { _ in false }))
+        #expect(!BootJournalExpirySweep.storeRequiresConvergence(
+            measureFootprint: { 100 }, requiresConvergence: { $0 > 200 }))
+        #expect(BootJournalExpirySweep.storeRequiresConvergence(
+            measureFootprint: { 300 }, requiresConvergence: { $0 > 200 }))
+    }
+
+    @Test("the runtime timer's first pass is prompt only when boot deferred backlog")
+    func runtimeFirstPass() {
+        #expect(BootJournalExpirySweep.runtimeFirstPassDelaySeconds(cadenceMinutes: 5, bootBacklogDeferred: true) == 5)
+        #expect(BootJournalExpirySweep.runtimeFirstPassDelaySeconds(cadenceMinutes: 5, bootBacklogDeferred: false) == 300)
+        #expect(BootJournalExpirySweep.runtimeFirstPassDelaySeconds(cadenceMinutes: 1, bootBacklogDeferred: false) == 60)
     }
 
     @Test("transient backpressure is conserved within its own budget, then fails")

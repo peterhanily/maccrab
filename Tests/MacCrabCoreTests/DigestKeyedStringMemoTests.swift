@@ -17,16 +17,71 @@ struct DigestKeyedStringMemoTests {
         String(repeating: "x --password=hunter2 ", count: 300),  // above the memo's input bound
     ]
 
+    /// Independent copy of `sanitize(arguments:)`'s token walk with the
+    /// uncached redactor suite as its leaf, so memoized argv output is checked
+    /// against the suite rather than against itself.
+    private static let referenceSensitiveFlags: Set<String> = [
+        "--password", "--passwd", "--secret", "--token", "--auth",
+        "--credential", "--api-key", "--api_key", "--apikey", "--key",
+        "--access-key", "--access_key", "--secret-key", "--secret_key",
+        "--private-key", "--private_key", "-p",
+    ]
+
+    private static func referenceArguments(_ arguments: [String]) -> [String] {
+        var result: [String] = []
+        var redactNext = false
+        var optionsEnded = false
+        for argument in arguments {
+            if optionsEnded { result.append(CommandSanitizer.applyRedactors(argument)); continue }
+            if argument == "--" { result.append(argument); redactNext = false; optionsEnded = true; continue }
+            let lowered = argument.lowercased()
+            if lowered.hasPrefix("-p"), !lowered.hasPrefix("--"), argument.count > 2 {
+                result.append("\(argument.prefix(2))[REDACTED]"); redactNext = false; continue
+            }
+            let flag = lowered.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                .first.map(String.init) ?? lowered
+            let isSensitiveFlag = referenceSensitiveFlags.contains(flag)
+            if redactNext, !isSensitiveFlag { result.append("[REDACTED]"); redactNext = false; continue }
+            if isSensitiveFlag {
+                if argument.contains("=") {
+                    result.append("\(argument.prefix { $0 != "=" })=[REDACTED]"); redactNext = false
+                } else {
+                    result.append(argument); redactNext = true
+                }
+                continue
+            }
+            result.append(CommandSanitizer.applyRedactors(argument))
+            redactNext = false
+        }
+        return result
+    }
+
     @Test("command redaction replays exactly what the redactor suite produces")
     func commandParity() {
         for sample in Self.samples {
             let expected = CommandSanitizer.applyRedactors(sample)
             #expect(CommandSanitizer.sanitize(sample) == expected, "\(sample.prefix(60))")
             #expect(CommandSanitizer.sanitize(sample) == expected, "replay: \(sample.prefix(60))")
-            let arguments = sample.split(separator: " ").map(String.init)
-            #expect(CommandSanitizer.sanitize(arguments: arguments)
-                    == CommandSanitizer.sanitize(arguments: arguments))
+            let arguments = sample.split(separator: " ").map(String.init) + ["--", "user:pw@x", "AKIAABCDEFGHIJKLMNOP"] // secret-scan:allow synthetic AWS-key-shaped fixture, not a credential
+            let expectedArguments = Self.referenceArguments(arguments)
+            #expect(CommandSanitizer.sanitize(arguments: arguments) == expectedArguments, "\(sample.prefix(60))")
+            #expect(CommandSanitizer.sanitize(arguments: arguments) == expectedArguments, "replay")
         }
+    }
+
+    @Test("an output larger than the input bound is returned but not retained")
+    func expandingOutputIsNotRetained() {
+        let memo = DigestKeyedStringMemo(capacity: 4, maximumInputBytes: 16)
+        var calls = 0
+        let expand: (String) -> String = { calls += 1; return String(repeating: $0, count: 4) }
+        #expect(memo.value(for: "abcdef", transform: expand) == "abcdefabcdefabcdefabcdef")
+        #expect(memo.count == 0)
+        _ = memo.value(for: "abcdef", transform: expand)
+        #expect(calls == 2)
+        #expect(memo.value(for: "abc", transform: expand) == "abcabcabcabc")
+        #expect(memo.count == 1)
+        // The real redactor expands, e.g. `-p''` to `-p'[REDACTED]'`.
+        #expect(CommandSanitizer.applyRedactors("mysql -p''").utf8.count > "mysql -p''".utf8.count)
     }
 
     @Test("field redaction replays both suites exactly for hinted values")

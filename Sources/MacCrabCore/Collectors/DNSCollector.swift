@@ -394,59 +394,90 @@ public actor DNSCollector {
                 allocatedLength = connection.bufferLength
             }
             guard let buffer else { return }
-            let captured = await readCapture(
+            // Reads, parsing and delivery stay back-to-back on the capture
+            // queue until the next interface check is due, exactly as they
+            // ran on the former pool thread; only that once-per-second
+            // boundary returns to this task. The kernel's immediate-mode BPF
+            // buffer is small, so a per-read reschedule could drop packets.
+            let outcome = await drainCapture(
                 descriptor: connection.descriptor,
                 into: CaptureReadBuffer(pointer: buffer),
-                length: connection.bufferLength
+                length: connection.bufferLength,
+                until: nextInterfaceCheck,
+                continuation: continuation,
+                telemetry: telemetry
             )
-            let bytesRead = captured.bytes
-            if bytesRead < 0 {
-                if captured.error == EINTR { continue }
-                if captured.error == EAGAIN { continue }
-                let reason = "BPF read failed (errno \(captured.error)); retrying capture"
-                sampleKernelStatistics()
-                binding.stop { _ = Darwin.close($0) }
-                telemetry.availability(.unavailable(reason: reason))
-                if await statusReporter.report(.unavailable(reason: reason)) {
-                    logger.warning("DNS collector: \(reason, privacy: .public)")
-                }
-                continue
-            }
-            if bytesRead == 0 { continue }
-            forEachCapturedDNS(in: UnsafeRawBufferPointer(start: buffer, count: bytesRead)) {
-                telemetry.yielded(continuation.yield($0))
+            guard case .failed(let error) = outcome else { continue }
+            let reason = "BPF read failed (errno \(error)); retrying capture"
+            sampleKernelStatistics()
+            binding.stop { _ = Darwin.close($0) }
+            telemetry.availability(.unavailable(reason: reason))
+            if await statusReporter.report(.unavailable(reason: reason)) {
+                logger.warning("DNS collector: \(reason, privacy: .public)")
             }
         }
     }
 
-    /// A BPF read blocks for up to its one-second timeout. It is issued on this
-    /// serial queue so the capture task waits for it suspended, instead of
-    /// parking a cooperative-pool thread for the collector's lifetime.
+    /// A BPF read blocks for up to its one-second timeout. Capture runs on
+    /// this serial queue so the task waits suspended instead of parking a
+    /// cooperative-pool thread for the collector's lifetime.
     private static let captureReadQueue = DispatchQueue(
         label: "com.maccrab.dns.bpf-read",
         qos: .default
     )
 
-    /// The capture loop awaits each read before it touches, resizes or frees
+    /// The capture loop awaits each drain before it touches, resizes or frees
     /// the buffer, so exactly one thread uses it at a time.
-    private struct CaptureReadBuffer: @unchecked Sendable {
+    struct CaptureReadBuffer: @unchecked Sendable {
         let pointer: UnsafeMutableRawPointer
     }
 
-    private struct CaptureRead: Sendable {
-        let bytes: Int
-        /// `errno` from the reading thread; meaningful only when `bytes < 0`.
-        let error: Int32
+    enum CaptureDrainOutcome: Sendable, Equatable {
+        /// The interface-check deadline arrived; reads so far were delivered.
+        case reachedDeadline
+        case cancelled
+        /// `errno` from the reading thread; never EINTR or EAGAIN, which the
+        /// drain retries just as the former loop did.
+        case failed(Int32)
     }
 
-    private static func readCapture(
+    /// Read, parse and yield back-to-back until `deadline` (system uptime),
+    /// cancellation or a read failure. A zero-byte read is the BPF timeout.
+    static func drainCapture(
         descriptor: Int32,
         into buffer: CaptureReadBuffer,
-        length: Int
-    ) async -> CaptureRead {
-        await BlockingWorkOffload.perform(on: captureReadQueue) {
-            let bytes = Darwin.read(descriptor, buffer.pointer, length)
-            return CaptureRead(bytes: bytes, error: bytes < 0 ? errno : 0)
+        length: Int,
+        until deadline: TimeInterval,
+        continuation: AsyncStream<DnsQuery>.Continuation,
+        telemetry: DNSCaptureTelemetry,
+        queue: DispatchQueue = captureReadQueue,
+        uptime: @escaping @Sendable () -> TimeInterval = {
+            Foundation.ProcessInfo.processInfo.systemUptime
+        }
+    ) async -> CaptureDrainOutcome {
+        let cancellation = BlockingWorkCancellation()
+        return await withTaskCancellationHandler {
+            await BlockingWorkOffload.perform(on: queue) {
+                while !cancellation.isCancelled {
+                    let bytes = Darwin.read(descriptor, buffer.pointer, length)
+                    if bytes < 0 {
+                        let error = errno
+                        guard error == EINTR || error == EAGAIN else {
+                            return .failed(error)
+                        }
+                    } else if bytes > 0 {
+                        forEachCapturedDNS(
+                            in: UnsafeRawBufferPointer(start: buffer.pointer, count: bytes)
+                        ) {
+                            telemetry.yielded(continuation.yield($0))
+                        }
+                    }
+                    if uptime() >= deadline { return .reachedDeadline }
+                }
+                return .cancelled
+            }
+        } onCancel: {
+            cancellation.cancel()
         }
     }
 

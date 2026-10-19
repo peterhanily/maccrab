@@ -1165,12 +1165,15 @@ enum DaemonSetup {
                     DaemonTimers.journalExpiryBackpressureRetryMilliseconds,
                 uptime: { Foundation.ProcessInfo.processInfo.systemUptime },
                 storeRequiresConvergence: {
-                    // Unmeasurable counts as needing convergence: keep draining.
-                    guard let footprint = try? measureDatabaseFootprintBytes(
-                        dbPath: eventsDatabasePath
-                    ) else { return true }
-                    return eventStartupBoundary.requiresStartupConvergence(
-                        footprintBytes: footprint
+                    BootJournalExpirySweep.storeRequiresConvergence(
+                        measureFootprint: {
+                            try measureDatabaseFootprintBytes(dbPath: eventsDatabasePath)
+                        },
+                        requiresConvergence: {
+                            eventStartupBoundary.requiresStartupConvergence(
+                                footprintBytes: $0
+                            )
+                        }
                     )
                 },
                 renewPhase: { progress in

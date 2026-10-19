@@ -51,6 +51,20 @@ struct BlockingWorkOffloadTests {
         #expect(value == 42)
     }
 
+    @Test("work a task waits on keeps at least that task's dispatch class")
+    func waiterPriorityCarried() async {
+        #expect(BlockingWorkOffload.dispatchQoS(waitedOnAt: .high, floor: .utility).qosClass == .userInitiated)
+        #expect(BlockingWorkOffload.dispatchQoS(waitedOnAt: .medium, floor: .utility).qosClass == .default)
+        #expect(BlockingWorkOffload.dispatchQoS(waitedOnAt: .low, floor: .utility).qosClass == .utility)
+        #expect(BlockingWorkOffload.dispatchQoS(waitedOnAt: .background, floor: .utility).qosClass == .utility)
+        #expect(BlockingWorkOffload.dispatchQoS(waitedOnAt: .background, floor: .background).qosClass == .background)
+        let queue = DispatchQueue(label: "com.maccrab.test.qos", qos: .utility, attributes: .concurrent)
+        let observed = await BlockingWorkOffload.perform(
+            on: queue, qos: DispatchQoS(qosClass: .userInitiated, relativePriority: 0), flags: .enforceQoS
+        ) { qos_class_self().rawValue }
+        #expect(observed == QOS_CLASS_USER_INITIATED.rawValue)
+    }
+
     @Test("more blocked readers than CPUs leave the cooperative pool usable")
     func poolRemainsAvailable() async throws {
         let readers = Foundation.ProcessInfo.processInfo.activeProcessorCount + 2
@@ -80,7 +94,9 @@ struct BlockingWorkOffloadTests {
             probeDone.signal()
             return sum
         }
-        let probeCompleted = probeDone.wait(timeout: .now() + 2) == .success
+        // Generous: a starved pool never completes it, while a loaded host
+        // running other suites in parallel still finishes in well under this.
+        let probeCompleted = probeDone.wait(timeout: .now() + 10) == .success
         for _ in 0..<readers { release.signal() }
         var joined = 0
         for owner in owners { joined += await owner.value >= 0 ? 1 : 0 }

@@ -2970,8 +2970,10 @@ enum DaemonTimers {
         // later, so the overhang stays near the documented five minutes.
         eventJournalExpiryTimer.schedule(
             deadline: .now() + .seconds(
-                state.journalExpiryBootBacklogDeferred
-                    ? 5 : journalExpiryIntervalMinutes * 60
+                BootJournalExpirySweep.runtimeFirstPassDelaySeconds(
+                    cadenceMinutes: journalExpiryIntervalMinutes,
+                    bootBacklogDeferred: state.journalExpiryBootBacklogDeferred
+                )
             ),
             repeating: .seconds(journalExpiryIntervalMinutes * 60)
         )

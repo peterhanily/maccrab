@@ -97,20 +97,24 @@ struct HotPathCostBenchmarkTests {
         let corpus = Self.events(count: 2_400)
         let clock = ContinuousClock()
         var cost: [String: Double] = [:]
-        var digest = SHA256()
-        func record(_ name: String, _ verdicts: String) { digest.update(data: Data((name + ":" + verdicts + "\n").utf8)) }
+        var passDigests: [String] = []
+        var aiAncestorsResolved = 0
 
         for pass in 0..<2 {  // pass 0 warms caches and code; pass 1 is reported
+            var digest = SHA256()
+            func record(_ name: String, _ verdicts: String) { digest.update(data: Data((name + ":" + verdicts + "\n").utf8)) }
             var local: [String: Double] = [:]
             var start = clock.now
             var answers: [String] = []
             for event in corpus {
                 answers.append(String(describing: registry.isAITool(executablePath: event.process.executable)))
                 for ancestor in event.process.ancestors {
-                    answers.append(String(describing: registry.isAITool(executablePath: ancestor.executable)))
+                    let tool = registry.isAITool(executablePath: ancestor.executable)
+                    if pass == 1, tool == .claudeCode { aiAncestorsResolved += 1 }
+                    answers.append(String(describing: tool))
                 }
             }
-            local["ai_tool_registry"] = Self.nanos(start.duration(to: clock.now)); if pass == 1 { record("ai", answers.joined(separator: ",")) }
+            local["ai_tool_registry"] = Self.nanos(start.duration(to: clock.now)); record("ai", answers.joined(separator: ","))
 
             start = clock.now; answers = []
             for event in corpus {
@@ -120,7 +124,7 @@ struct HotPathCostBenchmarkTests {
                                                                           accessingBinary: event.process.name)?.type))
                 answers.append(String(describing: AgentLineageService.materializedFileEventKind(path: path, eventAction: event.eventAction)))
             }
-            local["credential_and_lineage"] = Self.nanos(start.duration(to: clock.now)); if pass == 1 { record("cred", answers.joined(separator: ",")) }
+            local["credential_and_lineage"] = Self.nanos(start.duration(to: clock.now)); record("cred", answers.joined(separator: ","))
 
             start = clock.now; answers = []
             for event in corpus {
@@ -132,26 +136,27 @@ struct HotPathCostBenchmarkTests {
                     answers.append(String(describing: SessionEnricher.classifyAncestor(name: ancestor.name, executable: ancestor.executable)))
                 }
             }
-            local["path_policies"] = Self.nanos(start.duration(to: clock.now)); if pass == 1 { record("paths", answers.joined(separator: ",")) }
+            local["path_policies"] = Self.nanos(start.duration(to: clock.now)); record("paths", answers.joined(separator: ","))
 
             start = clock.now; answers = []
             for event in corpus {
                 let prepared = try EventJournalAdmissionValidator.prepare(event)
                 answers.append(String(prepared.canonicalJSON.count))
             }
-            local["journal_prepare"] = Self.nanos(start.duration(to: clock.now)); if pass == 1 { record("journal", answers.joined(separator: ",")) }
+            local["journal_prepare"] = Self.nanos(start.duration(to: clock.now)); record("journal", answers.joined(separator: ","))
 
             start = clock.now; answers = []
             for event in corpus {
                 answers.append((await rules.evaluate(event)).map(\.ruleId).sorted().joined(separator: "+"))
             }
-            local["rules"] = Self.nanos(start.duration(to: clock.now)); if pass == 1 { record("rules", answers.joined(separator: ",")) }
+            local["rules"] = Self.nanos(start.duration(to: clock.now)); record("rules", answers.joined(separator: ","))
 
             start = clock.now; answers = []
             for event in corpus {
                 answers.append((await sequences.evaluate(event)).map(\.ruleId).sorted().joined(separator: "+"))
             }
-            local["sequences"] = Self.nanos(start.duration(to: clock.now)); if pass == 1 { record("sequences", answers.joined(separator: ",")) }
+            local["sequences"] = Self.nanos(start.duration(to: clock.now)); record("sequences", answers.joined(separator: ","))
+            passDigests.append(digest.finalize().map { String(format: "%02x", $0) }.joined())
             if pass == 1 { cost = local }
         }
         var report: [String: Any] = ["schema": "hot-path-cost-v1", "events": corpus.count]
@@ -161,9 +166,14 @@ struct HotPathCostBenchmarkTests {
             total += ns
         }
         report["total_ns_per_event"] = (total / Double(corpus.count)).rounded()
-        report["verdict_digest"] = digest.finalize().map { String(format: "%02x", $0) }.joined()
+        // Cross-version comparison uses this printed digest; within one run the
+        // warm and measured passes must already agree.
+        report["verdict_digest"] = passDigests.last
         let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
         print("BENCH_HOT_PATH " + String(decoding: data, as: UTF8.self))
         #expect(total > 0)
+        #expect(passDigests.count == 2 && passDigests[0] == passDigests[1])
+        // Every event's ancestry holds exactly one Claude Code root.
+        #expect(aiAncestorsResolved == corpus.count)
     }
 }

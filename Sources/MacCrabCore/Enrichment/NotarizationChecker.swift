@@ -146,7 +146,15 @@ public actor NotarizationChecker {
         assessmentRunner = { path in
             // spctl can take a second or more; up to `maxConcurrent` waits must
             // not each park a cooperative-pool thread that every actor shares.
-            await BlockingWorkOffload.perform(on: Self.assessmentQueue) {
+            // A lane running this inline on overload lifts it to its own class.
+            await BlockingWorkOffload.perform(
+                on: Self.assessmentQueue,
+                qos: BlockingWorkOffload.dispatchQoS(
+                    waitedOnAt: Task.currentPriority,
+                    floor: .utility
+                ),
+                flags: .enforceQoS
+            ) {
                 Self.runSpctl(binaryPath: path)
             }
         }

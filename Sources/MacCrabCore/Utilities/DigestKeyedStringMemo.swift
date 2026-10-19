@@ -15,8 +15,10 @@ import Foundation
 /// remembered output is exact. Keys are digests, so raw inputs (which may
 /// carry a credential before redaction) are never retained; only outputs
 /// are, and those are the redacted values the journal persists anyway.
-/// Inputs above `maximumInputBytes` bypass the memo, and at most `capacity`
-/// entries are kept with first-in, first-out replacement.
+/// Inputs or outputs above `maximumInputBytes` bypass the memo (a redactor
+/// can expand `-p''` into `-p'[REDACTED]'`), and at most `capacity` entries
+/// are kept with first-in, first-out replacement, so retained values never
+/// exceed `capacity * maximumInputBytes` bytes.
 final class DigestKeyedStringMemo: @unchecked Sendable {
     struct Key: Hashable {
         let w0: UInt64, w1: UInt64, w2: UInt64, w3: UInt64
@@ -50,6 +52,7 @@ final class DigestKeyedStringMemo: @unchecked Sendable {
         // Computed outside the lock: concurrent misses for one input may both
         // compute, and both results are identical by construction.
         let output = transform(input)
+        guard output.utf8.count <= maximumInputBytes else { return output }
         lock.lock()
         if entries[key] == nil {
             if insertionOrder.count == capacity {
