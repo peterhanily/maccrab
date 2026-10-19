@@ -103,6 +103,15 @@ public actor FileInjectionScanner {
     }
 
     private func scanEligibleFile(path: String) -> ScanResult? {
+        // A complete evaluation of this exact snapshot needs no new read: the
+        // descriptor read below would only reach the same cache hit and nil
+        // verdict. Any write changes ctime, so a changed file is still read.
+        if let cached = scanCache[path]?.identity,
+           Self.unchangedIdentity(at: path) == cached {
+            touchCache(path: path, identity: cached)
+            return nil
+        }
+
         // Read through the same descriptor that was proven regular and within
         // the cap. A path-based attributes check followed by
         // String(contentsOfFile:) let an attacker rename a validated small file
@@ -281,6 +290,25 @@ public actor FileInjectionScanner {
         guard word == 0x6762656E67 || word == 0x6762736374 || word == 0x6762776C73,
               cursor < scalars.endIndex, scalars[cursor].value == 0xE007F else { return nil }
         return scalars.index(after: cursor)
+    }
+
+    /// The leaf's current identity when it is still a single-link regular
+    /// file within the scan cap (the reader's own preconditions), else nil.
+    /// Fields are converted exactly as BoundedRegularFileReader.Snapshot does.
+    private static func unchangedIdentity(at path: String) -> SnapshotIdentity? {
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFREG,
+              metadata.st_nlink == 1,
+              metadata.st_size >= 0,
+              metadata.st_size <= Int64(maxFileSize) else { return nil }
+        return SnapshotIdentity(
+            deviceID: UInt64(metadata.st_dev),
+            inodeNumber: UInt64(metadata.st_ino),
+            sizeBytes: metadata.st_size,
+            statusChangeSeconds: Int64(metadata.st_ctimespec.tv_sec),
+            statusChangeNanoseconds: Int64(metadata.st_ctimespec.tv_nsec)
+        )
     }
 
     private func touchCache(path: String, identity: SnapshotIdentity) {
