@@ -1044,6 +1044,9 @@ final class DaemonState {
     /// without a restart; the threat-intel feed's network loop is started /
     /// stopped directly via `threatIntel.setNetworkRefresh(_:)`.
     var vulnScanEnabled: Bool = false
+    /// Boot handed remaining eligible journal expiry to the runtime timer
+    /// (see BootJournalExpirySweep); its first pass then runs promptly.
+    var journalExpiryBootBacklogDeferred: Bool = false
     var packageFreshnessEnabled: Bool = false
     var threatIntelEnabled: Bool = false
     var certTransparencyEnabled: Bool = false

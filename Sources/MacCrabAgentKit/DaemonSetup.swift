@@ -1142,73 +1142,68 @@ enum DaemonSetup {
         // window. Keep the subsequent capacity-recovery phase explicitly
         // starting so dashboard readers do not reopen between these stages.
         Self.writeBootPhase(supportDir: supportDir, phase: "starting", startedAt: startedAt)
+        var journalExpiryBacklogDeferred = false
         do {
-            var expired = 0
-            var batches = 0
             // Keep one retention boundary for the complete boot sweep, as the
             // runtime expiry timer does. Advancing it per batch resets the
             // store's summary cursor and rescans already-visited prefixes.
             let retainedThrough = Date()
-            // Consecutive resets whenever a quantum makes progress; cumulative
-            // never does. Both are bounded by the boot-specific budget above
-            // rather than the runtime timer's 30s/120s values, which are
-            // tuned for a steady-state sweep's five-minute overhang, not a
-            // single-digit-second boot. Mirrors the steady-state handling in
-            // DaemonTimers.swift's event-journal-expiry timer.
-            var consecutiveWaitSeconds: TimeInterval = 0
-            var cumulativeWaitSeconds: TimeInterval = 0
-            while true {
-                let batch: Int
-                do {
-                    batch = try await eventStore.expireJournalBlocks(
+            let eventsDatabasePath = supportDir + "/events.db"
+            let outcome = try await BootJournalExpirySweep.run(
+                expire: {
+                    try await eventStore.expireJournalBlocks(
                         retainedThrough: retainedThrough,
                         maximumBlocks: 1_024
                     )
-                } catch let error as EventStoreError {
-                    guard JournalExpiryBackpressurePolicy.decide(
-                        error: error,
-                        consecutiveWaitSeconds: consecutiveWaitSeconds,
-                        cumulativeWaitSeconds: cumulativeWaitSeconds,
-                        maximumConsecutiveWaitSeconds:
-                            Self.bootJournalExpiryBackpressureBudgetSeconds,
-                        maximumCumulativeWaitSeconds:
-                            Self.bootJournalExpiryBackpressureBudgetSeconds
-                    ) == .conserveAndRetry else {
-                        throw error
-                    }
+                },
+                // Boot's own tight backpressure budget rather than the runtime
+                // timer's 30s/120s values, which are tuned for a steady-state
+                // sweep's five-minute overhang, not a single-digit-second boot.
+                backpressureBudgetSeconds:
+                    Self.bootJournalExpiryBackpressureBudgetSeconds,
+                retryMilliseconds:
+                    DaemonTimers.journalExpiryBackpressureRetryMilliseconds,
+                uptime: { Foundation.ProcessInfo.processInfo.systemUptime },
+                storeRequiresConvergence: {
+                    // Unmeasurable counts as needing convergence: keep draining.
+                    guard let footprint = try? measureDatabaseFootprintBytes(
+                        dbPath: eventsDatabasePath
+                    ) else { return true }
+                    return eventStartupBoundary.requiresStartupConvergence(
+                        footprintBytes: footprint
+                    )
+                },
+                renewPhase: { progress in
+                    Self.writeBootPhase(
+                        supportDir: supportDir,
+                        phase: "starting",
+                        startedAt: startedAt,
+                        detail: [
+                            "boot_step": "journal_expiry",
+                            "journal_expiry_expired_events": progress.expiredEvents,
+                            "journal_expiry_batches": progress.batches,
+                            "journal_expiry_elapsed_seconds": Int(progress.elapsedSeconds),
+                        ]
+                    )
+                },
+                onConservedBackpressure: {
                     logger.notice("Boot journal expiry: bounded record ownership is committed; conserving this pass for prompt retry.")
                     Self.writeBootPhase(
                         supportDir: supportDir,
                         phase: "starting",
                         startedAt: startedAt
                     )
-                    try await Task.sleep(
-                        for: .milliseconds(
-                            DaemonTimers.journalExpiryBackpressureRetryMilliseconds
-                        )
-                    )
-                    let waited = Double(
-                        DaemonTimers.journalExpiryBackpressureRetryMilliseconds
-                    ) / 1000.0
-                    consecutiveWaitSeconds += waited
-                    cumulativeWaitSeconds += waited
-                    continue
+                },
+                sleep: { milliseconds in
+                    try await Task.sleep(for: .milliseconds(milliseconds))
                 }
-                consecutiveWaitSeconds = 0
-                expired += batch
-                if batch == 0 { break }
-                batches += 1
-                if batches.isMultiple(of: 64) {
-                    Self.writeBootPhase(
-                        supportDir: supportDir,
-                        phase: "starting",
-                        startedAt: startedAt
-                    )
-                }
-                await Task.yield()
+            )
+            journalExpiryBacklogDeferred = outcome.deferredBacklogToRuntime
+            if outcome.progress.expiredEvents > 0 {
+                logger.notice("EventStore expired and aggregate-rolled \(outcome.progress.expiredEvents) authenticated journal events before generic cap recovery")
             }
-            if expired > 0 {
-                logger.notice("EventStore expired and aggregate-rolled \(expired) authenticated journal events before generic cap recovery")
+            if outcome.deferredBacklogToRuntime {
+                logger.notice("Boot journal expiry: work budget reached with the store inside its startup boundary after \(outcome.progress.batches) batches; the runtime expiry timer continues the remaining backlog.")
             }
         } catch {
             try DaemonBootstrap.failPreIngestionStorage(
@@ -3251,6 +3246,7 @@ enum DaemonSetup {
         // reload path cannot drift apart — they did, and eight tiers ended up
         // clamped at neither.
         state.storage = bootStorage
+        state.journalExpiryBootBacklogDeferred = journalExpiryBacklogDeferred
 
         // v1.19.1: seed the opt-in network-enrichment switches (off by default).
         // DaemonTimers (vuln scan) and EventLoop (package freshness) read these

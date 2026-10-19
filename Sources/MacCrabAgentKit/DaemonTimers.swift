@@ -2965,8 +2965,14 @@ enum DaemonTimers {
         let eventJournalExpiryTimer = DispatchSource.makeTimerSource(
             queue: .global()
         )
+        // Boot may hand eligible backlog to this timer once the store is inside
+        // its startup boundary; continue it promptly rather than one cadence
+        // later, so the overhang stays near the documented five minutes.
         eventJournalExpiryTimer.schedule(
-            deadline: .now() + .seconds(journalExpiryIntervalMinutes * 60),
+            deadline: .now() + .seconds(
+                state.journalExpiryBootBacklogDeferred
+                    ? 5 : journalExpiryIntervalMinutes * 60
+            ),
             repeating: .seconds(journalExpiryIntervalMinutes * 60)
         )
         eventJournalExpiryTimer.setEventHandler {
