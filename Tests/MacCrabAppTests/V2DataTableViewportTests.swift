@@ -236,13 +236,20 @@ struct V2DataTableViewportTests {
         let pinned = try probe(-1, 0, host: host)
         #expect(abs(pinned.convert(pinned.bounds, to: host).minY - beforeY) < 0.5)
         let document = try #require(scroll.documentView)
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, document.frame.maxY - scroll.contentView.bounds.height)))
-        scroll.reflectScrolledClipView(scroll.contentView)
-        await layoutBoundary(host)
         // Lazy document estimates can grow when the last row is realized. This
         // checks reachability after one native reveal, not exact initial End-
         // jump placement. Discovery must therefore allow an already-realized
         // offscreen row; the post-reveal lookup and full bounds remain strict.
+        // An End jump on a loaded host can land before the estimate settles or
+        // before realization is published, so repeat it (bounded) until the
+        // last row exists; an unreachable last row still fails below.
+        let lastIdentifier = "fixture.499.\(layout.columns.count - 1)"
+        for _ in 0..<8 {
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, document.frame.maxY - scroll.contentView.bounds.height)))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            await layoutBoundary(host)
+            if try descendants(host).contains(where: { $0.identifier?.rawValue == lastIdentifier }) { break }
+        }
         let last = try probe(499, layout.columns.count - 1, host: host, requireVisible: false)
         let before = last.convert(last.bounds, to: scroll.contentView)
         let beforeClip = scroll.contentView.bounds
