@@ -168,7 +168,7 @@ public struct EventInsertFilter: Sendable {
         }
         if let filePath = event.file?.path {
             for substring in pathSubstrings {
-                if filePath.contains(substring) {
+                if ExactSubstringSearch.contains(filePath, substring) {
                     counters.recordDropped()
                     return true
                 }

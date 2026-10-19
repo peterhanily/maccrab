@@ -1410,7 +1410,7 @@ public actor CrossProcessCorrelator {
                  (entry.m1 & pathMask.m1) != entry.m1) {
                 continue
             }
-            if path.contains(entry.sub) { return true }
+            if ExactSubstringSearch.contains(path, entry.sub) { return true }
         }
         if hasRotatedLogSuffix(path) { return true }
         return false

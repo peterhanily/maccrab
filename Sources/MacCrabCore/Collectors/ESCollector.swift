@@ -704,13 +704,13 @@ public final class ESCollector: @unchecked Sendable {
     /// True iff `path` is a credential/secret location worth emitting an OPEN
     /// (read) event for. The hot-path early-out for NOTIFY_OPEN.
     static func isCredentialReadPath(_ path: String) -> Bool {
-        for substring in credentialReadPathSubstrings where path.contains(substring) {
+        for substring in credentialReadPathSubstrings where ExactSubstringSearch.contains(path, substring) {
             return true
         }
         for suffix in credentialReadPathSuffixes where path.hasSuffix(suffix) {
             return true
         }
-        if path.contains("/Google/Chrome/") {
+        if ExactSubstringSearch.contains(path, "/Google/Chrome/") {
             for suffix in chromeLoginDataSuffixes where path.hasSuffix(suffix) {
                 return true
             }
@@ -755,7 +755,7 @@ public final class ESCollector: @unchecked Sendable {
     /// whose READ is worth emitting an OPEN event for. The second hot-path
     /// early-out for NOTIFY_OPEN, alongside `isCredentialReadPath`.
     static func isAgentContentReadPath(_ path: String) -> Bool {
-        for substring in agentContentReadPathSubstrings where path.contains(substring) {
+        for substring in agentContentReadPathSubstrings where ExactSubstringSearch.contains(path, substring) {
             return true
         }
         for suffix in agentConfigReadFileSuffixes where path.hasSuffix(suffix) {
@@ -770,7 +770,7 @@ public final class ESCollector: @unchecked Sendable {
     /// emission so the credential allowlist stays a tight firehose bound —
     /// those rules only flag NON-Apple openers anyway. (ES-OPEN-5)
     static func isKeychainPath(_ path: String) -> Bool {
-        return path.contains("/Keychains/")
+        return ExactSubstringSearch.contains(path, "/Keychains/")
             && (path.hasSuffix(".keychain-db") || path.hasSuffix(".keychain"))
     }
 
@@ -852,7 +852,9 @@ public final class ESCollector: @unchecked Sendable {
     /// location (suffix match plus bundle/framework/kext interiors).
     static func isCodeWritePath(_ path: String) -> Bool {
         for suffix in codeWriteSuffixes where path.hasSuffix(suffix) { return true }
-        return path.contains(".app/") || path.contains(".framework/") || path.contains(".kext/")
+        return ExactSubstringSearch.contains(path, ".app/")
+            || ExactSubstringSearch.contains(path, ".framework/")
+            || ExactSubstringSearch.contains(path, ".kext/")
     }
 
     /// True iff `path` is a well-known append-only LOG SINK — the ONLY write
@@ -862,8 +864,8 @@ public final class ESCollector: @unchecked Sendable {
     /// as a substring also covers `/private/var/log/`.
     static func isLogSinkWritePath(_ path: String) -> Bool {
         if path.hasSuffix(".log") { return true }
-        if path.contains("/var/log/") { return true }
-        if path.contains("/Library/Logs/") { return true }
+        if ExactSubstringSearch.contains(path, "/var/log/") { return true }
+        if ExactSubstringSearch.contains(path, "/Library/Logs/") { return true }
         return false
     }
 

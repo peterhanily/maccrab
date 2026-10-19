@@ -81,7 +81,7 @@ public actor FileContentEnricher {
     nonisolated public static func shouldScan(targetPath: String) -> Bool {
         // Order matters: more-specific checks first so we can early-exit.
         if targetPath.hasSuffix("/Info.plist") { return true }
-        if targetPath.hasSuffix(".rb") && targetPath.contains("/Library/Taps/") { return true }
+        if targetPath.hasSuffix(".rb") && ExactSubstringSearch.contains(targetPath, "/Library/Taps/") { return true }
         if targetPath.hasSuffix("/CHANGELOG.md")
             || targetPath.hasSuffix("/CHANGELOG")
             || targetPath.hasSuffix("/RELEASE_NOTES.md")
@@ -89,7 +89,8 @@ public actor FileContentEnricher {
             || targetPath.hasSuffix("/README.md") { return true }
         if targetPath.hasSuffix("/.gitconfig") || targetPath.hasSuffix("/.git/config") { return true }
         // LaunchAgents / LaunchDaemons plist content — for time-bomb detection.
-        if (targetPath.contains("/LaunchAgents/") || targetPath.contains("/LaunchDaemons/"))
+        if (ExactSubstringSearch.contains(targetPath, "/LaunchAgents/")
+            || ExactSubstringSearch.contains(targetPath, "/LaunchDaemons/"))
             && targetPath.hasSuffix(".plist") { return true }
         // v1.12.0 post-audit (H-Det5): broaden the node_modules /
         // site-packages allowlist beyond 6 specific basenames so the
@@ -107,7 +108,7 @@ public actor FileContentEnricher {
             "/.npm/_cacache/",
         ]
         let installExtensions: [String] = [".js", ".mjs", ".cjs", ".ts", ".py", ".json"]
-        for root in installRoots where targetPath.contains(root) {
+        for root in installRoots where ExactSubstringSearch.contains(targetPath, root) {
             for ext in installExtensions where targetPath.hasSuffix(ext) {
                 return true
             }
@@ -127,7 +128,7 @@ public actor FileContentEnricher {
         // dead, and even after it they stayed dead because shouldScan
         // returned false for them. Bounded volume (these change rarely vs
         // the event firehose) and the 64 KB / 8 MB read caps still apply.
-        for root in agentContentRoots where targetPath.contains(root) { return true }
+        for root in agentContentRoots where ExactSubstringSearch.contains(targetPath, root) { return true }
         for file in agentConfigFileSuffixes where targetPath.hasSuffix(file) { return true }
         // NOTE: the non-root maccrabd FSEvents fallback emits no close-class
         // action, so FileContent enrichment is sysext/ES-only by design.

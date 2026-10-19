@@ -533,8 +533,9 @@ enum EventLoop {
             "npm install", "npm i ", "pip install", "pip3 install",
             "cargo add", "brew install",
         ]
+        let lowercasedCommandLine = process.commandLine.lowercased()
         if packageCommands.contains(where: {
-            process.commandLine.lowercased().contains($0)
+            ExactSubstringSearch.contains(lowercasedCommandLine, $0)
         }) {
             await BehaviorScoreAlertEmitter.record(
                 state: state,
@@ -549,8 +550,8 @@ enum EventLoop {
         // AI child downloading and executing
         let downloadCommands = ["curl", "wget"]
         let executionPipes = ["| sh", "| bash", "| zsh", "-o /tmp", "-O /tmp"]
-        if downloadCommands.contains(where: { process.commandLine.contains($0) })
-            && executionPipes.contains(where: { process.commandLine.contains($0) }) {
+        if downloadCommands.contains(where: { ExactSubstringSearch.contains(process.commandLine, $0) })
+            && executionPipes.contains(where: { ExactSubstringSearch.contains(process.commandLine, $0) }) {
             await BehaviorScoreAlertEmitter.record(
                 state: state,
                 event: event,
@@ -567,7 +568,7 @@ enum EventLoop {
                 "/LaunchAgents/", "/LaunchDaemons/", "/StartupItems/",
                 ".zshrc", ".bashrc", ".bash_profile",
             ]
-            if persistencePaths.contains(where: { file.path.contains($0) }) {
+            if persistencePaths.contains(where: { ExactSubstringSearch.contains(file.path, $0) }) {
                 await BehaviorScoreAlertEmitter.record(
                     state: state,
                     event: event,
@@ -1523,7 +1524,9 @@ enum EventLoop {
 
                     // === Prevention: sandbox-analyze unnotarized binaries from Downloads/tmp ===
                     if preventionEnabled && SandboxAnalyzer.dynamicExecutionEnabled {
-                        if execPath.contains("/Downloads/") || execPath.contains("/tmp/") || execPath.contains("/Users/Shared/") {
+                        if ExactSubstringSearch.contains(execPath, "/Downloads/")
+                            || ExactSubstringSearch.contains(execPath, "/tmp/")
+                            || ExactSubstringSearch.contains(execPath, "/Users/Shared/") {
                             if let analysis = await sandboxAnalyzer.analyze(binaryPath: execPath) {
                                 if analysis.isSuspicious {
                                     let alert = Alert(
@@ -1748,7 +1751,8 @@ enum EventLoop {
             // === DYLD injection detection ===
             let cmdline = enrichedEvent.process.commandLine.lowercased()
             let args = enrichedEvent.process.args.joined(separator: " ").lowercased()
-            if cmdline.contains("dyld_insert_libraries") || args.contains("dyld_insert_libraries") {
+            if ExactSubstringSearch.contains(cmdline, "dyld_insert_libraries")
+                || ExactSubstringSearch.contains(args, "dyld_insert_libraries") {
                 await BehaviorScoreAlertEmitter.record(
                     state: state,
                     event: enrichedEvent,
@@ -2187,7 +2191,8 @@ enum EventLoop {
                     )
                 }
             }
-            if proc.executable.contains("/tmp/") || proc.executable.contains("/private/tmp/") {
+            if ExactSubstringSearch.contains(proc.executable, "/tmp/")
+                || ExactSubstringSearch.contains(proc.executable, "/private/tmp/") {
                 await BehaviorScoreAlertEmitter.record(
                     state: state,
                     event: enrichedEvent,
@@ -2196,7 +2201,7 @@ enum EventLoop {
                 )
             }
             if let file = enrichedEvent.file {
-                if file.path.contains("/LaunchAgents/") {
+                if ExactSubstringSearch.contains(file.path, "/LaunchAgents/") {
                     await BehaviorScoreAlertEmitter.record(
                         state: state,
                         event: enrichedEvent,
@@ -2204,7 +2209,7 @@ enum EventLoop {
                         forProcess: proc.pid, path: proc.executable
                     )
                 }
-                if file.path.contains("/LaunchDaemons/") {
+                if ExactSubstringSearch.contains(file.path, "/LaunchDaemons/") {
                     await BehaviorScoreAlertEmitter.record(
                         state: state,
                         event: enrichedEvent,

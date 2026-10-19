@@ -1059,7 +1059,7 @@ public actor CampaignDetector {
             "/.local/share/claude", "/.claude/",
             "/.vscode/", "/.cursor/",
         ]
-        return needles.contains { path.contains($0) }
+        return needles.contains { ExactSubstringSearch.contains(path, $0) }
     }
 
     /// True when a dev-tooling alert is below CRITICAL and so must not feed

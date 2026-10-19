@@ -320,21 +320,21 @@ enum IntentEvidenceClassifier {
     private static func isCredentialPath(_ p: String) -> Bool {
         return p.hasSuffix("/.aws/credentials")
             || p.hasSuffix("/.aws/config")
-            || p.contains("/.ssh/id_")
+            || ExactSubstringSearch.contains(p, "/.ssh/id_")
             || p.hasSuffix("/.ssh/authorized_keys")
             || p.hasSuffix("/.netrc")
             || p.hasSuffix("/.npmrc")
             || p.hasSuffix("/.pypirc")
             || p.hasSuffix("/.docker/config.json")
-            || p.contains("/.kube/config")
+            || ExactSubstringSearch.contains(p, "/.kube/config")
             || p.hasSuffix("/.gitconfig")
-            || p.contains("/.config/gh/hosts.yml")
-            || p.contains("/.cargo/credentials")
+            || ExactSubstringSearch.contains(p, "/.config/gh/hosts.yml")
+            || ExactSubstringSearch.contains(p, "/.cargo/credentials")
     }
 
     private static func isLaunchAgentPath(_ p: String) -> Bool {
-        return p.contains("/library/launchagents/")
-            || p.contains("/library/launchdaemons/")
+        return ExactSubstringSearch.contains(p, "/library/launchagents/")
+            || ExactSubstringSearch.contains(p, "/library/launchdaemons/")
     }
 
     private static func isShellRcPath(_ p: String) -> Bool {
@@ -347,7 +347,7 @@ enum IntentEvidenceClassifier {
     }
 
     private static func isWorkflowPath(_ p: String) -> Bool {
-        return p.contains("/.github/workflows/") && (p.hasSuffix(".yml") || p.hasSuffix(".yaml"))
+        return ExactSubstringSearch.contains(p, "/.github/workflows/") && (p.hasSuffix(".yml") || p.hasSuffix(".yaml"))
     }
 
     private static func isPackageConfigPath(_ p: String) -> Bool {

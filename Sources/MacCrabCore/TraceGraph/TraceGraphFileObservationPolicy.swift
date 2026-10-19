@@ -37,11 +37,11 @@ public enum TraceGraphFileObservationPolicy {
         let kind: FileKind
         if CredentialFence.defaultCredentialType(filePath: path) != nil {
             kind = .credentialFile
-        } else if path.contains("/Library/LaunchAgents/") {
+        } else if ExactSubstringSearch.contains(path, "/Library/LaunchAgents/") {
             kind = .launchAgent
-        } else if path.contains("/Library/LaunchDaemons/") {
+        } else if ExactSubstringSearch.contains(path, "/Library/LaunchDaemons/") {
             kind = .launchDaemon
-        } else if path.contains("/Library/LoginItems/") {
+        } else if ExactSubstringSearch.contains(path, "/Library/LoginItems/") {
             kind = .loginItem
         } else if path.hasSuffix("/.zshrc") || path.hasSuffix("/.bashrc")
                     || path.hasSuffix("/.bash_profile") || path.hasSuffix("/.zprofile") {
@@ -50,9 +50,9 @@ public enum TraceGraphFileObservationPolicy {
             kind = .plist
         } else if path.hasSuffix(".sh") || path.hasSuffix(".py") || path.hasSuffix(".rb") {
             kind = .script
-        } else if path.contains("/Downloads/") {
+        } else if ExactSubstringSearch.contains(path, "/Downloads/") {
             kind = .browserDownload
-        } else if path.contains("/node_modules/") {
+        } else if ExactSubstringSearch.contains(path, "/node_modules/") {
             kind = .packageFile
         } else {
             kind = .unknown

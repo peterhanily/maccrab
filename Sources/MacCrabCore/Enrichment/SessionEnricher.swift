@@ -69,22 +69,18 @@ public enum SessionEnricher {
         }
 
         // Terminal emulators (Apple + third-party + developer-popular).
-        let terminals: Set<String> = [
-            "terminal", "iterm2", "iterm", "alacritty", "kitty",
-            "ghostty", "wezterm", "warp", "tabby", "hyper",
-        ]
-        if terminals.contains(lowerName) {
+        if terminalNames.contains(lowerName) {
             return .terminal
         }
-        if lowerPath.contains("/terminal.app/") ||
-           lowerPath.contains("/iterm.app/") ||
-           lowerPath.contains("/ghostty.app/") ||
-           lowerPath.contains("/alacritty.app/") {
+        if ExactSubstringSearch.contains(lowerPath, "/terminal.app/") ||
+           ExactSubstringSearch.contains(lowerPath, "/iterm.app/") ||
+           ExactSubstringSearch.contains(lowerPath, "/ghostty.app/") ||
+           ExactSubstringSearch.contains(lowerPath, "/alacritty.app/") {
             return .terminal
         }
 
         // Finder — explicitly user-initiated via double-click.
-        if lowerName == "finder" || lowerPath.contains("/finder.app/") {
+        if lowerName == "finder" || ExactSubstringSearch.contains(lowerPath, "/finder.app/") {
             return .finder
         }
 
@@ -99,7 +95,7 @@ public enum SessionEnricher {
         }
 
         // XPC services — spawned by xpcproxy / launchd for app extensions.
-        if lowerName == "xpcproxy" || lowerPath.contains("xpcservices/") {
+        if lowerName == "xpcproxy" || ExactSubstringSearch.contains(lowerPath, "xpcservices/") {
             return .xpc
         }
 
@@ -111,14 +107,20 @@ public enum SessionEnricher {
 
         // Shells are pass-through — a bash spawned inside Terminal should
         // still resolve to .terminal. Returning nil lets the walker continue.
-        let shells: Set<String> = [
-            "bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh",
-            "login", "su", "sudo",
-        ]
-        if shells.contains(lowerName) {
+        if shellNames.contains(lowerName) {
             return nil
         }
 
         return nil
     }
+
+    // Built once; classifyAncestor runs for every ancestor of every event.
+    private static let terminalNames: Set<String> = [
+        "terminal", "iterm2", "iterm", "alacritty", "kitty",
+        "ghostty", "wezterm", "warp", "tabby", "hyper",
+    ]
+    private static let shellNames: Set<String> = [
+        "bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh",
+        "login", "su", "sudo",
+    ]
 }
