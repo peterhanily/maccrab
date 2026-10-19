@@ -81,7 +81,9 @@ struct DeferredEnrichmentIntegrationTests {
     private func event(
         id: UUID = UUID(),
         pending components: Set<HeavyEnrichmentComponent>,
-        args: [String] = []
+        args: [String] = [],
+        userName: String = "",
+        collectorSignature: Bool = false
     ) -> Event {
         let process = MacCrabCore.ProcessInfo(
             pid: 7_777,
@@ -93,11 +95,11 @@ struct DeferredEnrichmentIntegrationTests {
             args: args,
             workingDirectory: "/",
             userId: 501,
-            userName: "",
+            userName: userName,
             groupId: 20,
             startTime: Self.started,
-            codeSignature: nil,
-            isPlatformBinary: false
+            codeSignature: collectorSignature ? CodeSignatureInfo(signerType: .apple) : nil,
+            isPlatformBinary: collectorSignature
         )
         let coverage = Dictionary(uniqueKeysWithValues: components.map {
             ($0, HeavyEnrichmentCoverage.pending)
@@ -167,6 +169,111 @@ struct DeferredEnrichmentIntegrationTests {
             snapshot = await plane.snapshot()
         }
         return snapshot
+    }
+
+    @Test("Deferred usernames reach UEBA only once, after terminal settlement eligibility",
+          arguments: ["present", "success", "unavailable", "timeout"])
+    func deferredUserObservationExactlyOnce(scenario: String) async throws {
+        let known = scenario == "present"
+        let engine = UEBAEngine()
+        let buffer = DeferredEnrichmentBuffer(eventCapacity: 1, patchCapacity: 8,
+                                              liveMemoryBudget: isolatedMemoryBudget())
+        let original = event(pending: known ? [.environment] : [.environment, .userName],
+                             userName: known ? "operator" : "")
+        _ = await engine.observe(event: original)
+        let reservation = try #require(await buffer.reserveEventSlot())
+        #expect(await buffer.retain(original, using: reservation))
+        #expect((await buffer.markReady(original)).isEmpty)
+        if !known {
+            let value: HeavyEnrichmentValue? = scenario == "success" ? .userName("operator") : nil
+            let result = patch(event: original, component: .userName,
+                               outcome: scenario == "timeout" ? .timedOut : .completed,
+                               value: value)
+            let partial = await transfer([result], to: buffer)
+            #expect(partial.allSatisfy { !$0.shouldObserveUserBehavior })
+            #expect((await engine.profile(for: "operator")) == nil)
+            let repeated = await transfer([result], to: buffer)
+            #expect(repeated.allSatisfy { !$0.shouldObserveUserBehavior })
+            if scenario == "timeout" || scenario == "unavailable" {
+                let late = await transfer([patch(event: original, component: .userName,
+                                                  value: .userName("operator"))], to: buffer)
+                #expect(late.isEmpty, "A late success cannot reopen a terminal username component")
+            }
+        }
+        let final = await transfer([patch(event: original, component: .environment,
+                                         value: .environment([:]))], to: buffer)
+        let batch = try #require(final.first)
+        #expect(final.count == 1 && batch.terminal)
+        #expect(batch.shouldObserveUserBehavior == (scenario == "success"))
+        if batch.shouldObserveUserBehavior { _ = await engine.observe(event: batch.event) }
+        let count = await engine.profile(for: "operator")?.totalObservations ?? 0
+        #expect(count == ((known || scenario == "success") ? 1 : 0))
+        let duplicate = await transfer([patch(event: original, component: .userName,
+                                              value: .userName("operator"))], to: buffer)
+        #expect(duplicate.isEmpty)
+        await buffer.completeTerminalReplay(eventID: original.id)
+        await buffer.seal()
+        let snapshot = await buffer.snapshot()
+        #expect(snapshot.cleanlyDrained)
+        #expect(snapshot.patchesConserved && snapshot.patchBytesConserved)
+    }
+
+    @Test("Busy username cache coalesces through the heavy plane into identity-bound rule replay")
+    func busyUsernameDeferredRuleReplay() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rule = CompiledRule(
+            id: "username-fixture", title: "username-fixture", description: "inert rule",
+            level: .high, tags: [], logsource: .init(category: "process_creation", product: "macos"),
+            predicates: [.init(field: "User", modifier: .equals, values: ["operator"], negate: false)],
+            condition: .allOf, falsepositives: [], enabled: true)
+        try JSONEncoder().encode(rule).write(to: directory.appendingPathComponent("fixture.json"))
+        let rules = RuleEngine()
+        #expect(try await rules.loadRules(from: directory) == 1)
+        let budget = isolatedMemoryBudget()
+        let plane = HeavyEnrichmentPlane(configuration: .init(operationTimeoutSeconds: 30), liveMemoryBudget: budget)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let enricher = EventEnricher(heavyEnrichmentPlane: plane, userNameResolver: { _ in
+            entered.signal()
+            _ = release.wait(timeout: .now() + 30)
+            return "operator"
+        })
+        defer { release.signal() }
+        let buffer = DeferredEnrichmentBuffer(eventCapacity: 2, patchCapacity: 8, liveMemoryBudget: budget)
+        var originals: [Event] = []
+        for _ in 0..<2 {
+            let reservation = try #require(await buffer.reserveEventSlot())
+            let enriched = await enricher.enrich(event(pending: [], collectorSignature: true))
+            #expect(DeferredEventEnrichment.coverageState(for: .userName, in: enriched) == .pending)
+            #expect(await rules.evaluate(enriched).isEmpty)
+            #expect(await buffer.retain(enriched, using: reservation))
+            #expect((await buffer.markReady(enriched)).isEmpty)
+            originals.append(enriched)
+            if originals.count == 1 {
+                try #require(entered.wait(timeout: .now() + 5) == .success)
+            }
+        }
+        #expect((await plane.snapshot()).coalescedRequestsTotal == 1)
+        release.signal()
+        try await waitForCondition { (await plane.snapshot()).completedRequestsTotal == 2 }
+        let patches = await plane.drainDeferredResults()
+        let batches = await transfer(patches, to: buffer)
+        #expect(Set(batches.map { $0.event.id }) == Set(originals.map(\.id)))
+        #expect(batches.count == 2)
+        for batch in batches {
+            #expect(batch.event.timestamp == Self.started)
+            #expect(batch.event.process.userName == "operator")
+            #expect(await rules.reevaluate(batch.event, forCompleted: batch.completedComponents).map(\.ruleId) == ["username-fixture"])
+        }
+        #expect((await transfer(patches, to: buffer)).isEmpty, "Duplicate patches cannot re-run the rule")
+        for batch in batches { await buffer.completeTerminalReplay(eventID: batch.event.id) }
+        await buffer.seal()
+        let snapshot = await buffer.snapshot()
+        #expect(snapshot.cleanlyDrained)
+        #expect(snapshot.patchesConserved && snapshot.patchBytesConserved)
+        #expect((await enricher.shutdownHeavyEnrichment()).cleanlyDrained)
     }
 
     @Test("two ingestion lanes retain terminal patches that beat both originals")

@@ -6,14 +6,37 @@
 # within a single campaign window (default: 600 seconds).
 #
 # Usage:
-#   ./scripts/campaign-test.sh              # Quick burst (~5 min)
-#   ./scripts/campaign-test.sh --sustained  # Slow burn (~12 min, more realistic)
-#   ./scripts/campaign-test.sh --daemon     # Also start/stop a daemon
+#   ./scripts/campaign-test.sh --disposable-host              # Quick burst (~5 min)
+#   ./scripts/campaign-test.sh --disposable-host --sustained  # Slow burn (~12 min)
+#   ./scripts/campaign-test.sh --disposable-host --daemon     # Also start/stop a daemon
 #
-# SAFE: No files permanently modified, no real C2, no destructive actions.
-# Everything written to /tmp/maccrab_campaign_$$ and cleaned up on exit.
+# Disposable Mac/VM only: changes user configuration and startup files, reads
+# user metadata, can contact external services and may start/stop a daemon.
+# Cleanup is not guaranteed rollback. The flag does not verify host isolation.
 
 set -uo pipefail
+
+# BEGIN MACCRAB_DISPOSABLE_HOST_PREFLIGHT
+maccrab_refuse_simulation() {
+    printf '%s\n' 'REFUSED: legacy simulation requires --disposable-host as its first argument and no unsupported arguments.' >&2
+    printf '%s\n' 'Use a disposable Mac/VM with no retained data. This can modify user files and configuration, start or stop a daemon, read user metadata and contact external services. Cleanup is not a guaranteed rollback; the flag does not verify isolation.' >&2
+    printf '%s\n' 'Usage: scripts/campaign-test.sh --disposable-host [--sustained] [--daemon]' >&2
+    exit 64
+}
+if [ "${1:-}" != "--disposable-host" ]; then
+    maccrab_refuse_simulation
+fi
+shift
+SUSTAINED=false
+MANAGE_DAEMON=false
+for arg in "$@"; do
+    case "$arg" in
+        --sustained) SUSTAINED=true ;;
+        --daemon) MANAGE_DAEMON=true ;;
+        *) maccrab_refuse_simulation ;;
+    esac
+done
+# END MACCRAB_DISPOSABLE_HOST_PREFLIGHT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -27,8 +50,6 @@ MAGENTA='\033[0;35m'
 NC='\033[0m'
 BOLD='\033[1m'
 
-SUSTAINED=false
-MANAGE_DAEMON=false
 DAEMON_PID=""
 TEST_DIR="/tmp/maccrab_campaign_$$"
 CLEANUP_FILES=()
@@ -36,13 +57,6 @@ CLEANUP_PIDS=()
 DAEMON_CONFIG="$HOME/Library/Application Support/MacCrab/daemon_config.json"
 DAEMON_CONFIG_BAK=""
 DAEMON_CONFIG_CREATED=0
-
-for arg in "$@"; do
-    case "$arg" in
-        --sustained) SUSTAINED=true ;;
-        --daemon)    MANAGE_DAEMON=true ;;
-    esac
-done
 
 # ── Timing ──────────────────────────────────────────────────────────────────
 # Burst: waves every 30s → full simulation in ~5 min

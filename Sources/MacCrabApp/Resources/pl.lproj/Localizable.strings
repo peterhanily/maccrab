@@ -1973,3 +1973,19 @@
 "intelligence.packagesScanningAction" = "Skanowanie…";
 "intelligence.packagesScanAction" = "Uruchom skanowanie";
 "intelligence.packagesRescanAction" = "Skanuj ponownie";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "Wyświetlane są zapisane alerty. Odświeżanie…";
+"alerts.readDetails" = "Szczegóły odczytu alertów";
+"alerts.campaignsEmpty" = "Brak dostępnych wierszy kampanii";
+"events.histogramIncomplete" = "Pokrycie histogramu jest niepełne. Brakujące przedziały są nieznane, a nie zerowe.";
+"events.summariesIncomplete" = "Pokrycie podsumowań dziennych jest niepełne.";
+"events.readDetails" = "Szczegóły odczytu zdarzeń";
+"events.histogramDetails" = "Szczegóły histogramu";
+"events.summaryDetails" = "Szczegóły podsumowań dziennych";
+"events.readInterrupted" = "Odczyt zdarzeń został przerwany. Odśwież, aby ponowić próbę.";
+"events.readDeferredDetail" = "Odczyt zdarzeń jest tymczasowo odroczony. Próba zostanie ponowiona przy następnym odświeżeniu.";
+"events.summariesDeferred" = "Podsumowania dzienne są tymczasowo odroczone.";
+"events.searchIndexDegraded" = "Indeks pełnotekstowy czeka na naprawę; dopasowania mogą być niepełne.";
+"events.searchCoverageDetail" = "Wyszukiwanie jest częściowe: liczba zachowanych zdarzeń poza projekcją wyszukiwania: %lld; pozostałe luki w dowodach: %lld. Brak dopasowania nie dowodzi nieobecności.";
+"events.histogramCoverageDetail" = "Histogram obejmuje tylko potwierdzony zachowany przedział długości %lld s. Liczba luk w dowodach: %lld; brakujące przedziały są nieznane, a nie zerowe.";
+"intelligence.packagesResultsNotice" = "Próba skanowania zakończona. Wyniki obejmują tylko zwrócone pakiety.";

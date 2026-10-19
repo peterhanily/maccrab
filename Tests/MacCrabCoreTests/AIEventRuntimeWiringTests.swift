@@ -124,7 +124,7 @@ struct AIEventRuntimeWiringTests {
         let keychainGate = try #require(helper.range(of:
             "if isPlatformBinary && isKeychainPath(path) { return true }"))
         let dynamicDecision = try #require(helper.range(of:
-            "dynamicAIRegistry.shouldAdmit(facts)"))
+            "dynamicAIRegistry.shouldAdmitEndpointSecurityOpen("))
         #expect(keychainGate.lowerBound < dynamicDecision.lowerBound)
         #expect(collector.contains("processID: audit_token_to_pid(msg.process.pointee.audit_token)"))
         #expect(collector.contains("bridgeDynamicAIProcessStart(message: message)"))

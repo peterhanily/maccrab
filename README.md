@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
-[![Tests](https://img.shields.io/badge/tests-5044%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-5508%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20shipped%20(stable%20tier%20on%20by%20default)-blueviolet)](#what-runs-on-a-default-install)
 [![Version](https://img.shields.io/badge/version-1.22.6-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
@@ -816,11 +816,19 @@ make run-root         Run with Endpoint Security (sudo)
 
 ### Test suite
 
+The unfiltered Swift suite includes real macOS monitor tests that may briefly
+use the microphone and read clipboard, browser-extension and TCC metadata.
+Use an isolated test Mac/VM unless its owner explicitly authorizes those
+accesses. Keychain and external plugin-fixture tests remain opt-in and are
+reported as skipped unless deliberately enabled with their prerequisites.
+The badge counts executed tests, not skipped tests or all release-qualification
+lanes. See the [candidate repair gate](RELEASE_PROCESS.md#candidate-repair-gate).
+
 ```bash
 make test              # Run tests (summary)
 make test-full         # Full test suite with verbose output
 make test-fp           # False positive tests against benign system activity
-make test-detection    # Detection tests -- triggers all categories safely
+make test-detection    # Legacy simulation; refuses without disposable-host acknowledgement
 make test-integration  # Integration tests (daemon + CLI + rules)
 make test-stress       # 60-second stress test for event throughput
 make test-burst        # Burst benchmark -- fails on priority-stream event drops
@@ -839,7 +847,7 @@ make lint-rules        # Lint all YAML rules for format, UUID uniqueness, tags
 | `Tests/MacCrabCoreTests/SuppressionTests.swift` | Suppression manager tests |
 | `Tests/MacCrabCoreTests/ForensicTests.swift` | Forensic component tests (rootkit, crash, power, CDHash, threat hunter) |
 | `scripts/false-positive-test.sh` | FP regression tests against real system events |
-| `scripts/detection-test.sh` | Safe trigger tests for every detection category |
+| `scripts/detection-test.sh` | Legacy detection simulation — disposable host only |
 | `scripts/rule-lint.sh` | YAML validation, UUID uniqueness, ATT&CK tag checks |
 | `scripts/stress-test.sh` | High-throughput event flooding for performance validation |
 
@@ -847,15 +855,27 @@ make lint-rules        # Lint all YAML rules for format, UUID uniqueness, tags
 
 ### Red team simulation
 
+Detection and campaign scripts are legacy simulations for disposable Macs/VMs
+only. They may stop the daemon, erase retained event data, change user
+configuration, shell startup files and LaunchAgents, inspect user metadata,
+and contact external services. Artifacts are not confined to `/tmp`, and
+cleanup is not a guaranteed rollback. Do not run them on a Mac with retained
+data or active protection you depend on.
+
+Only on a disposable host, explicitly acknowledge those risks as follows.
+`MACCRAB_DISPOSABLE_HOST=1` passes `--disposable-host` as the first script
+argument; neither the variable nor the flag verifies host isolation.
+
 ```bash
-make test-detection              # 15 detection categories (~2 min)
-make test-campaign               # 5-wave kill chain simulation (~5 min)
-make test-campaign SUSTAINED=1   # Slow burn (~12 min, more realistic)
+make test-detection MACCRAB_DISPOSABLE_HOST=1            # Detection simulation
+make test-campaign MACCRAB_DISPOSABLE_HOST=1             # 5-wave simulation
+make test-campaign MACCRAB_DISPOSABLE_HOST=1 SUSTAINED=1 # Slow burn (~12 min)
 make test-fp                     # False positive validation (105 system processes)
-make test-stress 120             # Sustained operation monitor (120s)
+./scripts/stress-test.sh 120      # Sustained operation monitor (120s)
 ```
 
-All tests are safe -- artifacts in `/tmp`, localhost connections, cleanup on exit.
+These simulations and stress runs do not substitute for exact-candidate
+runtime, upgrade, recovery or accessibility qualification.
 
 ---
 
@@ -1250,7 +1270,7 @@ maccrab/
 │   ├── dev.sh                           # Development cycle driver
 │   ├── bundle-app.sh                    # .app bundle creator
 │   ├── install.sh / uninstall.sh        # System-wide install/remove
-│   ├── detection-test.sh                # Safe detection trigger tests
+│   ├── detection-test.sh                # Disposable-host detection simulation
 │   ├── false-positive-test.sh           # FP regression tests
 │   ├── rule-lint.sh                     # YAML rule validation
 │   ├── stress-test.sh                   # Event throughput stress test

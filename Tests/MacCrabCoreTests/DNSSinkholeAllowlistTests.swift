@@ -13,6 +13,15 @@ import Foundation
 @Suite("DNSSinkhole protected-domain allowlist")
 struct DNSSinkholeAllowlistTests {
 
+    private func hostsFixture() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-hosts-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try "127.0.0.1 localhost\n192.0.2.8 operator-fixture.invalid\n"
+            .write(to: directory.appendingPathComponent("hosts"), atomically: true, encoding: .utf8)
+        return directory
+    }
+
     // MARK: - isProtected
 
     @Test("Rejects exact-match Apple critical endpoints")
@@ -195,11 +204,12 @@ struct DNSSinkholeAllowlistTests {
     // MARK: - end-to-end on the actor
 
     @Test("enable() drops protected entries silently")
-    func enableDropsProtected() async {
-        let sinkhole = DNSSinkhole()
-        // Mix protected + actual-bad domains. Without root we won't actually
-        // write to /etc/hosts, but the actor's internal sinkholdDomains set
-        // will reflect the filter.
+    func enableDropsProtected() async throws {
+        let directory = try hostsFixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let hosts = directory.appendingPathComponent("hosts")
+        let sinkhole = DNSSinkhole(hostsPath: hosts.path)
+        // Exercise actual persistence, but never the Mac's /etc/hosts.
         await sinkhole.enable(domains: [
             "ocsp.apple.com",
             "github.com",
@@ -210,11 +220,21 @@ struct DNSSinkholeAllowlistTests {
         // Only the 2 non-protected entries should have been kept.
         #expect(stats.domainCount == 2)
         #expect(stats.enabled == true)
+        let contents = try String(contentsOf: hosts, encoding: .utf8)
+        #expect(contents.hasPrefix("127.0.0.1 localhost\n192.0.2.8 operator-fixture.invalid\n"))
+        #expect(contents.contains("127.0.0.1 evil.example\n"))
+        #expect(contents.contains("::1 evil.example\n"))
+        #expect(contents.contains("127.0.0.1 malware-c2.xyz\n"))
+        #expect(!contents.contains("ocsp.apple.com"))
+        #expect(!contents.contains("github.com"))
     }
 
     @Test("addDomains() drops protected entries on incremental add")
-    func addDomainsDropsProtected() async {
-        let sinkhole = DNSSinkhole()
+    func addDomainsDropsProtected() async throws {
+        let directory = try hostsFixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let hosts = directory.appendingPathComponent("hosts")
+        let sinkhole = DNSSinkhole(hostsPath: hosts.path)
         await sinkhole.enable(domains: ["initial-evil.example"])
         await sinkhole.addDomains([
             "apple.com",          // dropped
@@ -223,5 +243,11 @@ struct DNSSinkholeAllowlistTests {
         ])
         let stats = await sinkhole.stats()
         #expect(stats.domainCount == 2)  // initial-evil + another-evil
+        let contents = try String(contentsOf: hosts, encoding: .utf8)
+        #expect(contents.hasPrefix("127.0.0.1 localhost\n192.0.2.8 operator-fixture.invalid\n"))
+        #expect(contents.components(separatedBy: "127.0.0.1 initial-evil.example\n").count - 1 == 1)
+        #expect(contents.components(separatedBy: "127.0.0.1 another-evil.xyz\n").count - 1 == 1)
+        #expect(!contents.contains("apple.com"))
+        #expect(!contents.contains("127.0.0.1 127.0.0.1"))
     }
 }

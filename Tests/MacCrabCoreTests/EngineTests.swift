@@ -99,12 +99,12 @@ struct ResponseEngineTests {
         """
         try json.write(toFile: configPath, atomically: true, encoding: .utf8)
 
-        let engine = ResponseEngine(quarantineDir: tmpDir.appendingPathComponent("quarantine").path)
+        let recorder = ResponseActionTestRecorder()
+        let engine = makeInertResponseEngine(recording: recorder)
         try await engine.loadConfig(from: configPath)
 
-        // Execute for rule-abc to verify the rule-specific action was loaded.
-        // The "notify" action is a no-op in the engine (handled externally) but it
-        // still gets logged in the execution log.
+        // Verify real file decoding and routing, without consulting an admin's
+        // live actions.json or allowing any action to address a host resource.
         let alert = makeTestAlert(ruleId: "rule-abc", severity: .high)
         let event = makeTestEvent()
         await engine.execute(alert: alert, event: event)
@@ -113,6 +113,119 @@ struct ResponseEngineTests {
         #expect(log.count == 1)
         #expect(log[0].action == .notify)
         #expect(log[0].ruleId == "rule-abc")
+        #expect(log[0].target == "fixture:notify")
+        #expect(await recorder.invocations == [.init(
+            action: .notify, eventID: event.id, processID: event.process.pid,
+            ruleID: alert.ruleId)])
+    }
+
+    @Test("Owned user snapshot wins only when newer than the explicit config", arguments: [-1.0, 0.0, 1.0])
+    func configSelectsNewestSnapshot(userAgeOffset: TimeInterval) async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-action-selection-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let system = dir.appendingPathComponent("system.json")
+        let user = dir.appendingPathComponent("user.json")
+        try #"{"defaults":[{"action":"notify","minimumSeverity":"low"}]}"#
+            .write(to: system, atomically: true, encoding: .utf8)
+        try #"{"defaults":[{"action":"kill","minimumSeverity":"low"}]}"#
+            .write(to: user, atomically: true, encoding: .utf8)
+        let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: baseDate], ofItemAtPath: system.path)
+        try FileManager.default.setAttributes(
+            [.modificationDate: baseDate.addingTimeInterval(userAgeOffset)], ofItemAtPath: user.path)
+        let snapshot = try ownedActionsSnapshot(user)
+        let recorder = ResponseActionTestRecorder()
+        let engine = makeInertResponseEngine(recording: recorder, userConfigSnapshotProvider: { snapshot })
+        try await engine.loadConfig(from: system.path)
+        let event = makeTestEvent(pid: 42)
+        let alert = makeTestAlert()
+        await engine.execute(alert: alert, event: event)
+
+        let expected: ResponseActionType = userAgeOffset > 0 ? .kill : .notify
+        #expect(await recorder.invocations == [.init(
+            action: expected, eventID: event.id, processID: event.process.pid,
+            ruleID: alert.ruleId)])
+        let log = await engine.getExecutionLog()
+        #expect(log.count == 1)
+        #expect(log.first?.target == "fixture:\(expected.rawValue)")
+    }
+
+    @Test("Missing config sources do not discover live policy or discard the existing policy",
+          arguments: [true, false], [true, false])
+    func configMissingSnapshots(systemPresent: Bool, userPresent: Bool) async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-action-absence-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let system = dir.appendingPathComponent("system.json")
+        let user = dir.appendingPathComponent("user.json")
+        if systemPresent {
+            try #"{"defaults":[{"action":"notify","minimumSeverity":"low"}]}"#
+                .write(to: system, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)], ofItemAtPath: system.path)
+        }
+        let userSnapshot: BoundedRegularFileReader.Snapshot?
+        if userPresent {
+            try #"{"defaults":[{"action":"kill","minimumSeverity":"low"}]}"#
+                .write(to: user, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: 1_700_000_001)], ofItemAtPath: user.path)
+            userSnapshot = try ownedActionsSnapshot(user)
+        } else {
+            userSnapshot = nil
+        }
+        let recorder = ResponseActionTestRecorder()
+        let engine = makeInertResponseEngine(recording: recorder, userConfigSnapshotProvider: { userSnapshot })
+        await engine.setDefaultActions([ResponseActionConfig(action: .escalateNotification, minimumSeverity: .low)])
+        try await engine.loadConfig(from: system.path)
+        let event = makeTestEvent(pid: 42)
+        let alert = makeTestAlert()
+        await engine.execute(alert: alert, event: event)
+        let expected: ResponseActionType = userPresent ? .kill : (systemPresent ? .notify : .escalateNotification)
+        #expect(await recorder.invocations == [.init(
+            action: expected, eventID: event.id, processID: event.process.pid,
+            ruleID: alert.ruleId)])
+    }
+
+    @Test("Malformed newest policy is rejected without partially replacing active actions")
+    func malformedNewestConfigKeepsExistingPolicy() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-action-malformed-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let system = dir.appendingPathComponent("system.json")
+        let user = dir.appendingPathComponent("user.json")
+        try #"{"defaults":[{"action":"kill"}]}"#
+            .write(to: system, atomically: true, encoding: .utf8)
+        try "{broken".write(to: user, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)], ofItemAtPath: system.path)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_700_000_001)], ofItemAtPath: user.path)
+        let snapshot = try ownedActionsSnapshot(user)
+        let recorder = ResponseActionTestRecorder()
+        let engine = makeInertResponseEngine(recording: recorder, userConfigSnapshotProvider: { snapshot })
+        await engine.setDefaultActions([ResponseActionConfig(action: .notify, minimumSeverity: .low)])
+        await #expect(throws: DecodingError.self) { try await engine.loadConfig(from: system.path) }
+        let event = makeTestEvent(pid: 42)
+        let alert = makeTestAlert()
+        await engine.execute(alert: alert, event: event)
+        #expect(await recorder.invocations == [.init(
+            action: .notify, eventID: event.id, processID: event.process.pid,
+            ruleID: alert.ruleId)])
+    }
+
+    private func ownedActionsSnapshot(_ path: URL) throws -> BoundedRegularFileReader.Snapshot {
+        let outcome = BoundedRegularFileReader.readOutcome(
+            at: path.path, maximumBytes: ResponseEngine.maxActionConfigBytes)
+        guard case .success(let snapshot) = outcome else {
+            Issue.record("owned action fixture was rejected: \(outcome)")
+            throw CocoaError(.fileReadUnknown)
+        }
+        return snapshot
     }
 
     @Test("Default actions apply when no rule-specific config")
@@ -167,32 +280,29 @@ struct ResponseEngineTests {
         #expect(entry.timestamp.timeIntervalSinceNow > -5)
     }
 
-    @Test("Kill action targets correct PID")
-    func killActionTargetsCorrectPID() async throws {
-        let tmpDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("maccrab-test-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
-
-        let engine = ResponseEngine(quarantineDir: tmpDir.appendingPathComponent("quarantine").path)
+    @Test("Kill policy routes the exact event and records the executor outcome", arguments: [true, false])
+    func killActionTargetsCorrectPID(success: Bool) async throws {
+        let recorder = ResponseActionTestRecorder(success: success)
+        let engine = makeInertResponseEngine(recording: recorder)
         await engine.setActions(forRule: "kill-test", actions: [
             ResponseActionConfig(action: .kill, minimumSeverity: .high)
         ])
 
-        // Use PID 999999 — almost certainly non-existent, so kill() will fail
-        // harmlessly but the action will be logged with the correct target.
+        // PID is fixture data, never a host target. Admission and audit must
+        // preserve the event identity for both executor success and failure.
         let alert = makeTestAlert(ruleId: "kill-test", severity: .critical)
-        let event = makeTestEvent(pid: 999999)
+        let event = makeTestEvent(pid: 42)
         await engine.execute(alert: alert, event: event)
 
         let log = await engine.getExecutionLog()
         #expect(log.count == 1)
         #expect(log[0].action == .kill)
-        #expect(log[0].target == "pid:999999")
+        #expect(log[0].target == "fixture:kill")
         #expect(log[0].ruleId == "kill-test")
-        // The kill should have failed (no such process), which is fine — we just
-        // verify the target was recorded correctly.
-        #expect(log[0].success == false)
+        #expect(log[0].success == success)
+        #expect(await recorder.invocations == [.init(
+            action: .kill, eventID: event.id, processID: event.process.pid,
+            ruleID: alert.ruleId)])
     }
 
     @Test("Quarantine moves file to quarantine dir")

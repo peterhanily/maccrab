@@ -31,6 +31,15 @@ struct DeferredEnrichmentReplayBatch: Sendable {
     let event: Event
     let completedComponents: Set<HeavyEnrichmentComponent>
     let terminal: Bool
+    /// The original event had no username, so first-pass UEBA could not
+    /// observe it. Only its one terminal revision may supply that observation.
+    let needsDeferredUserObservation: Bool
+
+    var shouldObserveUserBehavior: Bool {
+        terminal && needsDeferredUserObservation
+            && !event.process.userName.isEmpty
+            && DeferredEventEnrichment.coverageState(for: .userName, in: event) == nil
+    }
     /// Reviewed matches accumulated since the immutable base boundary but not
     /// yet allowed to fan out. A pending-heavy Event publishes them only after
     /// the one exact terminal revision has durably settled.
@@ -191,6 +200,7 @@ actor DeferredEnrichmentBuffer {
 
     private struct Retained {
         var event: Event
+        let needsDeferredUserObservation: Bool
         var readyForReplay: Bool
         var terminalReplayInFlight: Bool
         var patches: [BufferedPatch]
@@ -436,6 +446,8 @@ actor DeferredEnrichmentBuffer {
         orphanPatchCount -= orphans.count
         retainedByEventID[event.id] = Retained(
             event: event,
+            needsDeferredUserObservation: event.process.userName.isEmpty
+                && DeferredEventEnrichment.coverageState(for: .userName, in: event) == .pending,
             readyForReplay: false,
             terminalReplayInFlight: false,
             patches: orphans,
@@ -669,6 +681,15 @@ actor DeferredEnrichmentBuffer {
                 continue
             }
             if var retained = retainedByEventID[eventID] {
+                // The exact terminal value is already in flight. A repeated
+                // patch cannot revise it or become an unconsumed byte charge
+                // when completeTerminalReplay releases the retained event.
+                guard !retained.terminalReplayInFlight else {
+                    increment(&identityRejectedPatchesTotal)
+                    increment(&patchesConsumedTotal)
+                    add(UInt64(item.retainedByteCharge), to: &patchBytesConsumedTotal)
+                    continue
+                }
                 retained.patches.append(item)
                 retainedByEventID[eventID] = retained
             } else {
@@ -781,6 +802,16 @@ actor DeferredEnrichmentBuffer {
                 for: patch.component,
                 in: event
             )
+            // Each accepted component owns one terminal transition. This also
+            // excludes late success after a timeout while another component
+            // still keeps the event retained; expired evidence cannot reopen
+            // its subscription or train a deferred user baseline.
+            guard before == .pending else {
+                increment(&identityRejectedPatchesTotal)
+                increment(&patchesConsumedTotal)
+                add(UInt64(item.retainedByteCharge), to: &patchBytesConsumedTotal)
+                continue
+            }
             guard let revised = patch.applying(to: event) else {
                 increment(&identityRejectedPatchesTotal)
                 increment(&patchesConsumedTotal)
@@ -841,6 +872,7 @@ actor DeferredEnrichmentBuffer {
             event: event,
             completedComponents: completed,
             terminal: terminal,
+            needsDeferredUserObservation: retained.needsDeferredUserObservation,
             undispatchedPrimaryMatches:
                 retained.undispatchedPrimaryMatches,
             undispatchedSequenceMatches:

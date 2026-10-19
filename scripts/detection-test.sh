@@ -1,15 +1,30 @@
 #!/bin/bash
 # MacCrab Detection Test Suite
 #
-# Triggers every detection category WITHOUT doing anything malicious.
-# Creates harmless artifacts that match rule patterns, verifies alerts fire,
-# then cleans up everything.
+# Legacy detection simulation for a disposable Mac/VM only. It deletes retained
+# user event data, changes user configuration and startup files, stops daemons,
+# reads user metadata and can contact external services. Cleanup is not rollback.
 #
-# Usage: ./scripts/detection-test.sh
+# Usage: ./scripts/detection-test.sh --disposable-host
 #
-# SAFE TO RUN: No files are permanently modified, no processes are harmed,
-# no network connections go to malicious destinations.
+# The acknowledgement prevents accidental invocation; it does not verify isolation.
 set -euo pipefail
+
+# BEGIN MACCRAB_DISPOSABLE_HOST_PREFLIGHT
+maccrab_refuse_simulation() {
+    printf '%s\n' 'REFUSED: legacy simulation requires --disposable-host as its first argument and no unsupported arguments.' >&2
+    printf '%s\n' 'Use a disposable Mac/VM with no retained data. This can delete event data, stop daemons, modify user files and contact external services. Cleanup is not a guaranteed rollback; the flag does not verify isolation.' >&2
+    printf '%s\n' 'Usage: scripts/detection-test.sh --disposable-host' >&2
+    exit 64
+}
+if [ "${1:-}" != "--disposable-host" ]; then
+    maccrab_refuse_simulation
+fi
+shift
+if [ "$#" -ne 0 ]; then
+    maccrab_refuse_simulation
+fi
+# END MACCRAB_DISPOSABLE_HOST_PREFLIGHT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -71,7 +86,7 @@ trap cleanup EXIT
 echo -e "${BOLD}"
 echo "╔══════════════════════════════════════════════════╗"
 echo "║     MacCrab Detection Test Suite                 ║"
-echo "║     Tests every detection category safely        ║"
+echo "║     Disposable-host detection simulation         ║"
 echo "╚══════════════════════════════════════════════════╝"
 echo -e "${NC}"
 

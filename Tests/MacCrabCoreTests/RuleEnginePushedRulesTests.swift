@@ -135,7 +135,8 @@ struct RuleEnginePushedRulesTests {
 
     @Test("ResponseEngine never arms an action for a detection-only (pushed) rule")
     func responseEngineDetectionOnlyGate() async throws {
-        let engine = ResponseEngine()
+        let recorder = ResponseActionTestRecorder()
+        let engine = makeInertResponseEngine(recording: recorder)
         // A confirmation-gated kill default: when execute() proceeds past the
         // detection-only gate it records a "pending" log entry but never actually
         // kills (safe for a unit test). So a log entry == "the gate let it through".
@@ -148,6 +149,7 @@ struct RuleEnginePushedRulesTests {
                                 description: "d", mitreTactics: nil, mitreTechniques: nil, suppressed: false)
         await engine.execute(alert: pushedAlert, event: makeEvent())
         #expect(await engine.getExecutionLog().isEmpty)
+        #expect(await recorder.invocations.isEmpty)
 
         // A normal rule with the same default DOES proceed (sanity check that the
         // gate isn't simply swallowing everything).
@@ -156,5 +158,8 @@ struct RuleEnginePushedRulesTests {
                                 description: "d", mitreTactics: nil, mitreTechniques: nil, suppressed: false)
         await engine.execute(alert: normalAlert, event: makeEvent())
         #expect(await engine.getExecutionLog().count == 1)
+        #expect(await engine.getExecutionLog().first?.target == "pending-confirmation")
+        #expect(await recorder.invocations.isEmpty,
+                "Neither detection-only refusal nor pending confirmation can execute")
     }
 }

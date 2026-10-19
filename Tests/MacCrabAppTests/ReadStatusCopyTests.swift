@@ -40,29 +40,47 @@ struct ReadStatusCopyTests {
         }
     }
 
-    @Test("Production keeps notice slots, explicit retry, full details and existing truth guards")
-    func sourceBindings() throws {
-        let app = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/MacCrabApp")
-        let alerts = try String(contentsOf: app.appendingPathComponent("V2/Workspaces/V2AlertsWorkspace.swift"), encoding: .utf8)
-        let events = try String(contentsOf: app.appendingPathComponent("Views/EventStream.swift"), encoding: .utf8)
-        #expect(alerts.contains("reservedMessages: [cachedNotice]"))
-        #expect(events.contains("reservedMessages: [refreshingNotice, incompleteNotice]"))
-        #expect(alerts.contains("!presentation.isFresh(for: presentationContext) ? 0 : nil"))
-        #expect(events.contains("querySession.showingCachedEvents && !presentedEvents.isEmpty"))
-        #expect(alerts.contains("if daemonReporting && presentation.isFresh(for: presentationContext) && !hasOpenAlerts"))
-        #expect(events.contains(".contentReadiness(contentReadinessForDisplay)"))
-        for source in [alerts, events] {
-            #expect(source.contains("DisclosureGroup(String(localized: \"inspector.details\""))
-            #expect(source.contains("Button(String(localized: \"common.retry\""))
-            #expect(!source.contains("This is not an all-clear."))
-            #expect(!source.contains("Content loaded"))
+    @Test("Histogram coverage does not change successful table-read meaning")
+    func histogramProvenance() {
+        let presentation = EventCoveragePresentation(phase: .loadedEmpty, isAggregate: false,
+            tableIsEmpty: true, tableWarning: nil, histogramWarning: "retained interval only")
+        #expect(presentation.emptyNotice == nil)
+        #expect(presentation.tableWarning == nil)
+        #expect(presentation.bannerWarnings.map(\.source) == [.histogram])
+    }
+
+    @Test("Independent warnings coexist; an empty table owns its warning exactly once",
+          arguments: [true, false], UIContentReadiness.Phase.allCases)
+    func independentCoverage(tableIsEmpty: Bool, phase: UIContentReadiness.Phase) {
+        let presentation = EventCoveragePresentation(phase: phase, isAggregate: false,
+            tableIsEmpty: tableIsEmpty, tableWarning: "query incomplete", histogramWarning: "bins unavailable")
+        #expect(presentation.tableWarning?.source == .events)
+        #expect(presentation.tableWarning?.detail == "query incomplete")
+        #expect(presentation.emptyNotice != nil)
+        #expect(presentation.bannerWarnings.map(\.source) == (tableIsEmpty ? [.histogram] : [.events, .histogram]))
+        #expect(presentation.bannerWarnings.last?.detail == "bins unavailable")
+    }
+
+    @Test("Aggregate warnings remain attached to daily summaries", arguments: [true, false])
+    func aggregateCoverage(tableIsEmpty: Bool) {
+        let presentation = EventCoveragePresentation(phase: .partial, isAggregate: true,
+            tableIsEmpty: tableIsEmpty, tableWarning: "summary failure", histogramWarning: "old histogram")
+        #expect(presentation.tableWarning?.source == .summaries)
+        #expect(presentation.bannerWarnings.map(\.source) == (tableIsEmpty ? [] : [.summaries]))
+        #expect(presentation.emptyNotice == .partial)
+    }
+
+    @Test("A retry overrides the old failure notice while cached refresh has its own slot",
+          arguments: [true, false], [true, false])
+    func alertRetry(hasSnapshot: Bool, hasError: Bool) {
+        for phase in [UIContentReadiness.Phase.loading, .refreshingCached] {
+            #expect(V2AlertReadNotice.resolve(phase: phase, hasSnapshot: hasSnapshot, hasError: hasError)
+                    == (hasSnapshot ? nil : .loading))
+            #expect(V2AlertReadNotice.cachedNoticeIndex(phase: phase, hasSnapshot: hasSnapshot, isFresh: false)
+                    == (hasSnapshot ? 1 : nil))
         }
-        #expect(alerts.contains("Text(error).textSelection(.enabled)"))
-        #expect(events.contains("Text(warning).textSelection(.enabled)"))
-        #expect(events.contains("Text(EventReadNotice.warning(phase: contentReadinessForDisplay.phase).text)"))
-        #expect(events.components(separatedBy: "EventReadNotice.resolve(phase: contentReadinessForDisplay.phase,").count - 1 == 2)
-        #expect(events.contains("guard !Task.isCancelled else { return }\n        if isAggregateMode { aggregateRefreshTick &+= 1 }\n        recomputeFilter()"))
+        #expect(V2AlertReadNotice.cachedNoticeIndex(phase: .failed, hasSnapshot: hasSnapshot, isFresh: false)
+                == (hasSnapshot ? 0 : nil))
+        #expect(V2AlertReadNotice.cachedNoticeIndex(phase: .loadedNonempty, hasSnapshot: hasSnapshot, isFresh: true) == nil)
     }
 }

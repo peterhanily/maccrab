@@ -922,7 +922,7 @@
 "alerts.confirmBulkSuppressTitle" = "Undertrycka dessa varningar?";
 "alerts.confirmDeleteMessage" = "”%@” och dess sparade belägg tas permanent bort från alerts.db. Detta kan inte ångras.";
 "alerts.confirmDeleteTitle" = "Radera denna varning permanent?";
-"alerts.daemonStaleDetail" = "Varningsdata kan vara ofullständiga. Kontrollera systemhälsan.";
+"alerts.daemonStaleDetail" = "Varningsdata kan vara ofullständiga. Kontrollera Systemstatus.";
 "alerts.daemonStaleTitle" = "Skyddsstatus är inte bekräftad";
 "alerts.emptyOpenBody" = "Inga ej undertryckta varningar under denna period.";
 "alerts.emptyOpenTitle" = "Inga öppna varningar";
@@ -1483,8 +1483,8 @@
 "system.daemonUnavailable" = "Inte klar";
 "system.daemonUptime" = "drifttid %@";
 "system.dataSourceLive" = "Läser från MacCrabCore-lager%@";
-"system.dataSourceMock" = "Exempeldata visas. Kontrollera motorreglagen nedan och anslut sedan igen för att läsa motordata.";
-"system.dataSourceOffline" = "Inga motordata tillgängliga. Kontrollera motorreglagen nedan och anslut sedan igen.";
+"system.dataSourceMock" = "Exempeldata visas. Kontrollera Motorkontroller nedan och anslut sedan igen för att läsa motordata.";
+"system.dataSourceOffline" = "Inga motordata tillgängliga. Kontrollera Motorkontroller nedan och anslut sedan igen.";
 "system.dataSourceTitle" = "Datakälla";
 "system.dns.available" = "Insamling tillgänglig inom området";
 "system.dns.interface" = "Rapporterat gränssnitt: %@";
@@ -1953,7 +1953,7 @@
 "events.cachedRefreshing" = "Sparade händelser visas. Uppdaterar…";
 "events.cachedIncomplete" = "Sparade händelser visas. De senaste uppgifterna är inte bekräftade.";
 "system.dataSourceConnected" = "Läser lokala motordata. Skyddets status visas nedan.";
-"system.otlpLifecycleSummary" = "Inmatning eller bearbetning av agentspår är försämrad. Kontrollera sensorernas status separat.";
+"system.otlpLifecycleSummary" = "Inmatning eller bearbetning av Agent Trace är försämrad. Kontrollera sensorernas status separat.";
 "system.auditSummary" = "Senaste privilegierade förfrågningarna och resultaten, nyast sist.";
 "system.alertEvidenceMeasurementTitle" = "Bevislagringen kunde inte mätas";
 "system.alertEvidenceCaptureTitle" = "Insamling av varningsbevis är försämrad";
@@ -1973,3 +1973,19 @@
 "intelligence.packagesScanningAction" = "Skannar…";
 "intelligence.packagesScanAction" = "Kör skanning";
 "intelligence.packagesRescanAction" = "Skanna igen";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "Sparade varningar visas. Uppdaterar…";
+"alerts.readDetails" = "Information om läsning av varningar";
+"alerts.campaignsEmpty" = "Inga kampanjrader tillgängliga";
+"events.histogramIncomplete" = "Histogrammets täckning är ofullständig. Saknade intervall är okända, inte noll.";
+"events.summariesIncomplete" = "Täckningen för dagliga sammanfattningar är ofullständig.";
+"events.readDetails" = "Information om händelseläsning";
+"events.histogramDetails" = "Histograminformation";
+"events.summaryDetails" = "Information om dagliga sammanfattningar";
+"events.readInterrupted" = "Händelseläsningen avbröts. Uppdatera för att försöka igen.";
+"events.readDeferredDetail" = "Händelseläsningen är tillfälligt uppskjuten. Ett nytt försök görs vid nästa uppdatering.";
+"events.summariesDeferred" = "Dagliga sammanfattningar är tillfälligt uppskjutna.";
+"events.searchIndexDegraded" = "Fulltextindexet väntar på reparation; textträffar kan vara ofullständiga.";
+"events.searchCoverageDetail" = "Sökningen är partiell: %lld sparade händelser ligger utanför sökprojektionen och %lld luckor i bevisunderlaget återstår. Inga träffar bevisar inte frånvaro.";
+"events.histogramCoverageDetail" = "Histogrammet täcker bara det verifierat sparade intervallet på %lld sekunder och har %lld luckor i bevisunderlaget; saknade intervall är okända, inte noll.";
+"intelligence.packagesResultsNotice" = "Skanningsförsöket är avslutat. Resultaten omfattar endast returnerade paket.";

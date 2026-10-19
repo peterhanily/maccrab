@@ -84,9 +84,51 @@ class SettingsStorageWiringTests(unittest.TestCase):
 
     def test_missing_reload_at_session_and_save_are_rejected(self):
         self.refuses('view', 'queueReload: { V2DaemonControl.reloadDetectionRules() }',
-                     'queueReload: { true }', 'session reload callback missing')
+                     'queueReload: { true }', 'real reload callback')
         self.refuses('edits', 'return queueReload() ? .reloadQueued : .savedAwaitingReload',
                      'return .savedAwaitingReload', 'must request reload and distinguish queue failure')
+
+    def test_constructor_rejects_noop_or_named_persistence_override(self):
+        for argument in ('persist: { _, _ in }, ', 'persist: ignoredWrite, '):
+            with self.subTest(argument=argument):
+                self.refuses('view', 'url: SettingsStorageEdits.overridesURL,',
+                             'url: SettingsStorageEdits.overridesURL, ' + argument,
+                             'no persistence override')
+
+    def test_constructor_must_be_the_entire_returned_expression(self):
+        original = '''SettingsStorageSession(
+            preferences: .standard, url: SettingsStorageEdits.overridesURL,
+            queueReload: { V2DaemonControl.reloadDetectionRules() }
+        )'''
+        for replacement in (
+            'if false { _ = ' + original + ' }; return ignoredSession',
+            'let unused = ' + original + '; return ignoredSession',
+            'return ignoredSession; _ = ' + original,
+            '/* ' + original + ' */ return ignoredSession',
+            'let decoy = #"' + original + '"#; return ignoredSession',
+        ):
+            with self.subTest(replacement=replacement):
+                self.refuses('view', original, replacement, 'exactly the production constructor')
+
+    def test_constructor_allows_formatting_and_comments_without_relaxing_arguments(self):
+        original = '''SettingsStorageSession(
+            preferences: .standard, url: SettingsStorageEdits.overridesURL,
+            queueReload: { V2DaemonControl.reloadDetectionRules() }
+        )'''
+        replacement = '''return SettingsStorageSession( /* durable default */
+            preferences : .standard ,
+            url : SettingsStorageEdits.overridesURL,
+            queueReload : { V2DaemonControl.reloadDetectionRules( ) } )'''
+        self.assertEqual(AUDIT.check(self.changed('view', original, replacement)), [])
+
+    def test_binding_rejects_dead_save_and_alternate_return_decoys(self):
+        original = AUDIT.Source(self.sources['edits']).block(
+            r'\bstruct\s+SettingsStorageSession\b'
+        ).block(r'\bfunc\s+binding\s*\(').text.strip()
+        self.refuses('edits', original, 'if false { _ = ' + original + ' }; return ignoredBinding',
+                     'actual save-backed binding')
+        self.refuses('view', 'storageSession.binding(', 'return ignoredBinding; _ = storageSession.binding(',
+                     'storageBinding must use the production session')
 
     def test_writer_and_daemon_must_agree_on_override_path(self):
         for file in ('edits', 'config'):

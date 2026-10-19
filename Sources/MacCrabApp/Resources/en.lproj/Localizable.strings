@@ -2012,3 +2012,19 @@
 "intelligence.packagesScanningAction" = "Scanning…";
 "intelligence.packagesScanAction" = "Run scan";
 "intelligence.packagesRescanAction" = "Re-scan";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "Showing saved alerts. Refreshing…";
+"alerts.readDetails" = "Alert read details";
+"alerts.campaignsEmpty" = "No campaign rows available";
+"events.histogramIncomplete" = "Histogram coverage is incomplete. Missing intervals are unknown, not zero.";
+"events.summariesIncomplete" = "Daily summary coverage is incomplete.";
+"events.readDetails" = "Event read details";
+"events.histogramDetails" = "Histogram details";
+"events.summaryDetails" = "Daily summary details";
+"events.readInterrupted" = "Event read was interrupted. Refresh to retry.";
+"events.readDeferredDetail" = "Event read is temporarily deferred. It will retry on the next refresh.";
+"events.summariesDeferred" = "Daily summaries are temporarily deferred.";
+"events.searchIndexDegraded" = "The full-text index awaits repair; text matches may be incomplete.";
+"events.searchCoverageDetail" = "Search is partial: %lld retained events are outside the search projection and %lld evidence gaps remain. No match is not proof of absence.";
+"events.histogramCoverageDetail" = "Histogram covers only the provable retained %lld-second interval and has %lld evidence gaps; missing bins are unknown, not zero.";
+"intelligence.packagesResultsNotice" = "Scan attempt finished. Results cover returned packages only.";

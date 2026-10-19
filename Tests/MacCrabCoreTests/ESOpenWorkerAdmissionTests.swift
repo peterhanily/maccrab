@@ -5,8 +5,8 @@ import Testing
 @testable import MacCrabCore
 
 /// Inert policy tests: no ES client, files, timers, stores, or shared registry.
-/// The reference is the original full-facts OPEN call; it remains available
-/// for policies whose requirements need more than dynamic-AI facts.
+/// Full-facts comparison checks fact reduction, not evaluator correctness.
+/// Separate explicit truth tables below independently check that evaluator.
 @Suite("ES OPEN worker admission equivalence")
 struct ESOpenWorkerAdmissionTests {
     private let dynamic = BuiltinFileEventRequirement(
@@ -116,6 +116,45 @@ struct ESOpenWorkerAdmissionTests {
         }
     }
 
+    @Test("independent conjunction oracle covers absent, unknown, matching and disproven facts")
+    func independentConjunctionOracle() {
+        // The expected answers are fixture data, never another call into the
+        // evaluator under test. A conjunction can be dropped iff at least one
+        // input is known false; unknown must remain fail-open.
+        let processes: [(FileEventFact<Int32>, Bool)] = [
+            (.unknown, true), (.absent, false), (.value(43), true), (.value(99), false),
+        ]
+        let actions: [(FileEventFact<String>, Bool)] = [
+            (.unknown, true), (.absent, false), (.value("open"), true), (.value("write"), false),
+        ]
+        let locations: [(FileEventFact<String>, Bool)] = [
+            (.unknown, true), (.absent, false), (.value("/fixture/match"), true),
+            (.value("/fixture/miss"), false),
+        ]
+        for demandAction in [DynamicFileEventActionDemand.fileActions(["open"]), .eventActions(["open"])] {
+            let candidate = registry(.current(validUntilUptimeNanoseconds: 200,
+                demands: [.init(processID: 43, action: demandAction,
+                    path: .equals(["/fixture/match"], caseInsensitive: false))]))
+            for (pid, processPossible) in processes {
+                for (action, actionPossible) in actions {
+                    for (path, pathPossible) in locations {
+                        let input = FileEventAdmissionFacts(source: .endpointSecurityFile,
+                            filePath: path, fileAction: action, eventAction: action, processID: pid)
+                        #expect(candidate.shouldAdmit(input, nowUptimeNanoseconds: 100)
+                            == (processPossible && actionPossible && pathPossible))
+                    }
+                }
+            }
+        }
+        let matching = registry(.current(validUntilUptimeNanoseconds: 200,
+            demands: [.init(processID: 43, action: .eventActions(["open"]),
+                path: .equals(["/fixture/match"], caseInsensitive: false))]))
+        #expect(fast(matching, path: "/fixture/match", pid: 43))
+        #expect(!fast(matching, path: "/fixture/miss", pid: 43))
+        #expect(!fast(matching, path: "/fixture/match", pid: 99))
+        #expect(fast(matching, path: "/fixture/match", pid: nil))
+    }
+
     @Test("custom/mixed/unknown policy uses the complete original facts, not an inferred dynamic shape")
     func fullFactFallback() {
         let empty = DynamicAIFileEventDemandSnapshot.current(validUntilUptimeNanoseconds: 200, demands: [])
@@ -182,21 +221,32 @@ struct ESOpenWorkerAdmissionTests {
 
     @Test("ES keychain/static protection gates match the original full-facts implementation")
     func esWorkerWiring() {
-        let candidate = registry(.unknown)
-        for path in paths {
-            for platform in [false, true] {
-                for protected in [nil, false, true] as [Bool?] {
-                    let oldDrop: Bool
-                    if platform && ESCollector.isKeychainPath(path) { oldDrop = true }
-                    else if protected ?? (ESCollector.isCredentialReadPath(path) || ESCollector.isAgentContentReadPath(path)) {
-                        oldDrop = false
-                    } else { oldDrop = !candidate.shouldAdmit(facts(path, pid: 43)) }
-                    #expect(ESCollector.shouldDropBeforeWorker(eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
-                        path: path, isPlatformBinary: platform, processID: 43, protectedPath: protected,
-                        dynamicAIRegistry: candidate) == oldDrop)
+        // Include a known empty snapshot: unknown demand alone can never
+        // exercise the dynamic drop path. Use a non-expiring fixture because
+        // the production worker samples its own monotonic clock.
+        for snapshot in [DynamicAIFileEventDemandSnapshot.unknown,
+                         .current(validUntilUptimeNanoseconds: UInt64.max, demands: [])] {
+            let candidate = registry(snapshot)
+            for path in paths {
+                for platform in [false, true] {
+                    for protected in [nil, false, true] as [Bool?] {
+                        let oldDrop: Bool
+                        if platform && ESCollector.isKeychainPath(path) { oldDrop = true }
+                        else if protected ?? (ESCollector.isCredentialReadPath(path) || ESCollector.isAgentContentReadPath(path)) {
+                            oldDrop = false
+                        } else { oldDrop = !candidate.shouldAdmit(facts(path, pid: 43)) }
+                        #expect(ESCollector.shouldDropBeforeWorker(eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+                            path: path, isPlatformBinary: platform, processID: 43, protectedPath: protected,
+                            dynamicAIRegistry: candidate) == oldDrop)
+                    }
                 }
             }
         }
+        let noDemand = registry(.current(validUntilUptimeNanoseconds: UInt64.max, demands: []))
+        #expect(ESCollector.shouldDropBeforeWorker(eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+            path: "/fixture/ordinary.bin", processID: 43, protectedPath: false, dynamicAIRegistry: noDemand))
+        #expect(!ESCollector.shouldDropBeforeWorker(eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+            path: "/fixture/ordinary.bin", processID: 43, protectedPath: true, dynamicAIRegistry: noDemand))
     }
 
     @Test("demand expiring during full facts is unknown at the single late clock sample")

@@ -87,6 +87,8 @@ public actor EventEnricher {
     /// serialising both ingestion lanes.
     private let heavyEnrichmentPlane: HeavyEnrichmentPlane
 
+    private let userNameCache: UserNameCache
+
     /// Logger scoped to the enrichment subsystem.
     private let log = Logger(
         subsystem: "com.maccrab.core",
@@ -121,7 +123,8 @@ public actor EventEnricher {
         captureEnv: Bool = false,
         pruneInterval: UInt64 = 5000,
         telemetryGapSignal: (@Sendable () -> Bool)? = nil,
-        heavyEnrichmentPlane: HeavyEnrichmentPlane = HeavyEnrichmentPlane()
+        heavyEnrichmentPlane: HeavyEnrichmentPlane = HeavyEnrichmentPlane(),
+        userNameResolver: (@Sendable (UInt32) -> String?)? = nil
     ) {
         self.lineage = lineage
         self.codeSigningCache = codeSigningCache
@@ -133,6 +136,8 @@ public actor EventEnricher {
         self.pruneInterval = pruneInterval
         self.telemetryGapSignal = telemetryGapSignal
         self.heavyEnrichmentPlane = heavyEnrichmentPlane
+        self.userNameCache = userNameResolver.map { UserNameCache(resolver: $0) }
+            ?? Self.sharedUserNameCache
     }
 
     // MARK: Enrichment
@@ -498,7 +503,7 @@ public actor EventEnricher {
         }
     }
 
-    /// getpwuid can reach directory services.  Only a lock-protected cache hit
+    /// getpwuid_r can reach directory services. Only a cache hit
     /// runs inline; the first lookup for a UID is owned by the heavy plane and
     /// all events for that same identity coalesce.
     private func resolveUserName(
@@ -506,20 +511,24 @@ public actor EventEnricher {
         binding: HeavyEnrichmentBinding
     ) async -> HeavyFieldResolution<String> {
         if !event.process.userName.isEmpty { return .complete(event.process.userName) }
-        if let cached = Self.userNameCache.lookup(event.process.userId) {
-            return cached.isEmpty ? .degraded(.unavailable) : .complete(cached)
+        if let cached = userNameCache.lookup(event.process.userId) {
+            return .complete(cached)
         }
 
         let uid = event.process.userId
+        let cache = userNameCache
         let offer = await heavyEnrichmentPlane.offer(
             component: .userName,
             binding: binding
         ) {
-            .userName(Self.userNameForUid(uid))
+            // Publication belongs to the plane's accepted terminal result,
+            // not this syscall: cancellation cannot retract an inline cache.
+            .userName(cache.name(for: uid, cacheResult: false))
         }
         switch offer {
         case .cacheHit(.userName(let value)):
             guard let value, !value.isEmpty else { return .degraded(.unavailable) }
+            cache.accept(value, for: uid)
             return .complete(value)
         case .cacheHit:
             return .degraded(.unavailable)
@@ -637,20 +646,30 @@ public actor EventEnricher {
         limit: Int = 128,
         maximumBytes: Int = Int.max
     ) async -> [DeferredEventEnrichment] {
-        await heavyEnrichmentPlane.drainDeferredResults(
+        let patches = await heavyEnrichmentPlane.drainDeferredResults(
             limit: limit,
             maximumBytes: maximumBytes
         )
+        for patch in patches { cacheAcceptedUserName(patch) }
+        return patches
     }
 
     package func drainOwnedDeferredEnrichments(
         limit: Int = 128,
         maximumBytes: Int = Int.max
     ) async -> [OwnedDeferredEventEnrichment] {
-        await heavyEnrichmentPlane.drainOwnedDeferredResults(
+        let results = await heavyEnrichmentPlane.drainOwnedDeferredResults(
             limit: limit,
             maximumBytes: maximumBytes
         )
+        for result in results { cacheAcceptedUserName(result.patch) }
+        return results
+    }
+
+    private func cacheAcceptedUserName(_ patch: DeferredEventEnrichment) {
+        guard patch.component == .userName, patch.outcome == .completed,
+              case .userName(let name)? = patch.value, let name else { return }
+        userNameCache.accept(name, for: patch.binding.userID)
     }
 
     public func heavyEnrichmentSnapshot() async -> HeavyEnrichmentPlaneSnapshot {
@@ -670,21 +689,16 @@ public actor EventEnricher {
 
     /// Per-uid cache of resolved user names. On a single-user macOS
     /// workstation almost every event has the same uid, so a tiny
-    /// bounded dictionary avoids repeated getpwuid calls for resident UIDs.
-    /// A lock serializes heavy-worker misses; inline lookups never wait on
-    /// that lock. The cache is separate from the enrichment actor so a slow
-    /// directory-service lookup cannot hold its executor.
-    private static let userNameCache = UserNameCache()
-
-    fileprivate static func userNameForUid(_ uid: UInt32) -> String {
-        Self.userNameCache.name(for: uid)
-    }
+    /// bounded dictionary avoids repeated directory calls for resident UIDs.
+    /// Its lock protects only bookkeeping, never the directory lookup.
+    private static let sharedUserNameCache = UserNameCache()
 }
 
 /// Bounded thread-safe uid → name cache backing `EventEnricher`.
 /// Defined at file scope so it doesn't inherit `EventEnricher`'s
 /// actor isolation. FIFO eviction changes only memoization: an evicted UID
-/// is resolved normally on its next miss, including previously empty names.
+/// is resolved normally on its next miss. Unavailable results are not cached:
+/// a transient directory-service failure must not poison a UID until restart.
 /// The existing heavy-enrichment plane remains the owner of blocking misses.
 final class UserNameCache: @unchecked Sendable {
     static let maximumEntries = 256
@@ -693,7 +707,8 @@ final class UserNameCache: @unchecked Sendable {
     private var insertionOrder: [UInt32] = []
     private var nextEvictionIndex = 0
     private let capacity: Int
-    private let resolver: @Sendable (UInt32) -> String
+    private let resolver: @Sendable (UInt32) -> String?
+    private var resolving = false
     private let lock = NSLock()
 
     convenience init() {
@@ -703,7 +718,7 @@ final class UserNameCache: @unchecked Sendable {
     /// Internal explicit-resolver seam; tests never contact directory services.
     /// Smaller capacities exercise the same ring; callers cannot raise its cap.
     init(capacity: Int = UserNameCache.maximumEntries,
-         resolver: @escaping @Sendable (UInt32) -> String) {
+         resolver: @escaping @Sendable (UInt32) -> String?) {
         self.capacity = max(1, min(capacity, Self.maximumEntries))
         self.resolver = resolver
         entries.reserveCapacity(self.capacity)
@@ -719,16 +734,44 @@ final class UserNameCache: @unchecked Sendable {
         return entries[uid]
     }
 
-    func name(for uid: UInt32) -> String {
+    func name(for uid: UInt32, cacheResult: Bool = true) -> String? {
         lock.lock()
-        defer { lock.unlock() }
         if let cached = entries[uid] {
+            lock.unlock()
             return cached
         }
-
-        // Keep resolution and copying under the same lock: libc getpwuid
-        // returns process-global static storage. Empty strings are cached too.
+        // The heavy plane owns normal coalescing and its physical-worker cap.
+        // This nonblocking gate also bounds the shared cache across separate
+        // planes: never wait on, or duplicate, an outstanding directory call.
+        guard !resolving else { lock.unlock(); return nil }
+        resolving = true
+        lock.unlock()
         let resolved = resolver(uid)
+        lock.lock()
+        defer { resolving = false; lock.unlock() }
+        // Cancellation is an early exit, not the publication authority. The
+        // production worker uses cacheResult:false and only its plane-accepted
+        // result may later call accept(), eliminating the deadline/cache race.
+        guard !Task.isCancelled, let resolved, !resolved.isEmpty,
+              HeavyEnrichmentValue.userName(resolved).retainedByteEstimate
+                <= HeavyEnrichmentComponent.userName.defaultMaximumResultBytes else { return nil }
+        if cacheResult { insert(resolved, for: uid) }
+        return resolved
+    }
+
+    /// Seed only from an accepted plane completion or an already accepted
+    /// plane cache hit. Empty/error/oversized values are never memoized.
+    func accept(_ resolved: String, for uid: UInt32) {
+        guard !resolved.isEmpty,
+              HeavyEnrichmentValue.userName(resolved).retainedByteEstimate
+                <= HeavyEnrichmentComponent.userName.defaultMaximumResultBytes else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        insert(resolved, for: uid)
+    }
+
+    private func insert(_ resolved: String, for uid: UInt32) {
+        if entries[uid] != nil { entries[uid] = resolved; return }
         if insertionOrder.count == capacity {
             entries.removeValue(forKey: insertionOrder[nextEvictionIndex])
             insertionOrder[nextEvictionIndex] = uid
@@ -737,16 +780,26 @@ final class UserNameCache: @unchecked Sendable {
             insertionOrder.append(uid)
         }
         entries[uid] = resolved
-        return resolved
     }
 
-    private static func resolveSystemName(_ uid: UInt32) -> String {
-        if let pw = getpwuid(uid_t(uid)) {
-            return String(cString: pw.pointee.pw_name)
+    private static func resolveSystemName(_ uid: UInt32) -> String? {
+        // Reentrant lookup with exclusively owned storage. Bound ERANGE growth
+        // even for malformed directory records; errors remain unavailable and
+        // can recover on a later event. No cache lock covers this syscall.
+        var size = 1_024
+        while size <= 64 * 1_024 {
+            var record = passwd()
+            var result: UnsafeMutablePointer<passwd>?
+            var storage = [CChar](repeating: 0, count: size)
+            let (status, name) = storage.withUnsafeMutableBufferPointer { buffer -> (Int32, String?) in
+                let status = getpwuid_r(uid_t(uid), &record, buffer.baseAddress!, buffer.count, &result)
+                guard status == 0, result != nil, let name = record.pw_name else { return (status, nil) }
+                return (status, String(cString: name))
+            }
+            if status == ERANGE { size *= 2; continue }
+            return name
         }
-        // Service UIDs without a passwd entry retain the existing empty-name
-        // semantics, rather than being substituted or treated as a new UID.
-        return ""
+        return nil
     }
 }
 

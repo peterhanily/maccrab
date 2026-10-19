@@ -3,6 +3,38 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — RC12 source repairs (qualification pending)
+
+### Fixed
+- Prevent stalled username lookups from exhausting heavy-enrichment workers;
+  use reentrant directory calls outside the cache lock, bounded physical
+  lookup admission, retryable unavailable results and terminal-only deferred
+  user-behavior observation.
+- Discard duplicate patches during terminal replay without stranding buffer
+  accounting, and prevent late enrichment from reopening a timed-out component.
+- Correct empty Campaigns, Events histogram coverage, refresh feedback and
+  package-read status; retain visible uncertainty without duplicate notices.
+- Restore the OPEN wiring regression and add independent admission verdicts.
+- Exercise saved storage settings through the authorized daemon consumer and
+  reject persistence overrides in the source guard.
+
+### Changed
+- Bind phase evidence to command, source bytes and explicit test executable;
+  refuse overwritten receipts, changed inputs, zero-test selections and failed
+  framework summaries. Require the tested executable to match its successful
+  build receipt.
+  Inventory changed-file test references before selecting safe local runs.
+- Fail clean CI if execution exits before its final success marker, including
+  Bash 3.2 expansion failures, while preserving staged release artifacts.
+- Refuse legacy detection/campaign simulations before side effects unless the
+  operator explicitly acknowledges a disposable host. Test only copied
+  preflight prefixes with inert endings; this guard does not verify isolation.
+- Document real monitor accesses and opt-in exclusions in the Swift suite;
+  replace the inaccurate claim that every test is safe and confined to `/tmp`.
+- Keep the historical invalid baseline fixture separate from the live policy.
+  Reference remeasurement, full CI and installed qualification remain
+  required; these source changes do not constitute release clearance.
+
 ## [1.22.6] — 2026-10-09
 
 ### Added

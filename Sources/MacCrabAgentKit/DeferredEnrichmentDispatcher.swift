@@ -176,7 +176,10 @@ enum DeferredEnrichmentDispatcher {
                     )
                     terminalEvent = await EventJournalAdmissionContext
                         .withTerminalRevision(terminalAdmission) {
-                            await EventLoop.dispatchReviewedMatches(
+                            if batch.shouldObserveUserBehavior {
+                                await EventLoop.observeUserBehavior(event: terminalEvent, state: state)
+                            }
+                            return await EventLoop.dispatchReviewedMatches(
                                 state: state,
                                 reviewed: reviewedTerminal
                             )

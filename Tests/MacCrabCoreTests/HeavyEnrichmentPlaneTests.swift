@@ -383,6 +383,114 @@ struct HeavyEnrichmentPlaneTests {
         _ = await plane.shutdown()
     }
 
+    @Test("A directory stall across deadlines cannot duplicate itself or consume unrelated workers")
+    func directoryStallIsIsolated() async {
+        let plane = HeavyEnrichmentPlane(configuration: .init(
+            maximumConcurrentWorkers: 4, maximumQueuedWorkItems: 8,
+            maximumOutstandingResults: 32, operationTimeoutSeconds: 30
+        ), liveMemoryBudget: Self.isolatedMemoryBudget())
+        let gate = HeavyEnrichmentTestGate()
+        let first = Self.event(uid: 501)
+        _ = await plane.offer(component: .userName, binding: .init(event: first), timeoutSeconds: 0.5) {
+            await gate.runIgnoringCancellation()
+            return .userName("late-value")
+        }
+        guard await Self.awaitWorkerEntry(gate, plane: plane) else { return }
+        let timedOut = await Self.waitForSnapshot(plane) { $0.timedOutRequestsTotal == 1 }
+        #expect(timedOut.physicalWorkers == 1)
+
+        for _ in 0..<6 {
+            #expect(await plane.offer(component: .userName, binding: .init(event: Self.event(uid: 501))) {
+                Issue.record("a duplicate lingering username worker started")
+                return .userName("wrong")
+            } == .rejected)
+        }
+        for uid in UInt32(502)...UInt32(505) {
+            _ = await plane.offer(component: .userName, binding: .init(event: Self.event(uid: uid)), timeoutSeconds: 0.1) {
+                Issue.record("a distinct UID bypassed the physical username limit")
+                return .userName("wrong")
+            }
+        }
+        // These complete positively while the directory gate remains closed.
+        for component in [HeavyEnrichmentComponent.environment, .processHashes, .codeSignature] {
+            _ = await plane.offer(component: component, binding: .init(event: Self.event())) {
+                switch component {
+                case .environment: return .environment(["fixture": "completed"])
+                case .processHashes: return .processHashes(.init(value: nil, fileIdentity: nil))
+                default: return .codeSignature(.init(value: nil, fileIdentity: nil))
+                }
+            }
+        }
+        let progress = await Self.waitForSnapshot(plane) {
+            $0.completedRequestsTotal == 3 && $0.timedOutRequestsTotal == 5
+        }
+        #expect(progress.physicalWorkers == 1)
+        #expect(progress.rejectedRequestsTotal == 6)
+        #expect(progress.requestsConserved && progress.physicalCapacityConserved)
+        let terminal = await plane.drainDeferredResults(limit: 32)
+        #expect(terminal.filter { $0.binding.eventID == first.id }.map(\.outcome) == [.timedOut])
+        await gate.release()
+        _ = await Self.waitForSnapshot(plane) { $0.physicalWorkers == 0 }
+        #expect(await plane.drainDeferredResults().isEmpty, "Late completion cannot reopen an expired subscriber")
+        let recovered = await plane.offer(component: .userName, binding: .init(event: Self.event(uid: 501))) {
+            .userName("recovered")
+        }
+        guard case .pending = recovered else { Issue.record("late values must not be cached"); return }
+        _ = await Self.waitForSnapshot(plane) { $0.completedRequestsTotal == 4 }
+        let recovery = await plane.drainDeferredResults()
+        #expect(recovery.map(\.value) == [.userName("recovered")])
+        #expect((await plane.shutdown()).cleanlyDrained)
+    }
+
+    @Test("A queued username cannot head-of-line block unrelated enrichment")
+    func directoryQueueDoesNotBlockOtherComponents() async {
+        let plane = HeavyEnrichmentPlane(configuration: .init(operationTimeoutSeconds: 30),
+                                        liveMemoryBudget: Self.isolatedMemoryBudget())
+        let gates = (0..<4).map { _ in HeavyEnrichmentTestGate() }
+        for index in 0..<4 {
+            _ = await plane.offer(component: index == 0 ? .userName : .environment,
+                                  binding: .init(event: Self.event(pid: Int32(index + 1)))) {
+                await gates[index].runIgnoringCancellation()
+                return index == 0 ? .userName("first") : .environment([:])
+            }
+            guard await Self.awaitWorkerEntry(gates[index], plane: plane) else {
+                for gate in gates { await gate.release() }
+                return
+            }
+        }
+        _ = await plane.offer(component: .userName, binding: .init(event: Self.event(uid: 502))) { .userName("second") }
+        _ = await plane.offer(component: .fileContent, binding: .init(event: Self.event())) { .fileContent(nil) }
+        #expect((await plane.snapshot()).queuedRequests == 2)
+        await gates[1].release()
+        let progress = await Self.waitForSnapshot(plane) { $0.completedRequestsTotal == 2 }
+        #expect(progress.queuedRequests == 1)
+        let results = await plane.drainDeferredResults()
+        #expect(Set(results.map(\.component)) == [.environment, .fileContent])
+        for gate in gates { await gate.release() }
+        _ = await Self.waitForSnapshot(plane) { $0.completedRequestsTotal == 6 }
+        _ = await plane.drainDeferredResults()
+        #expect((await plane.shutdown()).cleanlyDrained)
+    }
+
+    @Test("Unavailable usernames never poison the plane cache", arguments: [false, true])
+    func unavailableUserNameCacheRecovers(empty: Bool) async {
+        let plane = HeavyEnrichmentPlane(configuration: .init(operationTimeoutSeconds: 30),
+                                        liveMemoryBudget: Self.isolatedMemoryBudget())
+        let binding = HeavyEnrichmentBinding(event: Self.event())
+        _ = await plane.offer(component: .userName, binding: binding) { .userName(empty ? "" : nil) }
+        _ = await Self.waitForSnapshot(plane) { $0.completedRequestsTotal == 1 }
+        let missing = await plane.drainDeferredResults()
+        #expect(missing.count == 1)
+        let retry = await plane.offer(component: .userName, binding: binding) { .userName("recovered") }
+        guard case .pending = retry else { Issue.record("negative username was cached"); return }
+        _ = await Self.waitForSnapshot(plane) { $0.completedRequestsTotal == 2 }
+        #expect(await plane.drainDeferredResults().map(\.value) == [.userName("recovered")])
+        #expect(await plane.offer(component: .userName, binding: binding) {
+            Issue.record("positive username was not cached"); return .userName(nil)
+        } == .cacheHit(.userName("recovered")))
+        #expect((await plane.shutdown()).cleanlyDrained)
+    }
+
     @Test("same stable subject coalesces and completed evidence is a same-subject cache hit")
     func coalescingAndCacheHit() async {
         let plane = HeavyEnrichmentPlane(configuration: .init(

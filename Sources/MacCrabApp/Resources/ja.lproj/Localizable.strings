@@ -1953,7 +1953,7 @@
 "events.cachedRefreshing" = "保存済みのイベントを表示しています。更新中…";
 "events.cachedIncomplete" = "保存済みのイベントを表示しています。最新データは確認されていません。";
 "system.dataSourceConnected" = "ローカルエンジンのデータを読み取っています。保護状態は下に表示されます。";
-"system.otlpLifecycleSummary" = "エージェントトレースの入力または処理が低下しています。センサーの状態は別途確認してください。";
+"system.otlpLifecycleSummary" = "Agent Traceの入力または処理が低下しています。センサーの状態は別途確認してください。";
 "system.auditSummary" = "最近の特権リクエストとその結果です。新しいリクエストが最後に表示されます。";
 "system.alertEvidenceMeasurementTitle" = "証拠データの保存容量を測定できませんでした";
 "system.alertEvidenceCaptureTitle" = "アラート証拠の取得が低下しています";
@@ -1973,3 +1973,19 @@
 "intelligence.packagesScanningAction" = "スキャン中…";
 "intelligence.packagesScanAction" = "スキャンを実行";
 "intelligence.packagesRescanAction" = "再スキャン";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "保存済みのアラートを表示しています。更新中…";
+"alerts.readDetails" = "アラート読み取りの詳細";
+"alerts.campaignsEmpty" = "表示できるキャンペーン行はありません";
+"events.histogramIncomplete" = "ヒストグラムの範囲は不完全です。欠落区間はゼロではなく不明です。";
+"events.summariesIncomplete" = "日次サマリーの範囲は不完全です。";
+"events.readDetails" = "イベント読み取りの詳細";
+"events.histogramDetails" = "ヒストグラムの詳細";
+"events.summaryDetails" = "日次サマリーの詳細";
+"events.readInterrupted" = "イベントの読み取りが中断されました。更新して再試行してください。";
+"events.readDeferredDetail" = "イベントの読み取りは一時的に延期されています。次の更新時に再試行します。";
+"events.summariesDeferred" = "日次サマリーは一時的に延期されています。";
+"events.searchIndexDegraded" = "全文検索インデックスは修復待ちです。検索結果が不完全な可能性があります。";
+"events.searchCoverageDetail" = "検索は部分的です。保持されたイベントのうち%lld件が検索対象外で、証拠の欠落が%lld件あります。一致なしはイベントの不在を証明しません。";
+"events.histogramCoverageDetail" = "ヒストグラムは保持を確認できる%lld秒間のみをカバーし、証拠の欠落が%lld件あります。欠落区間はゼロではなく不明です。";
+"intelligence.packagesResultsNotice" = "スキャンの試行が終了しました。結果は返されたパッケージのみを対象とします。";

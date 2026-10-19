@@ -370,13 +370,24 @@ struct HeavyEnrichmentRuleCoverageTests {
             "component replay seeded the independent first step twice"
         )
 
-        // Sensitivity proof: an ordinary full replay of the same patched event
-        // does duplicate the `.none`-correlated seed, so the assertion above is
-        // specifically exercising step-level dependency filtering.
+        // Event/step identity deduplication now also protects ordinary full
+        // replay. Do not pin the old bug (a duplicate seed) as an oracle.
         let unfiltered = SequenceEngine(lineage: ProcessLineage())
         try await unfiltered.addRule(sequence)
         _ = await unfiltered.evaluate(initial)
         _ = await unfiltered.evaluate(patched)
-        #expect(await unfiltered.activePartialMatchCount == 2)
+        #expect(await unfiltered.activePartialMatchCount == 1)
+
+        // Independent sensitivity control: no prior event exists to dedupe.
+        // Component-only replay must not seed the independent first step;
+        // ordinary evaluation of the exact same fixture must seed it.
+        let replayOnly = SequenceEngine(lineage: ProcessLineage())
+        try await replayOnly.addRule(sequence)
+        #expect(await replayOnly.reevaluate(patched, forCompleted: [.fileContent]).isEmpty)
+        #expect(await replayOnly.activePartialMatchCount == 0)
+        let fullOnly = SequenceEngine(lineage: ProcessLineage())
+        try await fullOnly.addRule(sequence)
+        #expect(await fullOnly.evaluate(patched).isEmpty)
+        #expect(await fullOnly.activePartialMatchCount == 1)
     }
 }

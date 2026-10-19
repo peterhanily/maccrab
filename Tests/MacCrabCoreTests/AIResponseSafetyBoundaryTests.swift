@@ -32,8 +32,37 @@ private actor HostileHighConfidenceIntentBackend: LLMBackend {
     func callCount() -> Int { calls }
 }
 
+private actor InertResponseActionRecorder {
+    struct Invocation: Sendable, Equatable {
+        let action: ResponseActionType
+        let eventID: UUID
+        let processID: Int32
+        let ruleID: String
+    }
+    private(set) var invocations: [Invocation] = []
+
+    func execute(_ config: ResponseActionConfig, alert: Alert, event: Event) -> (target: String, success: Bool) {
+        invocations.append(.init(action: config.action, eventID: event.id,
+                                 processID: event.process.pid, ruleID: alert.ruleId))
+        return ("fixture:\(config.action.rawValue)", true)
+    }
+}
+
 @Suite("Model/advisory response safety boundary")
 struct AIResponseSafetyBoundaryTests {
+    private func makeResponse(recording recorder: InertResponseActionRecorder) -> ResponseEngine {
+        let blocks = TemporaryNetworkBlocks(io: .init(
+            write: { _ in Issue.record("response fixture reached PF writes"); return false },
+            reload: { Issue.record("response fixture reached PF reload"); return .init(loaded: false, enforcing: false) },
+            legacyStateUnverified: { false }))
+        return ResponseEngine(
+            quarantineDir: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
+            temporaryNetworkBlocks: blocks,
+            actionExecutor: { config, alert, event in
+                await recorder.execute(config, alert: alert, event: event)
+            })
+    }
+
     private static let classifierRuleID =
         "d1a2b3c4-2059-4000-a000-000000002059"
 
@@ -46,7 +75,7 @@ struct AIResponseSafetyBoundaryTests {
 
     private func installEvent(
         verdict: IntentClassifier.ClassificationResult? = nil,
-        pid: Int32 = 999_999
+        pid: Int32 = 42
     ) -> Event {
         let process = MacCrabCore.ProcessInfo(
             pid: pid,
@@ -134,10 +163,10 @@ struct AIResponseSafetyBoundaryTests {
         // Prove the accepted cached verdict reaches the real shipping Sigma
         // rule. This is not a hand-built alert that could conceal a rule wiring
         // mismatch.
-        try ensureRulesCompiled()
+        let fixtureRules = try ensureRulesCompiled()
         let ruleEngine = RuleEngine()
         _ = try await ruleEngine.loadRules(
-            from: compiledRulesDirectory
+            from: fixtureRules
         )
         let event = installEvent(verdict: cached)
         let matches = await ruleEngine.evaluate(event)
@@ -145,10 +174,8 @@ struct AIResponseSafetyBoundaryTests {
             $0.ruleId == Self.classifierRuleID
         })
 
-        let support = FileManager.default.temporaryDirectory
-            .appendingPathComponent("maccrab-ai-response-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: support) }
-        let response = ResponseEngine(supportDirectory: support.path)
+        let recorder = InertResponseActionRecorder()
+        let response = makeResponse(recording: recorder)
         // No rule-specific config: this is the hostile global-default shape
         // from the audit. The low threshold proves severity is not what saves
         // us. Notify remains eligible so the operator still sees the finding.
@@ -174,19 +201,19 @@ struct AIResponseSafetyBoundaryTests {
         #expect(!audit.contains { $0.target.hasPrefix("pid:") },
                 "No kill implementation may be reached for AI-derived intent")
         #expect(audit.contains {
-            $0.action == .notify && $0.success && $0.target == "notification"
+            $0.action == .notify && $0.success && $0.target == "fixture:notify"
         })
+        let admitted = await recorder.invocations
+        #expect(admitted.map(\.action) == [.notify])
+        #expect(admitted.first?.eventID == event.id)
     }
 
     @Test("Only explicit per-rule confirmation can create pending-only intent response")
     func confirmationMustBeExplicitAndRuleSpecific() async throws {
         let event = installEvent()
         let derivedAlert = alert()
-        let support = FileManager.default.temporaryDirectory
-            .appendingPathComponent("maccrab-ai-confirm-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: support) }
-
-        let explicit = ResponseEngine(supportDirectory: support.path)
+        let recorder = InertResponseActionRecorder()
+        let explicit = makeResponse(recording: recorder)
         await explicit.setActions(forRule: Self.classifierRuleID, actions: [
             ResponseActionConfig(
                 action: .kill,
@@ -200,7 +227,7 @@ struct AIResponseSafetyBoundaryTests {
         #expect(pending.target == "pending-confirmation")
         #expect(pending.success == false)
 
-        let global = ResponseEngine(supportDirectory: support.path)
+        let global = makeResponse(recording: recorder)
         await global.setDefaultActions([
             ResponseActionConfig(
                 action: .kill,
@@ -212,7 +239,7 @@ struct AIResponseSafetyBoundaryTests {
         let globalDenial = try #require(await global.getExecutionLog().first)
         #expect(globalDenial.target == ResponseEngine.advisoryOnlyDenialTarget)
 
-        let unconfirmed = ResponseEngine(supportDirectory: support.path)
+        let unconfirmed = makeResponse(recording: recorder)
         await unconfirmed.setActions(forRule: Self.classifierRuleID, actions: [
             ResponseActionConfig(
                 action: .kill,
@@ -225,11 +252,13 @@ struct AIResponseSafetyBoundaryTests {
             await unconfirmed.getExecutionLog().first
         )
         #expect(unconfirmedDenial.target == ResponseEngine.advisoryOnlyDenialTarget)
+        #expect(await recorder.invocations.isEmpty,
+                "Pending and denied actions must not reach even the inert executor")
 
         // Compatibility guard: this detector is a deterministic composite of
         // observed behavior, not model-authored advice. Existing operator
         // response policy must continue to reach the implementation.
-        let deterministic = ResponseEngine(supportDirectory: support.path)
+        let deterministic = makeResponse(recording: recorder)
         await deterministic.setDefaultActions([
             ResponseActionConfig(action: .kill, minimumSeverity: .low),
         ])
@@ -240,15 +269,19 @@ struct AIResponseSafetyBoundaryTests {
         let deterministicAttempt = try #require(
             await deterministic.getExecutionLog().first
         )
-        #expect(deterministicAttempt.target == "pid:\(event.process.pid)")
+        #expect(deterministicAttempt.target == "fixture:kill")
+        let admitted = await recorder.invocations
+        #expect(admitted.count == 1)
+        #expect(admitted.first?.action == .kill)
+        #expect(admitted.first?.eventID == event.id)
+        #expect(admitted.first?.processID == event.process.pid)
+        #expect(admitted.first?.ruleID == "maccrab.behavior.composite")
     }
 
     @Test("Future MCP baseline review alerts remain advisory at response boundary")
     func mcpBaselineReviewCannotAuthorizeContainment() async throws {
-        let support = FileManager.default.temporaryDirectory
-            .appendingPathComponent("maccrab-mcp-response-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: support) }
-        let response = ResponseEngine(supportDirectory: support.path)
+        let recorder = InertResponseActionRecorder()
+        let response = makeResponse(recording: recorder)
         await response.setDefaultActions([
             ResponseActionConfig(action: .kill, minimumSeverity: .low),
         ])
@@ -263,6 +296,7 @@ struct AIResponseSafetyBoundaryTests {
         #expect(denial.action == .kill)
         #expect(denial.target == ResponseEngine.advisoryOnlyDenialTarget)
         #expect(denial.success == false)
+        #expect(await recorder.invocations.isEmpty)
     }
 
     @Test("Advisory rule families and response policy cannot drift apart")

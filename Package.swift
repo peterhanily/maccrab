@@ -275,6 +275,7 @@ let package = Package(
             dependencies: [
                 "MacCrabApp",
                 "MacCrabCore",
+                "MacCrabAgentKit",
             ]
         ),
         .testTarget(

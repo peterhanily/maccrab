@@ -379,6 +379,7 @@ verify_release_source_snapshot
 # run over uncommitted or mid-run-edited inputs never vouches for HEAD.
 CI_RECEIPT_START=""
 if [ "$CLEAN_TREE" = "1" ]; then
+    CI_COMPLETED=0
     if ! CI_RECEIPT_START=$(/usr/bin/python3 -I "$SCRIPT_DIR/ci-receipt.py" snapshot); then
         CI_RECEIPT_START=""
     fi
@@ -390,6 +391,7 @@ CI_TOOLCHAIN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-ci-toolchain.XXXXXX")
 echo "Toolchain qualification evidence: $CI_TOOLCHAIN_DIR"
 /usr/bin/python3 -I "$SCRIPT_DIR/run-ci-phase.py" \
     --label "Swift toolchain identity" --timeout-seconds 30 \
+    --source-root "$PROJECT_DIR" \
     --log "$CI_TOOLCHAIN_DIR/toolchain.log" --result "$CI_TOOLCHAIN_DIR/toolchain.json" \
     -- /usr/bin/python3 -I "$SCRIPT_DIR/check-swift-toolchain.py"
 
@@ -557,6 +559,12 @@ if [ "$CLEAN_TREE" = "1" ]; then
     restore_release_artifacts_on_exit() {
         local status=$?
         trap - EXIT
+        # Bash 3.2 can report status zero to EXIT after a fatal expansion in
+        # an if condition. Restoring bytes is cleanup, never proof that CI ran.
+        if [ "$status" -eq 0 ] && [ "${CI_COMPLETED:-0}" != "1" ]; then
+            echo "ERROR: clean CI exited before all checks completed" >&2
+            status=1
+        fi
         if ! restore_release_artifacts && [ "$status" -eq 0 ]; then
             status=1
         fi
@@ -601,7 +609,7 @@ if [ "$CLEAN_TREE" = "1" ]; then
             exit 1
         fi
     fi
-    trap 'release_clean_lock_release' EXIT
+    trap restore_release_artifacts_on_exit EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -742,6 +750,7 @@ if [ "$CLEAN_TREE" = "1" ]; then
     echo "Dependency-resolution evidence: $CI_RESOLVE_DIR"
     /usr/bin/python3 -I "$SCRIPT_DIR/run-ci-phase.py" \
         --label "Resolve dependencies" --timeout-seconds 600 \
+        --source-root "$PROJECT_DIR" \
         --log "$CI_RESOLVE_DIR/resolve.log" --result "$CI_RESOLVE_DIR/resolve.json" \
         -- swift package resolve
 fi
@@ -774,6 +783,7 @@ PASS=0
 FAIL=0
 START=$(date +%s)
 CI_PHASE_NUMBER=0
+CI_TEST_BUILD_RECEIPT=""
 
 check() {
     local name="$1"
@@ -788,6 +798,19 @@ check() {
     slug=${slug#-}
     slug=${slug%-}
     local prefix="$CI_EVIDENCE_DIR/$CI_PHASE_NUMBER-${slug:-gate}"
+    # Bash 3.2 treats an empty array as unset under set -u. Keep this array
+    # nonempty for every phase, including phases without a build artifact.
+    local identity_args=(--source-root "$PROJECT_DIR")
+    # Bind the test executable separately from ignored build products. The
+    # test command below is skip-build, so a concurrent rebuild invalidates it.
+    case "$name" in
+        "Swift build tests")
+            CI_TEST_BUILD_RECEIPT="$prefix.json"
+            identity_args+=(--output-artifact "$(swift build --show-bin-path)/MacCrabPackageTests.xctest/Contents/MacOS/MacCrabPackageTests") ;;
+        "Swift test suite")
+            identity_args+=(--build-receipt "$CI_TEST_BUILD_RECEIPT"
+                --artifact "$(swift build --show-bin-path)/MacCrabPackageTests.xctest/Contents/MacOS/MacCrabPackageTests") ;;
+    esac
     CI_LOCAL_OUTPUT="$prefix.log"
     # The badge assertion is an in-process shell function. Materialize its
     # trusted definition in this private directory so it gets the same process
@@ -801,7 +824,7 @@ check() {
     printf "  %-40s " "$name"
     if /usr/bin/python3 -I "$SCRIPT_DIR/run-ci-phase.py" \
         --label "$name" --timeout-seconds "$phase_timeout" \
-        --log "$CI_LOCAL_OUTPUT" --result "$prefix.json" -- "$@"; then
+        --log "$CI_LOCAL_OUTPUT" --result "$prefix.json" "${identity_args[@]}" -- "$@"; then
         echo -e "${GREEN}PASS${NC}"
         PASS=$((PASS + 1))
     else
@@ -837,7 +860,7 @@ check "Swift build tests" swift build --build-tests
 
 echo ""
 echo -e "${BOLD}Tests${NC}"
-check "Swift test suite" swift test --no-parallel
+check "Swift test suite" swift test --skip-build --no-parallel
 
 # README ships a green `tests-N passing` badge that NOTHING verified —
 # prerelease-check.sh only printed it as info. It drifted badly: the badge said
@@ -909,6 +932,7 @@ check "Architectural audit (deterministic)" \
     env MACCRAB_AUDIT_SCOPE=deterministic ./scripts/pre-release-audit.sh
 check "Settings storage audit fixtures" /usr/bin/python3 -I -B ./scripts/test-settings-storage-wiring.py
 check "UI clarity source contracts" /usr/bin/python3 -I scripts/test-ui-clarity.py
+check "Red-team simulation entrypoint safeguards" /usr/bin/python3 -I -B scripts/test-red-team-preflight.py
 check "Release dependency provenance" ./scripts/check-release-dependencies.sh
 check "Release supply-chain fixtures" ./scripts/test-release-supply-chain.sh
 check "Site publisher one-commit fixtures" ./scripts/test-site-release-publish.sh
@@ -954,7 +978,6 @@ rm -rf "$CI_COMPILED_RULES"
 # untracked input, or replace the version-controlled hook that is executing.
 if [ "${PRESERVED_RELEASE_COUNT:-0}" -gt 0 ]; then
     restore_release_artifacts
-    trap - EXIT HUP INT TERM
 fi
 verify_release_source_snapshot
 
@@ -980,4 +1003,5 @@ else
             || echo "WARNING: the next push of this commit will run local CI again." >&2
     fi
     echo -e "\n${GREEN}ALL CHECKS PASSED${NC}"
+    CI_COMPLETED=1
 fi

@@ -1,8 +1,11 @@
 // LocalizationCoverageTests.swift
 // MacCrabAppTests
 //
-// UX-2 source lint covers explicit UI constructors and accessibility labels
-// throughout Sources/MacCrabApp. Ordinary literal copy uses stable localization
+// UX-2 source lint covers the explicit constructors listed in bareLiteral and
+// direct ASCII-leading help/accessibility labels throughout Sources/MacCrabApp.
+// It does NOT cover Toggle/TextField/Picker/Menu/custom controls, non-ASCII or
+// leading-interpolation prose, multiline arguments, or assigned/dynamic strings.
+// Ordinary literal copy uses stable localization
 // keys; exact technical values use Text(verbatim:). Dynamic expressions and
 // leading-interpolation literals still need semantic review, so this syntactic
 // check does not certify every rendered string. Both debt budgets are zero.
@@ -12,6 +15,34 @@ import Foundation
 
 @Suite("Localization coverage (UX-2)")
 struct LocalizationCoverageTests {
+
+    @Test("Read-state copy resolves through Foundation in every shipped locale",
+          arguments: ["en", "de", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt-BR", "ru", "sv", "zh-Hans", "zh-Hant"])
+    func readStateCatalogLookups(locale: String) throws {
+        // Test hosts do not have the app catalogs in Bundle.main. Explicitly
+        // open each shipped language bundle; do not mistake English defaults
+        // for localization coverage. Installed layout/VoiceOver is a separate
+        // candidate gate, not a claim made by this source-catalog test.
+        let languageURL = Self.packageRoot().appendingPathComponent(
+            "Sources/MacCrabApp/Resources/\(locale).lproj", isDirectory: true)
+        let bundle = try #require(Bundle(url: languageURL))
+        let data = try Data(contentsOf: languageURL.appendingPathComponent("Localizable.strings"))
+        let table = try #require(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: String])
+        let keys = ["alerts.cachedRefreshing", "alerts.readDetails", "alerts.campaignsEmpty",
+                    "alerts.loading", "alerts.readPartial", "alerts.readDeferred", "alerts.readUnavailable",
+                    "alerts.readFailed", "alerts.cachedNotice", "events.histogramIncomplete",
+                    "events.summariesIncomplete", "events.readDetails", "events.histogramDetails",
+                    "events.summaryDetails", "events.readInterrupted", "events.readDeferredDetail",
+                    "events.summariesDeferred", "events.searchIndexDegraded", "events.searchCoverageDetail",
+                    "events.histogramCoverageDetail", "intelligence.packagesResultsNotice",
+                    "ui.V2IntelligenceWorkspace.package.freshness"]
+        for key in keys {
+            let expected = try #require(table[key], "Missing \(key) in \(locale)")
+            #expect(!expected.isEmpty)
+            #expect(bundle.localizedString(forKey: key, value: "__MISSING__", table: "Localizable") == expected,
+                    "Foundation lookup did not resolve \(locale):\(key)")
+        }
+    }
 
     /// Every source localization key must have an English catalog row.
     /// The companion Python gate checks all locale keys, printf arguments,
@@ -74,7 +105,7 @@ struct LocalizationCoverageTests {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     }
 
-    @Test("no new bare user-facing string literal anywhere in MacCrabApp")
+    @Test("no bare literal in the documented UI syntax subset")
     func sourcesAreLocalized() throws {
         let root = Self.packageRoot().appendingPathComponent("Sources/MacCrabApp")
         // Resolve symlinks on BOTH sides: #filePath can sit under /tmp on some

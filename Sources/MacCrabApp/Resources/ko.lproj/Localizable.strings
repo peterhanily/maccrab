@@ -1177,9 +1177,9 @@
 "alerts.confirmBulkSuppressTitle" = "이 경고를 억제할까요?";
 "alerts.confirmDeleteMessage" = "“%@”와 증거 스냅샷을 alerts.db에서 영구 삭제합니다. 취소할 수 없습니다.";
 "alerts.confirmDeleteTitle" = "이 경고를 영구 삭제할까요?";
-"alerts.daemonStaleDetail" = "알림 데이터가 불완전할 수 있습니다. 시스템 상태를 확인하세요.";
+"alerts.daemonStaleDetail" = "경고 데이터가 불완전할 수 있습니다. 시스템 상태를 확인하세요.";
 "alerts.daemonStaleTitle" = "보호 상태가 확인되지 않음";
-"alerts.emptyOpenBody" = "이 기간에 억제되지 않은 알림이 없습니다.";
+"alerts.emptyOpenBody" = "이 기간에 억제되지 않은 경고가 없습니다.";
 "alerts.emptyOpenTitle" = "미해결 경고가 없습니다";
 "alerts.readFailedBody" = "디스크의 경고 저장소를 읽지 못했습니다(%@). 이 목록이 안전함을 뜻하지는 않습니다.";
 "alerts.readFailedTitle" = "경고를 읽지 못했습니다";
@@ -1935,12 +1935,12 @@
 "scans.pluginUnavailable" = "검사가 시작되지 않았습니다. 설치된 플러그인의 메타데이터를 사용할 수 없습니다. 실행하기 전에 플러그인을 다시 검증하거나 재설치하세요.";
 
 /* Concise read status and health guidance. */
-"alerts.loading" = "알림을 불러오는 중…";
-"alerts.readPartial" = "알림 데이터가 불완전합니다.";
-"alerts.readDeferred" = "알림 데이터를 기다리는 중…";
-"alerts.readUnavailable" = "알림 데이터를 사용할 수 없습니다.";
-"alerts.readFailed" = "알림을 불러오지 못했습니다.";
-"alerts.cachedNotice" = "저장된 알림을 표시합니다. 새로 고침이 필요합니다.";
+"alerts.loading" = "경고를 불러오는 중…";
+"alerts.readPartial" = "경고 데이터가 불완전합니다.";
+"alerts.readDeferred" = "경고 데이터를 기다리는 중…";
+"alerts.readUnavailable" = "경고 데이터를 사용할 수 없습니다.";
+"alerts.readFailed" = "경고를 불러오지 못했습니다.";
+"alerts.cachedNotice" = "저장된 경고를 표시합니다. 새로 고침이 필요합니다.";
 "alerts.campaignsUnavailable" = "캠페인 데이터를 사용할 수 없음";
 "alerts.campaignsIncomplete" = "표시할 캠페인 데이터가 없습니다. 읽기가 완료되지 않았을 수 있습니다.";
 "alerts.loadingCampaigns" = "캠페인을 불러오는 중…";
@@ -1953,13 +1953,13 @@
 "events.cachedRefreshing" = "저장된 이벤트를 표시합니다. 새로 고치는 중…";
 "events.cachedIncomplete" = "저장된 이벤트를 표시합니다. 최신 데이터는 확인되지 않았습니다.";
 "system.dataSourceConnected" = "로컬 엔진 데이터를 읽는 중입니다. 보호 상태는 아래에 표시됩니다.";
-"system.otlpLifecycleSummary" = "에이전트 추적 입력 또는 처리가 저하되었습니다. 센서 상태는 별도로 확인하세요.";
+"system.otlpLifecycleSummary" = "Agent Trace 입력 또는 처리가 저하되었습니다. 센서 상태는 별도로 확인하세요.";
 "system.auditSummary" = "최근 권한 요청과 처리 결과입니다. 최신 항목이 마지막에 표시됩니다.";
 "system.alertEvidenceMeasurementTitle" = "증거 저장 공간을 측정하지 못함";
-"system.alertEvidenceCaptureTitle" = "알림 증거 수집 저하";
+"system.alertEvidenceCaptureTitle" = "경고 증거 수집 저하";
 "system.alertEvidenceReserveTitle" = "이전 증거 보관 중";
 "system.alertEvidenceMeasurementSummary" = "저장 공간 사용량을 확인하지 못했습니다. 증거 보관을 신뢰하기 전에 세부 정보를 확인하세요.";
-"system.alertEvidenceCaptureSummary" = "일부 알림 증거가 불완전할 수 있습니다. 아래의 수집 세부 정보를 확인하세요.";
+"system.alertEvidenceCaptureSummary" = "일부 경고 증거가 불완전할 수 있습니다. 아래의 수집 세부 정보를 확인하세요.";
 "system.alertEvidenceReserveSummary" = "이전 증거는 만료될 때까지 임시 저장 한도 내에서 보관됩니다.";
 "rave.install.verifyingCatalog" = "카탈로그를 확인하는 중…";
 "intelligence.packagesScanning" = "패키지 검사 중…";
@@ -1969,7 +1969,23 @@
 "intelligence.packagesNotScanned" = "아직 패키지를 검사하지 않음";
 "intelligence.packagesNotScannedDetail" = "패키지 최신 상태를 켠 다음 검사 실행을 선택하세요. 패키지 이름이 레지스트리로 전송됩니다.";
 "investigation.aiSummaryUnavailable" = "사용 가능한 AI 요약 없음";
-"investigation.aiSummaryGuidance" = "저장된 높음 또는 심각 알림의 참고용 요약이 여기에 표시됩니다. 설정에서 엔진의 AI 백엔드를 구성하세요.";
+"investigation.aiSummaryGuidance" = "저장된 높음 또는 심각 경고의 참고용 요약이 여기에 표시됩니다. 설정에서 엔진의 AI 백엔드를 구성하세요.";
 "intelligence.packagesScanningAction" = "검사 중…";
 "intelligence.packagesScanAction" = "검사 실행";
 "intelligence.packagesRescanAction" = "다시 검사";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "저장된 경고를 표시합니다. 새로 고치는 중…";
+"alerts.readDetails" = "경고 읽기 세부 정보";
+"alerts.campaignsEmpty" = "표시할 캠페인 행이 없습니다";
+"events.histogramIncomplete" = "히스토그램 범위가 불완전합니다. 누락된 구간은 0이 아니라 알 수 없는 상태입니다.";
+"events.summariesIncomplete" = "일별 요약 범위가 불완전합니다.";
+"events.readDetails" = "이벤트 읽기 세부 정보";
+"events.histogramDetails" = "히스토그램 세부 정보";
+"events.summaryDetails" = "일별 요약 세부 정보";
+"events.readInterrupted" = "이벤트 읽기가 중단되었습니다. 새로 고쳐 다시 시도하세요.";
+"events.readDeferredDetail" = "이벤트 읽기가 일시적으로 연기되었습니다. 다음 새로 고침 시 다시 시도합니다.";
+"events.summariesDeferred" = "일별 요약이 일시적으로 연기되었습니다.";
+"events.searchIndexDegraded" = "전체 텍스트 색인이 복구를 기다리고 있어 검색 결과가 불완전할 수 있습니다.";
+"events.searchCoverageDetail" = "검색이 부분적입니다. 보관된 이벤트 %lld개가 검색 대상 밖에 있으며 증거 누락이 %lld개 남아 있습니다. 일치 항목이 없다고 이벤트가 없다는 뜻은 아닙니다.";
+"events.histogramCoverageDetail" = "히스토그램은 보관이 확인된 %lld초 구간만 포함하며 증거 누락이 %lld개 있습니다. 누락된 구간은 0이 아니라 알 수 없는 상태입니다.";
+"intelligence.packagesResultsNotice" = "스캔 시도가 끝났습니다. 결과에는 반환된 패키지만 포함됩니다.";

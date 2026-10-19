@@ -1,10 +1,9 @@
 // ResponseActionCoverageTests.swift
 // Fills the gaps the pre-existing EngineTests ResponseEngineTests left
 // uncovered: blockNetwork, script, and escalateNotification. The
-// network path uses injected PF outcomes; script uses /bin/echo in a
-// temp dir. The notification action is verified at
-// the config-load layer so we don't pop real system notifications mid-
-// test run.
+// network path uses injected PF outcomes; script rejection uses owned temp
+// fixtures. Notification admission is recorded through an inert executor so
+// config routing is covered without popping real system notifications.
 
 import Testing
 import Foundation
@@ -244,9 +243,8 @@ struct ResponseActionCoverageTests {
         """
         try json.write(toFile: configPath, atomically: true, encoding: .utf8)
 
-        let engine = ResponseEngine(
-            quarantineDir: dir.appendingPathComponent("quarantine").path
-        )
+        let recorder = ResponseActionTestRecorder()
+        let engine = makeInertResponseEngine(recording: recorder)
         try await engine.loadConfig(from: configPath)
 
         // Drive with a .high alert — below the .critical threshold, so
@@ -257,6 +255,7 @@ struct ResponseActionCoverageTests {
 
         let log = await engine.getExecutionLog()
         #expect(log.isEmpty, "escalate is critical-only; .high alert should be skipped")
+        #expect(await recorder.invocations.isEmpty)
     }
 
     // MARK: - All action types are valid JSON values
@@ -307,12 +306,21 @@ struct ResponseActionCoverageTests {
         let json = #"{"defaults":[{"action":"escalateNotification","minimumSeverity":"low"}]}"#
         try json.write(toFile: configPath, atomically: true, encoding: .utf8)
 
-        let engine = ResponseEngine(quarantineDir: dir.appendingPathComponent("q").path)
+        let recorder = ResponseActionTestRecorder()
+        let engine = makeInertResponseEngine(recording: recorder)
         try await engine.loadConfig(from: configPath)   // must NOT throw
 
         // The action loaded + is active: a .high alert (≥ .low) fires it.
-        await engine.execute(alert: makeAlert(severity: .high), event: makeProcEvent())
+        let alert = makeAlert(severity: .high)
+        let event = makeProcEvent()
+        await engine.execute(alert: alert, event: event)
         let log = await engine.getExecutionLog()
-        #expect(!log.isEmpty, "an omitted-requireConfirmation action must load AND fire")
+        #expect(log.count == 1, "an omitted-requireConfirmation action must load AND fire")
+        #expect(log.first?.action == .escalateNotification)
+        #expect(log.first?.target == "fixture:escalateNotification")
+        #expect(log.first?.success == true)
+        #expect(await recorder.invocations == [.init(
+            action: .escalateNotification, eventID: event.id,
+            processID: event.process.pid, ruleID: alert.ruleId)])
     }
 }

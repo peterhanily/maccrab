@@ -621,6 +621,18 @@ struct DaemonConfig: Codable {
 
     // MARK: - Loading
 
+    /// Only account discovery and admin membership are injected. File reads,
+    /// descriptor ownership checks, newest-file selection and the allowlisted
+    /// merge remain the production path even in isolated fixture tests.
+    struct UserOverrideEnvironment {
+        let homes: () -> [RealUserHome]
+        let isAdmin: (UInt32) -> Bool
+
+        static var live: Self {
+            Self(homes: { RealUserHomeResolver.all() }, isAdmin: { DaemonTimers.isAdminUID($0) })
+        }
+    }
+
     /// Load config from a JSON file, falling back to defaults for missing keys.
     ///
     /// v1.6.14: after parsing the primary `daemon_config.json` from the
@@ -634,7 +646,10 @@ struct DaemonConfig: Codable {
     /// system config here. Overrides are clamped by the same floors
     /// (50 MB / 1 d) the daemon already applies, so a hostile local
     /// config can't evict telemetry.
-    static func load(from directory: String, applyOverrides: Bool = true) -> DaemonConfig {
+    static func load(
+        from directory: String, applyOverrides: Bool = true,
+        overrideEnvironment: UserOverrideEnvironment = .live
+    ) -> DaemonConfig {
         let path = directory + "/daemon_config.json"
         var config: DaemonConfig
         var fileObject: [String: Any] = [:]
@@ -671,7 +686,7 @@ struct DaemonConfig: Codable {
         // into tests that pass a temp `directory`; tests opt out with
         // applyOverrides:false.
         if applyOverrides {
-            applyUserOverrides(into: &config)
+            applyUserOverrides(into: &config, environment: overrideEnvironment)
         }
         config.normalizeRuntimeTunables()
         return config
@@ -948,7 +963,9 @@ struct DaemonConfig: Codable {
     /// `migrateLegacyStorageKeys` uses — alertsRetentionDays gets the legacy
     /// retentionDays, campaignsRetentionDays gets it too, eventsMaxSizeMB
     /// gets the legacy maxDatabaseSizeMB.
-    private static func applyUserOverrides(into config: inout DaemonConfig) {
+    private static func applyUserOverrides(
+        into config: inout DaemonConfig, environment: UserOverrideEnvironment
+    ) {
         struct Candidate {
             let path: String
             let data: Data
@@ -956,7 +973,7 @@ struct DaemonConfig: Codable {
         }
         var candidates: [Candidate] = []
 
-        for home in RealUserHomeResolver.all() {
+        for home in environment.homes() {
             let overridesPath = home.appending(
                 "Library/Application Support/MacCrab/user_overrides.json"
             )
@@ -970,7 +987,7 @@ struct DaemonConfig: Codable {
             // ResponseAction.findUserHomeActionsPath gate — only honor a
             // user-home overrides file owned by an ADMIN user, so a non-admin on
             // a shared / managed Mac can't weaken the operator's config.
-            guard DaemonTimers.isAdminUID(home.userID) else { continue }
+            guard environment.isAdmin(home.userID) else { continue }
             candidates.append(Candidate(
                 path: overridesPath,
                 data: snapshot.data,

@@ -11,6 +11,40 @@ spec.loader.exec_module(check)
 
 
 class LocalizationContracts(unittest.TestCase):
+    def test_literal_scan_reports_its_boundaries_not_complete_coverage(self):
+        self.assertFalse(check.LITERAL_SCAN_SCOPE['complete_ui_localization_audit'])
+        self.assertEqual(check.LITERAL_SCAN_SCOPE['checked'],
+                         ['Text', 'Button', 'ProgressView', 'lifecycleDegradedBanner', 'V2EmptyState'])
+        for boundary in ['Toggle', 'Picker', 'Menu', 'help/accessibility modifiers', 'dynamic values']:
+            self.assertIn(boundary, check.LITERAL_SCAN_SCOPE['not_checked'])
+
+    def test_changed_cross_references_and_product_terms_match_their_headings(self):
+        resources = Path(__file__).resolve().parents[1] / 'Sources/MacCrabApp/Resources'
+        for locale in ['ru', 'it', 'sv']:
+            table = check.parse_strings(resources / f'{locale}.lproj/Localizable.strings')
+            for key in ['system.dataSourceOffline', 'system.dataSourceMock']:
+                self.assertIn(table['system.actionsSection'], table[key], (locale, key))
+        for locale in ['ja', 'ko', 'zh-Hans', 'zh-Hant', 'nl', 'sv']:
+            table = check.parse_strings(resources / f'{locale}.lproj/Localizable.strings')
+            self.assertIn('Agent Trace', table['system.otlpLifecycleDegradedTitle'])
+            self.assertIn('Agent Trace', table['system.otlpLifecycleSummary'])
+        for locale in ['sv', 'zh-Hans']:
+            table = check.parse_strings(resources / f'{locale}.lproj/Localizable.strings')
+            self.assertIn(table['overview.qaSystemHealth'], table['alerts.daemonStaleDetail'])
+
+    def test_new_alert_copy_keeps_workspace_terminology(self):
+        resources = Path(__file__).resolve().parents[1] / 'Sources/MacCrabApp/Resources'
+        stems = {'de': 'Warn', 'nl': 'waarschuwing', 'ko': '경고', 'zh-Hant': '警示'}
+        obsolete = {'de': 'Warnmeld', 'nl': 'melding', 'ko': '알림', 'zh-Hant': '警報'}
+        keys = ['alerts.loading', 'alerts.readPartial', 'alerts.readDeferred',
+                'alerts.readUnavailable', 'alerts.readFailed', 'alerts.cachedNotice',
+                'alerts.cachedRefreshing', 'alerts.readDetails', 'alerts.emptyOpenBody']
+        for locale, term in stems.items():
+            table = check.parse_strings(resources / f'{locale}.lproj/Localizable.strings')
+            for key in keys:
+                self.assertIn(term.casefold(), table[key].casefold(), (locale, key))
+                self.assertNotIn(obsolete[locale].casefold(), table[key].casefold(), (locale, key))
+
     def test_reordered_arguments_keep_position_and_width(self):
         self.assertEqual(check.format_signature('%lld scanners · %@'), check.format_signature('%2$@ · %1$lld scanners'))
         self.assertNotEqual(check.format_signature('%lld'), check.format_signature('%d'))

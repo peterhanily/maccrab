@@ -138,6 +138,18 @@ public actor ResponseEngine {
     /// Serialized temporary blocks in the dedicated response-action anchor.
     private let temporaryNetworkBlocks: TemporaryNetworkBlocks
 
+    /// Internal fixture seam after every authorization/confirmation gate.
+    /// Public construction always uses live actions; policy tests can record
+    /// admission without addressing a guessed PID, PF, files or notifications.
+    typealias ActionExecutor = @Sendable (ResponseActionConfig, Alert, Event) async -> (target: String, success: Bool)
+    private let actionExecutor: ActionExecutor?
+
+    /// Public construction discovers real, admin-owned user policy. Internal
+    /// fixtures supply only their own snapshots so a concurrent/future-dated
+    /// operator configuration cannot replace a test's explicit actions file.
+    typealias UserConfigSnapshotProvider = @Sendable () -> BoundedRegularFileReader.Snapshot?
+    private let userConfigSnapshotProvider: UserConfigSnapshotProvider
+
     /// Optional AlertSink for emitting "pending operator confirmation"
     /// alerts when an action is gated by requireConfirmation. v1.6.21:
     /// the gating mechanism (v1.6.20) skipped + logged silently, leaving
@@ -148,6 +160,8 @@ public actor ResponseEngine {
     private var alertSinkForPending: AlertSink?
 
     public init(quarantineDir: String? = nil, supportDirectory: String? = nil) {
+        self.actionExecutor = nil
+        self.userConfigSnapshotProvider = { Self.findUserHomeActionsSnapshot() }
         let appSupport: String = {
             if let supportDirectory { return supportDirectory }
             if geteuid() == 0 { return "/Library/Application Support/MacCrab" }
@@ -173,9 +187,13 @@ public actor ResponseEngine {
 
     /// Internal dependency injection for response routing fixtures. Creating a
     /// fixture must not open the live PF control plane or the real support dir.
-    init(quarantineDir: String, temporaryNetworkBlocks: TemporaryNetworkBlocks) {
+    init(quarantineDir: String, temporaryNetworkBlocks: TemporaryNetworkBlocks,
+         actionExecutor: ActionExecutor? = nil,
+         userConfigSnapshotProvider: @escaping UserConfigSnapshotProvider = { nil }) {
         self.quarantineDir = quarantineDir
         self.temporaryNetworkBlocks = temporaryNetworkBlocks
+        self.actionExecutor = actionExecutor
+        self.userConfigSnapshotProvider = userConfigSnapshotProvider
     }
 
     /// Start owned background cleanup without blocking collector startup.
@@ -209,7 +227,7 @@ public actor ResponseEngine {
     /// fix, ResponseActionsView wrote to a path the daemon never read.
     public func loadConfig(from path: String) throws {
         let systemSnapshot = Self.configSnapshot(at: path)
-        let userSnapshot = Self.findUserHomeActionsSnapshot()
+        let userSnapshot = userConfigSnapshotProvider()
 
         let chosen: Data? = {
             switch (systemSnapshot, userSnapshot) {
@@ -407,6 +425,13 @@ public actor ResponseEngine {
                         logger.warning("Failed to emit pending-action alert: \(error.localizedDescription)")
                     }
                 }
+                continue
+            }
+
+            if let actionExecutor {
+                let result = await actionExecutor(config, alert, event)
+                appendExecutionAudit(ruleID: alert.ruleId, action: config.action,
+                                     target: result.target, success: result.success)
                 continue
             }
 

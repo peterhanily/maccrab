@@ -1973,3 +1973,19 @@
 "intelligence.packagesScanningAction" = "Analyse…";
 "intelligence.packagesScanAction" = "Lancer l’analyse";
 "intelligence.packagesRescanAction" = "Relancer l’analyse";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "Affichage des alertes enregistrées. Actualisation…";
+"alerts.readDetails" = "Détails de lecture des alertes";
+"alerts.campaignsEmpty" = "Aucune ligne de campagne disponible";
+"events.histogramIncomplete" = "La couverture de l’histogramme est incomplète. Les intervalles manquants sont inconnus, pas nuls.";
+"events.summariesIncomplete" = "La couverture des résumés quotidiens est incomplète.";
+"events.readDetails" = "Détails de lecture des événements";
+"events.histogramDetails" = "Détails de l’histogramme";
+"events.summaryDetails" = "Détails des résumés quotidiens";
+"events.readInterrupted" = "La lecture des événements a été interrompue. Actualisez pour réessayer.";
+"events.readDeferredDetail" = "La lecture des événements est temporairement différée. Elle sera retentée à la prochaine actualisation.";
+"events.summariesDeferred" = "Les résumés quotidiens sont temporairement différés.";
+"events.searchIndexDegraded" = "L’index plein texte doit être réparé ; les correspondances peuvent être incomplètes.";
+"events.searchCoverageDetail" = "La recherche est partielle : %lld événements conservés sont hors de la projection de recherche et %lld lacunes de preuve subsistent. L’absence de correspondance ne prouve pas l’absence d’événements.";
+"events.histogramCoverageDetail" = "L’histogramme couvre uniquement l’intervalle conservé vérifiable de %lld secondes et comporte %lld lacunes de preuve ; les intervalles manquants sont inconnus, pas nuls.";
+"intelligence.packagesResultsNotice" = "La tentative d’analyse est terminée. Les résultats ne couvrent que les paquets renvoyés.";

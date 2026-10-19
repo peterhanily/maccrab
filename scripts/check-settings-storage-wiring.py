@@ -2,7 +2,8 @@
 """Source-only Settings wiring guard; never reads preferences or installed data.
 
 This checks the explicit production edges, not successful engine application.
-Behavioral persistence/failure coverage remains in StorageSettingsEditTests.
+Behavioral persistence/failure coverage remains in StorageSettingsEditTests;
+StorageSettingsConsumerTests exercises saved bytes through the daemon reader.
 Comments and string contents cannot impersonate declarations or call sites.
 """
 from __future__ import annotations
@@ -72,6 +73,13 @@ class Source:
         # Patterns may include literal arguments, but must begin in real code.
         return [match for match in re.finditer(pattern, self.text, re.MULTILINE)
                 if self.code[match.start():match.start() + 1].strip()]
+
+    def entire(self, pattern: str) -> bool:
+        # Fail closed on extra executable statements, argument overrides,
+        # alternate returns and dead/unused decoy calls. Whitespace and comments
+        # are intentionally irrelevant; this is a narrow source-shape guard,
+        # not a Swift control-flow analyser or installed-application proof.
+        return re.fullmatch(r'\s*' + pattern + r'\s*', self.text, re.MULTILINE) is not None
 
     def block(self, declaration: str) -> "Source":
         starts = self.matches(declaration)
@@ -146,18 +154,33 @@ def check(sources: dict[str, str]) -> list[str]:
             require(config, rf'\bif\s+let\s+v\s*=\s*storage\["{field}"\]\s+as\?\s+Int\s*\{{\s*config\.storage\.{field}\s*=\s*v\s*\}}',
                     f"daemon override consumer missing for {field}")
 
-        require(binding, r'\bstorageSession\.binding\(\s*field\s*,\s*display\s*:\s*value\s*,',
-                'storageBinding must use the production session with the selected field/display')
-        require(session, r'\bSettingsStorageSession\(\s*preferences\s*:\s*\.standard\s*,\s*url\s*:\s*SettingsStorageEdits\.overridesURL\s*,',
-                'storage session must use production preferences and overrides path')
-        require(session, r'\bqueueReload\s*:\s*\{\s*V2DaemonControl\.reloadDetectionRules\(\s*\)\s*\}',
-                'storage session reload callback missing')
+        if not binding.entire(
+            r'(?:return\s+)?storageSession\.binding\(\s*field\s*,\s*display\s*:\s*value\s*,'
+            r'\s*displayedEnvelopeMiB\s*:\s*\{\s*eventsMaxSizeMB\s*\}\s*,'
+            r'\s*onSave\s*:\s*showStorageSaveResult\s*\)'
+        ):
+            errors.append('storageBinding must use the production session with the selected field/display')
+        if not session.entire(
+            r'(?:return\s+)?SettingsStorageSession\(\s*preferences\s*:\s*\.standard\s*,'
+            r'\s*url\s*:\s*SettingsStorageEdits\.overridesURL\s*,'
+            r'\s*queueReload\s*:\s*\{\s*V2DaemonControl\.reloadDetectionRules\(\s*\)\s*\}\s*\)'
+        ):
+            errors.append('storage session must return exactly the production constructor, with no persistence override and the real reload callback')
         require(session_binding, r'\bBinding\(\s*get\s*:\s*\{\s*display\.wrappedValue\s*\}\s*,\s*set\s*:\s*\{\s*value\s+in',
                 'storage session must save only from the explicit binding setter')
         require(session_binding, r'\btry\s+SettingsStorageEdits\.save\(\s*field\s*:\s*field\s*,\s*value\s*:\s*value\s*,',
                 'storage binding setter does not persist the selected edit')
         require(session_binding, r'\bpreferences\s*:\s*preferences\s*,\s*at\s*:\s*url\s*,\s*persist\s*:\s*persist\s*,\s*queueReload\s*:\s*queueReload',
                 'storage binding must forward persistence and reload dependencies')
+        if not session_binding.entire(
+            r'(?:return\s+)?Binding\(\s*get\s*:\s*\{\s*display\.wrappedValue\s*\}\s*,'
+            r'\s*set\s*:\s*\{\s*value\s+in\s+onSave\(\s*Result\s*\{'
+            r'\s*try\s+SettingsStorageEdits\.save\(\s*field\s*:\s*field\s*,'
+            r'\s*value\s*:\s*value\s*,\s*displayedEnvelopeMiB\s*:\s*displayedEnvelopeMiB\(\s*\)\s*,'
+            r'\s*preferences\s*:\s*preferences\s*,\s*at\s*:\s*url\s*,'
+            r'\s*persist\s*:\s*persist\s*,\s*queueReload\s*:\s*queueReload\s*\)\s*\}\s*\)\s*\}\s*\)'
+        ):
+            errors.append('storage binding must return the actual save-backed binding, without dead or alternate setters')
         require(session_type, r'\bvar\s+persist\s*:[^=]+?=\s*\{\s*try\s+\$0\.write\(\s*to\s*:\s*\$1\s*,\s*options\s*:\s*\.atomic\s*\)\s*\}',
                 'production storage session must default to atomic persistence')
         require(save, r'\btry\s+persist\(\s*data\s*,\s*url\s*\)', 'storage save has no durable write')

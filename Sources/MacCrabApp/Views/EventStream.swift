@@ -47,6 +47,53 @@ enum EventReadNotice: Equatable {
     }
 }
 
+/// Coverage belongs to the read that produced it. A truncated histogram does
+/// not invalidate a successful filtered table read, and must not hide a table
+/// failure. Both surfaces consume this model instead of choosing a warning by
+/// string precedence. Empty tables own their notice so it is announced once.
+struct EventCoveragePresentation: Equatable {
+    enum Source: Hashable { case events, histogram, summaries }
+    struct Warning: Identifiable, Equatable {
+        let source: Source
+        let detail: String
+        let phase: UIContentReadiness.Phase
+        var id: Source { source }
+        var headline: String {
+            switch source {
+            case .events: return EventReadNotice.warning(phase: phase).text
+            case .histogram:
+                return String(localized: "events.histogramIncomplete", defaultValue: "Histogram coverage is incomplete. Missing intervals are unknown, not zero.")
+            case .summaries:
+                return String(localized: "events.summariesIncomplete", defaultValue: "Daily summary coverage is incomplete.")
+            }
+        }
+        var detailsTitle: String {
+            switch source {
+            case .events: return String(localized: "events.readDetails", defaultValue: "Event read details")
+            case .histogram: return String(localized: "events.histogramDetails", defaultValue: "Histogram details")
+            case .summaries: return String(localized: "events.summaryDetails", defaultValue: "Daily summary details")
+            }
+        }
+    }
+    let tableWarning: Warning?
+    let bannerWarnings: [Warning]
+    let emptyNotice: EventReadNotice?
+
+    init(phase: UIContentReadiness.Phase, isAggregate: Bool, tableIsEmpty: Bool,
+         tableWarning: String?, histogramWarning: String?) {
+        self.tableWarning = tableWarning.map {
+            Warning(source: isAggregate ? .summaries : .events, detail: $0, phase: phase)
+        }
+        emptyNotice = EventReadNotice.resolve(phase: phase, hasWarning: tableWarning != nil)
+        var banners: [Warning] = []
+        if !tableIsEmpty, let warning = self.tableWarning { banners.append(warning) }
+        if !isAggregate, let histogramWarning {
+            banners.append(Warning(source: .histogram, detail: histogramWarning, phase: phase))
+        }
+        bannerWarnings = banners
+    }
+}
+
 enum TimeRange: String, CaseIterable {
     case lastHour = "Last Hour"
     case last24h = "Last 24 Hours"
@@ -318,8 +365,7 @@ struct EventStream: View {
     @ViewBuilder
     private var aggregateTable: some View {
         if presentedAggregates.isEmpty {
-            let notice = EventReadNotice.resolve(phase: contentReadinessForDisplay.phase,
-                                                hasWarning: querySession.eventAggregateCoverageWarning != nil)
+            let notice = coveragePresentation.emptyNotice
             VStack(spacing: 12) {
                 Spacer()
                 Image(systemName: "tray")
@@ -329,11 +375,12 @@ struct EventStream: View {
                 if notice == .loading {
                     ProgressView(EventReadNotice.loading.text)
                 } else {
-                    Text(notice?.text ?? String(localized: "events.noAggregates", defaultValue: "No daily summaries for this time range."))
+                    Text(coveragePresentation.tableWarning?.headline ?? notice?.text ?? String(localized: "events.noAggregates", defaultValue: "No daily summaries for this time range."))
                         .font(.headline)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal)
+                    if let warning = coveragePresentation.tableWarning { coverageDetails(warning) }
                     if notice?.canRetry == true {
                         Button(String(localized: "common.retry", defaultValue: "Retry")) { Task { await reloadEvents() } }
                     }
@@ -404,6 +451,23 @@ struct EventStream: View {
                 }
             }
         }
+    }
+
+    private var coveragePresentation: EventCoveragePresentation {
+        EventCoveragePresentation(
+            phase: contentReadinessForDisplay.phase,
+            isAggregate: isAggregateMode,
+            tableIsEmpty: isAggregateMode ? presentedAggregates.isEmpty : presentedEvents.isEmpty,
+            tableWarning: isAggregateMode ? querySession.eventAggregateCoverageWarning : querySession.eventSearchCoverageWarning,
+            histogramWarning: showHistogram ? querySession.eventHistogramCoverageWarning : nil)
+    }
+
+    private func coverageDetails(_ warning: EventCoveragePresentation.Warning) -> some View {
+        DisclosureGroup(warning.detailsTitle) {
+            Text(warning.detail).textSelection(.enabled)
+        }
+        .font(.caption)
+        .accessibilityIdentifier("events.coverage.\(warning.source).details")
     }
 
     /// Recompute the filtered+sorted cache. Called from .onAppear,
@@ -838,23 +902,18 @@ struct EventStream: View {
                 .background(Color.accentColor.opacity(0.08))
             }
 
-            if let warning = isAggregateMode
-                ? querySession.eventAggregateCoverageWarning
-                : (querySession.eventSearchCoverageWarning
-                    ?? (showHistogram
-                        ? querySession.eventHistogramCoverageWarning : nil)) {
+            ForEach(coveragePresentation.bannerWarnings) { warning in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .accessibilityHidden(true)
                         // Keep the consequence visible; only diagnostic detail
                         // is collapsed, never the incomplete-data warning.
-                        Text(EventReadNotice.warning(phase: contentReadinessForDisplay.phase).text)
+                        Text(warning.headline)
+                            .accessibilityLabel(warning.headline)
                         Spacer()
                     }
-                    DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
-                        Text(warning).textSelection(.enabled)
-                    }
+                    coverageDetails(warning)
                 }
                 .font(.caption).foregroundColor(.orange)
                 .padding(.horizontal)
@@ -879,8 +938,7 @@ struct EventStream: View {
             if isAggregateMode {
                 aggregateTable
             } else if presentedEvents.isEmpty {
-                let notice = EventReadNotice.resolve(phase: contentReadinessForDisplay.phase,
-                                                    hasWarning: querySession.eventSearchCoverageWarning != nil)
+                let notice = coveragePresentation.emptyNotice
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "list.bullet.rectangle")
@@ -893,6 +951,7 @@ struct EventStream: View {
                         Text(notice?.text ?? String(localized: "events.noMatch", defaultValue: "No events matching current filters"))
                             .font(.headline)
                             .foregroundColor(.secondary)
+                        if let warning = coveragePresentation.tableWarning { coverageDetails(warning) }
                         if notice?.canRetry == true {
                             Button(String(localized: "common.retry", defaultValue: "Retry")) { Task { await reloadEvents() } }
                         }

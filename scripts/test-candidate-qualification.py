@@ -1827,7 +1827,7 @@ class CandidateQualificationTests(unittest.TestCase):
     def test_historical_public_policy_rejects_unsupported_executor_inventory_without_changes(self) -> None:
         # This accepted historical measurement is not a current qualification:
         # it predates two required executors and must not be silently rebound.
-        path = ROOT / qualification.RESOURCE_BASELINE_PATH
+        path = ROOT / "scripts/fixtures/historical-two-executor-resource-policy.json"
         original = path.read_bytes()
         policy = json.loads(original)
         historical_paths = tuple(row["path"] for row in policy["workload"]["executors"])

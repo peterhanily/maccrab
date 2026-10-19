@@ -292,8 +292,11 @@ public struct V2IntelligenceWorkspace: View {
                         .onChange(of: enrichThreatIntel) { _ in pushEnrichment() }
                     Toggle("Vulnerability scan — osv.dev CVE lookups (sends your software inventory)", isOn: $enrichVulnScan)
                         .onChange(of: enrichVulnScan) { _ in pushEnrichment() }
-                    Toggle("Package freshness — npm/PyPI/Homebrew/crates (reveals package names)", isOn: $enrichPackageFreshness)
+                    Toggle(String(localized: "ui.V2IntelligenceWorkspace.package.freshness", defaultValue: "Package freshness"), isOn: $enrichPackageFreshness)
+                        .help(String(localized: "settings.enrich.packageFreshness", defaultValue: "Package freshness (npm / PyPI / Homebrew / crates)"))
                         .onChange(of: enrichPackageFreshness) { _ in pushEnrichment() }
+                    Text(String(localized: "settings.enrich.packageFreshnessDesc", defaultValue: "Check a package's age when you install one. The lookup reveals the package name you are installing."))
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                     Toggle("Certificate transparency — crt.sh lookups (reveals domains you visit)", isOn: $enrichCertTransparency)
                         .onChange(of: enrichCertTransparency) { _ in pushEnrichment() }
                 }
@@ -942,15 +945,12 @@ public struct V2IntelligenceWorkspace: View {
 
     private var scanStatusLine: String {
         if packageScanInProgress {
-            return "Querying registries… this can take 30-90 s on a fresh scan."
+            return String(localized: "intelligence.packagesScanningDetail", defaultValue: "Checking installed packages against npm, PyPI, Homebrew, and Cargo.")
         }
-        if !enrichPackageFreshness {
-            return "Enable “Package freshness” in the Threat Intel tab to query npm / PyPI / Homebrew / Cargo. A scan uploads installed-package names; off by default."
+        if !enrichPackageFreshness || packageLastScannedAt == nil {
+            return String(localized: "intelligence.packagesNotScannedDetail", defaultValue: "Enable Package freshness, then choose Run scan. Package names are sent to registries.")
         }
-        if let last = packageLastScannedAt {
-            return "Last scan completed \(V2TimeFormat.relative(last)). Click Re-scan to refresh."
-        }
-        return "No scan run yet. Click Run scan to query npm / PyPI / Homebrew / Cargo for installed packages."
+        return String(localized: "intelligence.packagesResultsNotice", defaultValue: "Scan attempt finished. Results cover returned packages only.")
     }
 
     /// Run a real package scan via PackageFreshnessChecker. Two
@@ -968,8 +968,8 @@ public struct V2IntelligenceWorkspace: View {
         guard enrichPackageFreshness else {
             state.showToast(V2Toast(
                 kind: .warning,
-                title: "Package freshness is off",
-                detail: "Enable “Package freshness” in the Threat Intel tab to query registries."))
+                title: String(localized: "ui.V2IntelligenceWorkspace.package.freshness", defaultValue: "Package freshness"),
+                detail: String(localized: "intelligence.packagesNotScannedDetail", defaultValue: "Enable Package freshness, then choose Run scan. Package names are sent to registries.")))
             return
         }
         await MainActor.run { self.packageScanInProgress = true }
@@ -1022,9 +1022,15 @@ public struct V2IntelligenceWorkspace: View {
             self.packageScanInProgress = false
             self.packageLastScannedAt = Date()
             state.showToast(V2Toast(
-                kind: .success,
-                title: "Package scan complete",
-                detail: "\(mapped.count) packages inspected"
+                // The scanner returns rows, not completeness/error provenance.
+                // A finished task is not evidence of successful full coverage.
+                kind: mapped.isEmpty ? .warning : .info,
+                title: mapped.isEmpty
+                    ? String(localized: "intelligence.packagesEmpty", defaultValue: "No package data returned")
+                    : String(localized: "ui.V2IntelligenceWorkspace.package.freshness", defaultValue: "Package freshness"),
+                detail: mapped.isEmpty
+                    ? String(localized: "intelligence.packagesEmptyDetail", defaultValue: "This scan returned no package data. Coverage may be incomplete.")
+                    : String(localized: "intelligence.packagesResultsNotice", defaultValue: "Scan attempt finished. Results cover returned packages only.")
             ))
         }
     }

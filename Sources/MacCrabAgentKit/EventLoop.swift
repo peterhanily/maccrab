@@ -5,6 +5,28 @@ import os.log
 /// The main event processing loop. Processes each event through
 /// enrichment, AI guard, detection layers, and alert output.
 enum EventLoop {
+    /// Shared first-pass/deferred UEBA dispatch. Deferred callers invoke this
+    /// only after the terminal evidence revision settles, never on a pending
+    /// name, a timeout, or each incremental patch.
+    static func observeUserBehavior(event: Event, state: DaemonState) async {
+        guard let ueba = state.uebaEngine, event.eventCategory == .process,
+              !event.process.userName.isEmpty else { return }
+        let anomalies = await ueba.observe(event: event)
+        for anomaly in anomalies {
+            let alert = Alert(
+                ruleId: anomaly.alertRuleId, ruleTitle: anomaly.alertTitle,
+                severity: anomaly.severity, eventId: event.id.uuidString,
+                processPath: event.process.executable, processName: event.process.name,
+                description: anomaly.detail, mitreTactics: anomaly.mitreTactics,
+                mitreTechniques: anomaly.mitreTechniques)
+            do {
+                if try await state.alertSink.submit(alert: alert, event: event) {
+                    await state.notifier.notify(alert: alert)
+                }
+            } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+        }
+    }
+
     /// v1.17: shared formatter for threat-intel IOC-match alerts.
     /// Builds a human description plus a machine-parseable remediation
     /// hint (type=/source=/family= prefixes) from the matched IOCRecord.
@@ -1401,27 +1423,8 @@ enum EventLoop {
             // DaemonConfig.uebaEnabled) short-circuits before any actor hop.
             // observe() itself self-filters to exec/fork process events; the
             // category guard here just avoids the hop on the file firehose.
-            if let ueba = state.uebaEngine,
-               enrichedEvent.eventCategory == .process {
-                let anomalies = await ueba.observe(event: enrichedEvent)
-                for anomaly in anomalies {
-                    let alert = Alert(
-                        ruleId: anomaly.alertRuleId,
-                        ruleTitle: anomaly.alertTitle,
-                        severity: anomaly.severity,
-                        eventId: enrichedEvent.id.uuidString,
-                        processPath: enrichedEvent.process.executable,
-                        processName: enrichedEvent.process.name,
-                        description: anomaly.detail,
-                        mitreTactics: anomaly.mitreTactics,
-                        mitreTechniques: anomaly.mitreTechniques
-                    )
-                    do {
-                        if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                            await state.notifier.notify(alert: alert)
-                        }
-                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                }
+            if state.uebaEngine != nil, enrichedEvent.eventCategory == .process {
+                await observeUserBehavior(event: enrichedEvent, state: state)
             }
 
             // === Notarization check for executed binaries ===

@@ -13,7 +13,7 @@ public actor DNSSinkhole {
     /// Marker comment in /etc/hosts to identify MacCrab-managed entries
     private static let marker = "# MacCrab DNS Sinkhole — DO NOT EDIT BELOW THIS LINE"
     private static let endMarker = "# MacCrab DNS Sinkhole — END"
-    private let hostsPath = "/etc/hosts"
+    private let hostsPath: String
 
     private var sinkholdDomains: Set<String> = []
     private var isEnabled: Bool = false
@@ -29,7 +29,11 @@ public actor DNSSinkhole {
     /// explicit `enable(...)` (operator re-enable, or boot population) clears it.
     private var operatorDisabled: Bool = false
 
-    public init() {}
+    public init() { hostsPath = "/etc/hosts" }
+
+    /// Exercise the real filter/write path only against an owned fixture.
+    /// The shipping initializer's destination remains fixed at /etc/hosts.
+    init(hostsPath: String) { self.hostsPath = hostsPath }
 
     /// Enable the sinkhole with initial domains from threat intel.
     /// Protected domains (apple.com, github.com, our own appcast, etc.) and

@@ -34,6 +34,9 @@ enum V2AlertReadNotice: Equatable {
     case loading, partial, deferred, unavailable, failed
 
     static func resolve(phase: UIContentReadiness.Phase, hasSnapshot: Bool, hasError: Bool) -> Self? {
+        // A failed attempt may remain in the model while Retry is running.
+        // Loading is current state, not evidence that the old error vanished.
+        if isRefreshing(phase) { return hasSnapshot ? nil : .loading }
         guard !hasSnapshot, !hasError else { return nil }
         switch phase {
         case .loadedEmpty, .loadedNonempty: return nil
@@ -43,6 +46,15 @@ enum V2AlertReadNotice: Equatable {
         case .unavailable: return .unavailable
         case .failed: return .failed
         }
+    }
+
+    static func isRefreshing(_ phase: UIContentReadiness.Phase) -> Bool {
+        phase == .loading || phase == .refreshingCached
+    }
+
+    static func cachedNoticeIndex(phase: UIContentReadiness.Phase, hasSnapshot: Bool, isFresh: Bool) -> Int? {
+        guard hasSnapshot, !isFresh else { return nil }
+        return isRefreshing(phase) ? 1 : 0
     }
 
     var text: String {
@@ -212,6 +224,8 @@ struct V2AlertsWorkspace: View {
 
     private func listReadStatus(readiness: UIContentReadiness) -> some View {
         let cachedNotice = Text(String(localized: "alerts.cachedNotice", defaultValue: "Showing saved alerts. Refresh needed."))
+        let refreshingNotice = Text(String(localized: "alerts.cachedRefreshing", defaultValue: "Showing saved alerts. Refreshing…"))
+        let isRefreshing = V2AlertReadNotice.isRefreshing(readiness.phase)
         let notice = V2AlertReadNotice.resolve(
             phase: readiness.phase,
             hasSnapshot: presentation.hasSnapshot(for: presentationContext),
@@ -232,16 +246,17 @@ struct V2AlertsWorkspace: View {
                 }
             }
             StableNoticeText(
-                reservedMessages: [cachedNotice],
-                visibleIndex: presentation.hasSnapshot(for: presentationContext)
-                    && !presentation.isFresh(for: presentationContext) ? 0 : nil
+                reservedMessages: [cachedNotice, refreshingNotice],
+                visibleIndex: V2AlertReadNotice.cachedNoticeIndex(
+                    phase: readiness.phase, hasSnapshot: presentation.hasSnapshot(for: presentationContext),
+                    isFresh: presentation.isFresh(for: presentationContext))
             )
             .font(V2Theme.meta()).foregroundStyle(V2Theme.warning)
-            if let error = presentation.error(for: presentationContext) {
+            if let error = presentation.error(for: presentationContext), !isRefreshing {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(V2AlertReadNotice.failed.text)
-                        DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                        DisclosureGroup(String(localized: "alerts.readDetails", defaultValue: "Alert read details")) {
                             Text(error).textSelection(.enabled)
                         }
                     }
@@ -1690,13 +1705,12 @@ struct V2AlertsWorkspace: View {
                     }
                 } else if auxiliaryContext == loadContext && auxiliaryLoaded {
                     V2EmptyState(
-                        title: String(localized: "alerts.campaignsUnavailable", defaultValue: "Campaign data unavailable"),
+                        title: String(localized: "alerts.campaignsEmpty", defaultValue: "No campaign rows available"),
                         body: String(localized: "alerts.campaignsIncomplete", defaultValue: "No campaign data to display. The read may be incomplete."),
                         icon: "flame"
                     )
                     .frame(minHeight: 280)
                     .v2Panel()
-                    Button(String(localized: "common.retry", defaultValue: "Retry")) { Task { await reload() } }
                 } else {
                     Text(String(localized: "alerts.loadingCampaigns", defaultValue: "Loading campaigns…"))
                         .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)

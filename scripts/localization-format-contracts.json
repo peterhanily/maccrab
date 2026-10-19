@@ -1,6 +1,14 @@
 {
   "format_version": 1,
   "contracts": {
+    "events.searchCoverageDetail": [
+      {"expression": "snapshot.projectionOmitted", "type": "lld"},
+      {"expression": "snapshot.gaps.total", "type": "lld"}
+    ],
+    "events.histogramCoverageDetail": [
+      {"expression": "seconds", "type": "lld"},
+      {"expression": "snapshot.gaps.total", "type": "lld"}
+    ],
     "agentTraces.statusRunning": [
       {
         "expression": "Int(status.port)",

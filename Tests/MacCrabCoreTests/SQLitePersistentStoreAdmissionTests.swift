@@ -1033,13 +1033,44 @@ struct SQLitePersistentStoreAdmissionTests {
         let graph = try repositoryText(
             "Sources/MacCrabCore/Storage/SQLiteCausalGraphStore.swift"
         )
-        #expect(graph.contains("private func checkpointHeadroomAdmitted()"))
-        #expect(graph.contains(
-            "guard let db, checkpointHeadroomAdmitted() else"
-        ))
-        #expect(occurrences(of: "sqlite3_wal_checkpoint_v2", in: graph) == 1,
+        let hasGraphHeadroomHelper = graph.range(
+            of: #"private\s+func\s+checkpointHeadroomAdmitted\s*\("#,
+            options: .regularExpression
+        ) != nil
+        #expect(hasGraphHeadroomHelper)
+        // The handle and headroom guards are intentionally separate so that
+        // unavailable handles and admission deferrals have distinct telemetry.
+        // This is a source drift guard, not the behavioral proof: the telemetry
+        // suite separately exercises denied admission for all three modes.
+        let observationStart = graph.range(
+            of: #"private\s+func\s+checkpointObservation\s*\("#,
+            options: .regularExpression
+        )
+        let start = try #require(observationStart)
+        let maintenanceStart = graph.range(
+            of: #"private\s+func\s+checkpointAllowsMaintenance\s*\("#,
+            options: .regularExpression,
+            range: start.upperBound..<graph.endIndex
+        )
+        let end = try #require(maintenanceStart)
+        let checkpointBody = String(graph[start.lowerBound..<end.lowerBound])
+        let refusingHeadroomGuard = checkpointBody.range(
+            of: #"(?s)guard\s+checkpointHeadroomAdmitted\s*\(\s*\)\s+else\s*\{[^}]*\breturn\s+CheckpointObservation\s*\(\s*completed\s*:\s*false\b[^}]*\}"#,
+            options: .regularExpression
+        )
+        let refusal = try #require(refusingHeadroomGuard)
+        let checkpointCall = checkpointBody.range(
+            of: #"\bsqlite3_wal_checkpoint_v2\s*\("#,
+            options: .regularExpression
+        )
+        let call = try #require(checkpointCall)
+        #expect(refusal.upperBound < call.lowerBound,
+                "headroom refusal must return before SQLite can checkpoint")
+        let graphCheckpointCalls = occurrences(of: "sqlite3_wal_checkpoint_v2", in: graph)
+        #expect(graphCheckpointCalls == 1,
                 "TraceGraph checkpoints must stay centralized behind one fresh gate")
-        #expect(!graph.contains("PRAGMA wal_checkpoint"))
+        let hasUngatedGraphCheckpoint = graph.contains("PRAGMA wal_checkpoint")
+        #expect(!hasUngatedGraphCheckpoint)
 
         let allSwift = try sourceSwiftFiles()
         for (path, source) in allSwift {

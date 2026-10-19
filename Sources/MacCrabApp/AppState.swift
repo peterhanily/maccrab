@@ -2795,11 +2795,8 @@ final class AppState: ObservableObject, EventQueryReading {
                 raw = snapshot.events
                 if !snapshot.isComplete {
                     warning = (snapshot.searchIndexDegraded
-                        ? "The full-text index awaits repair; text matches may be incomplete. " : "")
-                        + "Search is partial: \(snapshot.projectionOmitted) "
-                        + "retained events are outside the search projection "
-                        + "and \(snapshot.gaps.total) evidence gaps remain. "
-                        + "No match is not proof of absence."
+                        ? String(localized: "events.searchIndexDegraded", defaultValue: "The full-text index awaits repair; text matches may be incomplete.") + "\n" : "")
+                        + String(localized: "events.searchCoverageDetail", defaultValue: "Search is partial: \(snapshot.projectionOmitted) retained events are outside the search projection and \(snapshot.gaps.total) evidence gaps remain. No match is not proof of absence.")
                 }
             } else {
                 // Apply the upper boundary before LIMIT, so newer events cannot
@@ -3601,7 +3598,7 @@ final class AppState: ObservableObject, EventQueryReading {
             guard generation == storeGeneration, !Task.isCancelled else { return [] }
             eventHistogramEffectiveSince = nil
             eventHistogramEffectiveUntil = nil
-            eventHistogramCoverageWarning = "Histogram evidence could not be read completely: " + error.localizedDescription
+            eventHistogramCoverageWarning = String(localized: "events.histogramIncomplete", defaultValue: "Histogram coverage is incomplete. Missing intervals are unknown, not zero.") + "\n" + error.localizedDescription
             return []
         }
     }
@@ -3625,8 +3622,7 @@ final class AppState: ObservableObject, EventQueryReading {
             var warning: String?
             if !snapshot.isComplete {
                 let seconds = max(0, Int(snapshot.effectiveUntil.timeIntervalSince(snapshot.effectiveSince)))
-                warning = "Histogram covers only the provable retained \(seconds)-second interval and has "
-                    + "\(snapshot.gaps.total) evidence gaps; missing bins are unknown, not zero."
+                warning = String(localized: "events.histogramCoverageDetail", defaultValue: "Histogram covers only the provable retained \(seconds)-second interval and has \(snapshot.gaps.total) evidence gaps; missing bins are unknown, not zero.")
             }
             return .init(bins: snapshot.bins.map { ($0.start, $0.count) }, effectiveSince: snapshot.effectiveSince,
                          effectiveUntil: snapshot.effectiveUntil, coverageWarning: warning)

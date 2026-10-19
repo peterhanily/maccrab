@@ -19,7 +19,15 @@ public actor PanicButton {
         public let actions: [String]
     }
 
-    public init() {}
+    /// Internal fixture seam for removal only. No fixture can accidentally
+    /// reach the live PF anchor when exercising the deactivation state path.
+    private let removeEmergencyFirewall: (@Sendable () -> Bool)?
+
+    public init() { removeEmergencyFirewall = nil }
+
+    init(removeEmergencyFirewall: @escaping @Sendable () -> Bool) {
+        self.removeEmergencyFirewall = removeEmergencyFirewall
+    }
 
     /// Execute emergency containment.
     ///
@@ -81,12 +89,18 @@ public actor PanicButton {
         var actions: [String] = []
 
         // Remove emergency firewall rules
-        if BoundedPrivilegedProcessRunner.run(
-            executable: "/sbin/pfctl",
-            arguments: ["-a", "com.maccrab.emergency", "-F", "all"],
-            timeout: 10,
-            maximumOutputBytes: nil
-        ) != nil {
+        let removalLaunched: Bool
+        if let removeEmergencyFirewall {
+            removalLaunched = removeEmergencyFirewall()
+        } else {
+            removalLaunched = BoundedPrivilegedProcessRunner.run(
+                executable: "/sbin/pfctl",
+                arguments: ["-a", "com.maccrab.emergency", "-F", "all"],
+                timeout: 10,
+                maximumOutputBytes: nil
+            ) != nil
+        }
+        if removalLaunched {
             actions.append("Emergency firewall rules removed")
         } else {
             logger.error("Failed to remove emergency firewall rules: trusted pfctl could not be launched")

@@ -6,6 +6,7 @@ No installed app, preferences, or user stores are opened by these tests.
 """
 import importlib.util
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,6 +81,33 @@ class HealthCopyContracts(unittest.TestCase):
         self.assertIn('Select a row for permissions and risk factors.', browser)
         self.assertIn('Servers launched from temporary folders are flagged; select a row for details.', mcp)
         self.assertIn('browserInventoryCoverageWarning(coverage)', browser)
+
+    def test_unproven_empty_campaign_read_is_not_a_failed_read(self):
+        source = source_guard.Source((ROOT / 'Sources/MacCrabApp/V2/Workspaces/V2AlertsWorkspace.swift').read_text())
+        body = source.block(r'\bvar\s+campaignsTab\b')
+        self.assertIn('alerts.campaignsEmpty', body.text)
+        self.assertIn('alerts.campaignsIncomplete', body.text)
+        self.assertNotIn('alerts.campaignsUnavailable', body.text)
+        self.assertNotIn('common.retry', body.text)
+        self.assertIn('auxiliaryContext == loadContext && auxiliaryLoaded', body.code)
+
+    def test_package_completion_does_not_claim_complete_coverage_or_success(self):
+        source = source_guard.Source((ROOT / 'Sources/MacCrabApp/V2/Workspaces/V2IntelligenceWorkspace.swift').read_text())
+        scan = source.block(r'\bfunc\s+runPackageScan\b')
+        self.assertRegex(scan.code, r'kind:\s*mapped\.isEmpty\s*\?\s*\.warning\s*:\s*\.info')
+        self.assertNotIn('kind: .success', scan.code)
+        for key in ['intelligence.packagesEmpty', 'intelligence.packagesEmptyDetail', 'intelligence.packagesResultsNotice']:
+            self.assertIn(key, scan.text)
+        self.assertIn('guard enrichPackageFreshness else', scan.code)
+        self.assertRegex(source.text, r'Toggle\(String\(localized:\s*"ui\.V2IntelligenceWorkspace\.package\.freshness"')
+
+    def test_data_source_is_not_a_green_protection_verdict_and_disclosures_are_distinct(self):
+        body = self.body('dataSourceCard', function=False)
+        self.assertNotIn('.healthy', body.code)
+        self.assertRegex(body.code, r'kind:\s*state\.provider\.lastErrorDescription\s*==\s*nil\s*\?\s*\.info\s*:\s*\.warning')
+        for path in ['V2/Workspaces/V2SystemWorkspace.swift', 'V2/Workspaces/V2AlertsWorkspace.swift', 'Views/EventStream.swift']:
+            source = (ROOT / 'Sources/MacCrabApp' / path).read_text()
+            self.assertNotRegex(source, r'DisclosureGroup\(String\(localized:\s*"inspector\.details",\s*defaultValue:\s*"Details"\)\)')
 
 
 if __name__ == '__main__':

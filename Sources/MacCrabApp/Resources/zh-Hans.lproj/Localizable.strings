@@ -1179,7 +1179,7 @@
 "alerts.confirmBulkSuppressTitle" = "抑制这些警报？";
 "alerts.confirmDeleteMessage" = "“%@”及其证据快照将从 alerts.db 中永久移除。此操作无法撤销。";
 "alerts.confirmDeleteTitle" = "永久删除此警报？";
-"alerts.daemonStaleDetail" = "警报数据可能不完整。请检查系统健康状况。";
+"alerts.daemonStaleDetail" = "警报数据可能不完整。请检查系统运行状况。";
 "alerts.daemonStaleTitle" = "防护状态尚未确认";
 "alerts.emptyOpenBody" = "此时间范围内没有未被抑制的警报。";
 "alerts.emptyOpenTitle" = "无未解决警报";
@@ -1953,7 +1953,7 @@
 "events.cachedRefreshing" = "正在显示已保存的事件。正在刷新…";
 "events.cachedIncomplete" = "正在显示已保存的事件。最新数据尚未确认。";
 "system.dataSourceConnected" = "正在读取本地引擎数据。防护状态显示在下方。";
-"system.otlpLifecycleSummary" = "代理跟踪的输入或处理性能下降。请单独检查传感器健康状况。";
+"system.otlpLifecycleSummary" = "Agent Trace的输入或处理性能下降。请单独检查传感器健康状况。";
 "system.auditSummary" = "最近的特权请求及其结果，最新请求在最后。";
 "system.alertEvidenceMeasurementTitle" = "无法测量证据存储用量";
 "system.alertEvidenceCaptureTitle" = "警报证据采集受限";
@@ -1973,3 +1973,19 @@
 "intelligence.packagesScanningAction" = "正在扫描…";
 "intelligence.packagesScanAction" = "运行扫描";
 "intelligence.packagesRescanAction" = "重新扫描";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "正在显示已保存的警报。正在刷新…";
+"alerts.readDetails" = "警报读取详情";
+"alerts.campaignsEmpty" = "没有可用的活动行";
+"events.histogramIncomplete" = "直方图覆盖不完整。缺失区间表示未知，而不是零。";
+"events.summariesIncomplete" = "每日摘要覆盖不完整。";
+"events.readDetails" = "事件读取详情";
+"events.histogramDetails" = "直方图详情";
+"events.summaryDetails" = "每日摘要详情";
+"events.readInterrupted" = "事件读取已中断。请刷新以重试。";
+"events.readDeferredDetail" = "事件读取已暂缓，将在下次刷新时重试。";
+"events.summariesDeferred" = "每日摘要已暂缓。";
+"events.searchIndexDegraded" = "全文索引等待修复，文本匹配结果可能不完整。";
+"events.searchCoverageDetail" = "搜索不完整：%lld 个保留事件不在搜索投影中，且仍有 %lld 处证据缺口。没有匹配并不能证明不存在。";
+"events.histogramCoverageDetail" = "直方图仅覆盖可验证保留的 %lld 秒区间，且有 %lld 处证据缺口；缺失区间表示未知，而不是零。";
+"intelligence.packagesResultsNotice" = "扫描尝试已结束。结果仅覆盖返回的软件包。";

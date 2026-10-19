@@ -113,6 +113,23 @@ make_ci_fixture() {
     cp "$PROJECT_DIR/.githooks/pre-push" "$fixture/.githooks/pre-push"
     cp "$SCRIPT_DIR/ci-local.sh" "$fixture/scripts/ci-local.sh"
     cp "$SCRIPT_DIR/run-ci-phase.py" "$fixture/scripts/run-ci-phase.py"
+    # Only source identity is synthetic in these non-Git lifecycle fixtures.
+    # Keep the real process deadline/artifact binding implementation. Real-Git
+    # identities and drift refusal are exercised by test-ci-phase.py.
+    /usr/bin/python3 - "$fixture/scripts/run-ci-phase.py" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+needle = "def source_identity(directory):\n"
+assert source.count(needle) == 1
+fixture_identity = '''    return {"root": str(Path(directory).resolve()),
+            "commit": "a" * 40, "tree": "b" * 40, "clean": True,
+            "status_sha256": "c" * 64, "index_sha256": "d" * 64,
+            "worktree_sha256": "e" * 64, "file_count": 1,
+            "hidden_index_entries": 0}
+'''
+path.write_text(source.replace(needle, needle + fixture_identity))
+PY
 
     # The artifact lifecycle fixtures do not need a real repository, but the
     # release hook must still see a coherent, stateful object graph: one
@@ -132,6 +149,7 @@ make_ci_fixture() {
         '        printf "%s\n" "${MACCRAB_TEST_TAG_TYPE:-tag}" ;;' \
         '    rev-parse)' \
         '        case "${2:-}" in' \
+        '            --show-toplevel) printf "%s\n" "$PWD" ;;' \
         '            HEAD) printf "%s\n" "$head_commit" ;;' \
         '            *:*) printf "%s\n" "$hook_blob" ;;' \
         '            *\^\{tree\}) printf "%s\n" "$source_tree" ;;' \
@@ -148,6 +166,7 @@ make_ci_fixture() {
     # Production pins Git and PATH. Only this disposable fixture redirects the
     # copied constants to its stateful shims.
     /usr/bin/sed -i '' \
+        -e "s#/usr/bin/git rev-parse --show-toplevel#${fixture}/fake-bin/git rev-parse --show-toplevel#" \
         -e "s#GIT_BIN=/usr/bin/git#GIT_BIN=${fixture}/fake-bin/git#" \
         -e "s#PATH=/usr/bin:/bin:/usr/sbin:/sbin#PATH=${fixture}/fake-bin:/usr/bin:/bin:/usr/sbin:/sbin#" \
         "$fixture/.githooks/pre-push" "$fixture/scripts/ci-local.sh"
@@ -161,6 +180,8 @@ make_ci_fixture() {
         '# ci-local.sh parses this summary to enforce the README tests badge, so the' \
         '# stub must emit the real shape rather than nothing.' \
         'case "$*" in' \
+        '    "build --show-bin-path") printf "%s/.build/fixture/debug\n" "$PWD" ;;' \
+        '    "build --build-tests") mkdir -p .build/fixture/debug/MacCrabPackageTests.xctest/Contents/MacOS; printf "fixture test executable\n" > .build/fixture/debug/MacCrabPackageTests.xctest/Contents/MacOS/MacCrabPackageTests ;;' \
         '    test*) printf "➜ Test \"optional fixture\" skipped.\nTest run with 2 tests in 1 suites passed after 0.001 seconds.\n" ;;' \
         'esac' \
         'exit 0'
@@ -248,6 +269,11 @@ make_ci_fixture() {
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-swift-toolchain.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/check-localizations.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-localizations.py"
+    # These source gates have their own tests; this fixture exercises only the
+    # release-artifact lifecycle and must materialize every invoked gate.
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-settings-storage-wiring.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-ui-clarity.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-red-team-preflight.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-localizations.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-localizations-foundation.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-compress-staged-icon.py"
@@ -363,8 +389,36 @@ assert_artifact "$ci_ok" "MacCrab-v9.9.9-rc.1.dmg" "$rc_sha"
     || fail "--clean preserved a stale non-release build object"
 grep -q '^package resolve$' "$ci_ok/swift.log" \
     || fail "tag hook did not perform a fresh dependency resolve"
+for expected_swift in 'build' 'build --build-tests' 'test --skip-build --no-parallel'; do
+    grep -q "^${expected_swift}$" "$ci_ok/swift.log" \
+        || fail "successful tag hook omitted swift $expected_swift"
+done
+grep -q 'ALL CHECKS PASSED' "$ci_ok/output.log" \
+    || fail "tag hook exited zero without terminal CI success"
 if find "$ci_ok" -maxdepth 1 -name '.maccrab-ci-release.*' | grep -q .; then
     fail "successful clean CI left a staged release artifact behind"
+fi
+
+# Bash 3.2 can deliver zero to an EXIT trap after an expansion error inside an
+# if. Independently exercise that zero-status early-exit contract: restoration
+# must preserve the DMG without laundering an unfinished gate into success.
+ci_early_exit="$TEST_ROOT/ci-early-zero-exit"
+make_ci_fixture "$ci_early_exit"
+mkdir -p "$ci_early_exit/.build"
+printf 'signed-notarized-stapled-early-exit\n' > "$ci_early_exit/.build/MacCrab-v9.9.8.dmg"
+early_exit_sha=$(shasum -a 256 "$ci_early_exit/.build/MacCrab-v9.9.8.dmg" | awk '{print $1}')
+/usr/bin/sed -i '' 's/check "Swift build (debug)" swift build/exit 0 # fixture: interrupted before first check/' \
+    "$ci_early_exit/scripts/ci-local.sh"
+set +e
+invoke_tag_hook "$ci_early_exit" v9.9.8 > "$ci_early_exit/output.log" 2>&1
+early_exit_status=$?
+set -e
+[ "$early_exit_status" -ne 0 ] || fail "clean CI accepted an early zero-status exit"
+grep -q 'clean CI exited before all checks completed' "$ci_early_exit/output.log" \
+    || fail "early clean CI exit was not diagnosed"
+assert_artifact "$ci_early_exit" "MacCrab-v9.9.8.dmg" "$early_exit_sha"
+if grep -q 'ALL CHECKS PASSED' "$ci_early_exit/output.log"; then
+    fail "early clean CI exit printed terminal success"
 fi
 
 # Failure-path probe: set -e used to make cleanup easy to get wrong. Force the
@@ -632,7 +686,7 @@ if [ -s "$ci_branch/swift.log" ] && grep -q '^package resolve$' "$ci_branch/swif
 fi
 [ -f "$ci_branch/.build/warm-build-object.o" ] \
     || fail "ordinary branch push unexpectedly wiped the warm build tree"
-for expected_swift in 'build' 'build --build-tests' 'test --no-parallel'; do
+for expected_swift in 'build' 'build --build-tests' 'test --skip-build --no-parallel'; do
     grep -q "^${expected_swift}$" "$ci_branch/swift.log" \
         || fail "ordinary branch hook did not run swift $expected_swift"
 done

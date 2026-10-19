@@ -1973,3 +1973,19 @@
 "intelligence.packagesScanningAction" = "Analizando…";
 "intelligence.packagesScanAction" = "Ejecutar análisis";
 "intelligence.packagesRescanAction" = "Volver a analizar";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "Se muestran las alertas guardadas. Actualizando…";
+"alerts.readDetails" = "Detalles de lectura de alertas";
+"alerts.campaignsEmpty" = "No hay filas de campañas disponibles";
+"events.histogramIncomplete" = "La cobertura del histograma es incompleta. Los intervalos ausentes son desconocidos, no cero.";
+"events.summariesIncomplete" = "La cobertura de los resúmenes diarios es incompleta.";
+"events.readDetails" = "Detalles de lectura de eventos";
+"events.histogramDetails" = "Detalles del histograma";
+"events.summaryDetails" = "Detalles de resúmenes diarios";
+"events.readInterrupted" = "La lectura de eventos se interrumpió. Actualice para reintentar.";
+"events.readDeferredDetail" = "La lectura de eventos se ha aplazado temporalmente. Se reintentará en la próxima actualización.";
+"events.summariesDeferred" = "Los resúmenes diarios se han aplazado temporalmente.";
+"events.searchIndexDegraded" = "El índice de texto completo requiere reparación; las coincidencias pueden ser incompletas.";
+"events.searchCoverageDetail" = "La búsqueda es parcial: %lld eventos conservados están fuera de la proyección de búsqueda y quedan %lld lagunas de evidencia. La ausencia de coincidencias no demuestra la ausencia de eventos.";
+"events.histogramCoverageDetail" = "El histograma solo cubre el intervalo conservado verificable de %lld segundos y tiene %lld lagunas de evidencia; los intervalos ausentes son desconocidos, no cero.";
+"intelligence.packagesResultsNotice" = "El intento de análisis terminó. Los resultados solo cubren los paquetes devueltos.";

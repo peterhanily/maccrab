@@ -1179,9 +1179,9 @@
 "alerts.confirmBulkSuppressTitle" = "抑制這些警報？";
 "alerts.confirmDeleteMessage" = "「%@」及其證據快照將從 alerts.db 永久移除。此操作無法復原。";
 "alerts.confirmDeleteTitle" = "永久刪除此警報？";
-"alerts.daemonStaleDetail" = "警報資料可能不完整。請檢查系統健康狀況。";
+"alerts.daemonStaleDetail" = "警示資料可能不完整。請檢查系統健康狀況。";
 "alerts.daemonStaleTitle" = "防護狀態尚未確認";
-"alerts.emptyOpenBody" = "此時間範圍內沒有未被抑制的警報。";
+"alerts.emptyOpenBody" = "此時間範圍內沒有未被抑制的警示。";
 "alerts.emptyOpenTitle" = "無未解決警報";
 "alerts.readFailedBody" = "無法讀取磁碟上的警報儲存區（%@），因此此清單不能作為安全無事的依據。";
 "alerts.readFailedTitle" = "無法讀取警報";
@@ -1935,12 +1935,12 @@
 "scans.pluginUnavailable" = "未啟動掃描。已安裝外掛的中繼資料無法使用。執行前，請重新驗證或重新安裝此外掛。";
 
 /* Concise read status and health guidance. */
-"alerts.loading" = "正在載入警報…";
-"alerts.readPartial" = "警報資料不完整。";
-"alerts.readDeferred" = "正在等待警報資料…";
-"alerts.readUnavailable" = "警報資料無法使用。";
-"alerts.readFailed" = "無法載入警報。";
-"alerts.cachedNotice" = "正在顯示已儲存的警報。需要重新整理。";
+"alerts.loading" = "正在載入警示…";
+"alerts.readPartial" = "警示資料不完整。";
+"alerts.readDeferred" = "正在等待警示資料…";
+"alerts.readUnavailable" = "警示資料無法使用。";
+"alerts.readFailed" = "無法載入警示。";
+"alerts.cachedNotice" = "正在顯示已儲存的警示。需要重新整理。";
 "alerts.campaignsUnavailable" = "活動資料無法使用";
 "alerts.campaignsIncomplete" = "沒有可顯示的活動資料。讀取可能不完整。";
 "alerts.loadingCampaigns" = "正在載入活動…";
@@ -1953,13 +1953,13 @@
 "events.cachedRefreshing" = "正在顯示已儲存的事件。正在重新整理…";
 "events.cachedIncomplete" = "正在顯示已儲存的事件。最新資料尚未確認。";
 "system.dataSourceConnected" = "正在讀取本機引擎資料。防護狀態顯示於下方。";
-"system.otlpLifecycleSummary" = "代理程式追蹤的輸入或處理效能降低。請另外檢查感測器健康狀況。";
+"system.otlpLifecycleSummary" = "Agent Trace的輸入或處理效能降低。請另外檢查感測器健康狀況。";
 "system.auditSummary" = "最近的特權請求及其結果，最新請求列於最後。";
 "system.alertEvidenceMeasurementTitle" = "無法測量證據儲存用量";
-"system.alertEvidenceCaptureTitle" = "警報證據擷取受限";
+"system.alertEvidenceCaptureTitle" = "警示證據擷取受限";
 "system.alertEvidenceReserveTitle" = "已保留舊證據";
 "system.alertEvidenceMeasurementSummary" = "無法驗證儲存用量。依賴證據保留功能前，請查看詳細資訊。";
-"system.alertEvidenceCaptureSummary" = "部分警報證據可能不完整。請查看下方的擷取詳細資訊。";
+"system.alertEvidenceCaptureSummary" = "部分警示證據可能不完整。請查看下方的擷取詳細資訊。";
 "system.alertEvidenceReserveSummary" = "舊證據會在暫時儲存配額內保留，直到過期。";
 "rave.install.verifyingCatalog" = "正在驗證目錄…";
 "intelligence.packagesScanning" = "正在掃描套件…";
@@ -1969,7 +1969,23 @@
 "intelligence.packagesNotScanned" = "尚未掃描套件";
 "intelligence.packagesNotScannedDetail" = "啟用「套件更新狀態」，然後選擇「執行掃描」。套件名稱會傳送至登錄庫。";
 "investigation.aiSummaryUnavailable" = "沒有可用的 AI 摘要";
-"investigation.aiSummaryGuidance" = "此處顯示已儲存的高風險或嚴重警報的參考摘要。請在設定中設定引擎的 AI 後端。";
+"investigation.aiSummaryGuidance" = "此處顯示已儲存的高風險或嚴重警示的參考摘要。請在設定中設定引擎的 AI 後端。";
 "intelligence.packagesScanningAction" = "正在掃描…";
 "intelligence.packagesScanAction" = "執行掃描";
 "intelligence.packagesRescanAction" = "重新掃描";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "正在顯示已儲存的警示。正在重新整理…";
+"alerts.readDetails" = "警示讀取詳細資訊";
+"alerts.campaignsEmpty" = "沒有可用的活動資料列";
+"events.histogramIncomplete" = "直方圖涵蓋範圍不完整。缺失區間表示未知，而不是零。";
+"events.summariesIncomplete" = "每日摘要涵蓋範圍不完整。";
+"events.readDetails" = "事件讀取詳細資訊";
+"events.histogramDetails" = "直方圖詳細資訊";
+"events.summaryDetails" = "每日摘要詳細資訊";
+"events.readInterrupted" = "事件讀取已中斷。請重新整理以重試。";
+"events.readDeferredDetail" = "事件讀取已暫緩，將在下次重新整理時重試。";
+"events.summariesDeferred" = "每日摘要已暫緩。";
+"events.searchIndexDegraded" = "全文索引等待修復，文字比對結果可能不完整。";
+"events.searchCoverageDetail" = "搜尋不完整：%lld 個保留事件不在搜尋投影中，且仍有 %lld 處證據缺口。沒有符合項目並不能證明不存在。";
+"events.histogramCoverageDetail" = "直方圖僅涵蓋可驗證保留的 %lld 秒區間，且有 %lld 處證據缺口；缺失區間表示未知，而不是零。";
+"intelligence.packagesResultsNotice" = "掃描嘗試已結束。結果僅涵蓋傳回的套件。";

@@ -20,7 +20,18 @@ public actor TravelMode {
     private var activatedAt: Date?
     private var networkName: String?
 
-    public init() {}
+    /// Internal effect seam for state-machine fixtures. Public construction
+    /// always performs the live firewall/DNS operations.
+    enum Effect: Sendable, Equatable {
+        case enableStrictFirewall, flushDNS, removeStrictFirewall
+    }
+    private let effectExecutor: (@Sendable (Effect) -> Void)?
+
+    public init() { effectExecutor = nil }
+
+    init(effectExecutor: @escaping @Sendable (Effect) -> Void) {
+        self.effectExecutor = effectExecutor
+    }
 
     /// Activate travel mode.
     public func activate(networkName: String? = nil) -> TravelModeStatus {
@@ -31,11 +42,11 @@ public actor TravelMode {
         var protections: [String] = []
 
         // 1. Block non-HTTPS traffic (allow only port 443, 53)
-        enableStrictFirewall()
+        perform(.enableStrictFirewall)
         protections.append("Non-HTTPS traffic blocked (ports 80, 8080 denied)")
 
         // 2. Flush DNS to remove any poisoned entries
-        flushDNS()
+        perform(.flushDNS)
         protections.append("DNS cache flushed")
 
         // 3. Note: polling intervals are managed by the daemon config
@@ -53,14 +64,7 @@ public actor TravelMode {
         isActive = false
 
         // Remove strict firewall rules
-        if BoundedPrivilegedProcessRunner.run(
-            executable: "/sbin/pfctl",
-            arguments: ["-a", "com.maccrab.travel", "-F", "all"],
-            timeout: 10,
-            maximumOutputBytes: nil
-        ) == nil {
-            logger.error("Failed to remove travel mode firewall rules: trusted pfctl could not be launched")
-        }
+        perform(.removeStrictFirewall)
 
         logger.info("Travel mode deactivated")
 
@@ -72,6 +76,28 @@ public actor TravelMode {
             isActive: isActive, activatedAt: activatedAt, networkName: networkName,
             protections: isActive ? ["Strict firewall", "DNS flushed", "Enhanced monitoring"] : []
         )
+    }
+
+    private func perform(_ effect: Effect) {
+        if let effectExecutor {
+            effectExecutor(effect)
+            return
+        }
+        switch effect {
+        case .enableStrictFirewall:
+            enableStrictFirewall()
+        case .flushDNS:
+            flushDNS()
+        case .removeStrictFirewall:
+            if BoundedPrivilegedProcessRunner.run(
+                executable: "/sbin/pfctl",
+                arguments: ["-a", "com.maccrab.travel", "-F", "all"],
+                timeout: 10,
+                maximumOutputBytes: nil
+            ) == nil {
+                logger.error("Failed to remove travel mode firewall rules: trusted pfctl could not be launched")
+            }
+        }
     }
 
     private nonisolated func enableStrictFirewall() {

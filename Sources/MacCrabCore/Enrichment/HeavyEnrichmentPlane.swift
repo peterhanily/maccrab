@@ -954,6 +954,16 @@ public actor HeavyEnrichmentPlane {
         increment(&offeredRequestsTotal)
         let key = WorkKey(component: component, binding: binding)
 
+        // A deadline terminates the old subscribers, not an uninterruptible
+        // syscall. Keep its username identity occupied until physical exit;
+        // later requests must not fan out into duplicate directory lookups.
+        if component == .userName, let existingID = activeByKey[key],
+           let existing = works[existingID],
+           existing.state == .timedOut || existing.state == .cancelled {
+            increment(&rejectedRequestsTotal)
+            return .rejected
+        }
+
         if var cached = cache[key] {
             increment(&completedRequestsTotal)
             increment(&cacheHitsTotal)
@@ -1008,7 +1018,7 @@ public actor HeavyEnrichmentPlane {
             return .pending(ticket: ticket, coalesced: true)
         }
 
-        let canRunNow = physicalWorkerCount < configuration.maximumConcurrentWorkers
+        let canRunNow = canStartWorker(component: component)
         guard canRunNow || queuedWorkIDs.count < configuration.maximumQueuedWorkItems else {
             increment(&rejectedRequestsTotal)
             return .rejected
@@ -1195,6 +1205,15 @@ public actor HeavyEnrichmentPlane {
     /// Includes timed-out/cancelled workers that have not physically exited.
     private var physicalWorkerCount: Int { workerTasks.count }
 
+    /// One directory lookup may linger; it must not occupy every worker and
+    /// starve signatures, hashes, environment or file-content evidence. This
+    /// is a subdivision of the existing total cap, not additional capacity.
+    private func canStartWorker(component: HeavyEnrichmentComponent) -> Bool {
+        guard physicalWorkerCount < configuration.maximumConcurrentWorkers else { return false }
+        guard component == .userName else { return true }
+        return !workerTasks.keys.contains { works[$0]?.component == .userName }
+    }
+
     private func scheduleDeadline(for workID: UInt64, timeoutNanoseconds: UInt64) {
         let task = Task.detached(priority: .utility) { [self] in
             do {
@@ -1226,16 +1245,26 @@ public actor HeavyEnrichmentPlane {
     }
 
     private func workerFinished(workID: UInt64, value: HeavyEnrichmentValue) {
+        // A stalled utility executor must not let a username completion beat
+        // its delayed timer after the actual deadline. This actor decision is
+        // the sole acceptance/publication boundary for both username caches.
+        if let work = works[workID], work.component == .userName,
+           work.state == .running,
+           DispatchTime.now().uptimeNanoseconds >= work.deadlineUptimeNanoseconds {
+            deadlineFired(workID: workID)
+        }
         workerTasks.removeValue(forKey: workID)
         deadlineTasks.removeValue(forKey: workID)?.cancel()
         guard let work = works.removeValue(forKey: workID) else {
             startAvailableWorkers()
             return
         }
+        if activeByKey[work.key] == workID {
+            activeByKey.removeValue(forKey: work.key)
+        }
 
         switch work.state {
         case .running:
-            activeByKey.removeValue(forKey: work.key)
             for subscriber in work.subscribers {
                 increment(&completedRequestsTotal)
                 appendDeferred(
@@ -1245,7 +1274,7 @@ public actor HeavyEnrichmentPlane {
                     value: value
                 )
             }
-            if work.cacheResult { insertCache(value, for: work.key) }
+            if work.cacheResult, value.hasEvidence { insertCache(value, for: work.key) }
         case .timedOut, .cancelled:
             // Requests became terminal at deadline/shutdown.  A late value is
             // intentionally discarded and never cached or applied.
@@ -1268,15 +1297,16 @@ public actor HeavyEnrichmentPlane {
             terminalize(work: work, outcome: .timedOut)
             startAvailableWorkers()
         case .running:
-            activeByKey.removeValue(forKey: work.key)
             guard workerTasks[workID] != nil else {
                 // Deadline elapsed before a queued item could publish its
                 // worker.  It is terminal, not a lingering physical worker.
                 works.removeValue(forKey: workID)
+                activeByKey.removeValue(forKey: work.key)
                 terminalize(work: work, outcome: .timedOut)
                 startAvailableWorkers()
                 return
             }
+            if work.component != .userName { activeByKey.removeValue(forKey: work.key) }
             work.state = .timedOut
             works[workID] = work
             workerTasks[workID]?.cancel()
@@ -1446,8 +1476,13 @@ public actor HeavyEnrichmentPlane {
     private func startAvailableWorkers() {
         guard accepting else { return }
         while physicalWorkerCount < configuration.maximumConcurrentWorkers,
-              !queuedWorkIDs.isEmpty {
-            let workID = queuedWorkIDs.removeFirst()
+              let index = queuedWorkIDs.firstIndex(where: { id in
+                  guard let work = works[id] else { return true }
+                  return canStartWorker(component: work.component)
+              }) {
+            // A queued username must not head-of-line block unrelated work
+            // while the single directory worker is occupied.
+            let workID = queuedWorkIDs.remove(at: index)
             guard var work = works[workID], work.state == .queued else { continue }
             if DispatchTime.now().uptimeNanoseconds >= work.deadlineUptimeNanoseconds {
                 deadlineFired(workID: workID)

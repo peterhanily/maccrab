@@ -8,6 +8,13 @@ import Testing
 import Foundation
 @testable import MacCrabCore
 
+private final class PanicRemovalRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func record() { lock.lock(); defer { lock.unlock() }; count += 1 }
+    func snapshot() -> Int { lock.lock(); defer { lock.unlock() }; return count }
+}
+
 @Suite("Panic Button")
 struct PanicButtonTests {
 
@@ -18,16 +25,20 @@ struct PanicButtonTests {
         #expect(true)
     }
 
-    @Test("deactivate() runs to completion without crash")
-    func deactivateSafe() async {
-        // deactivate() is idempotent — it flushes a pfctl anchor that may
-        // or may not exist. It returns the list of cleanup actions taken.
-        let button = PanicButton()
+    @Test("deactivate() requests cleanup once and reports launch outcome", arguments: [true, false])
+    func deactivateSafe(launched: Bool) async {
+        let recorder = PanicRemovalRecorder()
+        let button = PanicButton(removeEmergencyFirewall: {
+            recorder.record()
+            return launched
+        })
         let actions = await button.deactivate()
 
-        // We expect at least one cleanup action was attempted (the
-        // firewall flush) regardless of whether panic was ever active.
-        #expect(!actions.isEmpty)
+        #expect(recorder.snapshot() == 1)
+        #expect(actions == [
+            launched ? "Emergency firewall rules removed" : "Failed to remove emergency firewall rules",
+            "Normal operation restored",
+        ])
     }
 
     @Test("PanicResult struct holds expected fields")

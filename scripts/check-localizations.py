@@ -3,6 +3,13 @@
 
 This checks structural correctness; it does not certify translation quality or
 visual layout. Run native-language and packaged UI review separately.
+
+Literal scanning is deliberately limited to Text, Button, ProgressView and the
+known lifecycle/empty-state helper arguments. It does NOT certify Toggle,
+TextField, SecureField, Picker, Menu, Label, custom controls, help/accessibility
+modifiers, computed properties, string assignments, or dynamic values. The
+Swift LocalizationCoverageTests cover a different subset of direct literals;
+neither scanner is a Swift type checker or a complete localization audit.
 """
 from __future__ import annotations
 
@@ -24,6 +31,13 @@ PLURAL_CATEGORIES = {
 }
 FORMAT = re.compile(r'%(?:(?P<position>[1-9]\d*)\$)?[-+#0]*(?:\d+)?(?:\.\d+)?(?P<type>ll[diuoxX]|l[diuoxX]|[diuoxX@fFeEgGaAcCsSpn])')
 PLURAL_TOKEN = re.compile(r'%(?:(?P<position>[1-9]\d*)\$)?#@(?P<name>[A-Za-z_][A-Za-z_0-9]*)@')
+LITERAL_SCAN_SCOPE = {
+    'checked': ['Text', 'Button', 'ProgressView', 'lifecycleDegradedBanner', 'V2EmptyState'],
+    'not_checked': ['Toggle', 'TextField', 'SecureField', 'Picker', 'Menu', 'Label',
+                    'custom controls', 'help/accessibility modifiers',
+                    'computed properties', 'string assignments', 'dynamic values'],
+    'complete_ui_localization_audit': False,
+}
 
 
 def swift_literal(source: str, start: int, *, strict: bool = True):
@@ -348,7 +362,7 @@ def check(root: Path):
             errors.append(f'source:{key}: unused plural contract')
     except (ValueError, OSError, KeyError) as error:
         errors.append(f'source scan: {error}')
-    return errors, {'locales': len(tables), 'english_keys': len(english), 'plural_keys': len(english_plurals), 'errors': len(errors), 'native_language_review': 'NOT_PERFORMED', 'packaged_visual_review': 'NOT_PERFORMED'}
+    return errors, {'locales': len(tables), 'english_keys': len(english), 'plural_keys': len(english_plurals), 'errors': len(errors), 'literal_scan_scope': LITERAL_SCAN_SCOPE, 'native_language_review': 'NOT_PERFORMED', 'packaged_visual_review': 'NOT_PERFORMED'}
 
 
 def main():
@@ -364,6 +378,7 @@ def main():
         for error in errors:
             print(error)
         print('Native-language and packaged visual reviews are not certified by this check.')
+        print('Literal scan is partial; not checked: ' + ', '.join(LITERAL_SCAN_SCOPE['not_checked']))
     return 1 if errors else 0
 
 

@@ -253,11 +253,21 @@ help:
 	@echo "  make uninstall    Remove system install (sudo)"
 	@echo "  make run-root     Run with Endpoint Security (sudo)"
 
-# Run detection test suite (triggers all detection categories safely)
+# Legacy simulations require an explicit operator acknowledgement. This does
+# not check host isolation; run only on a disposable Mac/VM with no retained data.
+# BEGIN MACCRAB_DISPOSABLE_HOST_MAKE_ACK
+ifeq ($(MACCRAB_DISPOSABLE_HOST),1)
+override MACCRAB_SIMULATION_ACK := --disposable-host
+else
+override MACCRAB_SIMULATION_ACK :=
+endif
+# END MACCRAB_DISPOSABLE_HOST_MAKE_ACK
+
+# Run the legacy detection simulation (default invocation refuses).
 test-detection:
-	./scripts/detection-test.sh
+	./scripts/detection-test.sh $(MACCRAB_SIMULATION_ACK)
 
 # Run multi-tactic campaign simulation (exercises Campaigns panel)
-# Use 'make test-campaign SUSTAINED=1' for a slower 12-minute simulation
+# Add MACCRAB_DISPOSABLE_HOST=1 only on a disposable host; SUSTAINED=1 is slower.
 test-campaign:
-	./scripts/campaign-test.sh $(if $(SUSTAINED),--sustained,)
+	./scripts/campaign-test.sh $(MACCRAB_SIMULATION_ACK) $(if $(SUSTAINED),--sustained,)

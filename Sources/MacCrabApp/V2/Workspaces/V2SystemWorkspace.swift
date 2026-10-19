@@ -664,7 +664,7 @@ public struct V2SystemWorkspace: View {
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
-                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details") + ": " + title) {
                     Text(String(localized: "ui.final.lifecycleDetail", defaultValue: "\(impact) Offered \(timers.offeredHandlersTotal ?? 0), accepted \(timers.acceptedHandlersTotal ?? 0), completed \(timers.completedHandlersTotal ?? 0), in flight \(timers.inFlightHandlers ?? 0) of \(timers.maximumInFlightHandlers ?? 0), rejected \(timers.rejectedHandlersTotal ?? 0) (closed \(timers.closedRejectedHandlersTotal ?? 0), overload shed \(timers.overloadShedHandlersTotal ?? 0)), coalesced \(timers.coalescedHandlersTotal ?? 0), lossless inline fallback \(timers.inlineFallbackHandlersTotal ?? 0). Accepted conservation \(timers.conservesAcceptedHandlers.map { String($0) } ?? "unknown"); offered conservation \(timers.conservesOfferedHandlers.map { String($0) } ?? "unknown"). Current in-flight \(workLabel) work is normal when both conservation ledgers hold."))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
@@ -705,7 +705,7 @@ public struct V2SystemWorkspace: View {
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
-                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details") + ": " + String(localized: "system.otlpLifecycleDegradedTitle", defaultValue: "Agent Trace receiver feature degraded")) {
                     Text(String(
                         localized: "system.otlpLifecycleDegradedDetail",
                         defaultValue: "The loopback OTLP receiver rejected unauthenticated/self-reported input, broke or incompletely reported an ownership ledger, retained work after sealing, left a lifecycle operation in progress, or did not stop cleanly. Kernel-backed detection is unaffected. Listeners: accepted \(lifecycle.listenersAcceptedTotal ?? 0), completed \(lifecycle.listenersCompletedTotal ?? 0), active \(lifecycle.activeListeners ?? 0), ready \(lifecycle.readyListeners ?? 0), rejected after seal \(lifecycle.listenersRejectedAfterSealTotal ?? 0), conserving \(lifecycle.listenersConserved.map { String($0) } ?? "unknown"). Connections: accepted \(lifecycle.connectionsAcceptedTotal ?? 0), completed \(lifecycle.connectionsCompletedTotal ?? 0), active \(lifecycle.activeConnections ?? 0), rejected after seal \(lifecycle.connectionsRejectedAfterSealTotal ?? 0), rejected at capacity \(lifecycle.connectionsRejectedAtCapacityTotal ?? 0), conserving \(lifecycle.connectionsConserved.map { String($0) } ?? "unknown"). Body tasks: accepted \(lifecycle.bodyTasksAcceptedTotal ?? 0), completed \(lifecycle.bodyTasksCompletedTotal ?? 0), cancelled \(lifecycle.bodyTasksCancelledTotal ?? 0), rejected \(lifecycle.bodyTasksRejectedTotal ?? 0), in flight \(lifecycle.bodyTasksInFlight ?? 0) of \(lifecycle.maximumBodyTasks ?? 0), conserving \(lifecycle.bodyTasksConserved.map { String($0) } ?? "unknown"). Callback tasks: accepted \(lifecycle.callbackTasksAcceptedTotal ?? 0), completed \(lifecycle.callbackTasksCompletedTotal ?? 0), cancelled \(lifecycle.callbackTasksCancelledTotal ?? 0), rejected \(lifecycle.callbackTasksRejectedTotal ?? 0), in flight \(lifecycle.callbackTasksInFlight ?? 0) of \(lifecycle.maximumCallbackTasks ?? 0), conserving \(lifecycle.callbackTasksConserved.map { String($0) } ?? "unknown"). Lifecycle operations in progress \(lifecycle.lifecycleOperationsInProgress ?? 0); cleanly stopped \(lifecycle.cleanlyStopped.map { String($0) } ?? "unknown"), last shutdown clean \(lifecycle.lastShutdownClean.map { String($0) } ?? "not attempted"), shutdown timeouts \(lifecycle.shutdownTimeoutsTotal ?? 0)."
@@ -777,7 +777,7 @@ public struct V2SystemWorkspace: View {
                         .foregroundStyle(V2Theme.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details") + ": " + title) {
                     Text(String(
                         localized: "system.alertEvidenceTransitionDetail",
                         defaultValue: "Live transition-aware caps: events \(liveEvents), events+alerts \(liveTotal). Steady-state caps after preserved legacy events.db evidence ages out: events \(steadyEvents), events+alerts \(steadyTotal). Current bounded reserve: \(reserve) of maximum \(maximumReserve); legacy evidence rows \(legacyRows), charged \(legacyCharged). \(capture). A single in-flight capture is normal; pending on repeated heartbeats is stuck."
@@ -884,9 +884,9 @@ public struct V2SystemWorkspace: View {
         return HStack(spacing: 12) {
             ZStack {
                 Circle()
-                    .fill((isLive ? V2Theme.healthy : V2Theme.dataAccent).opacity(0.18))
+                    .fill(V2Theme.dataAccent.opacity(0.18))
                 Image(systemName: isLive ? "cylinder.split.1x2.fill" : "tray.full")
-                    .foregroundStyle(isLive ? V2Theme.healthy : V2Theme.dataAccent)
+                    .foregroundStyle(V2Theme.dataAccent)
                     .scaledSystem(16, weight: .semibold)
             }
             .frame(width: 38, height: 38)
@@ -896,7 +896,7 @@ public struct V2SystemWorkspace: View {
                         .scaledSystem(13, weight: .semibold)
                         .foregroundStyle(V2Theme.primaryText)
                     V2StatusChip(state.provider.mode.label,
-                                 kind: isLive ? .healthy : .info)
+                                 kind: state.provider.lastErrorDescription == nil ? .info : .warning)
                 }
                 Text(subtitle)
                     .font(V2Theme.meta())
@@ -907,7 +907,7 @@ public struct V2SystemWorkspace: View {
                         .foregroundStyle(V2Theme.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+                DisclosureGroup(String(localized: "system.dataSourceTitle", defaultValue: "Data source")) {
                     VStack(alignment: .leading, spacing: 4) {
                         if isLive {
                             Text(String(localized: "system.dataSourceLive", defaultValue: "Reading from MacCrabCore stores\(dirNote)"))
@@ -1170,7 +1170,7 @@ public struct V2SystemWorkspace: View {
                 .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
             Text(String(localized: "system.auditSummary", defaultValue: "Recent privileged requests and outcomes, newest last."))
                 .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
-            DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details")) {
+            DisclosureGroup(String(localized: "inspector.details", defaultValue: "Details") + ": " + String(localized: "system.auditSection", defaultValue: "Privileged-change audit trail")) {
                 Text(String(localized: "system.auditDesc", defaultValue: "Every suppression, config change, rule toggle and prune the engine processed from its privileged inbox — whether it came from this app, from maccrabctl, or from an AI agent over MCP. Newest last; for the full history run: maccrabctl audit"))
                     .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)

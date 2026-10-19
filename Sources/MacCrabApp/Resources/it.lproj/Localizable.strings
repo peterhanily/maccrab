@@ -1482,8 +1482,8 @@
 "system.daemonUnavailable" = "Non pronto";
 "system.daemonUptime" = "tempo di attività %@";
 "system.dataSourceLive" = "Lettura dagli archivi MacCrabCore%@";
-"system.dataSourceMock" = "Sono mostrati dati di esempio. Controlla i comandi del motore sotto, poi riconnettiti per leggerne i dati.";
-"system.dataSourceOffline" = "Nessun dato del motore disponibile. Controlla i comandi del motore sotto, poi riconnettiti.";
+"system.dataSourceMock" = "Sono mostrati dati di esempio. Controlla Controlli del motore sotto, poi riconnettiti per leggerne i dati.";
+"system.dataSourceOffline" = "Nessun dato del motore disponibile. Controlla Controlli del motore sotto, poi riconnettiti.";
 "system.dataSourceTitle" = "Origine dei dati";
 "system.dns.available" = "Acquisizione disponibile nel proprio ambito";
 "system.dns.interface" = "Interfaccia riportata: %@";
@@ -1973,3 +1973,19 @@
 "intelligence.packagesScanningAction" = "Scansione…";
 "intelligence.packagesScanAction" = "Avvia scansione";
 "intelligence.packagesRescanAction" = "Ripeti scansione";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "Sono mostrati gli avvisi salvati. Aggiornamento…";
+"alerts.readDetails" = "Dettagli di lettura degli avvisi";
+"alerts.campaignsEmpty" = "Nessuna riga di campagna disponibile";
+"events.histogramIncomplete" = "La copertura dell’istogramma è incompleta. Gli intervalli mancanti sono sconosciuti, non zero.";
+"events.summariesIncomplete" = "La copertura dei riepiloghi giornalieri è incompleta.";
+"events.readDetails" = "Dettagli di lettura degli eventi";
+"events.histogramDetails" = "Dettagli dell’istogramma";
+"events.summaryDetails" = "Dettagli dei riepiloghi giornalieri";
+"events.readInterrupted" = "La lettura degli eventi è stata interrotta. Aggiorna per riprovare.";
+"events.readDeferredDetail" = "La lettura degli eventi è temporaneamente rinviata. Verrà ritentata al prossimo aggiornamento.";
+"events.summariesDeferred" = "I riepiloghi giornalieri sono temporaneamente rinviati.";
+"events.searchIndexDegraded" = "L’indice a testo completo attende una riparazione; le corrispondenze potrebbero essere incomplete.";
+"events.searchCoverageDetail" = "La ricerca è parziale: %lld eventi conservati sono fuori dalla proiezione di ricerca e rimangono %lld lacune nelle evidenze. Nessuna corrispondenza non dimostra l’assenza di eventi.";
+"events.histogramCoverageDetail" = "L’istogramma copre solo l’intervallo conservato verificabile di %lld secondi e presenta %lld lacune nelle evidenze; gli intervalli mancanti sono sconosciuti, non zero.";
+"intelligence.packagesResultsNotice" = "Tentativo di scansione terminato. I risultati coprono solo i pacchetti restituiti.";

@@ -920,9 +920,9 @@
 "alerts.confirmBulkSuppressTitle" = "Deze waarschuwingen onderdrukken?";
 "alerts.confirmDeleteMessage" = "‘%@’ en het bijbehorende vastgelegde bewijsmateriaal worden definitief uit alerts.db verwijderd. Dit kan niet ongedaan worden gemaakt.";
 "alerts.confirmDeleteTitle" = "Deze waarschuwing definitief verwijderen?";
-"alerts.daemonStaleDetail" = "Meldingsgegevens kunnen onvolledig zijn. Controleer de systeemstatus.";
+"alerts.daemonStaleDetail" = "Waarschuwingsgegevens kunnen onvolledig zijn. Controleer de systeemstatus.";
 "alerts.daemonStaleTitle" = "Beschermingsstatus niet bevestigd";
-"alerts.emptyOpenBody" = "Geen niet-onderdrukte meldingen in deze periode.";
+"alerts.emptyOpenBody" = "Geen niet-onderdrukte waarschuwingen in deze periode.";
 "alerts.emptyOpenTitle" = "Geen open waarschuwingen";
 "alerts.readFailedBody" = "De waarschuwingenopslag op schijf kon niet worden gelezen (%@); deze lijst betekent dus NIET dat alles veilig is.";
 "alerts.readFailedTitle" = "Waarschuwingen konden niet worden gelezen";
@@ -1935,12 +1935,12 @@
 "scans.pluginUnavailable" = "Er is geen scan gestart. De metadata van deze geïnstalleerde plug-in zijn niet beschikbaar. Verifieer de plug-in opnieuw of installeer deze opnieuw voordat u deze uitvoert.";
 
 /* Concise read status and health guidance. */
-"alerts.loading" = "Meldingen laden…";
-"alerts.readPartial" = "De meldingsgegevens zijn onvolledig.";
-"alerts.readDeferred" = "Wachten op meldingsgegevens…";
-"alerts.readUnavailable" = "Meldingsgegevens zijn niet beschikbaar.";
-"alerts.readFailed" = "Meldingen konden niet worden geladen.";
-"alerts.cachedNotice" = "Opgeslagen meldingen worden getoond. Vernieuwen is nodig.";
+"alerts.loading" = "Waarschuwingen laden…";
+"alerts.readPartial" = "De waarschuwingsgegevens zijn onvolledig.";
+"alerts.readDeferred" = "Wachten op waarschuwingsgegevens…";
+"alerts.readUnavailable" = "Waarschuwingsgegevens zijn niet beschikbaar.";
+"alerts.readFailed" = "Waarschuwingen konden niet worden geladen.";
+"alerts.cachedNotice" = "Opgeslagen waarschuwingen worden getoond. Vernieuwen is nodig.";
 "alerts.campaignsUnavailable" = "Campagnegegevens niet beschikbaar";
 "alerts.campaignsIncomplete" = "Geen campagnegegevens om te tonen. Het lezen kan onvolledig zijn.";
 "alerts.loadingCampaigns" = "Campagnes laden…";
@@ -1953,13 +1953,13 @@
 "events.cachedRefreshing" = "Opgeslagen gebeurtenissen worden getoond. Vernieuwen…";
 "events.cachedIncomplete" = "Opgeslagen gebeurtenissen worden getoond. De nieuwste gegevens zijn niet bevestigd.";
 "system.dataSourceConnected" = "Lokale enginegegevens worden gelezen. De beschermingsstatus staat hieronder.";
-"system.otlpLifecycleSummary" = "Invoer of verwerking van agenttraces is verslechterd. Controleer de sensorstatus afzonderlijk.";
+"system.otlpLifecycleSummary" = "Invoer of verwerking van Agent Trace is verslechterd. Controleer de sensorstatus afzonderlijk.";
 "system.auditSummary" = "Recente bevoorrechte verzoeken en resultaten, nieuwste als laatste.";
 "system.alertEvidenceMeasurementTitle" = "Opslag van bewijsmateriaal kon niet worden gemeten";
-"system.alertEvidenceCaptureTitle" = "Vastleggen van meldingsbewijs verslechterd";
+"system.alertEvidenceCaptureTitle" = "Vastleggen van waarschuwingsbewijs verslechterd";
 "system.alertEvidenceReserveTitle" = "Ouder bewijsmateriaal bewaard";
 "system.alertEvidenceMeasurementSummary" = "Het opslaggebruik kon niet worden gecontroleerd. Bekijk de details voordat u op het bewaren van bewijs vertrouwt.";
-"system.alertEvidenceCaptureSummary" = "Een deel van het meldingsbewijs kan onvolledig zijn. Bekijk hieronder de vastleggingsdetails.";
+"system.alertEvidenceCaptureSummary" = "Een deel van het waarschuwingsbewijs kan onvolledig zijn. Bekijk hieronder de vastleggingsdetails.";
 "system.alertEvidenceReserveSummary" = "Ouder bewijsmateriaal wordt binnen een tijdelijk opslagquotum bewaard totdat het verloopt.";
 "rave.install.verifyingCatalog" = "Catalogus verifiëren…";
 "intelligence.packagesScanning" = "Pakketten scannen…";
@@ -1969,7 +1969,23 @@
 "intelligence.packagesNotScanned" = "Nog geen pakketscan uitgevoerd";
 "intelligence.packagesNotScannedDetail" = "Schakel Pakketactualiteit in en kies Scan uitvoeren. Pakketnamen worden naar registers verzonden.";
 "investigation.aiSummaryUnavailable" = "Geen AI-samenvattingen beschikbaar";
-"investigation.aiSummaryGuidance" = "Adviserende samenvattingen van opgeslagen HOGE of KRITIEKE meldingen verschijnen hier. Configureer de AI-backend van de engine in Instellingen.";
+"investigation.aiSummaryGuidance" = "Adviserende samenvattingen van opgeslagen HOGE of KRITIEKE waarschuwingen verschijnen hier. Configureer de AI-backend van de engine in Instellingen.";
 "intelligence.packagesScanningAction" = "Scannen…";
 "intelligence.packagesScanAction" = "Scan uitvoeren";
 "intelligence.packagesRescanAction" = "Opnieuw scannen";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "Opgeslagen waarschuwingen worden getoond. Vernieuwen…";
+"alerts.readDetails" = "Details van het lezen van waarschuwingen";
+"alerts.campaignsEmpty" = "Geen campagnerijen beschikbaar";
+"events.histogramIncomplete" = "De histogramdekking is onvolledig. Ontbrekende intervallen zijn onbekend, niet nul.";
+"events.summariesIncomplete" = "De dekking van dagoverzichten is onvolledig.";
+"events.readDetails" = "Details van het lezen van gebeurtenissen";
+"events.histogramDetails" = "Histogramdetails";
+"events.summaryDetails" = "Details van dagoverzichten";
+"events.readInterrupted" = "Het lezen van gebeurtenissen is onderbroken. Vernieuw om opnieuw te proberen.";
+"events.readDeferredDetail" = "Het lezen van gebeurtenissen is tijdelijk uitgesteld. Bij de volgende vernieuwing wordt het opnieuw geprobeerd.";
+"events.summariesDeferred" = "Dagoverzichten zijn tijdelijk uitgesteld.";
+"events.searchIndexDegraded" = "De volledige-tekstindex wacht op herstel; tekstovereenkomsten kunnen onvolledig zijn.";
+"events.searchCoverageDetail" = "De zoekopdracht is gedeeltelijk: %lld bewaarde gebeurtenissen vallen buiten de zoekprojectie en er blijven %lld bewijshiaten over. Geen overeenkomst bewijst geen afwezigheid.";
+"events.histogramCoverageDetail" = "Het histogram omvat alleen het aantoonbaar bewaarde interval van %lld seconden en heeft %lld bewijshiaten; ontbrekende intervallen zijn onbekend, niet nul.";
+"intelligence.packagesResultsNotice" = "Scanpoging afgerond. Resultaten omvatten alleen de teruggegeven pakketten.";

@@ -16,7 +16,8 @@ struct UIContentReadinessPresentationTests {
                     == expected[phase])
             // These have separate cached/error notices, not duplicate banners.
             #expect(V2AlertReadNotice.resolve(phase: phase, hasSnapshot: true, hasError: false) == nil)
-            #expect(V2AlertReadNotice.resolve(phase: phase, hasSnapshot: false, hasError: true) == nil)
+            #expect(V2AlertReadNotice.resolve(phase: phase, hasSnapshot: false, hasError: true)
+                    == (phase == .loading || phase == .refreshingCached ? .loading : nil))
             #expect(V2AlertReadNotice.resolve(phase: phase, hasSnapshot: true, hasError: true) == nil)
         }
         #expect(expected[.loadedEmpty] == nil && expected[.loadedNonempty] == nil)
@@ -44,14 +45,14 @@ struct UIContentReadinessPresentationTests {
             #expect(!page.contains(".phase.displayText"))
             #expect(!page.contains("Content loaded"))
         }
-        #expect(detection.contains("Text(presentation.status(for: presentationIdentity, query: state.ruleSearchQuery))\n                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)\n                    .contentReadiness(presentation.readiness(for: presentationIdentity, query: state.ruleSearchQuery))"))
-        #expect(events.contains("defaultValue: \"Events\"))\n                    .font(.title2)\n                    .fontWeight(.bold)\n                    .contentReadiness(contentReadinessForDisplay)"))
+        #expect(detection.contains(".contentReadiness(presentation.readiness(for: presentationIdentity, query: state.ruleSearchQuery))"))
+        #expect(events.contains(".contentReadiness(contentReadinessForDisplay)"))
         #expect(events.contains("ProgressView(EventReadNotice.loading.text)"))
         #expect(events.contains("localized: \"events.cachedIncomplete\""))
         #expect(alerts.components(separatedBy: "timeRangeChips(readiness: readiness)").count - 1 == 2)
         #expect(alerts.components(separatedBy: "timeRangeChips()").count - 1 == 1)
         #expect(alerts.contains(".contentReadiness(on ? readiness : nil)"))
-        #expect(alerts.contains(".accessibilityLabel(\"\\(label) time range\")\n                .accessibilityAddTraits(on ? [.isSelected] : [])"))
+        #expect(alerts.contains(".accessibilityAddTraits(on ? [.isSelected] : [])"))
         #expect(alerts.contains(".forDisplayedContent(isEmpty: visible.isEmpty)"))
         #expect(alerts.contains(".forDisplayedContent(isEmpty: history.isEmpty)"))
         #expect(alerts.contains("ProgressView(notice.text)"))

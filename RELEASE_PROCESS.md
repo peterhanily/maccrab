@@ -8,6 +8,49 @@ companion to `docs/TRUST.md` (which covers end-user verification),
 
 Required reading for anyone who plans to cut a release tag.
 
+### Candidate repair gate
+
+Do not install a newly built candidate over a failing deterministic gate.
+Before cutting the candidate, repair the source and run the full clean suite.
+Use an isolated host for real microphone, clipboard, browser or TCC tests
+unless the host owner explicitly authorizes those accesses on the build Mac.
+That authorization does not permit tests to target unrelated processes or
+modify live firewall/hosts settings: use owned fixtures or injected effects
+for those actions. Selected local passes are development evidence only.
+Unfiltered runs still report explicitly gated Keychain and external plugin
+fixtures as skipped unless separately enabled; do not count those as executed
+or claim that the full suite completes every qualification lane.
+Legacy `detection-test.sh` and `campaign-test.sh` simulations are separate,
+disposable-host-only operations. Their required first `--disposable-host`
+argument is an accident-prevention acknowledgement, not verified isolation.
+They are not run by CI; CI exercises only copied preflight prefixes with inert
+endings. Never point their legacy bodies at retained data or active protection.
+Set the README badge from the full suite's executed count, then rerun the
+source-bound gate after that edit. Never estimate a new badge from additions.
+
+Use `scripts/select-regression-tests.py --base <previous-candidate-commit>`
+to inventory changed tests and source references before selecting safe local
+regressions. Review every candidate; textual discovery misses transitive and
+runtime relationships and does not authorize sensitive tests.
+`run-ci-phase.py` records command/cwd and start/end source identities.
+For test runs pass `--source-root`, `--artifact <test-executable>`,
+`--test-inventory <reviewed-json>` and `--toolchain-report <identity-json>`;
+for builds use `--output-artifact`. Link the test phase with
+`--build-receipt <successful-build-json>` so its executable and source must
+match the completed build. A changed input invalidates a successful command.
+Retain failed/invalidated receipts and never overwrite them.
+Do not put credentials in command arguments: exact argv is retained in the
+private receipt. These phase receipts cannot replace the clean-CI receipt or
+candidate qualification manifest.
+
+Any tracked change invalidates candidate binding. A renewed reference baseline
+requires independent measurement and acceptance, never updated historical
+hashes. A strict backup failure stays failed even if an operator accepts a
+limited installation exception; recovery still requires an isolated restore
+drill. Installed UI/VoiceOver/keyboard/Reduce Motion, paint latency, upgrade,
+interruption/reboot, supported macOS and benign-host qualification remain
+separate from source tests.
+
 Key and token rotation (Sparkle EdDSA, rave catalog Ed25519, the site publish
 token) is handled by the release operator following internal runbooks kept
 outside this public repo.
@@ -268,7 +311,7 @@ capture mode and are rejected by `verify-release`.
 ### Step 1 — tests
 
 Each `release.sh` phase runs `scripts/ci-local.sh --clean`, including a fresh
-dependency resolution, builds, the full test suite, and all 20 local gates. Its
+dependency resolution, builds, the full test suite, and all configured local gates. Its
 free-space budget is checked when `release.sh` starts (Step 0) and again by
 `ci-local.sh` itself after the clean wipe. The
 first run does this before artifact construction. The qualified second run does
@@ -571,7 +614,7 @@ installed, so the project does not claim an independent hosted test or
 attestation signal. See `docs/CI-ARCHITECTURE.md` for this trust boundary and
 its compensating controls.
 
-- **`scripts/ci-local.sh`** — the gate. 20 checks: build, full test suite,
+- **`scripts/ci-local.sh`** — the configured gates: build, full test suite,
   rule compile + lint, broker fd fuzz (ASan/UBSan), deterministic
   architectural audit, secret/host-path diff scan, assessment-harness
   build/test/isolation, exact-candidate qualification fixtures,

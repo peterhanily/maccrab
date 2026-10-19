@@ -1973,3 +1973,19 @@
 "intelligence.packagesScanningAction" = "Verificando…";
 "intelligence.packagesScanAction" = "Executar verificação";
 "intelligence.packagesRescanAction" = "Verificar novamente";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "Exibindo alertas salvos. Atualizando…";
+"alerts.readDetails" = "Detalhes da leitura de alertas";
+"alerts.campaignsEmpty" = "Nenhuma linha de campanha disponível";
+"events.histogramIncomplete" = "A cobertura do histograma está incompleta. Intervalos ausentes são desconhecidos, não zero.";
+"events.summariesIncomplete" = "A cobertura dos resumos diários está incompleta.";
+"events.readDetails" = "Detalhes da leitura de eventos";
+"events.histogramDetails" = "Detalhes do histograma";
+"events.summaryDetails" = "Detalhes dos resumos diários";
+"events.readInterrupted" = "A leitura de eventos foi interrompida. Atualize para tentar novamente.";
+"events.readDeferredDetail" = "A leitura de eventos foi adiada temporariamente. Ela será tentada na próxima atualização.";
+"events.summariesDeferred" = "Os resumos diários foram adiados temporariamente.";
+"events.searchIndexDegraded" = "O índice de texto completo aguarda reparo; as correspondências podem estar incompletas.";
+"events.searchCoverageDetail" = "A busca é parcial: %lld eventos retidos estão fora da projeção de busca e restam %lld lacunas de evidência. A falta de correspondências não comprova ausência.";
+"events.histogramCoverageDetail" = "O histograma cobre apenas o intervalo retido verificável de %lld segundos e tem %lld lacunas de evidência; intervalos ausentes são desconhecidos, não zero.";
+"intelligence.packagesResultsNotice" = "Tentativa de verificação encerrada. Os resultados abrangem apenas os pacotes retornados.";

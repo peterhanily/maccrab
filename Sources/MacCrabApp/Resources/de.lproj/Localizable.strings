@@ -923,9 +923,9 @@
 "alerts.confirmBulkSuppressTitle" = "Diese Warnungen unterdrücken?";
 "alerts.confirmDeleteMessage" = "„%@“ und die dazu gespeicherten Belege werden endgültig aus alerts.db entfernt. Dies kann nicht rückgängig gemacht werden.";
 "alerts.confirmDeleteTitle" = "Diese Warnung endgültig löschen?";
-"alerts.daemonStaleDetail" = "Warnmeldungsdaten sind möglicherweise unvollständig. Prüfen Sie den Systemzustand.";
+"alerts.daemonStaleDetail" = "Warnungsdaten sind möglicherweise unvollständig. Prüfen Sie den Systemzustand.";
 "alerts.daemonStaleTitle" = "Schutzstatus nicht bestätigt";
-"alerts.emptyOpenBody" = "Keine nicht unterdrückten Warnmeldungen in diesem Zeitraum.";
+"alerts.emptyOpenBody" = "Keine nicht unterdrückten Warnungen in diesem Zeitraum.";
 "alerts.emptyOpenTitle" = "Keine offenen Warnungen";
 "alerts.readFailedBody" = "Der Warnungsspeicher auf dem Datenträger konnte nicht gelesen werden (%@). Diese Liste bedeutet daher KEINE Entwarnung.";
 "alerts.readFailedTitle" = "Warnungen konnten nicht gelesen werden";
@@ -1935,12 +1935,12 @@
 "scans.pluginUnavailable" = "Es wurde kein Scan gestartet. Die Metadaten dieses installierten Plugins sind nicht verfügbar. Überprüfen Sie es erneut oder installieren Sie es neu, bevor Sie es ausführen.";
 
 /* Concise read status and health guidance. */
-"alerts.loading" = "Warnmeldungen werden geladen…";
-"alerts.readPartial" = "Die Warnmeldungsdaten sind unvollständig.";
-"alerts.readDeferred" = "Warten auf Warnmeldungsdaten…";
-"alerts.readUnavailable" = "Warnmeldungsdaten sind nicht verfügbar.";
-"alerts.readFailed" = "Warnmeldungen konnten nicht geladen werden.";
-"alerts.cachedNotice" = "Gespeicherte Warnmeldungen werden angezeigt. Aktualisierung erforderlich.";
+"alerts.loading" = "Warnungen werden geladen…";
+"alerts.readPartial" = "Die Warnungsdaten sind unvollständig.";
+"alerts.readDeferred" = "Warten auf Warnungsdaten…";
+"alerts.readUnavailable" = "Warnungsdaten sind nicht verfügbar.";
+"alerts.readFailed" = "Warnungen konnten nicht geladen werden.";
+"alerts.cachedNotice" = "Gespeicherte Warnungen werden angezeigt. Aktualisierung erforderlich.";
 "alerts.campaignsUnavailable" = "Kampagnendaten nicht verfügbar";
 "alerts.campaignsIncomplete" = "Keine Kampagnendaten zum Anzeigen. Der Lesevorgang ist möglicherweise unvollständig.";
 "alerts.loadingCampaigns" = "Kampagnen werden geladen…";
@@ -1956,10 +1956,10 @@
 "system.otlpLifecycleSummary" = "Eingabe oder Verarbeitung von Agent Traces ist beeinträchtigt. Prüfen Sie den Sensorzustand gesondert.";
 "system.auditSummary" = "Aktuelle privilegierte Anfragen und Ergebnisse, neueste zuletzt.";
 "system.alertEvidenceMeasurementTitle" = "Speichernutzung für Beweisdaten konnte nicht ermittelt werden";
-"system.alertEvidenceCaptureTitle" = "Erfassung von Warnmeldungsbeweisen beeinträchtigt";
+"system.alertEvidenceCaptureTitle" = "Erfassung von Warnungsbeweisen beeinträchtigt";
 "system.alertEvidenceReserveTitle" = "Ältere Beweisdaten aufbewahrt";
 "system.alertEvidenceMeasurementSummary" = "Die Speichernutzung konnte nicht geprüft werden. Prüfen Sie die Details, bevor Sie sich auf die Aufbewahrung von Beweisdaten verlassen.";
-"system.alertEvidenceCaptureSummary" = "Einige Warnmeldungsbeweise sind möglicherweise unvollständig. Prüfen Sie unten die Erfassungsdetails.";
+"system.alertEvidenceCaptureSummary" = "Einige Warnungsbeweise sind möglicherweise unvollständig. Prüfen Sie unten die Erfassungsdetails.";
 "system.alertEvidenceReserveSummary" = "Ältere Beweisdaten bleiben bis zum Ablauf innerhalb eines vorübergehenden Speicherkontingents erhalten.";
 "rave.install.verifyingCatalog" = "Katalog wird geprüft…";
 "intelligence.packagesScanning" = "Pakete werden geprüft…";
@@ -1969,7 +1969,23 @@
 "intelligence.packagesNotScanned" = "Noch keine Paketprüfung";
 "intelligence.packagesNotScannedDetail" = "Aktivieren Sie „Paketaktualität“ und wählen Sie „Prüfung starten“. Paketnamen werden an Registries gesendet.";
 "investigation.aiSummaryUnavailable" = "Keine KI-Zusammenfassungen verfügbar";
-"investigation.aiSummaryGuidance" = "Beratende Zusammenfassungen gespeicherter Warnmeldungen mit Schweregrad HOCH oder KRITISCH erscheinen hier. Konfigurieren Sie das KI-Backend der Engine in den Einstellungen.";
+"investigation.aiSummaryGuidance" = "Beratende Zusammenfassungen gespeicherter Warnungen mit Schweregrad HOCH oder KRITISCH erscheinen hier. Konfigurieren Sie das KI-Backend der Engine in den Einstellungen.";
 "intelligence.packagesScanningAction" = "Prüfung läuft…";
 "intelligence.packagesScanAction" = "Prüfung starten";
 "intelligence.packagesRescanAction" = "Erneut prüfen";
+/* Read provenance and retry feedback. */
+"alerts.cachedRefreshing" = "Gespeicherte Warnungen werden angezeigt. Aktualisierung läuft…";
+"alerts.readDetails" = "Details zum Lesen der Warnungen";
+"alerts.campaignsEmpty" = "Keine Kampagnenzeilen verfügbar";
+"events.histogramIncomplete" = "Die Histogrammabdeckung ist unvollständig. Fehlende Intervalle sind unbekannt, nicht null.";
+"events.summariesIncomplete" = "Die Abdeckung der Tagesübersichten ist unvollständig.";
+"events.readDetails" = "Details zum Lesen der Ereignisse";
+"events.histogramDetails" = "Histogrammdetails";
+"events.summaryDetails" = "Details zu Tagesübersichten";
+"events.readInterrupted" = "Das Lesen der Ereignisse wurde unterbrochen. Aktualisieren Sie für einen neuen Versuch.";
+"events.readDeferredDetail" = "Das Lesen der Ereignisse wurde vorübergehend zurückgestellt. Beim nächsten Aktualisieren wird es erneut versucht.";
+"events.summariesDeferred" = "Tagesübersichten wurden vorübergehend zurückgestellt.";
+"events.searchIndexDegraded" = "Der Volltextindex wartet auf Reparatur; Texttreffer können unvollständig sein.";
+"events.searchCoverageDetail" = "Die Suche ist unvollständig: %lld gespeicherte Ereignisse liegen außerhalb der Suchprojektion und %lld Beleglücken bleiben. Kein Treffer beweist nicht die Abwesenheit.";
+"events.histogramCoverageDetail" = "Das Histogramm deckt nur das nachweisbar gespeicherte Intervall von %lld Sekunden ab und enthält %lld Beleglücken; fehlende Klassen sind unbekannt, nicht null.";
+"intelligence.packagesResultsNotice" = "Scanversuch beendet. Die Ergebnisse decken nur zurückgegebene Pakete ab.";

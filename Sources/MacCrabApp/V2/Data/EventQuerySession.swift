@@ -326,7 +326,7 @@ final class EventQuerySession: ObservableObject {
                 isLoading = false
                 if Task.isCancelled {
                     readiness.complete(.deferred, for: readyTicket)
-                    eventSearchCoverageWarning = "Event read was interrupted. Refresh to retry."
+                    eventSearchCoverageWarning = String(localized: "events.readInterrupted", defaultValue: "Event read was interrupted. Refresh to retry.")
                 } else if source != reader.engineSource || epoch != reader.eventQueryEpoch || reader.eventReadsDeferred {
                     readiness.complete(.unavailable, for: readyTicket)
                 }
@@ -348,7 +348,7 @@ final class EventQuerySession: ObservableObject {
             guard let page = result else {
                 if accepts(generation, epoch: epoch) {
                     retryNeeded = true
-                    eventSearchCoverageWarning = "Event read is temporarily deferred. It will retry on the next refresh."
+                    eventSearchCoverageWarning = String(localized: "events.readDeferredDetail", defaultValue: "Event read is temporarily deferred. It will retry on the next refresh.")
                     readiness.complete(.deferred, for: readyTicket)
                 }
                 return
@@ -366,12 +366,12 @@ final class EventQuerySession: ObservableObject {
         } catch is CancellationError {
             if accepts(generation, epoch: epoch) {
                 retryNeeded = true
-                eventSearchCoverageWarning = "Event read was interrupted. It will retry on the next refresh."
+                eventSearchCoverageWarning = String(localized: "events.readInterrupted", defaultValue: "Event read was interrupted. Refresh to retry.")
                 readiness.complete(.deferred, for: readyTicket)
             }
         } catch {
             guard accepts(generation, epoch: epoch) else { return }
-            eventSearchCoverageWarning = "Event evidence could not be read completely: " + error.localizedDescription
+            eventSearchCoverageWarning = String(localized: "events.readFailed", defaultValue: "Couldn’t load events.") + "\n" + error.localizedDescription
             readiness.complete(.failed, for: readyTicket)
         }
     }
@@ -411,7 +411,7 @@ final class EventQuerySession: ObservableObject {
         } catch is CancellationError {
         } catch {
             guard accepts(generation, epoch: epoch), pageToken == pageGeneration else { return }
-            eventSearchCoverageWarning = "Older event evidence could not be read completely: " + error.localizedDescription
+            eventSearchCoverageWarning = String(localized: "events.readPartial", defaultValue: "Event results are incomplete.") + "\n" + error.localizedDescription
             let ticket = readiness.begin(retainingCachedContent: false)
             readiness.complete(.partial, for: ticket)
         }
@@ -480,7 +480,7 @@ final class EventQuerySession: ObservableObject {
             guard case .aggregates(let result) = value else { throw CancellationError() }
             guard token == aggregateGeneration, acceptsEpoch(epoch) else { return [] }
             guard let rows = result else {
-                eventAggregateCoverageWarning = "Daily summaries are temporarily deferred."
+                eventAggregateCoverageWarning = String(localized: "events.summariesDeferred", defaultValue: "Daily summaries are temporarily deferred.")
                 aggregateReadiness.complete(.deferred, for: readyTicket)
                 return []
             }
@@ -491,7 +491,7 @@ final class EventQuerySession: ObservableObject {
             return []
         } catch {
             guard token == aggregateGeneration, acceptsEpoch(epoch) else { return [] }
-            eventAggregateCoverageWarning = "Daily summaries are incomplete: " + error.localizedDescription
+            eventAggregateCoverageWarning = String(localized: "events.summariesIncomplete", defaultValue: "Daily summary coverage is incomplete.") + "\n" + error.localizedDescription
             aggregateReadiness.complete(.failed, for: readyTicket)
             return []
         }
@@ -537,7 +537,7 @@ final class EventQuerySession: ObservableObject {
             guard token == histogramGeneration, acceptsEpoch(epoch) else { return [] }
             eventHistogramEffectiveSince = nil
             eventHistogramEffectiveUntil = nil
-            eventHistogramCoverageWarning = "Histogram evidence could not be read completely: " + error.localizedDescription
+            eventHistogramCoverageWarning = String(localized: "events.histogramIncomplete", defaultValue: "Histogram coverage is incomplete. Missing intervals are unknown, not zero.") + "\n" + error.localizedDescription
             return []
         }
     }

@@ -160,6 +160,44 @@ struct CausalGraphCheckpointTelemetryTests {
         }
     }
 
+    @Test("All explicit checkpoint modes defer before SQLite when below the free-space floor")
+    func allModesRefuseBelowFloorWithoutSQLiteAttempts() async throws {
+        let free = FreeSpaceProbe()
+        try await withStore(freeSpaceProbe: { _ in free.read() }) { store, _ in
+            try await seedOrphanEdge(in: store)
+            let before = await store.checkpointTelemetry()
+            // The configured floor is one byte. Deny immediately so neither
+            // PASSIVE nor its RESTART fallback may enter SQLite; TRUNCATE must
+            // independently apply the same fresh admission gate.
+            free.refuseAfter(0)
+            #expect(!(await store.walCheckpoint()))
+            #expect(!(await store.walCheckpointTruncate()))
+            let after = await store.checkpointTelemetry()
+            for (start, end) in [(before.passive, after.passive),
+                                 (before.restart, after.restart),
+                                 (before.truncate, after.truncate)] {
+                #expect(end.requestsTotal - start.requestsTotal == 1)
+                #expect(end.admissionDeferralsTotal - start.admissionDeferralsTotal == 1)
+                #expect(end.attemptsTotal == start.attemptsTotal)
+                #expect(end.sqliteNanosecondsTotal == start.sqliteNanosecondsTotal)
+                #expect(end.completedTotal == start.completedTotal)
+                #expect(end.unavailableTotal == start.unavailableTotal)
+                expectConserved(end)
+            }
+            #expect((await store.storageAdmissionStatus()).reason == .lowFreeSpace)
+            #expect(try await store.edge(id: "older-edge") != nil)
+
+            // Refusal must remain recoverable when a fresh probe admits it.
+            free.refuseAfter(Int.max)
+            #expect(await store.walCheckpointTruncate())
+            let recovered = await store.checkpointTelemetry()
+            #expect(recovered.truncate.attemptsTotal - after.truncate.attemptsTotal == 1)
+            #expect(recovered.truncate.completedTotal - after.truncate.completedTotal == 1)
+            #expect(recovered.truncate.admissionDeferralsTotal == after.truncate.admissionDeferralsTotal)
+            expectConserved(recovered.truncate)
+        }
+    }
+
     @Test("A pinned reader is counted as deferral and prevents substrate deletion")
     func pinnedReaderPreservesCandidatesUntilRelease() async throws {
         try await withStore { store, path in
