@@ -161,10 +161,20 @@ public actor TCCMonitor {
     private var watchFileDescriptors: [Int32] = []
 
     /// Debounce interval to coalesce rapid database writes (in seconds).
-    private let debounceInterval: TimeInterval = 0.5
+    private let debounceInterval: TimeInterval
 
     /// Tracks the last time a change was processed to implement debouncing.
     private var lastChangeTime: Date = .distantPast
+
+    /// One change pass at a time. Concurrent passes diffed against the same
+    /// snapshot and emitted every transition twice, and an older pass that
+    /// finished last restored a stale snapshot. A change during a pass asks
+    /// for one more pass instead.
+    private var changePassRunning = false
+    private var changePassRequested = false
+
+    /// Test seam: replaces the TCC database reads and skips the file watchers.
+    private let entriesReaderForTesting: (@Sendable () -> [String: TCCEntry])?
     private let snapshotWriter: CoalescingSnapshotWriter<PermissionSnapshot>
 
     /// The asynchronous stream of normalised events.
@@ -201,6 +211,15 @@ public actor TCCMonitor {
 
     /// Creates a new `TCCMonitor`. Call `start()` to begin monitoring.
     public init() {
+        self.init(entriesReaderForTesting: nil, debounceInterval: 0.5)
+    }
+
+    init(
+        entriesReaderForTesting: (@Sendable () -> [String: TCCEntry])?,
+        debounceInterval: TimeInterval = 0.5
+    ) {
+        self.entriesReaderForTesting = entriesReaderForTesting
+        self.debounceInterval = debounceInterval
         self.snapshotWriter = CoalescingSnapshotWriter(
             category: "tcc-permission-snapshot",
             persistence: Self.persistPermissionSnapshot
@@ -237,11 +256,12 @@ public actor TCCMonitor {
         // SQLite busy waits and multi-user reads must not pin this actor: stop
         // has to be able to seal startup while the cold snapshot is in flight.
         let initialSnapshot = await Task.detached(priority: .utility) { [self] in
-            readAllEntries()
+            entriesReaderForTesting?() ?? readAllEntries()
         }.value
         guard lifecyclePhase == .running, !Task.isCancelled else { return }
         snapshot = initialSnapshot
         logger.info("TCCMonitor started — initial snapshot has \(self.snapshot.count) entries.")
+        guard entriesReaderForTesting == nil else { return }
 
         // Install file watchers
         installWatcher(path: Self.systemDBPath, label: "system")
@@ -472,17 +492,41 @@ public actor TCCMonitor {
     /// writes multiple times for a single user action).
     private func handleDatabaseChange() async {
         guard lifecyclePhase == .running, !Task.isCancelled else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastChangeTime) >= debounceInterval else {
+        guard !changePassRunning else {
+            changePassRequested = true
             return
         }
-        lastChangeTime = now
+        changePassRunning = true
+        defer { changePassRunning = false }
+        repeat {
+            changePassRequested = false
+            await runChangePass()
+        } while changePassRequested && lifecyclePhase == .running && !Task.isCancelled
+    }
+
+    func databaseChangedForTesting() async {
+        await handleDatabaseChange()
+    }
+
+    private func runChangePass() async {
+        // Coalesce tccd's burst of writes for one user action by waiting out
+        // the rest of the interval, then reading once. A write inside the
+        // interval used to be skipped until some later write.
+        let elapsed = Date().timeIntervalSince(lastChangeTime)
+        if elapsed < debounceInterval {
+            try? await Task.sleep(for: .seconds(debounceInterval - elapsed))
+        }
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
+        lastChangeTime = Date()
 
         let currentEntries = await Task.detached(priority: .utility) { [self] in
-            readAllEntries()
+            entriesReaderForTesting?() ?? readAllEntries()
         }.value
         guard lifecyclePhase == .running, !Task.isCancelled else { return }
         let previousEntries = snapshot
+        // Publish the new baseline before emitting: emission awaits, and the
+        // next pass must diff against what this pass observed.
+        snapshot = currentEntries
 
         // Detect new or changed grants
         for (key, entry) in currentEntries {
@@ -506,10 +550,6 @@ public actor TCCMonitor {
                 guard lifecyclePhase == .running, !Task.isCancelled else { return }
             }
         }
-
-        // Update the snapshot
-        guard lifecyclePhase == .running, !Task.isCancelled else { return }
-        snapshot = currentEntries
     }
 
     // MARK: - Event Emission
