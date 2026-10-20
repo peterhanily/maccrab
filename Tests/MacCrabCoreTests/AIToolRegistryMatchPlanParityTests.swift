@@ -91,4 +91,22 @@ struct AIToolRegistryMatchPlanParityTests {
                     "\(path.debugDescription)")
         }
     }
+
+    @Test("the memo replays the uncached match, repeated and across a capacity clear")
+    func memoParity() {
+        let registry = AIToolRegistry()
+        for _ in 0..<3 {
+            for path in Self.corpus {
+                #expect(registry.isAITool(executablePath: path)
+                        == registry.uncachedIsAITool(executablePath: path), "\(path.debugDescription)")
+            }
+        }
+        // Overflow the memo with distinct paths, then re-check the corpus.
+        for index in 0..<4_200 {
+            _ = registry.isAITool(executablePath: "/tmp/churn/\(index)/bin")
+        }
+        for path in Self.corpus {
+            #expect(registry.isAITool(executablePath: path) == Self.reference(path, custom: []))
+        }
+    }
 }

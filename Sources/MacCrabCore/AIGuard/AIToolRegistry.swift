@@ -281,8 +281,42 @@ public struct AIToolRegistry: Sendable {
         self.customPlans = Self.plans(customPatterns)
     }
 
+    /// `isAITool` is pure for a registry, whose plans never change, and the
+    /// event loop asks it for the subject and every non-platform ancestor of
+    /// every event. Bounded; a full memo is cleared, which only costs a
+    /// recomputation.
+    private let memo = ResultMemo()
+
+    private final class ResultMemo: @unchecked Sendable {
+        static let capacity = 4_096
+        private let lock = NSLock()
+        private var results: [String: AIToolType?] = [:]
+
+        func value(for path: String, compute: (String) -> AIToolType?) -> AIToolType? {
+            lock.lock()
+            if let hit = results[path] {
+                lock.unlock()
+                return hit
+            }
+            lock.unlock()
+            let computed = compute(path)
+            lock.lock()
+            if results.count >= Self.capacity {
+                results.removeAll(keepingCapacity: true)
+            }
+            results[path] = computed
+            lock.unlock()
+            return computed
+        }
+    }
+
     /// Check if an executable path belongs to a known AI coding tool.
     public func isAITool(executablePath: String) -> AIToolType? {
+        memo.value(for: executablePath, compute: uncachedIsAITool)
+    }
+
+    /// The match itself; `isAITool` memoizes it.
+    func uncachedIsAITool(executablePath: String) -> AIToolType? {
         let path = executablePath.lowercased()
         let basename = (path as NSString).lastPathComponent
 
