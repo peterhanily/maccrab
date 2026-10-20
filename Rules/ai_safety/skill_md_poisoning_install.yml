@@ -6,8 +6,10 @@ id: d1a2b3c4-2030-4000-a000-000000002030
 # payload markers. The markers are agent-DIRECTIVE markup (<INSTRUCTIONS>,
 # <eval>, <run>, <fetch>, an inline base64 text/html data URI, __import__("os"))
 # which human-readable skill documentation does not carry, and the rule fires
-# only on FileAction 'create' of a file literally named SKILL.md under a skills
-# directory — not on edits, not on reads. FileContent is genuinely populated
+# only on the write of a file literally named SKILL.md under a skills
+# directory — not on reads. FileContent is read on the completed write (the
+# close event), never on create, so a create-only selection could not match;
+# both actions are accepted, as the sibling content rules do. FileContent is genuinely populated
 # for these paths (FileContentEnricher.shouldScan agentContentRoots covers
 # /.claude/skills/, /.codex/skills/, /.cursor/skills/), so this is a live rule,
 # not a dead one being promoted for appearances.
@@ -37,7 +39,9 @@ logsource:
     product: macos
 detection:
     selection_skill_install:
-        FileAction: 'create'
+        FileAction:
+            - 'create'
+            - 'close'
         TargetFilename|contains:
             - '/.claude/skills/'
             - '/.codex/skills/'
