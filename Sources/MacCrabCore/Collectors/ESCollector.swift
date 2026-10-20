@@ -459,11 +459,14 @@ public final class ESCollector: @unchecked Sendable {
         // System binaries and frameworks
         "/System/",
         "/usr/libexec/xpcproxy",
-        // Spotlight indexing
-        "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework",
+        // Spotlight indexing. Directory prefixes need the trailing slash:
+        // without it they were literal mutes of a directory, which mute no
+        // process, and once exec stayed visible through the /System/ mute
+        // these processes' execs flowed.
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/",
         "/.Spotlight-V100",
         // Time Machine
-        "/System/Library/CoreServices/backupd.bundle",
+        "/System/Library/CoreServices/backupd.bundle/",
         "/.MobileBackups",
         "/Volumes/com.apple.TimeMachine",
     ]
