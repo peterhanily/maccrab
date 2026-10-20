@@ -191,16 +191,17 @@ public struct CredentialFence: Sendable {
     /// still alerts — that cross-store read is the signal this fence exists to
     /// give, and it is untouched by this table.
     ///
-    /// Known limitation, deliberately accepted for now: this keys on basename,
-    /// not on signing identity, so a binary that renames itself `gh` can read
-    /// `~/.config/gh/` unflagged. That is a narrow win (one store, and only the
-    /// store matching the assumed name) against a large, sustained noise cost.
-    /// Upgrading the key to the accessor's Team ID / signing identifier is the
-    /// right follow-up and needs the caller to pass the code signature.
+    /// Known limitation, deliberately accepted for now: these per-tool stores
+    /// are keyed on basename, not on signing identity, so a binary that renames
+    /// itself `gh` can read `~/.config/gh/` unflagged. That is a narrow win (one
+    /// store, and only the store matching the assumed name) against a large,
+    /// sustained noise cost. The login keychain is not in this table: one name
+    /// claimed every keychain, so its owners are judged by identity in
+    /// `ownsKeychain`.
     private static let credentialOwners: [String: [String]] = [
         "gh":               ["/.config/gh/"],
         "git":              ["/.ssh/", ".netrc"],
-        "git-credential-osxkeychain": ["/library/keychains/", ".netrc"],
+        "git-credential-osxkeychain": [".netrc"],
         "ssh":              ["/.ssh/"],
         "ssh-add":          ["/.ssh/"],
         "ssh-keygen":       ["/.ssh/"],
@@ -216,17 +217,61 @@ public struct CredentialFence: Sendable {
         "yarn":             [".npmrc"],
         "twine":            [".pypirc"],
         "cargo":            ["/.cargo/"],
-        "google chrome":        ["/google/chrome/", "/library/keychains/"],
-        "google chrome helper": ["/google/chrome/", "/library/keychains/"],
+        "google chrome":        ["/google/chrome/"],
+        "google chrome helper": ["/google/chrome/"],
         "chrome-headless-shell": ["/google/chrome/", "/chrome-headless-shell/"],
         "firefox":          ["/firefox/profiles/"],
         "safari":           ["/safari/"],
-        "brave browser":    ["/bravesoftware/", "/library/keychains/"],
+        "brave browser":    ["/bravesoftware/"],
     ]
+
+    /// Team of Apple's Xcode and Command Line Tools binaries, which are signed
+    /// by Apple but are not platform binaries.
+    public static let appleDeveloperToolsTeamId = "59GAB85EFG"
+
+    /// The accessing process's kernel-attested signing identity, from the
+    /// Endpoint Security event. A copied or renamed platform binary keeps its
+    /// own signing identifier (a copy of /bin/cp stays com.apple.cp), and an
+    /// ad-hoc binary has no team.
+    public struct AccessorIdentity: Sendable, Hashable {
+        public let isPlatformBinary: Bool
+        public let teamId: String?
+        public let signingId: String?
+
+        public init(isPlatformBinary: Bool, teamId: String?, signingId: String?) {
+            self.isPlatformBinary = isPlatformBinary
+            self.teamId = teamId
+            self.signingId = signingId
+        }
+    }
+
+    /// Owners of the keychains, honoured only with an identity a renamed copy
+    /// cannot carry. A name alone let any binary called `Google Chrome`, or a
+    /// copy of /bin/cp named `git-credential-osxkeychain`, copy
+    /// login.keychain-db unflagged. Homebrew builds git's helper ad-hoc, with
+    /// no identity to bind, so an ad-hoc helper is still taken by its name.
+    private static func ownsKeychain(binary: String, identity: AccessorIdentity?) -> Bool {
+        guard let identity, !identity.isPlatformBinary else { return false }
+        switch binary {
+        case "git-credential-osxkeychain":
+            return identity.teamId == nil
+                || (identity.teamId == appleDeveloperToolsTeamId
+                    && identity.signingId == "com.apple.git-credential-osxkeychain")
+        case "google chrome", "google chrome helper":
+            return identity.teamId == "EQHXZ8M8AV"
+        case "brave browser":
+            return identity.teamId == "KL8N8XSYF4"
+        default:
+            return false
+        }
+    }
 
     /// True when `binary` (a lowercased basename) is the legitimate owner of
     /// the credential store at `path` (already lowercased).
-    private static func isOwnCredentialStore(binary: String, path: String) -> Bool {
+    private static func isOwnCredentialStore(binary: String, path: String, identity: AccessorIdentity?) -> Bool {
+        if ExactSubstringSearch.contains(path, "/library/keychains/") {
+            return ownsKeychain(binary: binary, identity: identity)
+        }
         guard let owned = credentialOwners[binary] else { return false }
         // git reads public keys and allowed_signers to sign and verify
         // commits; ssh, never git, reads a private key. `git diff --no-index
@@ -386,7 +431,8 @@ public struct CredentialFence: Sendable {
     /// reads still alert, and the Sigma cred-theft rules (NoiseFilter Gate-8)
     /// are unaffected by this advisory path entirely.
     public func checkAccessDetailed(filePath: String, aiToolName: String, aiToolType: AIToolType? = nil,
-                                    accessingBinary: String? = nil) -> (type: CredentialType, description: String)? {
+                                    accessingBinary: String? = nil,
+                                    accessorIdentity: AccessorIdentity? = nil) -> (type: CredentialType, description: String)? {
         let lowercasedPath = filePath.lowercased()
         guard let credType = Self.matchCredential(
             lowercasedPath: lowercasedPath,
@@ -398,10 +444,12 @@ public struct CredentialFence: Sendable {
         // `isOwnedByTool` check below already applies to AI tools. Runtime:
         // `gh` → ~/.config/gh/hosts.yml was 218 of this rule's 777 alerts.
         // `accessingBinary` is a basename and is defaulted, so callers that
-        // don't know the accessor keep the previous (stricter) behaviour.
+        // don't know the accessor keep the previous (stricter) behaviour. A
+        // keychain claim also needs `accessorIdentity`.
         if let accessingBinary,
            Self.isOwnCredentialStore(binary: accessingBinary.lowercased(),
-                                     path: lowercasedPath) {
+                                     path: lowercasedPath,
+                                     identity: accessorIdentity) {
             return nil
         }
 

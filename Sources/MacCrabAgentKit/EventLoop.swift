@@ -231,32 +231,40 @@ enum EventLoop {
     }
 
     /// Apple's signing and notarization tools, exempt from CredentialFence
-    /// only at a root-owned toolchain location and, once the signature is
-    /// known, signed by Apple. The name alone let a payload called `security`,
-    /// or a copy of `/bin/cp` (still a platform binary by cdhash) renamed in
-    /// a writable directory, copy a keychain unflagged.
-    private static let credentialFenceExemptAppleTools: Set<String> = [
-        "codesign", "security", "stapler", "productsign", "pkgbuild",
-        "productbuild", "notarytool", "altool", "amfid", "xcodebuild",
-    ]
-    private static let credentialFenceAppleToolLocations = [
-        "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/System/",
-        "/Library/Developer/CommandLineTools/",
+    /// only as the genuine binary: a platform binary, or signed by Apple's
+    /// developer-tools team, carrying the tool's own signing identifier. A
+    /// renamed copy keeps the identifier of what it really is (a copy of
+    /// /bin/cp stays com.apple.cp), so neither a name nor a location an admin
+    /// can write qualifies. pkgbuild and productbuild are not exempt: they
+    /// archive whatever directory they are given, a keychain included.
+    private static let credentialFenceExemptAppleTools: [String: Set<String>] = [
+        "codesign": ["com.apple.security.codesign", "com.apple.codesign"],
+        "security": ["com.apple.security"],
+        "stapler": ["com.apple.stapler"],
+        "productsign": ["com.apple.productsign"],
+        "notarytool": ["com.apple.gke.notary.tool"],
+        "altool": ["com.apple.itunes.altoolShim", "com.apple.itunes.altool", "com.apple.altool"],
+        "amfid": ["com.apple.amfid"],
+        "xcodebuild": ["com.apple.dt.xcodebuild"],
     ]
     /// MacCrab's own tools, exempt only with MacCrab's team signature.
     private static let credentialFenceExemptMacCrabTools: Set<String> = [
         "maccrabctl", "maccrabd", "com.maccrab.agent",
     ]
-    /// Sparkle's release tools ship ad-hoc signed, so there is no identity to
-    /// bind them to; they stay exempt by name.
+    /// Sparkle ships its release tools ad-hoc signed, so there is no identity
+    /// to bind them to. Only an ad-hoc binary with the name qualifies: a
+    /// renamed platform tool or a team-signed binary does not, though a
+    /// purpose-built ad-hoc binary with that name still would.
     private static let credentialFenceExemptReleaseTools: Set<String> = [
         "sign_update", "generate_keys",
     ]
-    /// Apple's ssh tools read the login keychain for `UseKeychain`
+    /// Apple's ssh and ssh-add read the login keychain for `UseKeychain`
     /// passphrases, which now reaches CredentialFence for an agent's `git
-    /// push`. Only the genuine binaries in SIP-protected /usr/bin qualify: a
-    /// renamed copy of cp named `ssh` must still be caught copying a keychain.
-    private static let keychainReadingSSHTools: Set<String> = ["ssh", "ssh-add", "scp", "sftp"]
+    /// push`. Only the genuine platform binaries qualify. scp and sftp exec ssh
+    /// for that lookup, so their own keychain opens are file transfers.
+    private static let keychainReadingSSHTools: [String: String] = [
+        "ssh": "com.apple.ssh", "ssh-add": "com.apple.ssh-add",
+    ]
 
     static func isCredentialFenceExempt(
         _ event: Event,
@@ -265,22 +273,58 @@ enum EventLoop {
         let process = event.process
         let path = process.executable
         let subject = (path as NSString).lastPathComponent
-        if keychainReadingSSHTools.contains(subject),
+        let signature = process.codeSignature
+        if let sshIdentifier = keychainReadingSSHTools[subject],
            let file = event.file?.path, ExactSubstringSearch.contains(file, "/Library/Keychains/") {
             return path.hasPrefix("/usr/bin/") && process.isPlatformBinary
+                && signature?.signingId == sshIdentifier
         }
-        if credentialFenceExemptAppleTools.contains(subject) {
-            let anchored = credentialFenceAppleToolLocations.contains { path.hasPrefix($0) }
-                || (path.hasPrefix("/Applications/Xcode") && path.contains(".app/Contents/Developer/"))
-            guard anchored else { return false }
-            if process.isPlatformBinary { return true }
-            guard let signature = process.codeSignature else { return true }
-            return signature.signerType == .apple
+        if let identifiers = credentialFenceExemptAppleTools[subject] {
+            guard let signature, let signingId = signature.signingId,
+                  identifiers.contains(signingId) else { return false }
+            return process.isPlatformBinary
+                || (signature.teamId == CredentialFence.appleDeveloperToolsTeamId && signature.signerType == .apple)
         }
         if credentialFenceExemptMacCrabTools.contains(subject) {
             return NoiseFilter.isMacCrabProcess(event: event, developmentEngine: developmentEngine)
         }
-        return credentialFenceExemptReleaseTools.contains(subject)
+        if credentialFenceExemptReleaseTools.contains(subject) {
+            guard !process.isPlatformBinary, let signature else { return false }
+            return signature.signerType == .adHoc && signature.teamId == nil
+        }
+        return false
+    }
+
+    /// The CredentialFence finding for one AI-attributed file event, if any.
+    /// Deployed honeyfiles have their own HIGH detector, and signing tools
+    /// legitimately use keychains under AI-driven release builds; dedicated
+    /// keychain-dump rules still cover malicious CLI use. Owner claims are
+    /// judged with the accessor's kernel-attested identity.
+    static func credentialFenceFinding(
+        event: Event,
+        fence: CredentialFence,
+        toolName: String,
+        toolType: AIToolType,
+        developmentEngine: Bool = NoiseFilter.engineIsDevelopmentBuild
+    ) -> (type: CredentialFence.CredentialType, description: String)? {
+        guard let filePath = event.file?.path,
+              event.enrichments["IsHoneyfile"] != "true",
+              !isCredentialFenceExempt(event, developmentEngine: developmentEngine) else { return nil }
+        let process = event.process
+        // Without a signature the identity is unknown, not ad-hoc.
+        return fence.checkAccessDetailed(
+            filePath: filePath,
+            aiToolName: toolName,
+            aiToolType: toolType,
+            accessingBinary: (process.executable as NSString).lastPathComponent,
+            accessorIdentity: process.codeSignature.map {
+                CredentialFence.AccessorIdentity(
+                    isPlatformBinary: process.isPlatformBinary,
+                    teamId: $0.teamId,
+                    signingId: $0.signingId
+                )
+            }
+        )
     }
 
     /// Synchronous pre-detection preparation followed by bounded ownership.
@@ -454,21 +498,14 @@ enum EventLoop {
         guard let filePath = event.file?.path else { return }
         let process = event.process
         let toolName = attribution.toolType.displayName
-        let subject = (process.executable as NSString).lastPathComponent
-        let credentialFenceExempt = isCredentialFenceExempt(event)
 
-        // Deployed credential-shaped honeyfiles have their own dedicated HIGH
-        // detector. Signing/notarization tools legitimately use keychains under
-        // AI-driven release builds; dedicated keychain-dump rules still cover
-        // malicious CLI use. These exemptions apply only to CredentialFence,
-        // never to project-boundary mutation enforcement.
-        if event.enrichments["IsHoneyfile"] != "true",
-           !credentialFenceExempt,
-           let (credentialType, description) = state.credentialFence.checkAccessDetailed(
-               filePath: filePath,
-               aiToolName: toolName,
-               aiToolType: attribution.toolType,
-               accessingBinary: subject
+        // The honeyfile and signing-tool exemptions apply only to
+        // CredentialFence, never to project-boundary mutation enforcement.
+        if let (credentialType, description) = credentialFenceFinding(
+               event: event,
+               fence: state.credentialFence,
+               toolName: toolName,
+               toolType: attribution.toolType
            ) {
             let alert = Alert(
                 ruleId: "maccrab.ai-guard.credential-access",
