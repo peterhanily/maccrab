@@ -939,8 +939,10 @@ public actor CampaignDetector {
     /// High-value 2-tactic combinations that always trigger a kill chain.
     /// v1.17.1: 2 tactics is weak corroboration — credential_access + C2 is
     /// also the shape of a benign AI agent reading a .env then making a network
-    /// call — so these are HIGH, not CRITICAL. CRITICAL is reserved for the
-    /// 3-tactic credential+persistence+C2 chain (see checkKillChain).
+    /// call — so these are HIGH, not CRITICAL. CRITICAL is reserved for a
+    /// kill chain of at least `minTacticsForKillChain` tactics (4, or 5 in dev
+    /// mode) that includes credential access, persistence and C2; those three
+    /// alone still produce a HIGH pair.
     ///
     /// Ordered: a Dictionary here made the winning pair, and so the title,
     /// depend on hash order.
@@ -955,7 +957,8 @@ public actor CampaignDetector {
             ("Malware Installation Chain", .high)),
     ]
 
-    /// The one CRITICAL shape. It always contains a HIGH pair
+    /// The tactics of the one CRITICAL shape, within a chain of at least
+    /// `minTacticsForKillChain` tactics. It always contains a HIGH pair
     /// (credential-access → C2, persistence → C2), so pairs must not be
     /// matched first: that returned HIGH, or nothing once deduplicated, and
     /// "Full Kill Chain" was unreachable.
