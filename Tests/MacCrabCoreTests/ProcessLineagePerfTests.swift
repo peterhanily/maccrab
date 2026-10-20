@@ -157,10 +157,11 @@ struct ProcessLineageMemoTests {
         await lineage.prune()
         #expect(await !lineage.contains(pid: 50))
 
-        // The child's walk now stops at the missing parent → empty chain,
-        // NOT the stale ["parent","launchd"] memo.
+        // The child was reparented to launchd when its exited parent was
+        // removed, as the kernel does → ["launchd"], NOT the stale
+        // ["parent","launchd"] memo.
         let afterPrune = await lineage.ancestors(of: 100)
-        #expect(afterPrune.isEmpty)
+        #expect(names(afterPrune) == ["launchd"])
     }
 
     @Test("Eviction of an ancestor under cap pressure invalidates descendant memo")
@@ -285,6 +286,48 @@ struct ProcessLineagePidReuseTests {
         await lineage.recordProcess(pid: 100, ppid: 1, path: "/usr/local/bin/node", name: "node",
                                     startTime: start.addingTimeInterval(60))
         #expect(await lineage.ancestors(of: 300).first?.executable == "/usr/local/bin/node")
+    }
+
+    @Test("a pid reused after its exited process was pruned does not adopt the old children")
+    func reuseAfterPruneDoesNotAdoptOldChildren() async {
+        let lineage = ProcessLineage(retentionWindow: 0)
+        let start = Date()
+        await lineage.recordProcess(pid: 1, ppid: 0, path: "/sbin/launchd", name: "launchd", startTime: start)
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/bin/zsh", name: "zsh", startTime: start)
+        await lineage.recordProcess(pid: 200, ppid: 100, path: "/usr/bin/caffeinate", name: "caffeinate", startTime: start)
+        await lineage.recordExit(pid: 100)
+        try? await Task.sleep(for: .milliseconds(10))
+        await lineage.prune()
+        #expect(await lineage.path(of: 100) == nil)
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/usr/local/bin/claude", name: "claude",
+                                    startTime: start.addingTimeInterval(3_600))
+        #expect(await lineage.ancestors(of: 200).map(\.executable) == ["/sbin/launchd"])
+    }
+}
+
+@Suite("ProcessLineage exit-order queue compaction")
+struct ProcessLineageExitOrderCompactionTests {
+    @Test("stale exit entries are compacted and eviction still takes the earliest live exit")
+    func compactionKeepsEvictionExact() async {
+        let lineage = ProcessLineage(retentionWindow: 3_600, maxProcessCount: 4)
+        let start = Date()
+        // One pid exiting and being re-recorded 1,200 times leaves stale entries
+        // past the rebuild bound (2 * 4 + 1,024).
+        for _ in 0..<1_200 {
+            await lineage.recordProcess(pid: 50, ppid: 0, path: "/bin/churn", name: "churn", startTime: start)
+            await lineage.recordExit(pid: 50)
+        }
+        await lineage.recordProcess(pid: 60, ppid: 0, path: "/bin/a", name: "a", startTime: start)
+        await lineage.recordExit(pid: 60)
+        await lineage.recordProcess(pid: 70, ppid: 0, path: "/bin/b", name: "b", startTime: start)
+        await lineage.recordProcess(pid: 80, ppid: 0, path: "/bin/c", name: "c", startTime: start)
+        // At the cap; the next insert evicts the earliest live exit: pid 50.
+        await lineage.recordProcess(pid: 90, ppid: 0, path: "/bin/d", name: "d", startTime: start)
+        #expect(await lineage.path(of: 50) == nil)
+        #expect(await lineage.path(of: 60) == "/bin/a")
+        await lineage.recordProcess(pid: 91, ppid: 0, path: "/bin/e", name: "e", startTime: start)
+        #expect(await lineage.path(of: 60) == nil)
+        #expect(await lineage.nodeCount == 4)
     }
 }
 

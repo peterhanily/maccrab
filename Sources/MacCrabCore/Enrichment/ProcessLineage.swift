@@ -334,7 +334,17 @@ public actor ProcessLineage {
         if childrenIndex[node.ppid]?.isEmpty == true {
             childrenIndex.removeValue(forKey: node.ppid)
         }
-        childrenIndex.removeValue(forKey: pid)
+        let children = childrenIndex.removeValue(forKey: pid) ?? []
+        // An exited parent's children were reparented to launchd by the
+        // kernel. Leaving them pointing at the dead pid let a process that
+        // later reuses it, after prune or eviction, adopt them. A running
+        // parent evicted under cap pressure is still their parent.
+        if node.exitTime != nil {
+            for child in children where nodes[child]?.ppid == pid {
+                nodes[child]?.ppid = 1
+                childrenIndex[1, default: []].insert(child)
+            }
+        }
 
         // Removing a node shortens the chain of any descendant that walked
         // through it. Drop the whole memo. (See ancestorsMemo.)
