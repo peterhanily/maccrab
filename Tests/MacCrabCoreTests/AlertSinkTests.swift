@@ -691,6 +691,22 @@ struct AlertSinkRecalibrationTests {
         #expect(try await storedSeverity(after: a) == .low)
     }
 
+    @Test("MacCrab's own integrity alerts keep their severity at the sysext path")
+    func selfDefenseVictimAlertsKeepSeverity() async throws {
+        // These name MacCrab as the victim, not the actor.
+        let sysext = "/Library/SystemExtensions/ABC/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
+        let tamper = alert(
+            ruleId: "maccrab.self-defense.binary_modified", ruleTitle: "MacCrab Tamper Detection: Binary Modified",
+            severity: .critical, processPath: sysext, mitreTactics: "attack.defense_evasion"
+        )
+        #expect(try await storedSeverity(after: tamper) == .critical)
+        let injected = alert(
+            ruleId: "maccrab.forensic.injected-library", ruleTitle: "Injected Library: com.maccrab.agent loaded x.dylib",
+            severity: .high, processPath: sysext, mitreTactics: "attack.defense_evasion"
+        )
+        #expect(try await storedSeverity(after: injected) == .high)
+    }
+
     @Test("A user-writable MacCrab path is not self-noise by path alone in a release engine")
     func userWritableSelfPathNeedsIdentity() async throws {
         // Without the event there is no signature to check. The app bundle and

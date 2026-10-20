@@ -263,6 +263,14 @@ public actor AlertSink {
         return developmentEngine && isMacCrabSelfNoise(path)
     }
 
+    /// Integrity and forensic alerts whose processPath names MacCrab as the
+    /// VICTIM: a tampered engine binary, or a library injected into it. They
+    /// are the integrity checks that self-noise lowering defers to, so they
+    /// keep their severity.
+    static func describesMacCrabAsVictim(ruleId: String) -> Bool {
+        ruleId.hasPrefix("maccrab.self-defense.") || ruleId == "maccrab.forensic.injected-library"
+    }
+
     /// FP recalibration (v1.19.3): DOWN-WEIGHT (never drop) two noise classes so
     /// they surface for review instead of screaming high/critical. The floor is
     /// `.low` (NOT `.informational`) so down-weighted alerts stay visible in the
@@ -298,6 +306,7 @@ public actor AlertSink {
         // (1) MacCrab self-noise — any severity above the floor, regardless of
         // alert type (own-process behavioral/chain alerts are noise).
         if alert.severity > .low,
+           !Self.describesMacCrabAsVictim(ruleId: alert.ruleId),
            Self.isVerifiedMacCrabActor(processPath: alert.processPath, event: event) {
             return downweighted("Severity reduced — MacCrab's own process; self-tamper is covered by integrity/code-signing checks, not behavioral alerts.")
         }
