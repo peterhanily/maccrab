@@ -1223,6 +1223,9 @@ final class AppState: ObservableObject, EventQueryReading {
     // MARK: Private
 
     private var pollTimer: AnyCancellable?
+    /// Whether the dashboard poll is running. It stops while the window is
+    /// unfocused or hidden, and views must not then claim to be live.
+    @Published private(set) var isPolling = false
     private let refreshCoordinator = DashboardRefreshCoordinator()
     private var pollingGeneration: UInt64 = 0
     /// nil until the first `updateStats()` sample primes it — see
@@ -1604,6 +1607,7 @@ final class AppState: ObservableObject, EventQueryReading {
     /// hammering SQLite for updates nobody is looking at.
     func startPolling() {
         guard pollTimer == nil else { return }
+        isPolling = true
         resumeEventReaderAdmission()
         pollingGeneration &+= 1
         // Deep-audit fix: honor the "Poll detection engine every N seconds"
@@ -1764,6 +1768,7 @@ final class AppState: ObservableObject, EventQueryReading {
     func stopPolling() {
         pollTimer?.cancel()
         pollTimer = nil
+        isPolling = false
         pollingGeneration &+= 1
         refreshCoordinator.cancel()
         if eventReaderRetention.acceptsReads {

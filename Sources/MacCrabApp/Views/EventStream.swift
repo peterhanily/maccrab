@@ -1083,7 +1083,7 @@ struct EventStream: View {
                         .accessibilityHidden(true)
                     Text(String(localized: "events.searchMode", defaultValue: "Search results — clear to resume live"))
                         .foregroundColor(.accentColor)
-                } else if isPaused {
+                } else if isPaused || !appState.isPolling {
                     Image(systemName: "pause.circle.fill")
                         .foregroundColor(.orange)
                         .accessibilityHidden(true)
