@@ -400,7 +400,16 @@ public actor RuleEngine {
     // MARK: State
 
     /// Rules indexed by logsource category for fast dispatch.
-    private var ruleIndex: [String: [CompiledRule]] = [:]
+    private var ruleIndex: [String: [CompiledRule]] = [:] {
+        didSet { enabledRuleIndex = ruleIndex.mapValues { $0.filter(\.enabled) } }
+    }
+
+    /// The enabled rules of each category, in index order. Evaluation used to
+    /// walk, copy and skip every disabled rule on every event: 210 of 267
+    /// process_creation and 103 of 138 file_event rules in the stable profile.
+    /// Derived on every index change, which happens only at load, reload,
+    /// rollback and enable/disable.
+    private var enabledRuleIndex: [String: [CompiledRule]] = [:]
 
     /// All rules keyed by ID for individual lookups.
     private var allRules: [String: CompiledRule] = [:]
@@ -1159,7 +1168,7 @@ public actor RuleEngine {
         dependencyFilter: HeavyEnrichmentDependencyMask?
     ) -> [RuleMatch] {
         let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
-        guard let rules = ruleIndex[category] else { return [] }
+        guard let rules = enabledRuleIndex[category] else { return [] }
 
         var matches: [RuleMatch] = []
         var rulesToDisable: [(id: String, title: String, ms: Double, breaches: Int)] = []
