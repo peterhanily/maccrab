@@ -1137,7 +1137,8 @@ enum EventLoop {
                 processTreeLogProbability = nil
             }
 
-            if let filePath = enrichedEvent.file?.path {
+            if let filePath = enrichedEvent.file?.path,
+               QuarantineEnricher.carriesProvenance(eventAction: enrichedEvent.eventAction) {
                 await state.quarantineEnricher.enrich(
                     &enrichedEvent.enrichments,
                     forFile: filePath,

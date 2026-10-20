@@ -303,6 +303,18 @@ public actor QuarantineEnricher {
         return guid.isEmpty ? nil : guid
     }
 
+    /// Whether an event can show where its file came from. The lookup ran on
+    /// every file event, two getxattr calls plus a database query on a shared
+    /// actor, although its output is display-only: no rule, sequence or graph
+    /// rule reads it. A download lands through create, rename and close; a
+    /// write, open or unlink adds nothing the completed file will not show.
+    public static func carriesProvenance(eventAction: String) -> Bool {
+        switch eventAction {
+        case "create", "rename", "close", "close_modified": return true
+        default: return false
+        }
+    }
+
     /// Enrich an event's enrichments dict with quarantine provenance.
     public func enrich(_ enrichments: inout [String: String], forFile filePath: String) {
         guard let info = lookup(filePath: filePath) else { return }
