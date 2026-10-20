@@ -699,8 +699,15 @@ public actor RuleEngine {
     /// Whether a rule whose eval just took `elapsedNs` (with `breaches`
     /// accumulated over-budget evals) should be auto-disabled: one pathological
     /// eval (catastrophic backtracking), or persistent over-budget cost.
-    func shouldAutoDisable(elapsedNs: UInt64, breaches: Int) -> Bool {
-        elapsedNs >= autoDisablePathologicalNs || breaches >= autoDisableMaxBreaches
+    ///
+    /// Only a regex can cost seconds of CPU in one evaluation; substring and
+    /// equality predicates over bounded fields cannot. The measurement is wall
+    /// time, which also counts preemption and paging, so a host stall used to
+    /// disable whichever rule happened to be running, must-fire rules
+    /// included, until the next reload.
+    func shouldAutoDisable(elapsedNs: UInt64, breaches: Int, usesRegex: Bool = true) -> Bool {
+        guard usesRegex else { return false }
+        return elapsedNs >= autoDisablePathologicalNs || breaches >= autoDisableMaxBreaches
     }
 
     // MARK: Regex caching
@@ -1199,7 +1206,11 @@ public actor RuleEngine {
                 logger.warning("Slow rule: \(rule.title) (\(rule.id)) took \(String(format: "%.1f", ms))ms")
                 let breaches = (ruleBudgetBreaches[rule.id] ?? 0) + 1
                 ruleBudgetBreaches[rule.id] = breaches
-                if shouldAutoDisable(elapsedNs: elapsed, breaches: breaches) {
+                if shouldAutoDisable(
+                    elapsedNs: elapsed,
+                    breaches: breaches,
+                    usesRegex: rule.predicates.contains { $0.modifier == .regex }
+                ) {
                     rulesToDisable.append((rule.id, rule.title, ms, breaches))
                 }
             } else if ruleBudgetBreaches[rule.id] != nil {
