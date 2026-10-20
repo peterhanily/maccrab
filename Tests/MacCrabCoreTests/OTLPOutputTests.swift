@@ -75,6 +75,35 @@ struct OTLPOutputTests {
         #expect(stats.sent == 0)
     }
 
+    // MARK: - Redaction
+
+    @Test("the exported command line carries no credential from argv")
+    func commandLineIsRedacted() async throws {
+        let out = OTLPOutput(endpoint: URL(string: "https://otelcol.example.com")!, batchSize: 100)
+        let (alert, _) = sampleAlertAndEvent()
+        for (argv, secret) in [
+            (["/usr/local/bin/sshpass", "-p", "S3cret", "ssh", "h"], "S3cret"),
+            (["/usr/bin/curl", "-u", "admin:pw0rd", "https://x.invalid"], "pw0rd"),
+            (["/usr/bin/tool", "--password", "S3cret"], "S3cret"),
+        ] {
+            let proc = MacCrabCore.ProcessInfo(
+                pid: 1234, ppid: 1, rpid: 1, name: (argv[0] as NSString).lastPathComponent,
+                executable: argv[0], commandLine: argv.joined(separator: " "), args: argv,
+                workingDirectory: "/tmp", userId: 501, userName: "alice", groupId: 20,
+                startTime: Date(timeIntervalSince1970: 1_712_500_000))
+            let event = Event(
+                timestamp: Date(timeIntervalSince1970: 1_712_500_000),
+                eventCategory: .process, eventType: .start, eventAction: "exec", process: proc)
+            let record = await out.buildLogRecord(alert: alert, event: event)
+            let attributes = try #require(record["attributes"] as? [[String: Any]])
+            let commandLine = attributes.first { $0["key"] as? String == "process.command_line" }
+                .flatMap { ($0["value"] as? [String: Any])?["stringValue"] as? String }
+            let exported = try #require(commandLine)
+            #expect(exported.hasPrefix(argv[0]))
+            #expect(!exported.contains(secret), "\(exported)")
+        }
+    }
+
     // MARK: - URL handling
 
     @Test("URL appendingPathComponentIfMissing appends /v1/logs when absent")

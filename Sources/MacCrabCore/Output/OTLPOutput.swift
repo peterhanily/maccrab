@@ -237,7 +237,8 @@ public actor OTLPOutput: Output {
         ]
     }
 
-    private func buildLogRecord(alert: Alert, event: Event?) -> [String: Any] {
+    /// Internal (not private) so a test can check what leaves the machine.
+    func buildLogRecord(alert: Alert, event: Event?) -> [String: Any] {
         // OTLP timestamps are nanoseconds since Unix epoch as strings (JSON
         // numbers can't represent the full int64 range).
         let unixNanos = Int64(alert.timestamp.timeIntervalSince1970 * 1_000_000_000)

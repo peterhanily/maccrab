@@ -303,6 +303,37 @@ struct OCSFMapperTests {
         #expect(json.contains("\"finding\""))
     }
 
+    @Test("Exported command lines carry no credential from argv")
+    func exportedCommandLinesAreRedacted() {
+        for (argv, secret) in [
+            (["/usr/local/bin/sshpass", "-p", "S3cret", "ssh", "h"], "S3cret"),
+            (["/usr/bin/curl", "-u", "admin:pw0rd", "https://x.invalid"], "pw0rd"),
+            (["/usr/bin/security", "unlock-keychain", "-p", "S3cret"], "S3cret"),
+        ] {
+            let process = MacCrabCore.ProcessInfo(
+                pid: 1234, ppid: 1, rpid: 1, name: (argv[0] as NSString).lastPathComponent,
+                executable: argv[0], commandLine: argv.joined(separator: " "), args: argv,
+                workingDirectory: "/tmp", userId: 501, userName: "alice", groupId: 20,
+                startTime: Date(timeIntervalSince1970: 1_712_345_600))
+            let event = Event(
+                timestamp: Date(timeIntervalSince1970: 1_712_345_700),
+                eventCategory: .process, eventType: .start, eventAction: "exec", process: process)
+            guard case .process(let activity) = OCSFMapper.mapEvent(event) else {
+                Issue.record("Expected .process case")
+                continue
+            }
+            let alert = Alert(id: "a1", ruleId: "r", ruleTitle: "Test rule", severity: .high, eventId: "e1")
+            let finding = OCSFMapper.mapAlert(alert, event: event)
+            for cmdLine in [
+                activity.process.cmdLine, activity.actor?.process.cmdLine,
+                finding.process?.cmdLine, finding.actor?.process.cmdLine,
+            ] {
+                #expect(cmdLine?.isEmpty == false)
+                #expect(cmdLine?.contains(secret) == false, "\(cmdLine ?? "nil")")
+            }
+        }
+    }
+
     @Test("Metadata block contains product name and schema version")
     func metadataBlock() throws {
         let event = makeProcessEvent()
