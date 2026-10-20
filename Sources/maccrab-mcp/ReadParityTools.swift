@@ -80,17 +80,7 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
         // Sigma rule: surface the compiled predicate so the agent can see what
         // the match actually required.
         let compiledDir = dataDir + "/compiled_rules"
-        let fm = FileManager.default
-        var ruleJSON: [String: Any]?
-        if let files = try? fm.contentsOfDirectory(atPath: compiledDir) {
-            for file in files where file.hasSuffix(".json") && file != "manifest.json" {
-                guard let data = fm.contents(atPath: compiledDir + "/" + file),
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      (json["id"] as? String) == alert.ruleId else { continue }
-                ruleJSON = json
-                break
-            }
-        }
+        let ruleJSON = CompiledRuleFileIndex.shared.rule(id: alert.ruleId, in: compiledDir)
         lines.append("")
         guard let ruleJSON else {
             lines.append("The compiled rule for \(alert.ruleId) is not readable from this process, so the")
@@ -229,3 +219,56 @@ func handleGetBrowserExtensions(_ args: [String: Any]) -> Any {
     }
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
+
+/// Rule id -> compiled file, built once per server process. Every
+/// get_alert_detail call used to open and parse each compiled rule (about
+/// 480 files) to find one id. Launched by an AI agent, this server is an
+/// attributed agent child, so each of those opens was admitted, journaled
+/// and scanned as agent activity: MacCrab amplifying itself.
+final class CompiledRuleFileIndex: @unchecked Sendable {
+    static let shared = CompiledRuleFileIndex()
+
+    private let lock = NSLock()
+    private var directory: String?
+    private var paths: [String: String] = [:]
+
+    func rule(id: String, in compiledDir: String) -> [String: Any]? {
+        if let path = cachedPath(id: id, in: compiledDir), let json = Self.load(path), (json["id"] as? String) == id {
+            return json
+        }
+        // Missing or stale entry (rules changed): rebuild once.
+        rebuild(compiledDir)
+        guard let path = cachedPath(id: id, in: compiledDir), let json = Self.load(path),
+              (json["id"] as? String) == id else { return nil }
+        return json
+    }
+
+    private func cachedPath(id: String, in compiledDir: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard directory == compiledDir else { return nil }
+        return paths[id]
+    }
+
+    private func rebuild(_ compiledDir: String) {
+        var next: [String: String] = [:]
+        let fm = FileManager.default
+        if let files = try? fm.contentsOfDirectory(atPath: compiledDir) {
+            for file in files where file.hasSuffix(".json") && file != "manifest.json" {
+                let path = compiledDir + "/" + file
+                if let id = Self.load(path)?["id"] as? String, next[id] == nil {
+                    next[id] = path
+                }
+            }
+        }
+        lock.lock()
+        directory = compiledDir
+        paths = next
+        lock.unlock()
+    }
+
+    private static func load(_ path: String) -> [String: Any]? {
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+}
+
