@@ -262,7 +262,7 @@ public actor AlertSink {
     /// the contributing-alert level. Single sink chokepoint so every engine is
     /// covered uniformly; runs AFTER enrichment so the parent-lineage check sees
     /// the parent executable lifted from the event.
-    private func recalibrateDevToolingSeverity(_ alert: Alert) -> Alert {
+    private func recalibrateDevToolingSeverity(_ alert: Alert, filePath: String? = nil) -> Alert {
         func downweighted(_ note: String) -> Alert {
             var copy = alert
             copy.severity = .low
@@ -286,8 +286,14 @@ public actor AlertSink {
         // (login./System.keychain is indistinguishable from theft) and ONLY for
         // a trusted browser/Electron actor — so a non-browser (e.g. the `claude`
         // CLI under ~/.local) reading credentials then beaconing still escalates.
+        //
+        // When the triggering event names a file, it must be in this browser's
+        // own profile: a VS Code or Slack helper reading Chrome's Login Data
+        // is the signed-stealer pattern, not sync. File-less alerts (an
+        // own-store read followed by a sync upload) keep the down-weight.
         if alert.severity > .low, let p = alert.processPath,
-           NoiseFilter.isTrustedBrowserHelper(path: p) {
+           NoiseFilter.isTrustedBrowserHelper(path: p),
+           filePath.map({ NoiseFilter.isBrowserReadingOwnProfile(processPath: p, filePath: $0) }) ?? true {
             let blob = "\(alert.ruleTitle) \(alert.description ?? "")".lowercased()
             let isCredential = blob.contains("credential")
                 || (alert.mitreTactics ?? "").lowercased().contains("credential")
@@ -803,7 +809,8 @@ public actor AlertSink {
                 alert: settled,
                 event: event,
                 precomputedSnapshot: preparedTrigger.snapshotJSON
-            )
+            ),
+            filePath: event.file?.path
         )
         let reservation: AlertDeduplicator.EmissionReservation
         switch await deduplicator.reserveEmission(
@@ -965,7 +972,7 @@ public actor AlertSink {
                     alert: $0,
                     event: event,
                     precomputedSnapshot: trigger.snapshotJSON
-                ))
+                ), filePath: event.file?.path)
             }
             // Reserve both dedup dimensions before writing, but do not commit
             // their windows yet. A failed batch rolls every reservation back.

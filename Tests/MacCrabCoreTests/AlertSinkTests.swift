@@ -860,6 +860,41 @@ struct AlertSinkRecalibrationTests {
         #expect(try await storedSeverity(after: a) == .low)
     }
 
+    /// Submits through the event path, so the triggering file is known.
+    private func storedSeverity(after alert: Alert, readingFile path: String) async throws -> Severity {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-recal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try AlertStore(directory: tempDir.path)
+        let sink = AlertSink(alertStore: store, deduplicator: AlertDeduplicator(suppressionWindow: 60))
+        let process = MacCrabCore.ProcessInfo(
+            pid: 4_242, ppid: 1, rpid: 1, name: alert.processName ?? "p",
+            executable: alert.processPath ?? "/p", commandLine: "p", args: [],
+            workingDirectory: "/", userId: 501, userName: "u", groupId: 20, startTime: Date())
+        let event = Event(timestamp: Date(), eventCategory: .file, eventType: .info,
+                          eventAction: "open", process: process,
+                          file: FileInfo(path: path, action: .open))
+        _ = try await sink.submit(alert: alert, event: event)
+        return try await store.alerts(forEventId: alert.eventId).first?.severity ?? alert.severity
+    }
+
+    @Test("an Electron helper reading ANOTHER browser's credential store stays LOUD")
+    func foreignBrowserStoreStaysLoud() async throws {
+        let loginData = "/Users/x/Library/Application Support/Google/Chrome/Default/Login Data"
+        let vscode = alert(
+            ruleTitle: "Browser Credential Store Accessed", severity: .high,
+            processPath: "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper.app/Contents/MacOS/Code Helper",
+            mitreTactics: "attack.credential_access")
+        #expect(NoiseFilter.isTrustedBrowserHelper(path: vscode.processPath!))
+        #expect(try await storedSeverity(after: vscode, readingFile: loginData) == .high)
+        let chrome = alert(
+            ruleTitle: "Browser Credential Store Accessed", severity: .high,
+            processPath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            mitreTactics: "attack.credential_access")
+        #expect(try await storedSeverity(after: chrome, readingFile: loginData) == .low)
+    }
+
     @Test("browser touching the SYSTEM login.keychain stays LOUD")
     func browserSystemKeychainPreserved() async throws {
         let a = alert(
