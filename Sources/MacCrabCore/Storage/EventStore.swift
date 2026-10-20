@@ -973,6 +973,13 @@ public actor EventStore {
         journalIndexRebuildHookForTesting = hook
     }
 
+    /// Test seam: throws inside a journal block transaction, before COMMIT.
+    private var journalBlockPreCommitFailureForTesting: (() throws -> Void)?
+
+    func setJournalBlockPreCommitFailureForTesting(_ hook: (() throws -> Void)?) {
+        journalBlockPreCommitFailureForTesting = hook
+    }
+
     func setJournalRebuildFailAfterPartialForTesting(_ on: Bool) {
         journalRebuildFailAfterPartialForTesting = on
     }
@@ -9453,8 +9460,15 @@ public actor EventStore {
             lane: lane,
             maintenance: maintenance
         )
+        // Only an uncertain outcome invalidates the in-memory index: a
+        // failed COMMIT, or a store whose identity was not re-proved. A
+        // failure before COMMIT has certainly rolled back, and rebuilding the
+        // index then re-verified every retained block on each retry.
+        var identityVerified = false
+        var commitAttempted = false
         do {
             try requireCurrentJournalIdentityUnderWriterLock()
+            identityVerified = true
             for (rowID, digest) in zip(
                 legacyRowIDs,
                 legacySourceDigests
@@ -9799,6 +9813,8 @@ public actor EventStore {
                 }
             }
             try advanceStorageMutationGeneration(now: now)
+            try journalBlockPreCommitFailureForTesting?()
+            commitAttempted = true
             try execute("COMMIT")
             for (ordinal, event) in events.enumerated() {
                 let location = JournalLocation(
@@ -9851,45 +9867,36 @@ public actor EventStore {
             }
             // COMMIT errors can have an uncertain durable outcome. Force the
             // next operation to reconstruct truth from append-local rosters.
-            journalIndexLoaded = false
-            journalIndexTopologyGeneration = nil
-            journalIndexedBlockCount = 0
-            journalIndexedMinimumBlockID = nil
-            journalIndexedMaximumBlockID = nil
-            journalBaseLocations.removeAll(keepingCapacity: false)
-            journalDeltaLocations.removeAll()
-            journalIndexedLocationCount = 0
-            journalOverflowBloom = JournalBloom()
-            journalOverflowFirstBlockID = nil
-            journalIndexOverflowed = false
-            journalExpiredBlockTombstones.removeAll(keepingCapacity: false)
-            journalExpirySummaryCursor = 0
-            journalExpirySummaryCutoff = nil
-            verifiedJournalSummaries.removeAll(keepingCapacity: false)
-            journalVerifiedBlocks = 0
+            if commitAttempted || !identityVerified {
+                discardJournalIndexAfterUncertainOutcome()
+            }
             throw error
         } catch {
             try? execute("ROLLBACK")
-            // COMMIT errors can have an uncertain durable outcome. Force the
-            // next operation to reconstruct truth from append-local rosters.
-            journalIndexLoaded = false
-            journalIndexTopologyGeneration = nil
-            journalIndexedBlockCount = 0
-            journalIndexedMinimumBlockID = nil
-            journalIndexedMaximumBlockID = nil
-            journalBaseLocations.removeAll(keepingCapacity: false)
-            journalDeltaLocations.removeAll()
-            journalIndexedLocationCount = 0
-            journalOverflowBloom = JournalBloom()
-            journalOverflowFirstBlockID = nil
-            journalIndexOverflowed = false
-            journalExpiredBlockTombstones.removeAll(keepingCapacity: false)
-            journalExpirySummaryCursor = 0
-            journalExpirySummaryCutoff = nil
-            verifiedJournalSummaries.removeAll(keepingCapacity: false)
-            journalVerifiedBlocks = 0
+            if commitAttempted || !identityVerified {
+                discardJournalIndexAfterUncertainOutcome()
+            }
             throw error
         }
+    }
+
+    private func discardJournalIndexAfterUncertainOutcome() {
+        journalIndexLoaded = false
+        journalIndexTopologyGeneration = nil
+        journalIndexedBlockCount = 0
+        journalIndexedMinimumBlockID = nil
+        journalIndexedMaximumBlockID = nil
+        journalBaseLocations.removeAll(keepingCapacity: false)
+        journalDeltaLocations.removeAll()
+        journalIndexedLocationCount = 0
+        journalOverflowBloom = JournalBloom()
+        journalOverflowFirstBlockID = nil
+        journalIndexOverflowed = false
+        journalExpiredBlockTombstones.removeAll(keepingCapacity: false)
+        journalExpirySummaryCursor = 0
+        journalExpirySummaryCutoff = nil
+        verifiedJournalSummaries.removeAll(keepingCapacity: false)
+        journalVerifiedBlocks = 0
     }
 
     /// Complete worst-case transaction charge for one append-local journal
