@@ -101,7 +101,13 @@ enum DeferredEnrichmentDispatcher {
         _ batches: [DeferredEnrichmentReplayBatch],
         state: DaemonState
     ) async {
-        for batch in batches {
+        // Merging a non-terminal replay can release a follow-up replay of the
+        // same event; it joins this queue.
+        var queue = batches
+        var next = 0
+        while next < queue.count {
+            let batch = queue[next]
+            next += 1
             await EventJournalAdmissionContext.$sourceMemoryLease.withValue(
                 batch.sourceMemoryLease
             ) {
@@ -143,12 +149,12 @@ enum DeferredEnrichmentDispatcher {
                     )
                     terminalEvent = newlyReviewed.event
                     if !batch.terminal {
-                        await state.deferredEnrichmentBuffer.mergeReviewedMatches(
+                        queue.append(contentsOf: await state.deferredEnrichmentBuffer.mergeReviewedMatches(
                             eventID: terminalEvent.id,
                             event: terminalEvent,
                             primaryMatches: newlyReviewed.primaryMatches,
                             sequenceMatches: newlyReviewed.sequenceMatches
-                        )
+                        ))
                     }
                 }
 

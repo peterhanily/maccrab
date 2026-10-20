@@ -192,6 +192,14 @@ struct DeferredEnrichmentIntegrationTests {
             let partial = await transfer([result], to: buffer)
             #expect(partial.allSatisfy { !$0.shouldObserveUserBehavior })
             #expect((await engine.profile(for: "operator")) == nil)
+            // As the dispatcher does, a non-terminal replay merges back before
+            // the event's next patch can replay.
+            for batch in partial where !batch.terminal {
+                #expect(await buffer.mergeReviewedMatches(
+                    eventID: batch.event.id, event: batch.event,
+                    primaryMatches: [], sequenceMatches: []
+                ).isEmpty)
+            }
             let repeated = await transfer([result], to: buffer)
             #expect(repeated.allSatisfy { !$0.shouldObserveUserBehavior })
             if scenario == "timeout" || scenario == "unavailable" {
@@ -406,6 +414,59 @@ struct DeferredEnrichmentIntegrationTests {
                 "terminal evidence is canonical work even with zero matches")
         #expect(try delta.applying(to: base) == finalized)
         await buffer.completeTerminalReplay(eventID: original.id)
+    }
+
+    @Test("a patch arriving during another replay's review waits for its merge")
+    func concurrentReplaysAreSerializedPerEvent() async throws {
+        let buffer = DeferredEnrichmentBuffer(
+            eventCapacity: 1,
+            patchCapacity: 4,
+            liveMemoryBudget: isolatedMemoryBudget()
+        )
+        let original = event(pending: [.environment, .userName, .processHashes])
+        let reservation = try #require(await buffer.reserveEventSlot())
+        #expect(await buffer.retain(original, using: reservation))
+        #expect((await buffer.markReady(original)).isEmpty)
+
+        // Replay 1 (environment) is under review...
+        let first = try #require(await transfer([
+            patch(event: original, component: .environment, value: .environment(["LANG": "C"])),
+        ], to: buffer).first)
+        #expect(!first.terminal)
+        // ...when the username patch is drained. It must not start a second
+        // replay from the same revision.
+        #expect(await transfer([
+            patch(event: original, component: .userName, value: .userName("operator")),
+        ], to: buffer).isEmpty)
+
+        // Merging replay 1 releases the held patch, built on the merged revision.
+        let fromFirst = match("from-first")
+        var reviewed = first.event
+        reviewed.ruleMatches = [fromFirst]
+        let second = try #require(await buffer.mergeReviewedMatches(
+            eventID: original.id, event: reviewed,
+            primaryMatches: [fromFirst], sequenceMatches: []
+        ).first)
+        #expect(!second.terminal)
+        #expect(second.completedComponents == [.userName])
+        #expect(second.event.process.userName == "operator")
+        #expect(second.event.process.envVars == ["LANG": "C"])
+        #expect(second.undispatchedPrimaryMatches.map(\.ruleId) == ["from-first"])
+
+        // The last component cannot strand the event or lose either review.
+        #expect(await transfer([
+            patch(event: original, component: .processHashes,
+                  value: .processHashes(HeavyProcessHashEvidence(value: nil, fileIdentity: nil))),
+        ], to: buffer).isEmpty)
+        let fromSecond = match("from-second")
+        let terminal = try #require(await buffer.mergeReviewedMatches(
+            eventID: original.id, event: second.event,
+            primaryMatches: [fromSecond], sequenceMatches: []
+        ).first)
+        #expect(terminal.terminal)
+        #expect(Set(terminal.undispatchedPrimaryMatches.map(\.ruleId)) == ["from-first", "from-second"])
+        await buffer.completeTerminalReplay(eventID: original.id)
+        #expect(await buffer.snapshot().retainedEvents == 0)
     }
 
     @Test("pending-heavy review accumulates without fanout until terminal")

@@ -203,6 +203,11 @@ actor DeferredEnrichmentBuffer {
         let needsDeferredUserObservation: Bool
         var readyForReplay: Bool
         var terminalReplayInFlight: Bool
+        /// A non-terminal replay is under review and has not merged back.
+        /// Later patches wait for that merge: a second replay built from the
+        /// same revision raced it, losing its matches or re-pending a
+        /// component whose patch was already consumed.
+        var reviewInFlight: Bool
         var patches: [BufferedPatch]
         var journalAdmission: EventJournalAdmission?
         var undispatchedPrimaryMatches: [RuleMatch]
@@ -467,6 +472,7 @@ actor DeferredEnrichmentBuffer {
                 && DeferredEventEnrichment.coverageState(for: .userName, in: event) == .pending,
             readyForReplay: false,
             terminalReplayInFlight: false,
+            reviewInFlight: false,
             patches: orphans,
             journalAdmission: journalAdmission,
             undispatchedPrimaryMatches: [],
@@ -543,30 +549,37 @@ actor DeferredEnrichmentBuffer {
     /// Carry reviewed matches from a non-terminal replay into the retained
     /// revision so later component completion order cannot change the final
     /// terminal overlay. Storage promotion independently unions the same set.
+    ///
+    /// Ends that replay's exclusive review and returns the replay of any
+    /// patches that arrived meanwhile, built on the merged revision. The
+    /// caller must dispatch it.
+    @discardableResult
     func mergeReviewedMatches(
         eventID: UUID,
         event: Event,
         primaryMatches: [RuleMatch],
         sequenceMatches: [RuleMatch]
-    ) {
-        guard var retained = retainedByEventID[eventID] else { return }
-        guard HeavyEnrichmentBinding(event: retained.event).matches(event)
-        else { return }
-        retained.terminalDelta = composeTerminalDelta(
-            retained.terminalDelta,
-            from: retained.event,
-            to: event
-        )
-        retained.event = event
-        retained.undispatchedPrimaryMatches = ReviewedRuleMatches.merged(
-            retained.undispatchedPrimaryMatches,
-            primaryMatches
-        )
-        retained.undispatchedSequenceMatches = ReviewedRuleMatches.merged(
-            retained.undispatchedSequenceMatches,
-            sequenceMatches
-        )
+    ) -> [DeferredEnrichmentReplayBatch] {
+        guard var retained = retainedByEventID[eventID] else { return [] }
+        retained.reviewInFlight = false
+        if HeavyEnrichmentBinding(event: retained.event).matches(event) {
+            retained.terminalDelta = composeTerminalDelta(
+                retained.terminalDelta,
+                from: retained.event,
+                to: event
+            )
+            retained.event = event
+            retained.undispatchedPrimaryMatches = ReviewedRuleMatches.merged(
+                retained.undispatchedPrimaryMatches,
+                primaryMatches
+            )
+            retained.undispatchedSequenceMatches = ReviewedRuleMatches.merged(
+                retained.undispatchedSequenceMatches,
+                sequenceMatches
+            )
+        }
         retainedByEventID[eventID] = retained
+        return consumeBufferedPatches(for: eventID)
     }
 
     /// Claims bounded space before a caller removes results from the core plane.
@@ -803,6 +816,7 @@ actor DeferredEnrichmentBuffer {
         guard var retained = retainedByEventID[eventID],
               retained.readyForReplay,
               !retained.terminalReplayInFlight,
+              !retained.reviewInFlight,
               !retained.patches.isEmpty else { return [] }
 
         let patches = retained.patches
@@ -879,10 +893,10 @@ actor DeferredEnrichmentBuffer {
         let terminal = !DeferredEventEnrichment.hasPendingCoverage(in: event)
         if terminal {
             retained.terminalReplayInFlight = true
-            retainedByEventID[eventID] = retained
-        } else {
-            retainedByEventID[eventID] = retained
+        } else if !completed.isEmpty {
+            retained.reviewInFlight = true
         }
+        retainedByEventID[eventID] = retained
 
         guard terminal || !completed.isEmpty else { return [] }
         return [DeferredEnrichmentReplayBatch(
