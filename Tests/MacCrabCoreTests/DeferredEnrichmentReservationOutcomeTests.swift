@@ -48,4 +48,20 @@ struct DeferredEnrichmentReservationOutcomeTests {
             Issue.record("requests after seal must report sealed"); return
         }
     }
+
+    @Test("a replay forces a gap status only from its own admission, never the draining lane's")
+    func replayStatusIsPerEvent() async throws {
+        #expect(DeferredEnrichmentDispatcher.replayForcedStatus(admission: nil) == .dropped)
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabAgentKit/DeferredEnrichmentDispatcher.swift"))
+        let dispatch = try #require(source.range(of: "private static func dispatch("))
+        let body = source[dispatch.lowerBound...]
+        let forced = try #require(body.range(of: ".withForcedNonverifiedStatus("))
+        let admission = try #require(body.range(of: ".withAdmission("))
+        #expect(forced.lowerBound < admission.lowerBound,
+                "every replay must rebind the forced status before its admission scope")
+        #expect(body.contains("replayForcedStatus(admission: batch.journalAdmission)"))
+    }
 }

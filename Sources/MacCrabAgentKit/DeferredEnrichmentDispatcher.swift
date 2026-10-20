@@ -89,6 +89,14 @@ enum DeferredEnrichmentDispatcher {
         return DeferredEnrichmentShutdownResult(plane: plane, buffer: buffer)
     }
 
+    /// The journal status a replay forces on its alerts: `.dropped` only when
+    /// its own base was refused, exactly as the lane decides for its event.
+    static func replayForcedStatus(
+        admission: EventJournalAdmission?
+    ) -> EventJournalContextStatus? {
+        admission == nil ? .dropped : nil
+    }
+
     private static func dispatch(
         _ batches: [DeferredEnrichmentReplayBatch],
         state: DaemonState
@@ -100,6 +108,13 @@ enum DeferredEnrichmentDispatcher {
                 await EventJournalAdmissionContext
                     .$deferredPatchMemoryLeases.withValue(
                         batch.appliedPatchMemoryLeases
+                    ) {
+                    // A lane drains replays inside its own event's scope. A
+                    // status forced for that event (its base was refused)
+                    // must not stamp other events' verified evidence as a
+                    // gap: each replay derives it from its own admission.
+                    await EventJournalAdmissionContext.withForcedNonverifiedStatus(
+                        replayForcedStatus(admission: batch.journalAdmission)
                     ) {
                     await EventJournalAdmissionContext.withAdmission(
                         batch.journalAdmission
@@ -184,6 +199,7 @@ enum DeferredEnrichmentDispatcher {
                                 reviewed: reviewedTerminal
                             )
                         }
+                }
                 }
                 }
                 }
