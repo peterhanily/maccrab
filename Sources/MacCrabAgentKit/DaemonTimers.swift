@@ -3411,15 +3411,14 @@ enum DaemonTimers {
                     withJSONObject: payload,
                     options: [.sortedKeys]
                 ) else { return }
-                let path = state.supportDir + "/heartbeat.json"
-                let tmp = path + ".tmp"
-                do {
-                    try data.write(to: URL(fileURLWithPath: tmp))
-                    try FileManager.default.moveItem(atPath: tmp, toPath: path)
-                } catch {
-                    try? FileManager.default.removeItem(atPath: path)
-                    try? FileManager.default.moveItem(atPath: tmp, toPath: path)
-                }
+                // One atomic rename, as writeBootPhase already does: the
+                // former move-or-delete-then-move left readers a window in
+                // which heartbeat.json did not exist at all.
+                try? SecureFileIO.atomicReplace(
+                    at: state.supportDir + "/heartbeat.json",
+                    data: data,
+                    mode: 0o644
+                )
             }
             }
         }
@@ -5468,15 +5467,22 @@ enum DaemonTimers {
                     withJSONObject: metricsPayload,
                     options: [.sortedKeys]
                 ) {
-                    let metricsPath = "/var/tmp/maccrab.metrics.json"
-                    let metricsTmp = metricsPath + ".tmp"
+                    // Root publishes into world-writable /var/tmp. The former
+                    // fixed `.tmp` name was opened with symlink-following
+                    // create/truncate, so any local user could point it at a
+                    // root-writable file and have it overwritten every tick.
+                    // SecureFileIO uses an exclusive no-follow temporary and
+                    // refuses to replace anything but our own regular file.
                     do {
-                        try metricsData.write(to: URL(fileURLWithPath: metricsTmp))
-                        _ = try? FileManager.default.removeItem(atPath: metricsPath)
-                        try FileManager.default.moveItem(atPath: metricsTmp, toPath: metricsPath)
+                        try SecureFileIO.atomicReplace(
+                            at: "/var/tmp/maccrab.metrics.json",
+                            data: metricsData,
+                            mode: 0o644
+                        )
                     } catch {
                         // Metrics writes are best-effort — no alert if /var/tmp
-                        // is unreadable for some reason; next tick will retry.
+                        // is unusable or a foreign entry occupies the name;
+                        // the next tick will retry.
                     }
                 }
             }
@@ -5500,19 +5506,14 @@ enum DaemonTimers {
             // category counts, collector health, drop counter) for the
             // ES Health panel. If the rich payload stalls, the
             // dashboard's "engine alive" check still works.
-            let path = state.supportDir + "/heartbeat_rich.json"
-            // Write via temp + rename so the dashboard never catches a
-            // half-written file. Silent on failure — the next 30s tick
-            // will try again.
-            let tmp = path + ".tmp"
-            do {
-                try data.write(to: URL(fileURLWithPath: tmp))
-                try FileManager.default.moveItem(atPath: tmp, toPath: path)
-            } catch {
-                // File may already exist; retry as overwrite.
-                try? FileManager.default.removeItem(atPath: path)
-                try? FileManager.default.moveItem(atPath: tmp, toPath: path)
-            }
+            // One atomic rename so the dashboard never catches a half-written
+            // or momentarily missing file. Silent on failure — the next 30s
+            // tick will try again.
+            try? SecureFileIO.atomicReplace(
+                at: state.supportDir + "/heartbeat_rich.json",
+                data: data,
+                mode: 0o644
+            )
 
             // Run independent snapshots concurrently, but join all four to the
             // timer handler. Their per-writer in-flight guards still prevent
