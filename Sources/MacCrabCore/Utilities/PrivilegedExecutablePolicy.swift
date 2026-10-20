@@ -181,6 +181,10 @@ public enum BoundedPrivilegedProcessRunner {
         qos: .utility,
         attributes: .concurrent
     )
+    /// Each command holds a dispatch thread for up to its timeout, and an
+    /// alert storm can start many response scripts at once; past this many,
+    /// callers wait without holding a thread.
+    static let asyncLimit = AsyncPermits(4)
 
     /// `run` for async callers. The runner polls the child every 10 ms with
     /// usleep, so even a short command held a cooperative-pool thread for
@@ -196,7 +200,8 @@ public enum BoundedPrivilegedProcessRunner {
         mergeStandardErrorIntoOutput: Bool = true,
         standardInputData: Data? = nil
     ) async -> Result? {
-        await BlockingWorkOffload.perform(
+        await asyncLimit.acquire()
+        let result = await BlockingWorkOffload.perform(
             on: asyncQueue,
             qos: BlockingWorkOffload.dispatchQoS(
                 waitedOnAt: Task.currentPriority,
@@ -215,6 +220,8 @@ public enum BoundedPrivilegedProcessRunner {
                 standardInputData: standardInputData
             )
         }
+        await asyncLimit.release()
+        return result
     }
 
     public static func run(
@@ -568,4 +575,30 @@ public final class PrivatePrivilegedCommandFile {
     deinit {
         cleanup()
     }
+}
+
+/// A fixed number of permits; acquirers past it suspend in arrival order.
+actor AsyncPermits {
+    private var available: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(_ permits: Int) { available = max(1, permits) }
+
+    func acquire() async {
+        if available > 0 {
+            available -= 1
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            available += 1
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+
+    var waiting: Int { waiters.count }
 }
