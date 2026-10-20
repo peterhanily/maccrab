@@ -242,6 +242,27 @@ public actor AlertSink {
         return false
     }
 
+    /// Whether the alert's actor is MacCrab itself, by a test the actor
+    /// cannot forge. With the triggering event (and the alert attributed to
+    /// that event's process) this is MacCrab's kernel-attested team signature,
+    /// as in `NoiseFilter.isMacCrabProcess`. Otherwise only the path is known,
+    /// so only the system-extension location, which only sysextd writes,
+    /// counts in a release engine. The app bundle and the Tier-B staging
+    /// directory are writable by any process of the user who owns them, and a
+    /// payload placed there had every alert, criticals included, stored LOW.
+    static func isVerifiedMacCrabActor(
+        processPath: String?,
+        event: Event?,
+        developmentEngine: Bool = NoiseFilter.engineIsDevelopmentBuild
+    ) -> Bool {
+        if let event, processPath == nil || processPath == event.process.executable {
+            return NoiseFilter.isMacCrabProcess(event: event, developmentEngine: developmentEngine)
+        }
+        guard let path = processPath else { return false }
+        if path.hasPrefix("/Library/SystemExtensions/") && path.contains("com.maccrab.agent") { return true }
+        return developmentEngine && isMacCrabSelfNoise(path)
+    }
+
     /// FP recalibration (v1.19.3): DOWN-WEIGHT (never drop) two noise classes so
     /// they surface for review instead of screaming high/critical. The floor is
     /// `.low` (NOT `.informational`) so down-weighted alerts stay visible in the
@@ -262,7 +283,11 @@ public actor AlertSink {
     /// the contributing-alert level. Single sink chokepoint so every engine is
     /// covered uniformly; runs AFTER enrichment so the parent-lineage check sees
     /// the parent executable lifted from the event.
-    private func recalibrateDevToolingSeverity(_ alert: Alert, filePath: String? = nil) -> Alert {
+    private func recalibrateDevToolingSeverity(
+        _ alert: Alert,
+        event: Event? = nil,
+        filePath: String? = nil
+    ) -> Alert {
         func downweighted(_ note: String) -> Alert {
             var copy = alert
             copy.severity = .low
@@ -272,7 +297,8 @@ public actor AlertSink {
 
         // (1) MacCrab self-noise — any severity above the floor, regardless of
         // alert type (own-process behavioral/chain alerts are noise).
-        if alert.severity > .low, Self.isMacCrabSelfNoise(alert.processPath) {
+        if alert.severity > .low,
+           Self.isVerifiedMacCrabActor(processPath: alert.processPath, event: event) {
             return downweighted("Severity reduced — MacCrab's own process; self-tamper is covered by integrity/code-signing checks, not behavioral alerts.")
         }
 
@@ -810,6 +836,7 @@ public actor AlertSink {
                 event: event,
                 precomputedSnapshot: preparedTrigger.snapshotJSON
             ),
+            event: event,
             filePath: event.file?.path
         )
         let reservation: AlertDeduplicator.EmissionReservation
@@ -972,7 +999,7 @@ public actor AlertSink {
                     alert: $0,
                     event: event,
                     precomputedSnapshot: trigger.snapshotJSON
-                ), filePath: event.file?.path)
+                ), event: event, filePath: event.file?.path)
             }
             // Reserve both dedup dimensions before writing, but do not commit
             // their windows yet. A failed batch rolls every reservation back.

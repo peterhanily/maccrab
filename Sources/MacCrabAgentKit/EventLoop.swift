@@ -230,12 +230,49 @@ enum EventLoop {
         let projectDirectory: String
     }
 
-    private static let credentialFenceExemptBinaries: Set<String> = [
+    /// Apple's signing and notarization tools, exempt from CredentialFence
+    /// only at a root-owned toolchain location and, once the signature is
+    /// known, signed by Apple. The name alone let a payload called `security`,
+    /// or a copy of `/bin/cp` (still a platform binary by cdhash) renamed in
+    /// a writable directory, copy a keychain unflagged.
+    private static let credentialFenceExemptAppleTools: Set<String> = [
         "codesign", "security", "stapler", "productsign", "pkgbuild",
         "productbuild", "notarytool", "altool", "amfid", "xcodebuild",
+    ]
+    private static let credentialFenceAppleToolLocations = [
+        "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/System/",
+        "/Library/Developer/CommandLineTools/",
+    ]
+    /// MacCrab's own tools, exempt only with MacCrab's team signature.
+    private static let credentialFenceExemptMacCrabTools: Set<String> = [
         "maccrabctl", "maccrabd", "com.maccrab.agent",
+    ]
+    /// Sparkle's release tools ship ad-hoc signed, so there is no identity to
+    /// bind them to; they stay exempt by name.
+    private static let credentialFenceExemptReleaseTools: Set<String> = [
         "sign_update", "generate_keys",
     ]
+
+    static func isCredentialFenceExempt(
+        _ event: Event,
+        developmentEngine: Bool = NoiseFilter.engineIsDevelopmentBuild
+    ) -> Bool {
+        let process = event.process
+        let path = process.executable
+        let subject = (path as NSString).lastPathComponent
+        if credentialFenceExemptAppleTools.contains(subject) {
+            let anchored = credentialFenceAppleToolLocations.contains { path.hasPrefix($0) }
+                || (path.hasPrefix("/Applications/Xcode") && path.contains(".app/Contents/Developer/"))
+            guard anchored else { return false }
+            if process.isPlatformBinary { return true }
+            guard let signature = process.codeSignature else { return true }
+            return signature.signerType == .apple
+        }
+        if credentialFenceExemptMacCrabTools.contains(subject) {
+            return NoiseFilter.isMacCrabProcess(event: event, developmentEngine: developmentEngine)
+        }
+        return credentialFenceExemptReleaseTools.contains(subject)
+    }
 
     /// Synchronous pre-detection preparation followed by bounded ownership.
     /// Detection continues on the original enriched Event; only the journal
@@ -409,6 +446,7 @@ enum EventLoop {
         let process = event.process
         let toolName = attribution.toolType.displayName
         let subject = (process.executable as NSString).lastPathComponent
+        let credentialFenceExempt = isCredentialFenceExempt(event)
 
         // Deployed credential-shaped honeyfiles have their own dedicated HIGH
         // detector. Signing/notarization tools legitimately use keychains under
@@ -416,7 +454,7 @@ enum EventLoop {
         // malicious CLI use. These exemptions apply only to CredentialFence,
         // never to project-boundary mutation enforcement.
         if event.enrichments["IsHoneyfile"] != "true",
-           !credentialFenceExemptBinaries.contains(subject),
+           !credentialFenceExempt,
            let (credentialType, description) = state.credentialFence.checkAccessDetailed(
                filePath: filePath,
                aiToolName: toolName,

@@ -685,20 +685,27 @@ struct AlertSinkRecalibrationTests {
     func selfNoiseDownweighted() async throws {
         let a = alert(
             ruleTitle: "Cross-Process Attack Chain", severity: .high,
-            processPath: "/Applications/MacCrab.app/Contents/Resources/bin/maccrab-mcp",
+            processPath: "/Library/SystemExtensions/ABC/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent",
             mitreTactics: "attack.execution"
         )
         #expect(try await storedSeverity(after: a) == .low)
     }
 
-    @Test("Tier-B verified trampoline staging path is self-noise")
-    func tierBTrampolineSelfNoise() async throws {
-        let a = alert(
-            ruleTitle: "Non-System Binary Lacks Notarization", severity: .medium,
-            processPath: "/private/var/folders/hf/X/T/maccrab-tier-b-verified-4F4CCE5E",
-            mitreTactics: "attack.defense_evasion"
-        )
-        #expect(try await storedSeverity(after: a) == .low)
+    @Test("A user-writable MacCrab path is not self-noise by path alone in a release engine")
+    func userWritableSelfPathNeedsIdentity() async throws {
+        // Without the event there is no signature to check. The app bundle and
+        // the Tier-B staging directory are writable by the user who owns them.
+        for (path, severity) in [
+            ("/Applications/MacCrab.app/Contents/Resources/bin/maccrab-mcp", Severity.high),
+            ("/private/var/folders/hf/X/T/maccrab-tier-b-verified-4F4CCE5E", Severity.medium),
+        ] {
+            let a = alert(
+                ruleTitle: "Cross-Process Attack Chain", severity: severity,
+                processPath: path, mitreTactics: "attack.execution"
+            )
+            let expected = NoiseFilter.engineIsDevelopmentBuild ? Severity.low : severity
+            #expect(try await storedSeverity(after: a) == expected, "\(path)")
+        }
     }
 
     @Test("dev-tooling lineage via PARENT executable down-weights")
