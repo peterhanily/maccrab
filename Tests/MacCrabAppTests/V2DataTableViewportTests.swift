@@ -244,10 +244,11 @@ struct V2DataTableViewportTests {
         // before realization is published, so repeat it (bounded) until the
         // last row exists; an unreachable last row still fails below.
         // Bounded by time rather than a count of main-queue hops: under a
-        // full-suite load eight hops were not always enough.
+        // full-suite load eight hops were not always enough, and five seconds
+        // was not always enough on a host also running other heavy work.
         let lastIdentifier = "fixture.499.\(layout.columns.count - 1)"
         let clock = ContinuousClock()
-        let realizationDeadline = clock.now.advanced(by: .seconds(5))
+        let realizationDeadline = clock.now.advanced(by: .seconds(15))
         repeat {
             scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, document.frame.maxY - scroll.contentView.bounds.height)))
             scroll.reflectScrolledClipView(scroll.contentView)

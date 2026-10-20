@@ -214,9 +214,13 @@ struct ESIngressStormBenchmarkTests {
         }
         for i in 0..<4_000 {
             // kill(pid, 0) liveness probes and SIGTERM job control at build
-            // processes — the measured ~4.1k/s flood shape.
+            // processes — the measured ~4.1k/s flood shape. A fatal signal at
+            // this process is kept on purpose (it stands in for MacCrab), so a
+            // target that happens to equal the runner's pid is moved off it.
+            var target = 4_000 + Int32(i)
+            if target == ESCollector.ownProcessID { target = 3_999 }
             storm.append(Message(type: Self.signalType, path: nil, closeModified: true,
-                                 signal: (i & 3 == 0) ? SIGTERM : 0, targetPID: 4_000 + Int32(i)))
+                                 signal: (i & 3 == 0) ? SIGTERM : 0, targetPID: target))
         }
         for i in 0..<26_000 {
             storm.append(Message(type: [Self.execType, Self.forkType, Self.exitType][i % 3],
