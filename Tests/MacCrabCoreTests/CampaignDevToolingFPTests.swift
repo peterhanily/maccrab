@@ -71,6 +71,24 @@ struct CampaignDevToolingFPTests {
         #expect(!campaigns.filter { $0.type == .killChain }.isEmpty)
     }
 
+    @Test("credential access, persistence and C2 escalate to the CRITICAL Full Kill Chain")
+    func fullKillChainIsReachable() async {
+        // Four tactics meet the default threshold. The HIGH credential → C2
+        // pair matches first; once deduplicated it used to return nothing,
+        // so the CRITICAL chain was never produced.
+        let detector = CampaignDetector()
+        _ = await detector.processAlert(alert("cred.dump", "/tmp/evil", ["attack.credential_access"], pid: 6001))
+        let partial = await detector.processAlert(
+            alert("c2.beacon", "/tmp/evil", ["attack.command_and_control"], pid: 6002))
+        #expect(partial.first { $0.type == .killChain }?.severity == .high)
+        _ = await detector.processAlert(alert("exec.payload", "/tmp/evil", ["attack.execution"], pid: 6003))
+        let full = await detector.processAlert(
+            alert("persist.plist", "/tmp/evil", ["attack.persistence"], pid: 6004))
+        let chain = full.first { $0.type == .killChain }
+        #expect(chain?.title == "Full Kill Chain")
+        #expect(chain?.severity == .critical)
+    }
+
     // MARK: - FP 2: sub-CRITICAL dev tooling does not coordinate
 
     @Test("HIGH dev-tooling alerts do NOT mint a coordinated attack (esbuild/node_modules)")

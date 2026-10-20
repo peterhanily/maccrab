@@ -575,8 +575,12 @@ public actor CampaignDetector {
         guard tacticContributorIDs.count >= 2 || tacticContributorCriticalCount > 0 else { return nil }
         let tacticCount = contributorTacticAlertIDs.count
         guard tacticCount >= 2 else { return nil }
+        let isFullKillChain = tacticCount >= minTacticsForKillChain
+            && Self.fullKillChainTactics.allSatisfy {
+                contributorTacticAlertIDs[$0]?.isEmpty == false
+            }
 
-        for (combo, result) in Self.twoTacticCombinations {
+        for (combo, result) in Self.twoTacticCombinations where !isFullKillChain {
             decisionOperations &+= UInt64(combo.count)
             guard combo.allSatisfy({ contributorTacticAlertIDs[$0]?.isEmpty == false }) else {
                 continue
@@ -937,15 +941,26 @@ public actor CampaignDetector {
     /// also the shape of a benign AI agent reading a .env then making a network
     /// call — so these are HIGH, not CRITICAL. CRITICAL is reserved for the
     /// 3-tactic credential+persistence+C2 chain (see checkKillChain).
-    private static let twoTacticCombinations: [Set<String>: (title: String, severity: Severity)] = [
-        Set(["initial_access", "persistence"]):
-            ("Malware Installation Chain", .high),
-        Set(["credential_access", "command_and_control"]):
-            ("Partial Kill Chain (credential-access → C2)", .high),
-        Set(["persistence", "command_and_control"]):
-            ("Partial Kill Chain (persistence → C2)", .high),
-        Set(["initial_access", "execution"]):
-            ("Malware Installation Chain", .high),
+    ///
+    /// Ordered: a Dictionary here made the winning pair, and so the title,
+    /// depend on hash order.
+    private static let twoTacticCombinations: [(Set<String>, (title: String, severity: Severity))] = [
+        (Set(["initial_access", "persistence"]),
+            ("Malware Installation Chain", .high)),
+        (Set(["credential_access", "command_and_control"]),
+            ("Partial Kill Chain (credential-access → C2)", .high)),
+        (Set(["persistence", "command_and_control"]),
+            ("Partial Kill Chain (persistence → C2)", .high)),
+        (Set(["initial_access", "execution"]),
+            ("Malware Installation Chain", .high)),
+    ]
+
+    /// The one CRITICAL shape. It always contains a HIGH pair
+    /// (credential-access → C2, persistence → C2), so pairs must not be
+    /// matched first: that returned HIGH, or nothing once deduplicated, and
+    /// "Full Kill Chain" was unreachable.
+    private static let fullKillChainTactics: Set<String> = [
+        "credential_access", "persistence", "command_and_control",
     ]
 
     private func normalizeTactic(_ tactic: String) -> String {
@@ -1147,7 +1162,9 @@ public actor CampaignDetector {
         // rules are derived from `alerts`; feeding the whole window over-reported
         // the blast radius and polluted rule generation with benign/sub-threshold
         // alerts that never contributed a tactic to this chain.
-        for (combo, result) in Self.twoTacticCombinations {
+        let isFullKillChain = allTactics.count >= minTacticsForKillChain
+            && Self.fullKillChainTactics.isSubset(of: allTactics)
+        for (combo, result) in Self.twoTacticCombinations where !isFullKillChain {
             if combo.isSubset(of: allTactics) {
                 let description = "Detected tactics: \(allTactics.sorted().joined(separator: ", ")) across \(tacticContributingAlerts.count) alerts within \(Int(campaignWindow))s"
                 return Campaign(
