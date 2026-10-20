@@ -211,6 +211,13 @@ public actor MCPAttributor {
         accessSeq.removeValue(forKey: pid)
     }
 
+    /// An exec changes the command line the verdict was computed from, even
+    /// when the binary is the same (`claude` forking then exec'ing
+    /// `claude mcp serve`), so the cached verdict is dropped.
+    public func processExecuted(pid: Int32) {
+        processExited(pid: pid)
+    }
+
     // MARK: - Internals
 
     private struct SearchTarget {

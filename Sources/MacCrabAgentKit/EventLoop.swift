@@ -664,6 +664,9 @@ enum EventLoop {
             // pid→server cache evicts proactively rather than waiting for
             // its 5K-entry LRU cap to overflow (audit P-W3.8). Cheap —
             // no-op for events that aren't NOTIFY_EXIT.
+            if event.eventAction == "exec" {
+                await state.mcpAttributor.processExecuted(pid: event.process.pid)
+            }
             if event.eventAction == "exit" {
                 await state.mcpAttributor.processExited(pid: event.process.pid)
                 _ = await state.aiSessionLifecycleCoordinator.processExited(

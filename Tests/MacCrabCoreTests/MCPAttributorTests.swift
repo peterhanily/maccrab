@@ -144,6 +144,29 @@ struct MCPAttributorPackageTokenTests {
         #expect(afterExec?.serverName == "filesystem")
     }
 
+    @Test("An exec of the same binary as a server re-attributes after the exec hook")
+    func sameBinaryExecReattributes() async throws {
+        let monitor = MCPMonitor()
+        await monitor._testInjectServer(MCPMonitor.ConfiguredServer(
+            name: "self-serve", command: "claude", args: ["mcp", "serve"], tool: "claude"))
+        let lineage = ProcessLineage()
+        await lineage.recordProcess(pid: 5101, ppid: 0, path: "/usr/local/bin/claude",
+                                    name: "claude", startTime: Date(), commandLine: "claude")
+        await lineage.recordProcess(pid: 5102, ppid: 5101, path: "/usr/local/bin/claude",
+                                    name: "claude", startTime: Date(), commandLine: "claude")
+        let attributor = MCPAttributor(mcpMonitor: monitor, lineage: lineage)
+        let ancestors = await lineage.ancestors(of: 5102)
+        let forked = await attributor.attribute(pid: 5102, executable: "/usr/local/bin/claude",
+                                                ancestors: ancestors, aiTool: .claudeCode)
+        await lineage.recordProcess(pid: 5102, ppid: 5101, path: "/usr/local/bin/claude",
+                                    name: "claude", startTime: Date(), commandLine: "claude mcp serve")
+        await attributor.processExecuted(pid: 5102)
+        let served = await attributor.attribute(pid: 5102, executable: "/usr/local/bin/claude",
+                                                ancestors: ancestors, aiTool: .claudeCode)
+        #expect(forked == nil || forked?.serverName == "self-serve")
+        #expect(served?.serverName == "self-serve")
+    }
+
     @Test("Aider aider_mcp_* package token attributes correctly (v1.7.2)")
     func aiderShapeAttribution() async throws {
         let aider = MCPMonitor.ConfiguredServer(
