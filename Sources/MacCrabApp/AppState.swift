@@ -3485,16 +3485,27 @@ final class AppState: ObservableObject, EventQueryReading {
                 }
                 return
             }
+            // A full page may have skipped events between the last poll and
+            // its oldest row. Prepending it would leave a hole that paging
+            // older can never reach, so the cache takes the contiguous page
+            // and each window reloads its own query.
+            let saturated = snapshot.events.count >= 200
             let newViewModels = snapshot.events
                 .filter { $0.timestamp > lastEventTimestamp }
                 .map { eventToViewModel($0) }
             if !newViewModels.isEmpty {
-                events.insert(contentsOf: newViewModels, at: 0)
+                if saturated {
+                    events = newViewModels
+                } else {
+                    events.insert(contentsOf: newViewModels, at: 0)
+                }
                 // Soft cap matches the alerts list — see loadAlertsIncremental.
                 if events.count > 5000 { events = Array(events.prefix(5000)) }
                 lastEventTimestamp = newViewModels.first?.timestamp ?? lastEventTimestamp
             }
-            for session in sessions { session.receiveIncremental(newViewModels, epoch: generation) }
+            for session in sessions {
+                session.receiveIncremental(newViewModels, epoch: generation, saturated: saturated)
+            }
             withExtendedLifetime(snapshot) {}
         } catch {}
     }

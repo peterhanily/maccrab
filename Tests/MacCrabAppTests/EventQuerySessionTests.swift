@@ -489,4 +489,22 @@ struct EventQuerySessionTests {
         session.synchronizeSourceEpoch()
         #expect(retainedTable.isEmpty && session.events.isEmpty)
     }
+
+    @Test("a full live page reloads the window instead of prepending over a gap")
+    func saturatedIncrementalReloads() async {
+        let reader = Reader()
+        let base = Date().addingTimeInterval(-60)
+        reader.result = .init(events: [row("older", at: base)], nextCursor: nil)
+        let session = EventQuerySession(reader: reader)
+        await session.loadEvents(query(live: true))
+        #expect(session.events.map(\.processName) == ["older"])
+        let tick = session.retryTick
+        session.receiveIncremental([row("newer", at: base.addingTimeInterval(30))], epoch: session.sourceEpoch,
+                                   saturated: true)
+        #expect(session.events.map(\.processName) == ["older"], "no prepend across a possible gap")
+        session.pollTick()
+        #expect(session.retryTick == tick + 1, "the next poll reloads the query")
+        session.receiveIncremental([row("newest", at: base.addingTimeInterval(40))], epoch: session.sourceEpoch)
+        #expect(session.events.map(\.processName) == ["newest", "older"], "a partial page still prepends")
+    }
 }

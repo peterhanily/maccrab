@@ -440,7 +440,8 @@ final class EventQuerySession: ObservableObject {
             && query?.acceptsIncremental == true && query?.isSearch == false
     }
 
-    func receiveIncremental(_ rows: [EventViewModel], epoch: UInt64, warning: String? = nil) {
+    func receiveIncremental(_ rows: [EventViewModel], epoch: UInt64, warning: String? = nil,
+                            saturated: Bool = false) {
         guard canReceiveIncremental, epoch == sourceEpoch, epoch == reader.eventQueryEpoch,
               !reader.eventReadsDeferred, queryLoaded, !isLoading,
               let query, query.acceptsIncremental, !query.isSearch else { return }
@@ -448,6 +449,13 @@ final class EventQuerySession: ObservableObject {
             eventSearchCoverageWarning = warning
             let ticket = readiness.begin(retainingCachedContent: false)
             readiness.complete(.partial, for: ticket)
+            return
+        }
+        // A full live page may have skipped events since the newest row shown,
+        // and across categories. Reload this window's own query, filtered in
+        // SQL, rather than prepend over a hole that "Load older" cannot reach.
+        if saturated {
+            retryNeeded = true
             return
         }
         let existing = Set(events.map(\.id))
