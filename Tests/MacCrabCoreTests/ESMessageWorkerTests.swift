@@ -477,3 +477,34 @@ struct ESMessageWorkerTests {
         #expect(decoded.offeredTotal == 0 && decoded.inFlight == 0)
     }
 }
+
+@Suite("ESMessageWorker top reserve")
+struct ESMessageWorkerTopReserveTests {
+    @Test("a write flood cannot take the top reserve; a protected message still gets in")
+    func writeFloodLeavesTopReserve() {
+        let freed = ManagedAtomicCounter()
+        let gate = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: 64,
+            uptimeNanoseconds: { DispatchTime.now().uptimeNanoseconds },
+            process: { _ in gate.wait() },
+            free: { _ in freed.increment() }
+        )
+        func handle() -> ESMessageWorker.Handle { UnsafeRawPointer(bitPattern: 0x1000)! }
+        var ordinary = 0, writes = 0
+        for _ in 0..<64 where worker.submit(handle(), lineageCritical: false) { ordinary += 1 }
+        for _ in 0..<64 where worker.submit(handle(), lineageCritical: false, writeFamily: true) { writes += 1 }
+        // lineageReserve 16, top 4: ordinary stops at 48, writes at 60.
+        #expect(ordinary == 48)
+        #expect(writes == 12)
+        #expect(worker.submit(handle(), lineageCritical: true))
+        for _ in 0..<70 { gate.signal() }
+        worker.shutdownAndDrain()
+    }
+}
+
+private final class ManagedAtomicCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func increment() { lock.lock(); value += 1; lock.unlock() }
+}

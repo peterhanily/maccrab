@@ -1374,12 +1374,27 @@ public final class ESCollector: @unchecked Sendable {
     /// sources. A protected OPEN (static credential / agent-content allowlist,
     /// classified on the callback bytes) is admitted to the reserve per
     /// message through `usesWorkerReserve(eventType:protectedOpen:)`.
-    static let reserveEligibleRawValues: Set<UInt32> = lineageCriticalRawValues.union([
+    static let reserveEligibleRawValues: Set<UInt32> = topReserveRawValues
+        .union(writeFamilyRawValues)
+
+    /// The write family may use the reserve, but not its top slice.
+    static let writeFamilyRawValues: Set<UInt32> = [
         ES_EVENT_TYPE_NOTIFY_CREATE.rawValue,
         ES_EVENT_TYPE_NOTIFY_WRITE.rawValue,
         ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue,
         ES_EVENT_TYPE_NOTIFY_RENAME.rawValue,
         ES_EVENT_TYPE_NOTIFY_UNLINK.rawValue,
+    ]
+
+    /// Rare, high-value types that may use the whole budget alongside lineage.
+    /// A write loop could otherwise fill every reserved slot, and an exec
+    /// storm used to refuse a BTM add, a kext load or a `chmod +x` (only
+    /// exec- or escalation-granting SETMODEs survive the callback) before any
+    /// ordinary message. A protected OPEN joins them per message.
+    static let topReserveRawValues: Set<UInt32> = lineageCriticalRawValues.union([
+        ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD.rawValue,
+        ES_EVENT_TYPE_NOTIFY_KEXTLOAD.rawValue,
+        ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue,
     ])
 
     // MARK: - NOTIFY_SIGNAL callback policy (v1.22.7)
@@ -1519,6 +1534,14 @@ public final class ESCollector: @unchecked Sendable {
     /// Ordinary OPENs (and SIGNAL) never can — they are the flood sources.
     static func usesWorkerReserve(eventType: UInt32, protectedOpen: Bool) -> Bool {
         reserveEligibleRawValues.contains(eventType)
+            || (eventType == ES_EVENT_TYPE_NOTIFY_OPEN.rawValue && protectedOpen)
+    }
+
+    /// Whether a retained message may also use the top slice of the reserve,
+    /// which the write family cannot: a 1-byte write loop could fill every
+    /// reserved slot and refuse a credential or honeyfile OPEN at hand-off.
+    static func usesWorkerTopReserve(eventType: UInt32, protectedOpen: Bool) -> Bool {
+        topReserveRawValues.contains(eventType)
             || (eventType == ES_EVENT_TYPE_NOTIFY_OPEN.rawValue && protectedOpen)
     }
 
@@ -1767,9 +1790,10 @@ public final class ESCollector: @unchecked Sendable {
             // hand-off. Record the third point against the message we just lost.
             let accepted = worker.submit(
                 UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()),
-                lineageCritical: ESCollector.usesWorkerReserve(
+                lineageCritical: ESCollector.usesWorkerTopReserve(
                     eventType: evType, protectedOpen: protectedOpen
                 ),
+                writeFamily: ESCollector.writeFamilyRawValues.contains(evType),
                 eventType: evType
             )
             if !accepted, let canary = canary { canary.noteDroppedAtHandoff(canaryNonces) }
@@ -3435,6 +3459,8 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// slots early, leaving the tail of the budget for the events nothing
     /// downstream can reconstruct.
     private let lineageReserve: Int
+    /// The part of `lineageReserve` that only top-tier messages may use.
+    private let topReserve: Int
 
     private let lock = NSLock()
     private var pending: [Pending?]
@@ -3501,6 +3527,9 @@ public final class ESMessageWorker: @unchecked Sendable {
         self.lineageReserve = reservesLineageSlots
             ? Swift.max(1, Swift.min(cap - 1, cap / 4))
             : 0
+        self.topReserve = reservesLineageSlots
+            ? Swift.max(1, Swift.min(cap - 1, cap / 4) / 4)
+            : 0
         self.queue = DispatchQueue(label: label, qos: .userInitiated)
         self.process = process
         self.free = free
@@ -3523,7 +3552,12 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// drop can be attributed per-type in the heartbeat. Defaults to 0 so the
     /// worker's own unit tests (opaque handles, no ES type) and any non-ES user
     /// of this worker still compile unchanged.
-    public func submit(_ handle: Handle, lineageCritical: Bool = true, eventType: UInt32 = 0) -> Bool {
+    public func submit(
+        _ handle: Handle,
+        lineageCritical: Bool = true,
+        writeFamily: Bool = false,
+        eventType: UInt32 = 0
+    ) -> Bool {
         lock.lock()
         offeredTotal &+= 1
         if shuttingDown {
@@ -3539,7 +3573,10 @@ public final class ESMessageWorker: @unchecked Sendable {
         // critical drops LESS likely — it never admits a message the old policy
         // would have refused. Defaulting to `true` keeps every existing caller
         // (and the worker's unit tests) on the previous full-budget behaviour.
-        let admissionCap = lineageCritical ? maxInFlight : maxInFlight - lineageReserve
+        // The write family reaches into the reserve but never its top slice.
+        let admissionCap = lineageCritical ? maxInFlight
+            : writeFamily ? maxInFlight - topReserve
+            : maxInFlight - lineageReserve
         if inFlight >= admissionCap {
             backpressureDroppedCount &+= 1
             // v1.21.6 (audit DET-05): the WRITE side of the per-type attribution.
