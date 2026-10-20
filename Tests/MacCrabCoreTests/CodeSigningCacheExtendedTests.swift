@@ -120,27 +120,65 @@ struct CodeSigningCacheExtendedTests {
         )
     }
 
-    @Test("A vanished path retains the cached verdict, not a re-eval to .unsigned (v1.21.4 L2)")
-    func vanishedPathRetainsCachedVerdict() async throws {
+    /// A copy of an Apple platform tool keeps its embedded Apple signature,
+    /// so it stands in for the genuine binary a spoofer would prime.
+    private func appleSignedCopy() throws -> String {
         let fm = FileManager.default
-        let path = fm.temporaryDirectory
-            .appendingPathComponent("maccrab_cs_\(UUID().uuidString)")
-            .path
-        fm.createFile(atPath: path, contents: Data(repeating: 0x41, count: 4096))
+        let dir = fm.temporaryDirectory.appendingPathComponent("maccrab_cs_\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("com.apple.helper").path
+        try fm.copyItem(atPath: "/usr/bin/true", toPath: path)
+        return path
+    }
 
+    @Test("A vanished path is a miss and never inherits the verdict primed under it")
+    func vanishedPathIsMiss() async throws {
+        let fm = FileManager.default
+        let path = try appleSignedCopy()
+        defer { try? fm.removeItem(atPath: (path as NSString).deletingLastPathComponent) }
         let cache = CodeSigningCache()
-        // Prime the cache while the file is present (verdict + identity stored).
-        _ = await cache.evaluate(path: path)
-        #expect(await cache.lookup(path: path) != nil, "present file → cache hit")
+        #expect(await cache.evaluate(path: path).signerType == .apple)
+        #expect(cache.lookup(path: path)?.signerType == .apple)
 
-        // The file vanishes (app self-update / moved to another volume / transient
-        // network-mount error) → currentIdentity() can't stat it and returns nil.
+        // A self-unlinking spoofer that ran from this path must not be served
+        // the genuine binary's verdict once the path is gone.
         try fm.removeItem(atPath: path)
+        #expect(cache.lookup(path: path) == nil)
+        // Evaluating the missing path stores nothing for a later lookup.
+        _ = await cache.evaluate(path: path)
+        #expect(cache.lookup(path: path) == nil)
+    }
 
-        // L2: a nil (un-stat-able) identity must RETAIN the cached verdict, NOT be
-        // treated as a miss — a miss would re-evaluate the gone path to .unsigned
-        // and falsely trip signer-negated rules on a live, legit-signed process.
-        #expect(await cache.lookup(path: path) != nil,
-                "a vanished path must serve the last cached verdict, not downgrade to a miss")
+    @Test("A verdict computed while the path was replaced is not bound to the new file")
+    func replacementDuringEvaluationIsNotCached() async throws {
+        let fm = FileManager.default
+        let path = try appleSignedCopy()
+        defer { try? fm.removeItem(atPath: (path as NSString).deletingLastPathComponent) }
+        let cache = CodeSigningCache(afterEvaluationForTesting: { evaluated in
+            // Rename a different file into place mid-evaluation.
+            let staged = evaluated + ".staged"
+            FileManager.default.createFile(atPath: staged, contents: Data("#!/bin/sh\n".utf8))
+            _ = rename(staged, evaluated)
+        })
+        #expect(await cache.evaluate(path: path).signerType == .apple)
+        #expect(cache.lookup(path: path) == nil)
+        #expect(await CodeSigningCache().evaluate(path: path).signerType != .apple)
+    }
+
+    @Test("A same-size rewrite with a restored mtime is still a miss")
+    func restoredMtimeRewriteIsMiss() async throws {
+        let fm = FileManager.default
+        let path = fm.temporaryDirectory.appendingPathComponent("maccrab_cs_\(UUID().uuidString)").path
+        defer { try? fm.removeItem(atPath: path) }
+        fm.createFile(atPath: path, contents: Data(repeating: 0x41, count: 4096))
+        let cache = CodeSigningCache()
+        _ = await cache.evaluate(path: path)
+        #expect(cache.lookup(path: path) != nil)
+        let original = try fm.attributesOfItem(atPath: path)[.modificationDate] as? Date
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try handle.write(contentsOf: Data(repeating: 0x42, count: 4096))
+        try handle.close()
+        try fm.setAttributes([.modificationDate: try #require(original)], ofItemAtPath: path)
+        #expect(cache.lookup(path: path) == nil)
     }
 }

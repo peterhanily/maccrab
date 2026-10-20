@@ -41,19 +41,33 @@ public actor CodeSigningCache {
     /// Cheap stat-derived identity used to detect in-place binary replacement.
     /// Stored alongside the cached verdict so a swapped binary can't ride the
     /// prior trusted verdict cached under the same path.
+    /// Change time is included because an unprivileged writer cannot restore
+    /// it, unlike mtime after a same-size rewrite.
     private struct FileIdentity: Equatable {
         let dev: dev_t
         let ino: ino_t
         let size: off_t
         let mtimeSec: time_t
         let mtimeNsec: Int
+        let ctimeSec: time_t
+        let ctimeNsec: Int
     }
 
     // MARK: Storage
 
-    /// Underlying LRU cache. `NSCache` is thread-safe on its own but we
-    /// access it exclusively through the actor to keep the API consistent.
-    private let cache: NSCache<NSString, CachedEntry>
+    /// Underlying LRU cache. `NSCache` is thread-safe, so `lookup` reads it
+    /// without an actor hop: an event lane that only needs a cached verdict
+    /// never queues behind a Security framework evaluation.
+    nonisolated(unsafe) private let cache: NSCache<NSString, CachedEntry>
+
+    /// Security framework work runs here, off the actor and the cooperative
+    /// pool. Validating a first-seen app bundle hashes its sealed resources
+    /// and can take seconds.
+    private static let evaluationQueue = DispatchQueue(
+        label: "com.maccrab.codesigning.evaluate",
+        qos: .utility,
+        attributes: .concurrent
+    )
 
     private var cacheHits: Int = 0
     private var cacheMisses: Int = 0
@@ -72,7 +86,18 @@ public actor CodeSigningCache {
     public init(countLimit: Int = 8192) {
         self.cache = NSCache<NSString, CachedEntry>()
         self.cache.countLimit = countLimit
+        self.afterEvaluationForTesting = nil
     }
+
+    /// Test seam: runs on the evaluation queue after Security answers and
+    /// before the identity is re-checked.
+    init(countLimit: Int = 8192, afterEvaluationForTesting: @escaping @Sendable (String) -> Void) {
+        self.cache = NSCache<NSString, CachedEntry>()
+        self.cache.countLimit = countLimit
+        self.afterEvaluationForTesting = afterEvaluationForTesting
+    }
+
+    private let afterEvaluationForTesting: (@Sendable (String) -> Void)?
 
     // MARK: Direct access
 
@@ -81,21 +106,20 @@ public actor CodeSigningCache {
     /// - Parameter path: Absolute path to the binary on disk.
     /// - Returns: The cached `CodeSignatureInfo`, or `nil` on a cache miss
     ///   (including a stale entry whose on-disk file was replaced in place).
-    public func lookup(path: String) -> CodeSignatureInfo? {
+    public nonisolated func lookup(path: String) -> CodeSignatureInfo? {
         guard let entry = cache.object(forKey: path as NSString) else { return nil }
-        // Serve the cached verdict unless the on-disk identity CHANGED in place.
+        // Serve the cached verdict only while the path still names the bytes
+        // it was computed for. An in-place swap changes the identity.
         //
-        // v1.21.4 review fix (L2): only a NON-nil current identity that DIFFERS
-        // from the cached one means an in-place replacement (swap) → miss, so the
-        // caller re-evaluates the new bytes (the anti-spoof behavior the FileIdentity
-        // check was added for). A NIL current identity means the path can't be
-        // stat'd right now — the file was moved/unlinked (app self-update, or the
-        // binary lives on a network/removable mount that transiently errored), NOT
-        // that the running binary changed. Re-evaluating a vanished path returns
-        // `.unsigned` and would falsely trip ~126 signer-negated rules + defeat the
-        // Apple-signer trust gate on a live, legitimately-signed process. So on a
-        // nil identity we RETAIN the last trusted verdict rather than downgrade.
-        if let current = currentIdentity(path: path), current != entry.identity {
+        // A vanished path is also a miss. v1.21.4 (L2) kept serving the last
+        // verdict there, to avoid re-evaluating a missing file as `.unsigned`.
+        // But a self-unlinking spoofer then inherited a genuine binary's
+        // `.apple` verdict primed under the same path. The enricher's evaluation
+        // already refuses to publish a verdict for a path without a stable
+        // identity, so the event reports signing as unavailable instead, which
+        // neither trips signer-negated rules nor grants trust.
+        guard let current = Self.currentIdentity(path: path),
+              current == entry.identity else {
             return nil
         }
         return entry.info
@@ -106,11 +130,11 @@ public actor CodeSigningCache {
     /// - Parameters:
     ///   - path: Absolute path to the binary on disk.
     ///   - info: The signing information to cache.
+    ///   The verdict must describe the bytes currently at `path`; a missing
+    ///   path stores nothing.
     public func store(path: String, info: CodeSignatureInfo) {
-        cache.setObject(
-            CachedEntry(info, identity: currentIdentity(path: path)),
-            forKey: path as NSString
-        )
+        guard let identity = Self.currentIdentity(path: path) else { return }
+        cache.setObject(CachedEntry(info, identity: identity), forKey: path as NSString)
     }
 
     /// Stat the file to capture its current (dev, inode, size, mtime) identity.
@@ -118,7 +142,7 @@ public actor CodeSigningCache {
     /// only matches another nil, so a file that appears/disappears at the path is
     /// correctly treated as a cache miss. Follows symlinks (`stat`, not `lstat`)
     /// so the identity tracks the actually-executed binary bytes.
-    private func currentIdentity(path: String) -> FileIdentity? {
+    private nonisolated static func currentIdentity(path: String) -> FileIdentity? {
         var st = stat()
         guard path.withCString({ stat($0, &st) }) == 0 else { return nil }
         return FileIdentity(
@@ -126,7 +150,9 @@ public actor CodeSigningCache {
             ino: st.st_ino,
             size: st.st_size,
             mtimeSec: st.st_mtimespec.tv_sec,
-            mtimeNsec: st.st_mtimespec.tv_nsec
+            mtimeNsec: st.st_mtimespec.tv_nsec,
+            ctimeSec: st.st_ctimespec.tv_sec,
+            ctimeNsec: st.st_ctimespec.tv_nsec
         )
     }
 
@@ -140,17 +166,35 @@ public actor CodeSigningCache {
     ///
     /// - Parameter path: Absolute path to the binary on disk.
     /// - Returns: Signing information for the binary.
-    public func evaluate(path: String) -> CodeSignatureInfo {
+    public func evaluate(path: String) async -> CodeSignatureInfo {
         // 1. Cache hit — fast path.
         if let cached = lookup(path: path) {
             cacheHits += 1
             return cached
         }
 
-        // 2. Cache miss — perform Security framework evaluation.
+        // 2. Cache miss — perform Security framework evaluation off the actor.
         cacheMisses += 1
-        let info = performEvaluation(path: path)
-        store(path: path, info: info)
+        let before = Self.currentIdentity(path: path)
+        let afterEvaluation = afterEvaluationForTesting
+        let info = await BlockingWorkOffload.perform(
+            on: Self.evaluationQueue,
+            qos: BlockingWorkOffload.dispatchQoS(
+                waitedOnAt: Task.currentPriority,
+                floor: .utility
+            ),
+            flags: .enforceQoS
+        ) {
+            let info = Self.performEvaluation(path: path)
+            afterEvaluation?(path)
+            return info
+        }
+        // Bind the verdict only to bytes that stayed in place for the whole
+        // evaluation. Capturing the identity afterwards let a binary renamed
+        // into place mid-evaluation inherit the previous file's verdict.
+        if let before, Self.currentIdentity(path: path) == before {
+            cache.setObject(CachedEntry(info, identity: before), forKey: path as NSString)
+        }
         return info
     }
 
@@ -158,9 +202,8 @@ public actor CodeSigningCache {
 
     /// Perform the actual SecStaticCode evaluation.
     ///
-    /// This is intentionally a synchronous, non-isolated helper. All
-    /// Security framework calls happen on the actor's serial executor.
-    private func performEvaluation(path: String) -> CodeSignatureInfo {
+    /// Synchronous and blocking; `evaluate` runs it on `evaluationQueue`.
+    private nonisolated static func performEvaluation(path: String) -> CodeSignatureInfo {
         let url = URL(fileURLWithPath: path) as CFURL
 
         // --- Create static code reference ---
@@ -247,7 +290,7 @@ public actor CodeSigningCache {
     /// 2. App Store requirement (leaf CN = "Apple Mac OS Application Signing").
     /// 3. `"anchor apple generic"` -- Developer ID.
     /// 4. Falls back to `.adHoc` (valid but no Apple anchor) or `.unsigned`.
-    private func determineSignerType(
+    private nonisolated static func determineSignerType(
         staticCode: SecStaticCode,
         isValid: Bool,
         flags: UInt32
@@ -279,7 +322,7 @@ public actor CodeSigningCache {
     }
 
     /// Test whether a static code object satisfies a textual requirement string.
-    private func satisfiesRequirement(staticCode: SecStaticCode, requirement: String) -> Bool {
+    private nonisolated static func satisfiesRequirement(staticCode: SecStaticCode, requirement: String) -> Bool {
         var reqRef: SecRequirement?
         guard SecRequirementCreateWithString(
             requirement as CFString,
@@ -297,7 +340,7 @@ public actor CodeSigningCache {
     /// Uses `SecStaticCodeCheckValidity` with the notarization requirement.
     /// A stapled ticket does not guarantee Apple's server-side check passed,
     /// but it is the best offline signal available.
-    private func checkNotarization(staticCode: SecStaticCode) -> Bool {
+    private nonisolated static func checkNotarization(staticCode: SecStaticCode) -> Bool {
         // The notarized requirement checks for a stapled ticket.
         let notarizedReq =
             "notarized"

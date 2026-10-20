@@ -361,7 +361,7 @@ public actor EventEnricher {
         // A validated CodeSigningCache hit is intentionally same-event.  The
         // cache re-stats the path and rejects a same-path replacement before
         // returning a verdict.
-        if let cached = await codeSigningCache.lookup(path: process.executable) {
+        if let cached = codeSigningCache.lookup(path: process.executable) {
             if let collectorSignature {
                 return .complete(
                     cached.signerType == .apple
