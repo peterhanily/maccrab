@@ -951,6 +951,7 @@ enum EventLoop {
                     if let aiType {
                         if let attr = await state.mcpAttributor.attribute(
                             pid: aiProc.pid,
+                            executable: aiProc.executable,
                             ancestors: aiProc.ancestors,
                             aiTool: aiType
                         ) {

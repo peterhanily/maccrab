@@ -82,7 +82,14 @@ public actor MCPAttributor {
     /// this PID's ancestry and decided there's no MCP attribution" —
     /// caching the negative result keeps the hot path O(1) on the
     /// many AI-child events that aren't actually under an MCP server.
-    private var cache: [pid_t: Attribution?] = [:]
+    /// A verdict holds only for the image it was computed for. A fork child
+    /// carries its parent's image and is cached as unattributed; when that
+    /// PID then execs the MCP server, its events must not keep the fork's nil.
+    private struct CachedAttribution {
+        let attribution: Attribution?
+        let executable: String?
+    }
+    private var cache: [pid_t: CachedAttribution] = [:]
     /// v1.7.3 LRU: parallel access-sequence map. Bumped on every
     /// hit (lookup) and miss (insert). Eviction removes the entry
     /// with the lowest access seq. Pre-v1.7.3 used `cache.keys.first`
@@ -125,21 +132,22 @@ public actor MCPAttributor {
     ///   process don't repeat the walk.
     public func attribute(
         pid: Int32,
+        executable: String? = nil,
         ancestors: [ProcessAncestor],
         aiTool: AIToolType
     ) async -> Attribution? {
-        if let cached = cache[pid] {
+        if let cached = cache[pid], cached.executable == executable {
             // v1.7.3: bump access seq so frequently-used entries stay
             // in cache when eviction kicks in.
             accessCounter &+= 1
             accessSeq[pid] = accessCounter
-            return cached
+            return cached.attribution
         }
 
         let toolKey = Self.mcpToolKey(for: aiTool)
         let configured = await mcpMonitor.serversForTool(toolKey)
         guard !configured.isEmpty else {
-            recordMiss(pid: pid)
+            recordMiss(pid: pid, executable: executable)
             return nil
         }
 
@@ -188,10 +196,10 @@ public actor MCPAttributor {
         }
 
         if let best = bestMatch {
-            recordHit(pid: pid, attribution: best.0)
+            recordHit(pid: pid, executable: executable, attribution: best.0)
             return best.0
         }
-        recordMiss(pid: pid)
+        recordMiss(pid: pid, executable: executable)
         return nil
     }
 
@@ -211,16 +219,16 @@ public actor MCPAttributor {
         let cmd: String?
     }
 
-    private func recordHit(pid: pid_t, attribution: Attribution) {
+    private func recordHit(pid: pid_t, executable: String?, attribution: Attribution) {
         evictIfFull()
-        cache[pid] = attribution
+        cache[pid] = CachedAttribution(attribution: attribution, executable: executable)
         accessCounter &+= 1
         accessSeq[pid] = accessCounter
     }
 
-    private func recordMiss(pid: pid_t) {
+    private func recordMiss(pid: pid_t, executable: String?) {
         evictIfFull()
-        cache[pid] = .some(nil)
+        cache[pid] = CachedAttribution(attribution: nil, executable: executable)
         accessCounter &+= 1
         accessSeq[pid] = accessCounter
     }

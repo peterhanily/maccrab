@@ -119,6 +119,31 @@ struct MCPAttributorPackageTokenTests {
         #expect(second == nil)
     }
 
+    @Test("A fork child's cached nil does not survive its exec of an MCP server")
+    func execReplacesForkVerdict() async throws {
+        let monitor = MCPMonitor()
+        await monitor._testInjectServer(MCPMonitor.ConfiguredServer(
+            name: "filesystem", command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"], tool: "claude"))
+        let lineage = ProcessLineage()
+        await lineage.recordProcess(pid: 5001, ppid: 0, path: "/usr/local/bin/claude",
+                                    name: "claude", startTime: Date(), commandLine: "claude")
+        // Fork: the child still runs the parent's image.
+        await lineage.recordProcess(pid: 5002, ppid: 5001, path: "/usr/local/bin/claude",
+                                    name: "claude", startTime: Date(), commandLine: "claude")
+        let attributor = MCPAttributor(mcpMonitor: monitor, lineage: lineage)
+        let ancestors = await lineage.ancestors(of: 5002)
+        #expect(await attributor.attribute(pid: 5002, executable: "/usr/local/bin/claude",
+                                           ancestors: ancestors, aiTool: .claudeCode) == nil)
+        // Exec: the same PID is now the MCP server.
+        await lineage.recordProcess(pid: 5002, ppid: 5001, path: "/usr/local/bin/node",
+            name: "node", startTime: Date(),
+            commandLine: "node /usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js /tmp")
+        let afterExec = await attributor.attribute(pid: 5002, executable: "/usr/local/bin/node",
+                                                   ancestors: ancestors, aiTool: .claudeCode)
+        #expect(afterExec?.serverName == "filesystem")
+    }
+
     @Test("Aider aider_mcp_* package token attributes correctly (v1.7.2)")
     func aiderShapeAttribution() async throws {
         let aider = MCPMonitor.ConfiguredServer(
