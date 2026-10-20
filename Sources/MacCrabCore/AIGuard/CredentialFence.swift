@@ -228,6 +228,12 @@ public struct CredentialFence: Sendable {
     /// the credential store at `path` (already lowercased).
     private static func isOwnCredentialStore(binary: String, path: String) -> Bool {
         guard let owned = credentialOwners[binary] else { return false }
+        // git reads public keys and allowed_signers to sign and verify
+        // commits; ssh, never git, reads a private key. `git diff --no-index
+        // /dev/null ~/.ssh/id_rsa` from an agent's child must still alert.
+        if binary == "git", ExactSubstringSearch.contains(path, "/.ssh/") {
+            return path.hasSuffix(".pub") || path.hasSuffix("/allowed_signers")
+        }
         return owned.contains { ExactSubstringSearch.contains(path, $0) }
     }
 

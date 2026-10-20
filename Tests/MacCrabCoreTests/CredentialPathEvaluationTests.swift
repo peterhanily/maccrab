@@ -203,3 +203,23 @@ struct GraphClassificationReuseTests {
         }
     }
 }
+
+@Suite("Credential ownership: git and SSH keys")
+struct CredentialOwnershipGitTests {
+    @Test("git owns public SSH files and .netrc, never a private key")
+    func gitDoesNotOwnPrivateKeys() {
+        let fence = CredentialFence()
+        let home = "/Users/x"
+        func flagged(_ path: String, _ binary: String) -> Bool {
+            fence.checkAccessDetailed(filePath: home + path, aiToolName: "Claude Code",
+                                      accessingBinary: binary) != nil
+        }
+        #expect(flagged("/.ssh/id_rsa", "git"))
+        #expect(flagged("/.ssh/id_ed25519", "git"))
+        #expect(!flagged("/.ssh/id_ed25519.pub", "git"))
+        #expect(!flagged("/.ssh/allowed_signers", "git"))
+        #expect(!flagged("/.netrc", "git"))
+        // ssh itself still owns its keys.
+        #expect(!flagged("/.ssh/id_rsa", "ssh"))
+    }
+}
