@@ -411,6 +411,9 @@ public actor SequenceEngine {
     /// proof that no event was evaluated: a miss or single-step completion can
     /// leave them empty while still racing a detached checkpoint read.
     private var checkpointRestoreAllowed = true
+    /// Bumped by every change to the installed rules, so an evaluation that
+    /// planned before waiting for the mutation lease can tell its plan is stale.
+    private var ruleSetGeneration: UInt64 = 0
 
     /// Conservative serialized-state weight, updated through the centralized
     /// bucket setters below. Capture verifies it against a full recomputation
@@ -753,6 +756,7 @@ public actor SequenceEngine {
             removeRuleFromIndex(rule.id)
         }
         rules[rule.id] = rule
+        ruleSetGeneration &+= 1
         heavyDependencyMasks[rule.id] = Dictionary(
             uniqueKeysWithValues: rule.steps.map { step in
                 (step.id, HeavyEnrichmentRuleCoverage.dependencyMask(
@@ -1468,6 +1472,7 @@ public actor SequenceEngine {
         rules = nextRules
         ruleIndex = nextIndex
         heavyDependencyMasks = nextHeavyDependencies
+        ruleSetGeneration &+= 1
         if ruleFingerprintStateChanged { markCheckpointStateMutation() }
 
         // Retain in-flight state only when BOTH identity and the complete rule
@@ -1669,6 +1674,7 @@ public actor SequenceEngine {
         }
         guard previous.enabled != enabled else { return }
         rules[ruleId]?.enabled = enabled
+        ruleSetGeneration &+= 1
         markCheckpointStateMutation()
 
         // If disabling, discard any in-flight partial matches for this rule.
@@ -2545,92 +2551,49 @@ public actor SequenceEngine {
         _ event: Event,
         dependencyFilter: HeavyEnrichmentDependencyMask?
     ) async -> [RuleMatch] {
-        guard await acquireMutationLease() == .acquired else { return [] }
-        defer { releaseMutationLease() }
-        guard !Task.isCancelled else { return [] }
+        // Predicate planning is pure over the event and the installed rules,
+        // which change only synchronously on this actor, so it runs before the
+        // mutation lease: an event matching no step (most file events) no
+        // longer waits behind another lane holding the lease across its
+        // lineage await. A plan made before the wait is rebuilt if the rules
+        // changed meanwhile. Events that match nothing change no partial or
+        // pending state, and sweeps only remove already-expired state.
+        // Any evaluated event, matching or not, closes the startup restore gate.
         checkpointRestoreAllowed = false
-
-        // Periodic housekeeping: sweep expired partials and enforce memory cap.
-        let now = Date()
-        if now.timeIntervalSince(lastSweep) >= sweepInterval {
-            sweepExpired(now: now)
-            lastSweep = now
-        }
-
-        // Pre-emptive sweep: trigger early cleanup when at 80% capacity to
-        // reduce the likelihood of hitting the hard cap during event bursts.
-        // v1.21.4 (#20): throttled to at most once per `preemptiveSweepInterval`
-        // (was: a full O(partials) sweep on EVERY event above 80%). Any expired
-        // partial this throttle lets linger is cleared right before `evictOldest`
-        // (see the cap-enforcement block below), so eviction — the only path that
-        // can drop a LIVE partial — stays detection-exact. See `lastPreemptiveSweep`.
-        if totalPartialCount > maxPartialMatches * 8 / 10,
-           now.timeIntervalSince(lastPreemptiveSweep) >= Self.preemptiveSweepInterval {
-            sweepExpired(now: now)
-            lastSweep = now
-            lastPreemptiveSweep = now
-        }
-
-        let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
-        let unresolvedMask = HeavyEnrichmentRuleCoverage.unresolvedMask(in: event)
-
-        // Find rule IDs that have at least one step matching this category.
-        guard let candidateRuleIds = ruleIndex[category] else {
+        let plannedGeneration = ruleSetGeneration
+        var plans = evaluationPlans(
+            for: event,
+            dependencyFilter: dependencyFilter,
+            countEvaluations: true
+        )
+        guard !plans.isEmpty else {
+            // Housekeeping keeps its cadence: only an event arriving when a
+            // sweep is due takes the lease, and only to sweep.
+            if housekeepingDue(now: Date()),
+               await acquireMutationLease() == .acquired {
+                defer { releaseMutationLease() }
+                runHousekeeping(now: Date())
+            }
             return []
         }
 
-        // Resolution and folding are pure functions of this Event value. Keep
-        // the memo local to this evaluation (including each enriched replay),
-        // and use it only during synchronous predicate planning before lineage
-        // awaits. No field cache is stored on the actor or shared between events.
-        let fieldMemo = RuleEngine.FieldMemo(event: event)
-        var plans: [EventEvaluationPlan] = []
-        for ruleId in candidateRuleIds {
-            guard let rule = rules[ruleId], rule.enabled else { continue }
-
-            // Preserve rule-step order and STEP-granularity replay eligibility,
-            // but materialize only the matching plan, not an intermediate array
-            // of eligible steps. A miss allocates no step array, and a replay
-            // resolves each relevant step's dependency mask only once.
-            let ruleDependencyMasks = heavyDependencyMasks[ruleId]
-            var matchingSteps: [SequenceStep] = []
-            var countedEvaluation = false
-            for step in rule.steps where step.logsourceCategory == category {
-                let stepDependencyMask = ruleDependencyMasks?[step.id]
-                    ?? HeavyEnrichmentRuleCoverage.dependencyMask(
-                        predicates: step.predicates,
-                        conditionTree: step.conditionTree
-                    )
-                if let dependencyFilter,
-                   stepDependencyMask.intersection(dependencyFilter).isEmpty { continue }
-
-                // Count an enabled, eligible rule exactly once, even when all
-                // eligible steps fail predicates or have unresolved evidence.
-                // Unrelated component replay must not count or seed this rule.
-                if !countedEvaluation {
-                    ruleStats[ruleId, default: SequenceRuleStats(ruleId: ruleId)].evaluationCount &+= 1
-                    countedEvaluation = true
-                }
-                if evaluateStepPredicates(
-                    step,
-                    against: event,
-                    dependencyMask: stepDependencyMask,
-                    unresolvedMask: unresolvedMask,
-                    memo: fieldMemo
-                ) {
-                    matchingSteps.append(step)
-                }
+        guard await acquireMutationLease() == .acquired else { return [] }
+        defer { releaseMutationLease() }
+        guard !Task.isCancelled else { return [] }
+        if ruleSetGeneration != plannedGeneration {
+            plans = evaluationPlans(
+                for: event,
+                dependencyFilter: dependencyFilter,
+                countEvaluations: false
+            )
+            guard !plans.isEmpty else {
+                runHousekeeping(now: Date())
+                return []
             }
-
-            guard !matchingSteps.isEmpty else { continue }
-            plans.append(EventEvaluationPlan(
-                ruleId: ruleId,
-                rule: rule,
-                matchingSteps: matchingSteps
-            ))
         }
 
-        guard !plans.isEmpty else { return [] }
+        let now = Date()
+        runHousekeeping(now: now)
 
         // Build one atomic ProcessLineage view for every relationship that this
         // event can actually evaluate. The old path awaited the lineage actor up
@@ -2938,6 +2901,107 @@ public actor SequenceEngine {
     // MARK: - Predicate Evaluation
 
     /// Evaluate all predicates for a step against an event.
+    /// Whether the periodic or pre-emptive sweep below is due.
+    private func housekeepingDue(now: Date) -> Bool {
+        now.timeIntervalSince(lastSweep) >= sweepInterval
+            || (totalPartialCount > maxPartialMatches * 8 / 10
+                && now.timeIntervalSince(lastPreemptiveSweep) >= Self.preemptiveSweepInterval)
+    }
+
+    /// Periodic housekeeping: sweep expired partials and enforce memory cap.
+    /// Requires the mutation lease.
+    private func runHousekeeping(now: Date) {
+        if now.timeIntervalSince(lastSweep) >= sweepInterval {
+            sweepExpired(now: now)
+            lastSweep = now
+        }
+
+        // Pre-emptive sweep: trigger early cleanup when at 80% capacity to
+        // reduce the likelihood of hitting the hard cap during event bursts.
+        // v1.21.4 (#20): throttled to at most once per `preemptiveSweepInterval`
+        // (was: a full O(partials) sweep on EVERY event above 80%). Any expired
+        // partial this throttle lets linger is cleared right before `evictOldest`
+        // (see the cap-enforcement block below), so eviction — the only path that
+        // can drop a LIVE partial — stays detection-exact. See `lastPreemptiveSweep`.
+        if totalPartialCount > maxPartialMatches * 8 / 10,
+           now.timeIntervalSince(lastPreemptiveSweep) >= Self.preemptiveSweepInterval {
+            sweepExpired(now: now)
+            lastSweep = now
+            lastPreemptiveSweep = now
+        }
+    }
+
+    /// The steps of each enabled rule that this event satisfies. Pure over the
+    /// event and the installed rules; counts each eligible rule's evaluation
+    /// once when asked.
+    private func evaluationPlans(
+        for event: Event,
+        dependencyFilter: HeavyEnrichmentDependencyMask?,
+        countEvaluations: Bool
+    ) -> [EventEvaluationPlan] {
+        let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
+        let unresolvedMask = HeavyEnrichmentRuleCoverage.unresolvedMask(in: event)
+
+        // Find rule IDs that have at least one step matching this category.
+        guard let candidateRuleIds = ruleIndex[category] else {
+            return []
+        }
+
+        // Resolution and folding are pure functions of this Event value. Keep
+        // the memo local to this evaluation (including each enriched replay),
+        // and use it only during synchronous predicate planning before lineage
+        // awaits. No field cache is stored on the actor or shared between events.
+        let fieldMemo = RuleEngine.FieldMemo(event: event)
+        var plans: [EventEvaluationPlan] = []
+        for ruleId in candidateRuleIds {
+            guard let rule = rules[ruleId], rule.enabled else { continue }
+
+            // Preserve rule-step order and STEP-granularity replay eligibility,
+            // but materialize only the matching plan, not an intermediate array
+            // of eligible steps. A miss allocates no step array, and a replay
+            // resolves each relevant step's dependency mask only once.
+            let ruleDependencyMasks = heavyDependencyMasks[ruleId]
+            var matchingSteps: [SequenceStep] = []
+            var countedEvaluation = false
+            for step in rule.steps where step.logsourceCategory == category {
+                let stepDependencyMask = ruleDependencyMasks?[step.id]
+                    ?? HeavyEnrichmentRuleCoverage.dependencyMask(
+                        predicates: step.predicates,
+                        conditionTree: step.conditionTree
+                    )
+                if let dependencyFilter,
+                   stepDependencyMask.intersection(dependencyFilter).isEmpty { continue }
+
+                // Count an enabled, eligible rule exactly once, even when all
+                // eligible steps fail predicates or have unresolved evidence.
+                // Unrelated component replay must not count or seed this rule.
+                if !countedEvaluation {
+                    if countEvaluations {
+                        ruleStats[ruleId, default: SequenceRuleStats(ruleId: ruleId)].evaluationCount &+= 1
+                    }
+                    countedEvaluation = true
+                }
+                if evaluateStepPredicates(
+                    step,
+                    against: event,
+                    dependencyMask: stepDependencyMask,
+                    unresolvedMask: unresolvedMask,
+                    memo: fieldMemo
+                ) {
+                    matchingSteps.append(step)
+                }
+            }
+
+            guard !matchingSteps.isEmpty else { continue }
+            plans.append(EventEvaluationPlan(
+                ruleId: ruleId,
+                rule: rule,
+                matchingSteps: matchingSteps
+            ))
+        }
+        return plans
+    }
+
     private func evaluateStepPredicates(
         _ step: SequenceStep,
         against event: Event,
