@@ -305,10 +305,26 @@ actor DeferredEnrichmentBuffer {
     /// ingestion consumers can wait here, while the independent timer continues
     /// draining terminal patches and releasing retained slots.
     func reserveEventSlot() async -> DeferredEnrichmentReservation? {
+        if case .reserved(let reservation) = await reserveEventSlotOutcome() {
+            return reservation
+        }
+        return nil
+    }
+
+    /// Why a reservation was not granted. Only `.sealed` is terminal: memory
+    /// admission also refuses when the global budget's waiter list is full,
+    /// and a consumer that stopped on that transient refusal never resumed.
+    enum ReservationOutcome: Sendable {
+        case reserved(DeferredEnrichmentReservation)
+        case sealed
+        case memoryRejected
+    }
+
+    func reserveEventSlotOutcome() async -> ReservationOutcome {
         increment(&reservationRequestsTotal)
         guard acceptingReservations else {
             increment(&reservationsRejectedAfterSealTotal)
-            return nil
+            return .sealed
         }
         let reservationID: UUID?
         if canClaimLocalReservation {
@@ -321,9 +337,10 @@ actor DeferredEnrichmentBuffer {
             }
         } else {
             increment(&reservationMemoryRejectionsTotal)
-            return nil
+            return .memoryRejected
         }
-        guard let reservationID else { return nil }
+        // Waiters are resumed without a slot only by `seal()`.
+        guard let reservationID else { return .sealed }
 
         // The local slot is claimed before awaiting global credit, so a waiter
         // never pins 24 MiB that the retained event ahead of it needs to finish.
@@ -334,21 +351,21 @@ actor DeferredEnrichmentBuffer {
             pendingMemoryReservationIDs.remove(reservationID)
             increment(&reservationMemoryRejectionsTotal)
             grantWaitingReservations()
-            return nil
+            return acceptingReservations ? .memoryRejected : .sealed
         }
         guard acceptingReservations,
               pendingMemoryReservationIDs.remove(reservationID) != nil else {
             increment(&reservationsRejectedAfterSealTotal)
             grantWaitingReservations()
-            return nil
+            return .sealed
         }
         reservations[reservationID] = lease
         reservedRawEventBytes += lease.bytes
         increment(&reservationsGrantedTotal)
-        return DeferredEnrichmentReservation(
+        return .reserved(DeferredEnrichmentReservation(
             id: reservationID,
             memoryLease: lease
-        )
+        ))
     }
 
     /// Shrink the pre-enrichment worst-case R claim to the final synchronous

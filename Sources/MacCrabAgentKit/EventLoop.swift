@@ -681,8 +681,25 @@ enum EventLoop {
             // has bounded external ownership. Saturation back-pressures this
             // consumer; it never turns into an unreported event eviction.
             stageStartedNanos = DispatchTime.now().uptimeNanoseconds
-            let reservedEventSlot = await state.deferredEnrichmentBuffer
-                .reserveEventSlot()
+            var reservedEventSlot: DeferredEnrichmentReservation?
+            var memoryRetryMilliseconds = 5
+            reservation: while true {
+                switch await state.deferredEnrichmentBuffer.reserveEventSlotOutcome() {
+                case .reserved(let reservation):
+                    reservedEventSlot = reservation
+                    break reservation
+                case .sealed:
+                    break reservation
+                case .memoryRejected:
+                    // Transient: the global budget refused while its waiter
+                    // list was full. Retry this same event; ending the lane
+                    // here stopped its consumption for good and evicted every
+                    // later offer. The buffer counts each refusal.
+                    if Task.isCancelled { break reservation }
+                    try? await Task.sleep(for: .milliseconds(memoryRetryMilliseconds))
+                    memoryRetryMilliseconds = min(memoryRetryMilliseconds * 2, 100)
+                }
+            }
             stageAwaits.record(.enrichmentReservation, startedAt: stageStartedNanos)
             guard let heavyReservation = reservedEventSlot else {
                 // Reservation admission seals only after ingestion has been
