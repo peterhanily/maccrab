@@ -365,6 +365,15 @@ public final class UnifiedLogCollector: @unchecked Sendable {
     /// - `messageType`: log level (Default, Info, Debug, Error, Fault)
     /// - `eventMessage`: the human-readable log message
     private static func normalise(json: [String: Any], logger: Logger) -> Event? {
+        normalise(json: json, logger: logger, engineProcessID: Int(getpid()))
+    }
+
+    /// The engine's own log lines (Security framework calls behind code-signing
+    /// checks, LaunchServices lookups) are not observations of the host. They
+    /// re-entered the priority lane as events, a self-generated share of it.
+    static func normalise(json: [String: Any], logger: Logger, engineProcessID: Int) -> Event? {
+        guard (json["processID"] as? Int) != engineProcessID else { return nil }
+
         // Required fields
         guard let subsystem = json["subsystem"] as? String,
               let eventMessage = json["eventMessage"] as? String else {
