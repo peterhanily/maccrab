@@ -63,12 +63,20 @@ enum CommandSanitizer {
         options: .caseInsensitive
     )
 
-    /// `sshpass -p VALUE` and `sshpass -pVALUE`. sshpass's `-p` always takes
-    /// the password; in a bare string another program's `-p` is ambiguous.
-    private static let sshpassPassword = try! NSRegularExpression(
-        pattern: #"(\bsshpass\b[^\n]*?\s-p)\s*('[^']*'|"[^"]*"|\S+)"#,
-        options: []
-    )
+    /// A password given to a program that always takes one there, separated
+    /// or compact: `sshpass -p VALUE`, `security unlock-keychain -p VALUE`,
+    /// `zip -P VALUE`, `ssh-keygen -P OLD -N NEW`, `docker login -p VALUE`. In
+    /// a bare string another program's `-p` is ambiguous, and a shell
+    /// separator ends the program's arguments. A value already redacted is
+    /// skipped, so repeated passes reach every flag after the program.
+    private static let programPasswordFlags: [NSRegularExpression] = [
+        #"(\b(?:sshpass|security|altool|cqlsh|cypher-shell)\b[^\n;&|]*?\s-p)"#,
+        #"(\b(?:zip|unzip|zipcloak|security|sqlcmd|bcp|ipmitool|mosquitto_(?:pub|sub|rr))\b[^\n;&|]*?\s-P)"#,
+        #"(\bssh-keygen\b[^\n;&|]*?\s-[PN])"#,
+        #"(\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm|finch)\b[^\n;&|]*?\blogin\b[^\n;&|]*?\s-p)"#,
+    ].map {
+        try! NSRegularExpression(pattern: $0 + #"\s*(?!\[REDACTED\])('[^']*'|"[^"]*"|\S+)"#, options: [])
+    }
 
     /// `user:password` after curl/wget-style `-u`, `--user` or `--proxy-user`.
     /// Only an all-numeric pair is a uid:gid (`docker run -u 501:20`); a
@@ -188,10 +196,17 @@ enum CommandSanitizer {
         )
 
         // 5b. Program- and pair-specific password arguments
-        result = sshpassPassword.stringByReplacingMatches(
-            in: result, options: [], range: fullRange(),
-            withTemplate: "$1 [REDACTED]"
-        )
+        for pattern in programPasswordFlags {
+            // One flag per program occurrence and pass; stop once nothing changes.
+            for _ in 0..<8 {
+                let next = pattern.stringByReplacingMatches(
+                    in: result, options: [], range: fullRange(),
+                    withTemplate: "$1 [REDACTED]"
+                )
+                if next == result { break }
+                result = next
+            }
+        }
         result = userPasswordFlag.stringByReplacingMatches(
             in: result, options: [], range: fullRange(),
             withTemplate: "$1[REDACTED]"
@@ -244,38 +259,64 @@ enum CommandSanitizer {
 
     /// The argv walk with its per-token redactor as a parameter, so the memo
     /// parity test can run the same walk over the uncached suite.
+    ///
+    /// A `-p`/`-P` value is redacted unless argv[0] is a program whose flag is
+    /// known not to carry a secret there (a port, pid, path or boolean). That
+    /// list fails closed: an unknown program, a launcher or interpreter
+    /// (`sudo`, `xargs`, `sh`, `python3`), the argv after `--` or a find
+    /// `-exec`, and an ssh or docker command after its target get no
+    /// exemption, because another program's arguments follow there.
     static func sanitize(arguments: [String], leaf: (String) -> String) -> [String] {
         var result: [String] = []
         result.reserveCapacity(arguments.count)
         var redactNext = false
-        var redactNextIsPasswordP = false
+        // The pending value follows an optional-value `-p` (`mysql -p -u root`
+        // prompts), so a dash token is the next option, not the value.
+        var pendingValueIsOptional = false
         var userPairNext = false
-        var optionsEnded = false
-        // Whether a program seen so far takes its password through `-p` or
-        // `-P`. A wrapper (`sudo`, `docker exec db`) puts it after argv[0].
+        let program = arguments.first.map(programName) ?? ""
+        var exemptionsApply = true
+        let window = optionWindows[program]
+        var windowValuePending = false
+        var windowPositionals = 0
+        // Whether a program seen so far takes a password through `-p` or `-P`.
+        // A wrapper (`sudo`, `docker exec db`) puts it after argv[0].
         var lowerPIsPassword = false
+        var lowerPIsOptional = false
         var upperPIsPassword = false
+        var newPassphraseFlag = false
+        let containerTool = containerLoginPrograms.contains(program)
 
-        for argument in arguments {
+        for (index, argument) in arguments.enumerated() {
             if !argument.hasPrefix("-"), !redactNext, !userPairNext {
-                let program = programName(argument)
-                if passwordLowerPPrograms.contains(program) {
+                let name = programName(argument)
+                if passwordLowerPPrograms.contains(name) {
                     lowerPIsPassword = true
-                    optionsEnded = false  // a new command's argv: `kubectl exec pod -- mysql`
+                    if optionalValuePasswordPrograms.contains(name) { lowerPIsOptional = true }
                 }
-                if passwordUpperPPrograms.contains(program) {
-                    upperPIsPassword = true
-                    optionsEnded = false
-                }
+                if passwordUpperPPrograms.contains(name) { upperPIsPassword = true }
+                if name == "ssh-keygen" { newPassphraseFlag = true }
+                if containerTool, argument == "login" { lowerPIsPassword = true }
             }
-            if optionsEnded {
-                result.append(leaf(argument))
-                continue
+            // An ssh destination or docker image ends the program's own
+            // options; the remote or container command follows it.
+            if exemptionsApply, index > 0, let window {
+                if windowValuePending {
+                    windowValuePending = false
+                } else if argument.hasPrefix("--") {
+                    windowValuePending = window.longValueOptions.contains(argument)
+                } else if argument.hasPrefix("-"), argument.count > 1 {
+                    windowValuePending = takesSeparateValue(argument, letters: window.valueLetters)
+                } else if windowPositionals < window.leadingPositionals {
+                    windowPositionals += 1
+                } else {
+                    exemptionsApply = false
+                }
             }
             if argument == "--" {
                 result.append(argument)
                 redactNext = false
-                optionsEnded = true
+                exemptionsApply = false
                 continue
             }
 
@@ -294,30 +335,48 @@ enum CommandSanitizer {
             ).first.map(String.init) ?? lowered
             let isSensitiveFlag = sensitiveArgumentFlags.contains(flag)
 
-            if redactNext, !isSensitiveFlag {
+            if redactNext {
                 redactNext = false
-                // An option after a password `-p` is the next option, not the
-                // value: `mysql -p -u root` prompts for the password.
-                if !(redactNextIsPasswordP && argument.hasPrefix("-")) {
+                // A flag handled here is the next option, not the pending
+                // value (`curl -p -u alice:secret`), as is any option after an
+                // optional-value `-p`. Anything else is the value, even a
+                // dash-leading one (`zip -P -x7Kq9!`).
+                let nextOption = isSensitiveFlag
+                    || userPairFlags.contains(lowered)
+                    || argument == "-p" || argument == "-P"
+                    || (newPassphraseFlag && argument == "-N")
+                    || (pendingValueIsOptional && argument.hasPrefix("-"))
+                if !nextOption {
                     result.append("[REDACTED]")
                     continue
                 }
             }
 
-            // `-p` / `-P` take a password only for the programs above. For
-            // everything else they are a port (ssh, nc, docker), a pid (lsof),
-            // parents (mkdir) or a find predicate (-perm, -print), which the
-            // stored command line keeps for hunting.
             if !argument.hasPrefix("--"),
-               (lowerPIsPassword && argument.hasPrefix("-p"))
-                || (upperPIsPassword && argument.hasPrefix("-P")) {
+               argument.hasPrefix("-p") || argument.hasPrefix("-P") {
+                let upper = argument.hasPrefix("-P")
+                let exempt = exemptionsApply
+                    && !(upper ? upperPIsPassword : lowerPIsPassword)
+                    && (upper ? nonSecretUpperPPrograms : nonSecretLowerPPrograms).contains(program)
+                if exempt {
+                    result.append(leaf(argument))
+                    continue
+                }
                 if argument.count > 2 {
                     result.append("\(argument.prefix(2))[REDACTED]")
                 } else {
                     result.append(argument)
                     redactNext = true
-                    redactNextIsPasswordP = true
+                    pendingValueIsOptional = !upper && lowerPIsOptional
                 }
+                continue
+            }
+            // `zip -erP VALUE`: a password program's flag bundled last.
+            if passwordFlagEndsBundle(argument, lower: lowerPIsPassword, upper: upperPIsPassword)
+                || (newPassphraseFlag && argument == "-N") {
+                result.append(argument)
+                redactNext = true
+                pendingValueIsOptional = false
                 continue
             }
             if userPairFlags.contains(lowered) {
@@ -340,9 +399,12 @@ enum CommandSanitizer {
                     // token, preserving deterministic option structure.
                     result.append(argument)
                     redactNext = true
-                    redactNextIsPasswordP = false
+                    pendingValueIsOptional = false
                 }
                 continue
+            }
+            if program == "find", findCommandFlags.contains(argument) {
+                exemptionsApply = false
             }
             result.append(leaf(argument))
             redactNext = false
@@ -364,20 +426,125 @@ enum CommandSanitizer {
 
     private static let userPairFlags: Set<String> = ["-u", "--user", "--proxy-user"]
 
-    /// Programs whose `-p` takes a password, separated (`sshpass -p VALUE`,
-    /// `mongosh -p VALUE`) or compact (`mysql -pVALUE`, `7z a -pVALUE`).
-    private static let passwordLowerPPrograms: Set<String> = [
+    private static let mysqlFamily: Set<String> = [
         "mysql", "mysqladmin", "mysqldump", "mysqlimport", "mysqlshow",
         "mysqlcheck", "mysqlpump", "mysqlsh", "mysqlbinlog", "mysqlslap",
+        "mysql_upgrade", "mysql_secure_installation",
         "mariadb", "mariadb-admin", "mariadb-dump", "mariadb-import",
-        "mariadb-show", "mariadb-check", "mariadb-binlog",
-        "sshpass", "mongo", "mongosh", "mongodump", "mongorestore",
-        "mongoexport", "mongoimport", "mongofiles", "mongostat", "mongotop",
-        "7z", "7za", "7zr", "7zz", "rar", "unrar",
+        "mariadb-show", "mariadb-check", "mariadb-binlog", "mariadb-upgrade",
+        "mariadb-backup", "mariabackup",
     ]
 
-    /// Programs whose `-P` takes a password (`zip -P VALUE`).
-    private static let passwordUpperPPrograms: Set<String> = ["zip", "unzip", "zipcloak"]
+    /// Programs whose `-p` value is optional or attached: `mysql -p -u root`
+    /// and `mongosh -p` prompt, `7z a -pVALUE` never separates.
+    private static let optionalValuePasswordPrograms: Set<String> = mysqlFamily.union([
+        "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport",
+        "mongoimport", "mongofiles", "mongostat", "mongotop",
+        "7z", "7za", "7zr", "7zz", "rar", "unrar",
+    ])
+
+    /// Programs whose `-p` takes a password, separated (`sshpass -p VALUE`,
+    /// `security unlock-keychain -p VALUE`) or compact (`mysql -pVALUE`). Any
+    /// of them in argv turns redaction on, through wrappers too.
+    private static let passwordLowerPPrograms: Set<String> = optionalValuePasswordPrograms.union([
+        "sshpass", "security", "altool", "cqlsh", "cypher-shell", "unar", "lsar",
+    ])
+
+    /// Programs whose `-P` takes a password (`zip -P VALUE`, `security import
+    /// x.p12 -P VALUE`, `ssh-keygen -P OLD`) or secret-bearing properties
+    /// (`gradle -Psigning.password=VALUE`).
+    private static let passwordUpperPPrograms: Set<String> = [
+        "zip", "unzip", "zipcloak", "security", "ssh-keygen", "sqlcmd", "bcp",
+        "ipmitool", "mosquitto_pub", "mosquitto_sub", "mosquitto_rr",
+        "gradle", "gradlew",
+    ]
+
+    /// `docker login -u USER -p VALUE` and the same for other registry clients.
+    private static let containerLoginPrograms: Set<String> = [
+        "docker", "podman", "nerdctl", "buildah", "skopeo", "oras", "helm", "finch",
+    ]
+
+    /// argv[0] programs whose `-p` is a port, pid, path, boolean or strip
+    /// count, kept for hunting. Launchers, interpreters, and programs that run
+    /// another program's argv without a `--` (`swift run`, `go run`, `gdb
+    /// --args`, `kubectl patch -p`) stay off this list.
+    private static let nonSecretLowerPPrograms: Set<String> = [
+        "ssh", "autossh", "mosh", "scp", "sftp", "rsync", "nc", "ncat", "netcat",
+        "telnet", "traceroute", "traceroute6", "dig", "nmap", "ping", "ping6",
+        "redis-cli", "psql", "pg_dump", "pg_dumpall", "pg_restore", "pg_isready",
+        "pg_basebackup", "createdb", "dropdb", "createuser", "dropuser",
+        "vacuumdb", "reindexdb", "clusterdb", "pgbench",
+        "lsof", "ps", "top", "renice", "lldb", "dtrace", "sample",
+        "spindump", "leaks", "heap", "vmmap", "footprint",
+        "mkdir", "cp", "install", "tar", "bsdtar", "gtar", "cpio", "patch",
+        "git", "diff", "ls", "find", "ssh-keygen",
+        "docker", "podman", "nerdctl",
+        "cc", "c++", "clang", "clang++", "gcc", "g++", "ld", "ld64",
+        "swiftc", "swift-frontend", "swift-build", "swift-test",
+        "xcodebuild", "rustc", "cargo", "make", "gmake",
+    ]
+
+    /// argv[0] programs whose `-P` is a port, pid, path, boolean or name.
+    private static let nonSecretUpperPPrograms: Set<String> = mysqlFamily.union([
+        "scp", "sftp", "ssh", "rsync", "lsof", "pgrep", "pkill", "grep", "egrep",
+        "fgrep", "rg", "cp", "ln", "find", "chown", "chmod", "chgrp", "du", "pwd",
+        "rm", "tar", "bsdtar", "gtar", "curl", "wget", "mvn", "cc", "c++",
+        "clang", "clang++", "gcc", "g++", "cpp", "cmake", "docker", "podman",
+        "nerdctl", "nc",
+    ])
+
+    /// find runs another program's argv after these.
+    private static let findCommandFlags: Set<String> = ["-exec", "-execdir", "-ok", "-okdir"]
+
+    /// The options a program takes before its target, and how many positionals
+    /// (a subcommand) precede that target.
+    private struct OptionWindow {
+        let valueLetters: Set<Character>
+        let longValueOptions: Set<String>
+        let leadingPositionals: Int
+    }
+
+    private static let containerWindow = OptionWindow(
+        valueLetters: Set("acehlmpuvw"),
+        longValueOptions: [
+            "--name", "--network", "--net", "--env", "--env-file", "--volume",
+            "--mount", "--label", "--user", "--workdir", "--entrypoint",
+            "--platform", "--hostname", "--memory", "--cpus", "--restart",
+            "--pull", "--publish", "--expose", "--device", "--add-host",
+            "--log-driver", "--log-opt", "--dns", "--cap-add", "--cap-drop",
+            "--security-opt", "--tmpfs", "--ulimit", "--gpus", "--runtime",
+            "--shm-size", "--ip", "--pid", "--ipc", "--cidfile", "--health-cmd",
+            "--stop-signal", "--stop-timeout",
+        ],
+        leadingPositionals: 1
+    )
+
+    /// ssh-style destinations and container images end the program's own
+    /// options. An unknown long option counts as boolean, so a mistake ends
+    /// the exemption early rather than late.
+    private static let optionWindows: [String: OptionWindow] = [
+        "ssh": OptionWindow(valueLetters: Set("bBcDeEFiIJlLmoOpPQRSwW"), longValueOptions: [], leadingPositionals: 0),
+        "autossh": OptionWindow(valueLetters: Set("bBcDeEFiIJlLmMoOpPQRSwW"), longValueOptions: [], leadingPositionals: 0),
+        "mosh": OptionWindow(valueLetters: Set("p"), longValueOptions: [], leadingPositionals: 0),
+        "docker": containerWindow,
+        "podman": containerWindow,
+        "nerdctl": containerWindow,
+    ]
+
+    /// Whether a one-dash option token takes the next token as its value: the
+    /// first value-taking letter in the bundle is its last letter.
+    private static func takesSeparateValue(_ token: String, letters: Set<Character>) -> Bool {
+        let flags = token.dropFirst()
+        guard let first = flags.firstIndex(where: { letters.contains($0) }) else { return false }
+        return flags.index(after: first) == flags.endIndex
+    }
+
+    /// `-erP` for a program whose `-P` takes a password: the value follows.
+    private static func passwordFlagEndsBundle(_ token: String, lower: Bool, upper: Bool) -> Bool {
+        guard token.count > 2, token.hasPrefix("-"), !token.hasPrefix("--"),
+              let last = token.last, token.dropFirst().allSatisfy(\.isLetter) else { return false }
+        return (last == "p" && lower) || (last == "P" && upper)
+    }
 
     /// Lowercased basename of an argv token.
     private static func programName(_ token: String) -> String {

@@ -193,9 +193,10 @@ struct AlertTriggerRepresentationTests {
         #expect(args[6] == "-p" && args[7] == "[REDACTED]")
         #expect(args[8] == "--secret")
         #expect(args[9] == "--token" && args[10] == "[REDACTED]")
+        // After `--` another program's argv may follow; its flags still redact.
         #expect(args[11] == "--")
         #expect(args[12] == "--password")
-        #expect(args[13] == "after-end-of-options")
+        #expect(args[13] == "[REDACTED]")
         #expect(args[14] == "safe-after")
     }
 
@@ -218,7 +219,8 @@ struct AlertTriggerRepresentationTests {
         #expect(args[2] == "-p[REDACTED]")
         #expect(args[3] == "safe-after")
         #expect(args[4] == "--")
-        #expect(args[5] == "-ppositional-is-not-an-option")
+        // `--` is no escape hatch: another program's argv may follow it.
+        #expect(args[5] == "-p[REDACTED]")
     }
 
     @Test("an oversized current trigger compacts to a valid Event under 64 KiB")
