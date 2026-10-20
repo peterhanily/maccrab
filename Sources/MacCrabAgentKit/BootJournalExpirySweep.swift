@@ -24,9 +24,20 @@ enum BootJournalExpirySweep {
     }
 
     struct Outcome: Equatable, Sendable {
+        enum Ending: Equatable, Sendable {
+            /// No eligible block remains.
+            case drained
+            /// The work budget ran out with the store inside its startup boundary.
+            case workBudgetSpent
+            /// A pass expired nothing while eligible blocks remain, e.g. a
+            /// reader pinned the WAL at a checkpoint boundary.
+            case stoppedWithBacklog
+        }
+
         let progress: Progress
+        let ending: Ending
         /// Eligible backlog remained and is left to the runtime expiry timer.
-        let deferredBacklogToRuntime: Bool
+        var deferredBacklogToRuntime: Bool { ending != .drained }
     }
 
     /// Boot-phase renewal cadence; well inside the app's 120 s freshness window.
@@ -63,6 +74,7 @@ enum BootJournalExpirySweep {
         retryMilliseconds: Int,
         uptime: () -> TimeInterval,
         storeRequiresConvergence: () -> Bool,
+        backlogRemains: () async -> Bool,
         renewPhase: (Progress) -> Void,
         onConservedBackpressure: () -> Void,
         sleep: (Int) async throws -> Void
@@ -102,7 +114,11 @@ enum BootJournalExpirySweep {
             progress.elapsedSeconds = now - startedAt
             progress.workSeconds += now - callStartedAt
             if batch == 0 {
-                return Outcome(progress: progress, deferredBacklogToRuntime: false)
+                // Zero is also what a pass stopped by a reader pin returns.
+                return Outcome(
+                    progress: progress,
+                    ending: await backlogRemains() ? .stoppedWithBacklog : .drained
+                )
             }
             progress.batches += 1
             if now - lastRenewal >= phaseRenewalSeconds {
@@ -110,7 +126,7 @@ enum BootJournalExpirySweep {
                 lastRenewal = now
             }
             if progress.workSeconds >= workBudgetSeconds, !storeRequiresConvergence() {
-                return Outcome(progress: progress, deferredBacklogToRuntime: true)
+                return Outcome(progress: progress, ending: .workBudgetSpent)
             }
             await Task.yield()
         }

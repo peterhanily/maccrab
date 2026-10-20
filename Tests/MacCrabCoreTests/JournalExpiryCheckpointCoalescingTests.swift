@@ -285,6 +285,8 @@ struct JournalExpiryCheckpointCoalescingTests {
             boundaries.committed()
             reader.pin(readerPath)
         }
+        #expect(try await f.store.hasJournalExpiryBacklog(retainedThrough: f.cutoff))
+        #expect(try await !f.store.hasJournalExpiryBacklog(retainedThrough: .distantPast))
         let first = try await f.store.expireJournalBlocks(
             retainedThrough: f.cutoff, maximumBlocks: 1_024,
             pinnedEntry: .conserveCurrentCutoff)
@@ -301,7 +303,14 @@ struct JournalExpiryCheckpointCoalescingTests {
             retainedThrough: .distantPast, pinnedEntry: .conserveCurrentCutoff) == 0)
         #expect(boundaries.observed.checkpoints == [0, 64])
         // Startup/default still defers; it must not inherit runtime's busy loop.
+        // Its zero is indistinguishable from a drained store, so startup asks
+        // the store whether eligible blocks remain behind the reader.
         #expect(try await f.store.expireJournalBlocks(retainedThrough: f.cutoff) == 0)
+        #expect(try await f.store.hasJournalExpiryBacklog(retainedThrough: f.cutoff))
+        // Runtime asks the checkpoint once instead of waiting out the 5 s busy
+        // timeout, which held the actor on every 250 ms retry behind a reader.
+        let clock = ContinuousClock()
+        let busyStarted = clock.now
         do {
             _ = try await f.store.expireJournalBlocks(
                 retainedThrough: f.cutoff, pinnedEntry: .conserveCurrentCutoff)
@@ -310,6 +319,7 @@ struct JournalExpiryCheckpointCoalescingTests {
             guard case let .busy(_, failure) = error else { throw error }
             #expect(failure != nil)
         }
+        #expect(busyStarted.duration(to: clock.now) < .milliseconds(2_500))
         #expect(boundaries.observed.commits == 64)
         let state = try await f.store.storageAdmissionConnectionStateForTesting()
         #expect(!state.inTransaction)
@@ -319,6 +329,7 @@ struct JournalExpiryCheckpointCoalescingTests {
             retainedThrough: f.cutoff, pinnedEntry: .conserveCurrentCutoff) == 4)
         #expect(try await aggregateSum(f.store) == 132)
         #expect(try await f.store.count() == 0)
+        #expect(try await !f.store.hasJournalExpiryBacklog(retainedThrough: f.cutoff))
     }
 
     @Test("Pressure drains prior progress and retries the same untouched block once",

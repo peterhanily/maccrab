@@ -15103,8 +15103,12 @@ public actor EventStore {
         return snapshot
     }
 
-    private func journalRecoveryCheckpointBoundary() throws -> WALCheckpointObservation {
-        let checkpoint = try walCheckpointTruncateObservation()
+    private func journalRecoveryCheckpointBoundary(
+        waitForReaders: Bool = true
+    ) throws -> WALCheckpointObservation {
+        let checkpoint = try walCheckpointTruncateObservation(
+            waitForReaders: waitForReaders
+        )
         try checkpoint.requireValidOutcome(context: "event journal recovery checkpoint")
         let footprint = try SQLitePersistentStoreAdmission.measureFamily(
             databasePath
@@ -15654,9 +15658,29 @@ public actor EventStore {
 
     private static let journalExpiryCheckpointBlockLimit = 64
 
-    private func journalExpiryCheckpointBoundary() throws -> WALCheckpointObservation {
+    /// Startup expiry runs before producers and may wait out a reader in the
+    /// busy handler. The runtime pass must not: a reader that keeps the WAL
+    /// pinned would hold this actor for the full busy timeout on every 250 ms
+    /// retry, stalling every drain and settlement behind it. It asks once and
+    /// lets its caller's bounded backpressure policy decide.
+    private func journalExpiryCheckpointBoundary(
+        waitForReaders: Bool
+    ) throws -> WALCheckpointObservation {
         journalExpiryCheckpointHookForTesting?()
-        return try journalRecoveryCheckpointBoundary()
+        return try journalRecoveryCheckpointBoundary(waitForReaders: waitForReaders)
+    }
+
+    /// Whether an authenticated, untombstoned journal block is still eligible
+    /// for expiry at `now`. In-memory only: startup uses it to tell a pass
+    /// that stopped at a reader pin from one whose backlog actually drained.
+    public func hasJournalExpiryBacklog(retainedThrough now: Date) throws -> Bool {
+        let cutoff = now.timeIntervalSince1970
+        guard !isReadOnly, cutoff.isFinite else { return false }
+        try ensureJournalIndex()
+        return verifiedJournalSummaries.contains {
+            !isJournalBlockTombstoned($0.blockID)
+                && $0.metadata.retainedUntil <= cutoff
+        }
     }
 
     private func rollbackJournalExpiryTransaction() throws {
@@ -15837,7 +15861,14 @@ public actor EventStore {
         // Only eligible retained work needs an expiry checkpoint or retry.
         // Preserve startup's reader deferral, while the runtime timer explicitly
         // requests typed busy to conserve this frozen cutoff.
-        let entryBoundary = try journalExpiryCheckpointBoundary()
+        let checkpointWaitsForReaders: Bool
+        switch pinnedEntry {
+        case .deferUntilNextPass: checkpointWaitsForReaders = true
+        case .conserveCurrentCutoff: checkpointWaitsForReaders = false
+        }
+        let entryBoundary = try journalExpiryCheckpointBoundary(
+            waitForReaders: checkpointWaitsForReaders
+        )
         if !entryBoundary.truncated {
             switch pinnedEntry {
             case .deferUntilNextPass: return 0
@@ -16428,7 +16459,9 @@ public actor EventStore {
                     }
                     guard needsBoundary, committedSinceCheckpoint > 0,
                           !retriedAfterCheckpoint else { throw error }
-                    let boundary = try journalExpiryCheckpointBoundary()
+                    let boundary = try journalExpiryCheckpointBoundary(
+                        waitForReaders: checkpointWaitsForReaders
+                    )
                     guard boundary.truncated else { return expiredEvents }
                     committedSinceCheckpoint = 0
                     retriedAfterCheckpoint = true
@@ -16438,7 +16471,9 @@ public actor EventStore {
                 // detected at this bounded boundary, not necessarily after the
                 // first block. Once observed, this invocation stops mutating.
                 if committedSinceCheckpoint == Self.journalExpiryCheckpointBlockLimit {
-                    let boundary = try journalExpiryCheckpointBoundary()
+                    let boundary = try journalExpiryCheckpointBoundary(
+                        waitForReaders: checkpointWaitsForReaders
+                    )
                     guard boundary.truncated else { return expiredEvents }
                     committedSinceCheckpoint = 0
                 }
@@ -16446,7 +16481,9 @@ public actor EventStore {
             }
         }
         if committedSinceCheckpoint > 0 {
-            let boundary = try journalExpiryCheckpointBoundary()
+            let boundary = try journalExpiryCheckpointBoundary(
+                waitForReaders: checkpointWaitsForReaders
+            )
             guard boundary.truncated else { return expiredEvents }
         }
         return expiredEvents

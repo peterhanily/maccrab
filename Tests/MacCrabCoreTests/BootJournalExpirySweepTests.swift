@@ -28,14 +28,18 @@ struct BootJournalExpirySweepTests {
         }
     }
 
-    private func run(_ script: Script, convergence: @escaping () -> Bool = { false }) async throws
-        -> BootJournalExpirySweep.Outcome {
+    private func run(
+        _ script: Script,
+        convergence: @escaping () -> Bool = { false },
+        backlogRemains: @escaping () -> Bool = { false }
+    ) async throws -> BootJournalExpirySweep.Outcome {
         try await BootJournalExpirySweep.run(
             expire: { try script.next() },
             backpressureBudgetSeconds: 2,
             retryMilliseconds: 250,
             uptime: { script.clock },
             storeRequiresConvergence: convergence,
+            backlogRemains: backlogRemains,
             renewPhase: { script.renewals.append($0) },
             onConservedBackpressure: { script.conserved += 1 },
             sleep: { script.slept.append($0); script.clock += Double($0) / 1_000 }
@@ -51,6 +55,21 @@ struct BootJournalExpirySweepTests {
         #expect(outcome.progress.batches == 2)
         #expect(script.calls == 3)
         #expect(script.renewals.isEmpty)
+    }
+
+    @Test("a zero pass that leaves eligible blocks behind a reader hands them to the runtime timer")
+    func zeroPassWithBacklogDefers() async throws {
+        let pinned = Script([.success(100), .success(0)], secondsPerCall: 1)
+        let stopped = try await run(pinned, backlogRemains: { true })
+        #expect(stopped.ending == .stoppedWithBacklog)
+        #expect(stopped.deferredBacklogToRuntime)
+        #expect(stopped.progress.expiredEvents == 100)
+        #expect(pinned.calls == 2)
+
+        let empty = Script([.success(100), .success(0)], secondsPerCall: 1)
+        let drained = try await run(empty, backlogRemains: { false })
+        #expect(drained.ending == .drained)
+        #expect(!drained.deferredBacklogToRuntime)
     }
 
     @Test("progress renewal follows elapsed time, not batch count")

@@ -1176,6 +1176,13 @@ enum DaemonSetup {
                         }
                     )
                 },
+                backlogRemains: {
+                    // An unanswerable probe asks for the prompt runtime pass,
+                    // which is harmless when nothing is actually left.
+                    (try? await eventStore.hasJournalExpiryBacklog(
+                        retainedThrough: retainedThrough
+                    )) ?? true
+                },
                 renewPhase: { progress in
                     Self.writeBootPhase(
                         supportDir: supportDir,
@@ -1205,8 +1212,13 @@ enum DaemonSetup {
             if outcome.progress.expiredEvents > 0 {
                 logger.notice("EventStore expired and aggregate-rolled \(outcome.progress.expiredEvents) authenticated journal events before generic cap recovery")
             }
-            if outcome.deferredBacklogToRuntime {
+            switch outcome.ending {
+            case .drained:
+                break
+            case .workBudgetSpent:
                 logger.notice("Boot journal expiry: work budget reached with the store inside its startup boundary after \(outcome.progress.batches) batches; the runtime expiry timer continues the remaining backlog.")
+            case .stoppedWithBacklog:
+                logger.notice("Boot journal expiry: a reader held the WAL at a checkpoint boundary after \(outcome.progress.batches) batches; the runtime expiry timer continues the remaining backlog.")
             }
         } catch {
             try DaemonBootstrap.failPreIngestionStorage(
