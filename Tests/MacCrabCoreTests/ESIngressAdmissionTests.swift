@@ -440,30 +440,61 @@ struct ESIngressAdmissionTests {
     }
 }
 
-@Suite("Protected file events ride the priority lane")
+@Suite("Protected file events ride the priority lane within a budget")
 struct ProtectedFileLaneTests {
-    private func fileEvent(_ action: String, _ path: String) -> Event {
+    private func fileEvent(_ action: String, _ path: String, stamped: Bool = false) -> Event {
         let process = MacCrabCore.ProcessInfo(
             pid: 77, ppid: 1, rpid: 1, name: "node", executable: "/usr/local/bin/node",
             commandLine: "node", args: [], workingDirectory: "/", userId: 501, userName: "u",
             groupId: 20, startTime: Date())
         return Event(eventCategory: .file, eventType: .change, eventAction: action,
-                     process: process, file: FileInfo(path: path, action: .write))
+                     process: process, file: FileInfo(path: path, action: .write),
+                     enrichments: stamped
+                        ? [EventPipelineLane.protectedFileLaneEnrichmentKey: EventPipelineLane.protectedFileLanePriority]
+                        : [:])
     }
 
-    @Test("exec-granting mode changes and persistence writes cannot be evicted by a file flood")
-    func protectedClassRidesPriority() {
-        #expect(EventPipelineLane.finalLane(for: fileEvent("setmode", "/tmp/payload")) == .priority)
-        #expect(EventPipelineLane.finalLane(for: fileEvent("setowner", "/tmp/payload")) == .file,
-                "an unfiltered chown -R must not flood the priority lane")
+    @Test("exec-granting mode changes and persistence writes are candidates; bulk file traffic is not")
+    func protectedCandidates() {
+        #expect(EventPipelineLane.isProtectedFileCandidate(fileEvent("setmode", "/tmp/payload")))
+        #expect(!EventPipelineLane.isProtectedFileCandidate(fileEvent("setowner", "/tmp/payload")),
+                "an unfiltered chown -R must not reach the priority lane")
         for path in ["/Users/x/Library/LaunchAgents/com.evil.plist", "/Library/LaunchDaemons/x.plist",
                      "/Users/x/.zshrc", "/Users/x/.ssh/authorized_keys", "/private/etc/sudoers.d/x"] {
             for action in ["create", "write", "rename", "close_modified"] {
-                #expect(EventPipelineLane.finalLane(for: fileEvent(action, path)) == .priority, "\(action) \(path)")
+                #expect(EventPipelineLane.isProtectedFileCandidate(fileEvent(action, path)), "\(action) \(path)")
             }
         }
-        #expect(EventPipelineLane.finalLane(for: fileEvent("write", "/Users/x/project/main.swift")) == .file)
-        #expect(EventPipelineLane.finalLane(for: fileEvent("close_modified", "/tmp/build/out.o")) == .file)
+        #expect(!EventPipelineLane.isProtectedFileCandidate(fileEvent("write", "/Users/x/project/main.swift")))
+        #expect(!EventPipelineLane.isProtectedFileCandidate(fileEvent("close_modified", "/tmp/build/out.o")))
+        #expect(!EventPipelineLane.isProtectedFileCandidate(fileEvent("open", "/Users/x/.zshrc")),
+                "OPEN has its own lane rule")
+    }
+
+    @Test("only the worker's stamp moves a protected file event to the priority lane")
+    func stampDecidesTheLane() {
+        #expect(EventPipelineLane.finalLane(for: fileEvent("setmode", "/tmp/payload")) == .file)
+        #expect(EventPipelineLane.finalLane(for: fileEvent("setmode", "/tmp/payload", stamped: true)) == .priority)
+        let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
+        #expect(EventPipelineLane.finalLane(for: fileEvent("write", plist)) == .file)
+        #expect(EventPipelineLane.finalLane(for: fileEvent("write", plist, stamped: true)) == .priority)
+    }
+
+    @Test("a flood spends the budget and then keeps the file lane; the budget refills over time")
+    func budgetBoundsAFlood() {
+        let budget = ProtectedFileLaneBudget(capacity: 64, refillPerSecond: 16)
+        let t0: UInt64 = 1_000_000_000
+        var admitted = 0
+        for i in 0..<100_000 where budget.admit(nowNanos: t0 + UInt64(i)) { admitted += 1 }
+        #expect(admitted == 64, "a burst at syscall rate gets the burst capacity and no more")
+        #expect(!budget.admit(nowNanos: t0 + 100_000))
+        // A quarter second later 4 tokens have refilled.
+        var refilled = 0
+        for _ in 0..<10 where budget.admit(nowNanos: t0 + 250_100_000) { refilled += 1 }
+        #expect(refilled == 4)
+        // A clock that steps backwards neither refills nor wedges the budget.
+        #expect(!budget.admit(nowNanos: t0))
+        #expect(budget.admit(nowNanos: t0 + 2_000_000_000))
     }
 }
 

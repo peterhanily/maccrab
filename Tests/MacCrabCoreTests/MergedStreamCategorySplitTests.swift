@@ -76,11 +76,12 @@ struct MergedStreamCategorySplitTests {
                 "credential-read OPEN must ride the priority stream")
         #expect(!DaemonState.ridesFileStream(event(.file, action: "btm_add")),
                 "BTM launch-item registration must ride the priority stream")
-        // Only exec- or escalation-granting SETMODEs survive the ES callback.
-        #expect(!DaemonState.ridesFileStream(event(.file, action: "setmode")),
-                "a chmod +x must stay in order with its exec on the priority stream")
+        // A protected file event moves only with the ES worker's budgeted stamp.
+        #expect(!DaemonState.ridesFileStream(event(.file, action: "setmode", enrichments: [
+            EventPipelineLane.protectedFileLaneEnrichmentKey: EventPipelineLane.protectedFileLanePriority,
+        ])), "a budget-admitted chmod +x rides the priority stream")
         // ...while write-family file noise still rides the file stream.
-        for action in ["write", "create", "rename", "unlink", "close_modified", "setowner"] {
+        for action in ["write", "create", "rename", "unlink", "close_modified", "setowner", "setmode"] {
             #expect(DaemonState.ridesFileStream(event(.file, action: action)),
                     "\(action) is file-write flood and must ride the file stream")
         }

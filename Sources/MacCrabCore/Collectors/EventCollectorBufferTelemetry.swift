@@ -30,31 +30,45 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
     /// single-event credential rules, the wall-clock sequence windows and
     /// the injection-evidence weld all need in order and persisted) and
     /// `btm_add` (the only sensor for a ghost login item). A dynamic-AI OPEN
-    /// is the one exception, decided per event in `finalLane(for:)`.
-    ///
-    /// `setmode` is rare too: the ES callback keeps only mode changes that
-    /// grant execution or setuid/setgid, the `chmod +x` of a dropped payload,
-    /// which then stays in order with its exec. `setowner` is unfiltered (an
-    /// installer's `chown -R` emits thousands) and stays on the file lane.
+    /// is the one exception, decided per event in `finalLane(for:)`, as is
+    /// a protected file event the ES worker stamped for the priority lane.
     public static func routesToFile(_ category: EventCategory, action: String) -> Bool {
         guard category == .file else { return false }
         switch action {
-        case "open", "btm_add", "setmode": return false
+        case "open", "btm_add": return false
         default: return true
         }
     }
 
-    /// Persistence locations. Any file event under one rides the priority
-    /// lane: the file lane evicts its oldest events under overload, and an
-    /// agent could read a few thousand files to push its own LaunchAgent
-    /// write out of the lane before it was evaluated. These events are rare
-    /// next to bulk file traffic.
+    /// Enrichment key the ES worker stamps on a protected file event it
+    /// admitted to the priority lane (`isProtectedFileCandidate`).
+    public static let protectedFileLaneEnrichmentKey = "protected_file_lane"
+    /// The value for a protected file event admitted to the priority lane.
+    public static let protectedFileLanePriority = "priority"
+
+    /// Persistence locations. The file lane evicts its oldest events under
+    /// overload, and an agent could read a few thousand files to push its own
+    /// LaunchAgent write out of the lane before it was evaluated.
     static let persistencePathMarkers = [
         "/LaunchAgents/", "/LaunchDaemons/", "/StartupItems/",
         "/Library/Security/SecurityAgentPlugins/", "/Library/ScriptingAdditions/",
         "/.ssh/authorized_keys", "/etc/sudoers", "/usr/lib/cron/tabs/", "/var/at/tabs/",
         "/.zshrc", "/.zshenv", "/.zprofile", "/.bashrc", "/.bash_profile", "/.profile",
     ]
+
+    /// A file-lane event the ES worker may move to the priority lane: a
+    /// SETMODE (the callback keeps only mode changes that grant execution or
+    /// setuid/setgid, the `chmod +x` of a dropped payload) or any file event
+    /// under a persistence location. Both are rare next to bulk file traffic,
+    /// but unprivileged code can raise either at syscall rate on its own
+    /// files, so the worker admits them through `ProtectedFileLaneBudget`
+    /// and the rest keep the file lane.
+    public static func isProtectedFileCandidate(_ event: Event) -> Bool {
+        guard routesToFile(event.eventCategory, action: event.eventAction) else { return false }
+        if event.eventAction == "setmode" { return true }
+        guard let path = event.file?.path else { return false }
+        return ExactSubstringSearch.containsAny(path, persistencePathMarkers)
+    }
 
     /// The per-event lane. v1.22.7: an `open` stamped
     /// `open_admission = dynamic_ai` rides the FILE lane. Measured on the
@@ -76,11 +90,41 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
         guard routesToFile(event.eventCategory, action: event.eventAction) else {
             return .priority
         }
-        if let path = event.file?.path,
-           ExactSubstringSearch.containsAny(path, persistencePathMarkers) {
+        if event.enrichments[protectedFileLaneEnrichmentKey] == protectedFileLanePriority {
             return .priority
         }
         return .file
+    }
+}
+
+/// How many protected file events (`EventPipelineLane.isProtectedFileCandidate`)
+/// one ES worker may move to the priority lane: a token bucket of `capacity`
+/// refilled at `refillPerSecond`. The priority lane is a drop-oldest buffer
+/// that also carries exec/fork/exit, and a `chmod 755` loop or a write loop
+/// on the caller's own `~/.zshrc` costs nothing to run, so an unbounded
+/// class would let it evict lineage. Past the budget an event keeps the file
+/// lane. Owned by one serial `ESMessageWorker` queue, so it needs no lock.
+final class ProtectedFileLaneBudget {
+    private let capacity: Double
+    private let refillPerNanosecond: Double
+    private var tokens: Double
+    private var lastNanos: UInt64?
+
+    init(capacity: Int = 64, refillPerSecond: Double = 16) {
+        self.capacity = Double(capacity)
+        self.refillPerNanosecond = refillPerSecond / 1_000_000_000
+        self.tokens = Double(capacity)
+    }
+
+    /// Spends one token if one is available at `nowNanos` (monotonic).
+    func admit(nowNanos: UInt64) -> Bool {
+        if let last = lastNanos, nowNanos > last {
+            tokens = Swift.min(capacity, tokens + Double(nowNanos - last) * refillPerNanosecond)
+        }
+        lastNanos = Swift.max(lastNanos ?? nowNanos, nowNanos)
+        guard tokens >= 1 else { return false }
+        tokens -= 1
+        return true
     }
 }
 

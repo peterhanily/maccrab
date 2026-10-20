@@ -21,6 +21,7 @@
 
 import Testing
 import Foundation
+import EndpointSecurity
 @testable import MacCrabCore
 
 /// Thread-safe tally of `process`/`free` calls, keyed by the opaque handle. Both
@@ -498,6 +499,36 @@ struct ESMessageWorkerTopReserveTests {
         #expect(ordinary == 48)
         #expect(writes == 12)
         #expect(worker.submit(handle(), lineageCritical: true))
+        for _ in 0..<70 { gate.signal() }
+        worker.shutdownAndDrain()
+    }
+
+    @Test("a chmod +x flood submitted as the collector submits it leaves lineage its whole reserve")
+    func setmodeFloodLeavesLineageReserve() {
+        let setmode = ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue
+        #expect(!ESCollector.usesWorkerTopReserve(eventType: setmode, protectedOpen: false))
+        #expect(!ESCollector.writeFamilyRawValues.contains(setmode))
+        let freed = ManagedAtomicCounter()
+        let gate = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: 64,
+            uptimeNanoseconds: { DispatchTime.now().uptimeNanoseconds },
+            process: { _ in gate.wait() },
+            free: { _ in freed.increment() }
+        )
+        func handle() -> ESMessageWorker.Handle { UnsafeRawPointer(bitPattern: 0x1000)! }
+        var chmods = 0, lineage = 0
+        for _ in 0..<64 where worker.submit(
+            handle(),
+            lineageCritical: ESCollector.usesWorkerTopReserve(eventType: setmode, protectedOpen: false),
+            writeFamily: ESCollector.writeFamilyRawValues.contains(setmode),
+            eventType: setmode
+        ) { chmods += 1 }
+        for _ in 0..<64 where worker.submit(
+            handle(), lineageCritical: true, eventType: ES_EVENT_TYPE_NOTIFY_EXEC.rawValue
+        ) { lineage += 1 }
+        #expect(chmods == 48)
+        #expect(lineage == 16, "EXEC/FORK/EXIT keep the full quarter-cap reserve")
         for _ in 0..<70 { gate.signal() }
         worker.shutdownAndDrain()
     }

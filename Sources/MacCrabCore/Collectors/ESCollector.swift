@@ -1414,13 +1414,16 @@ public final class ESCollector: @unchecked Sendable {
 
     /// Rare, high-value types that may use the whole budget alongside lineage.
     /// A write loop could otherwise fill every reserved slot, and an exec
-    /// storm used to refuse a BTM add, a kext load or a `chmod +x` (only
-    /// exec- or escalation-granting SETMODEs survive the callback) before any
-    /// ordinary message. A protected OPEN joins them per message.
+    /// storm used to refuse a BTM add or a kext load before any ordinary
+    /// message. A protected OPEN joins them per message. SETMODE stays out:
+    /// the callback keeps every mode change that grants execution, which an
+    /// installer's or `rsync -a`'s `chmod 755` does as readily as a payload's
+    /// `chmod +x`, and unprivileged code can raise it at syscall rate on its
+    /// own files. In this tier such a loop would take the slots lineage
+    /// depends on, on the same exec-client worker.
     static let topReserveRawValues: Set<UInt32> = lineageCriticalRawValues.union([
         ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD.rawValue,
         ES_EVENT_TYPE_NOTIFY_KEXTLOAD.rawValue,
-        ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue,
     ])
 
     // MARK: - NOTIFY_SIGNAL callback policy (v1.22.7)
@@ -1674,6 +1677,8 @@ public final class ESCollector: @unchecked Sendable {
         // queue (the only mutator), so it carries no lock; its counts go through
         // the locked tracker for the heartbeat.
         let coalescer = ESRepeatCoalescer()
+        // Same ownership as the coalescer: this worker's serial queue only.
+        let protectedLaneBudget = ProtectedFileLaneBudget()
         let worker = ESMessageWorker(
             maxInFlight: maxInFlight,
             label: "com.maccrab.es.message-worker.\(label)",
@@ -1689,6 +1694,7 @@ public final class ESCollector: @unchecked Sendable {
                     deliveryTelemetry: deliveryTelemetry,
                     tracker: tracker,
                     coalescer: coalescer,
+                    protectedLaneBudget: protectedLaneBudget,
                     logger: logger
                 )
             },
@@ -2393,6 +2399,7 @@ public final class ESCollector: @unchecked Sendable {
         deliveryTelemetry: EventCollectorBufferTelemetry,
         tracker: ESSeqTracker,
         coalescer: ESRepeatCoalescer,
+        protectedLaneBudget: ProtectedFileLaneBudget,
         logger: Logger
     ) {
         autoreleasepool {
@@ -2499,6 +2506,15 @@ public final class ESCollector: @unchecked Sendable {
                 default:
                     break
                 }
+            }
+
+            // An exec-granting SETMODE or a file event under a persistence
+            // location rides the priority lane while the budget lasts, out of
+            // reach of a file-lane flood (`EventPipelineLane.finalLane(for:)`).
+            if EventPipelineLane.isProtectedFileCandidate(event),
+               protectedLaneBudget.admit(nowNanos: box.startNanos) {
+                event.enrichments[EventPipelineLane.protectedFileLaneEnrichmentKey] =
+                    EventPipelineLane.protectedFileLanePriority
             }
 
             let result = continuation.yield(event)
