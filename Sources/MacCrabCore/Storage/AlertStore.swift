@@ -1726,6 +1726,40 @@ public actor AlertStore {
         return sqlite3_column_int(stmt, 0) == 1
     }
 
+    /// Unsuppressed alerts strictly newer than `after`, oldest first, for a
+    /// forward reader such as the notification channel. Reading the newest
+    /// rows and widening the window re-read thousands of full rows every tick
+    /// during a backlog and skipped the oldest past the widest window. The
+    /// investigation, analyst and triggering-evidence columns, up to 64 KiB a
+    /// row, are not read; columns keep their positions for the row decoder.
+    public func alertsForNotification(after: Date, limit: Int) throws -> [Alert] {
+        let sql = """
+            SELECT id, timestamp, rule_id, rule_title, severity, event_id, process_path,
+                   process_name, description, mitre_tactics, mitre_techniques, suppressed,
+                   NULL, d3fend_techniques, remediation_hint, NULL, campaign_id, user_id,
+                   user_name, working_directory, ai_tool, parent_executable, process_sha256,
+                   host_name, NULL, ai_tool_session_id
+            FROM alerts WHERE timestamp > ?1 AND suppressed = 0
+            ORDER BY timestamp ASC, rowid ASC LIMIT ?2
+            """
+        return try queryAlerts(sql: sql, bindings: [
+            (1, .double(after.timeIntervalSince1970)),
+            (2, .int(Int32(max(1, min(limit, 1_000))))),
+        ])
+    }
+
+    /// How many unsuppressed alerts are strictly newer than `after`.
+    public func notificationBacklogCount(after: Date) throws -> Int {
+        let sql = "SELECT COUNT(*) FROM alerts WHERE timestamp > ?1 AND suppressed = 0"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, after.timeIntervalSince1970)
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed("Failed to count the notification backlog")
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
     /// PERF-5: exact count of alerts since `since`, computed SQL-side (no row
     /// materialization). Replaces counting via `alerts(…, limit: 5000).count`,
     /// which silently UNDERCOUNTED once a busy host exceeded the 5000-row cap.

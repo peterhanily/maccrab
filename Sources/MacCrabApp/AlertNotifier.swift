@@ -170,46 +170,35 @@ final class AlertNotifier: NSObject {
             return
         }
 
-        let since = cursor ?? Date.distantPast
-        // `AlertStore.alerts(since:limit:)` is `ORDER BY timestamp DESC LIMIT n`
-        // — it returns the NEWEST n. With a fixed limit of 200 and a cursor that
-        // then advances to the newest alert seen, any burst larger than 200
-        // between ticks silently skipped the OLDEST alerts of the burst: the
-        // window returned rows 1..200 counting back from newest, the cursor
-        // jumped past everything older, and those alerts were never notified.
-        // That is precisely an alert storm — the moment the operator most needs
-        // the channel — and it discards the earliest, usually most causally
-        // interesting, alerts of the burst. Widen the window until it is no
-        // longer saturated so the cursor can never step over a gap. Bounded so a
-        // pathological storm cannot pull an unbounded result set into the GUI.
-        var fetchLimit = 200
-        var raw: [Alert]
-        guard let first = try? await store.alerts(since: since, limit: fetchLimit) else {
-            finish(.fetchFailed)
-            return
-        }
-        raw = first
-        while raw.count == fetchLimit && fetchLimit < 5_000 {
-            fetchLimit = min(fetchLimit * 4, 5_000)
-            guard let wider = try? await store.alerts(since: since, limit: fetchLimit) else { break }
-            raw = wider
-        }
-        // Strictly newer than the cursor + not suppressed, oldest first.
-        let fresh = raw
-            .filter { !$0.suppressed && (cursor == nil || $0.timestamp > cursor!) }
-            .sorted { $0.timestamp < $1.timestamp }
-
         // First run (no persisted cursor): seed to the newest alert and
         // do NOT notify the backlog.
-        if cursor == nil {
-            cursor = raw.map(\.timestamp).max() ?? Date()
+        guard let since = cursor else {
+            guard let newest = try? await store.alerts(since: Date.distantPast, limit: 1) else {
+                finish(.fetchFailed)
+                return
+            }
+            cursor = newest.first?.timestamp ?? Date()
             persistCursor()
             finish(.cursorSeeded)
+            return
+        }
+        // Read forward from the cursor, oldest first: this tick's slice plus
+        // one row to learn whether more wait. Reading the newest rows and
+        // widening the window up to 5,000 re-read about 9,200 full rows every
+        // tick during a backlog and skipped, for good, the oldest alerts of a
+        // storm larger than the widest window.
+        guard let fresh = try? await store.alertsForNotification(
+            after: since, limit: Self.maximumDeliveriesPerTick + 1
+        ) else {
+            finish(.fetchFailed)
             return
         }
         guard !fresh.isEmpty else {
             finish(.nothingFresh)
             return
+        }
+        func backlog(after: Date) async -> Int {
+            (try? await store.notificationBacklogCount(after: after)) ?? 0
         }
 
         let status = await center.notificationSettings().authorizationStatus
@@ -222,7 +211,7 @@ final class AlertNotifier: NSObject {
         // (Denied is treated as determined: we process + fall back to the
         // in-app popover so a user who said "no" isn't stuck retrying forever.)
         if status == .notDetermined {
-            finish(.authorizationPending, backlog: fresh.count)
+            finish(.authorizationPending, backlog: await backlog(after: since))
             return
         }
 
@@ -251,7 +240,7 @@ final class AlertNotifier: NSObject {
             cursor = max(cursor ?? alert.timestamp, alert.timestamp)
         }
         persistCursor()
-        let remaining = fresh.count - slice.count
+        let remaining = fresh.count > slice.count ? await backlog(after: cursor ?? since) : 0
         if remaining > 0 {
             logger.notice(
                 "alert notifier draining backlog: delivered slice of \(slice.count, privacy: .public), \(remaining, privacy: .public) still pending"
