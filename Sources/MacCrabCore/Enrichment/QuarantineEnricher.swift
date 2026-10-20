@@ -308,6 +308,9 @@ public actor QuarantineEnricher {
     /// actor, although its output is display-only: no rule, sequence or graph
     /// rule reads it. A download lands through create, rename and close; a
     /// write, open or unlink adds nothing the completed file will not show.
+    /// Chrome renames a finished download into place before it sets the
+    /// quarantine attribute, so its events show no provenance; that loss is
+    /// display-only, for the reason above.
     public static func carriesProvenance(eventAction: String) -> Bool {
         switch eventAction {
         case "create", "rename", "close", "close_modified": return true
