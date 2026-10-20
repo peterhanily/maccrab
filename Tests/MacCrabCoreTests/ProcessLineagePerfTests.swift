@@ -331,3 +331,57 @@ struct ProcessLineageExitOrderCompactionTests {
     }
 }
 
+@Suite("ProcessLineage exits that never arrive")
+struct ProcessLineageLivenessTests {
+    private final class DeadPids: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pids: Set<pid_t> = []
+        func kill(_ pid: pid_t) { lock.lock(); pids.insert(pid); lock.unlock() }
+        func isRunning(_ pid: pid_t) -> Bool { lock.lock(); defer { lock.unlock() }; return !pids.contains(pid) }
+    }
+
+    @Test("a vanished process is marked exited, so its children are not adopted by a pid reuse")
+    func vanishedParentReleasesChildren() async throws {
+        let dead = DeadPids()
+        let lineage = ProcessLineage(retentionWindow: 0.05, processIsRunning: { pid, _ in dead.isRunning(pid) })
+        let past = Date(timeIntervalSinceNow: -60)
+        await lineage.recordProcess(pid: 1, ppid: 0, path: "/sbin/launchd", name: "launchd", startTime: past)
+        await lineage.recordProcess(pid: 300, ppid: 1, path: "/System/Library/Frameworks/X.framework/x",
+                                    name: "x", startTime: past)
+        await lineage.recordProcess(pid: 301, ppid: 300, path: "/usr/bin/tool", name: "tool", startTime: past)
+        // The /System/ parent exits; its exit is muted and never recorded.
+        dead.kill(300)
+        await lineage.prune()   // marks 300 exited
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await lineage.prune()   // retention removes it and reparents 301
+        #expect(await !lineage.contains(pid: 300))
+        await lineage.recordProcess(pid: 300, ppid: 1, path: "/usr/local/bin/claude", name: "claude", startTime: Date())
+        #expect(await lineage.ancestors(of: 301).map(\.executable) == ["/sbin/launchd"])
+    }
+
+    @Test("a live process, a just-started one and launchd are never marked exited")
+    func liveProcessesStay() async {
+        let dead = DeadPids()
+        dead.kill(400)
+        dead.kill(1)
+        let lineage = ProcessLineage(retentionWindow: 0, processIsRunning: { pid, _ in dead.isRunning(pid) })
+        await lineage.recordProcess(pid: 1, ppid: 0, path: "/sbin/launchd", name: "launchd",
+                                    startTime: Date(timeIntervalSinceNow: -60))
+        await lineage.recordProcess(pid: 401, ppid: 1, path: "/bin/zsh", name: "zsh",
+                                    startTime: Date(timeIntervalSinceNow: -60))
+        await lineage.recordProcess(pid: 400, ppid: 1, path: "/bin/new", name: "new", startTime: Date())
+        await lineage.prune()
+        #expect(await lineage.contains(pid: 1))
+        #expect(await lineage.contains(pid: 401))
+        #expect(await lineage.contains(pid: 400), "inside the grace period")
+    }
+
+    @Test("the libproc probe sees this process and a reused pid as different starts")
+    func liveProbe() {
+        let me = Foundation.ProcessInfo.processInfo.processIdentifier
+        #expect(ProcessLineage.liveProcessMatches(pid: me, startedAt: Date()))
+        #expect(!ProcessLineage.liveProcessMatches(pid: me, startedAt: Date(timeIntervalSince1970: 0)),
+                "a holder that started after the recorded start reused the pid")
+        #expect(!ProcessLineage.liveProcessMatches(pid: 99_999_999, startedAt: Date()))
+    }
+}

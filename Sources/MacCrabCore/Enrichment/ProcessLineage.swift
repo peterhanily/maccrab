@@ -194,13 +194,69 @@ public actor ProcessLineage {
     // prefers exited processes, and a busy machine has ~200–800 live PIDs;
     // 10_000 covers all live PIDs plus a 1-hour retention window of recently-
     // exited ones with comfortable headroom. ~30 MB private heap reclaimed.
-    public init(retentionWindow: TimeInterval = 3600, maxAncestorDepth: Int = 20, maxProcessCount: Int = 10_000) {
+    public init(
+        retentionWindow: TimeInterval = 3600,
+        maxAncestorDepth: Int = 20,
+        maxProcessCount: Int = 10_000,
+        processIsRunning: @escaping @Sendable (pid_t, Date) -> Bool = ProcessLineage.liveProcessMatches
+    ) {
         self.retentionWindow = retentionWindow
         self.maxAncestorDepth = min(
             max(maxAncestorDepth, 1),
             SequenceCheckpointLimits.maximumProcessAncestors
         )
         self.maxProcessCount = maxProcessCount
+        self.processIsRunning = processIsRunning
+    }
+
+    // MARK: Liveness
+
+    /// Exits that never arrive. ES keeps exec visible through the /System/
+    /// process mute but not exit, and can drop an exit under load. Such a node
+    /// stayed "running" until evicted, eviction at the cap then removed the
+    /// oldest running process (a long-lived ancestor such as the login shell),
+    /// and a process that reused the pid adopted its children. `prune` marks
+    /// these exited, at most every `livenessSweepInterval`, once they are
+    /// `livenessGrace` old; they then leave through the retention path.
+    private static let livenessSweepInterval: TimeInterval = 30
+    private static let livenessGrace: TimeInterval = 10
+    private var lastLivenessSweep: Date?
+    private let processIsRunning: @Sendable (pid_t, Date) -> Bool
+
+    /// Whether `pid` is still the process that started at `startTime`. Only
+    /// ESRCH proves an exit; a process this daemon may not inspect counts as
+    /// running. A node's start time is the birth time ES reports, or for
+    /// other sources the moment the process was first seen, which is no
+    /// earlier, so a holder that started over a second later reused the pid.
+    public static func liveProcessMatches(pid: pid_t, startedAt startTime: Date) -> Bool {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else {
+            return errno != ESRCH
+        }
+        let started = TimeInterval(info.pbi_start_tvsec)
+            + TimeInterval(info.pbi_start_tvusec) / 1_000_000
+        return started <= startTime.timeIntervalSince1970 + 1
+    }
+
+    private func markVanishedProcessesExited() {
+        let now = Date()
+        if let last = lastLivenessSweep,
+           now.timeIntervalSince(last) < Self.livenessSweepInterval {
+            return
+        }
+        lastLivenessSweep = now
+        let settled = now.addingTimeInterval(-Self.livenessGrace)
+        let vanished = nodes.values.compactMap { node -> pid_t? in
+            guard node.exitTime == nil, node.pid > 1, node.startTime < settled,
+                  !processIsRunning(node.pid, node.startTime) else { return nil }
+            return node.pid
+        }
+        for pid in vanished {
+            nodes[pid]?.exitTime = now
+            exitOrder.append((pid, now))
+        }
+        compactExitOrderIfNeeded()
     }
 
     // MARK: Recording
@@ -589,6 +645,7 @@ public actor ProcessLineage {
     /// Should be called periodically (e.g. every few minutes) to bound memory
     /// usage. Running processes (exitTime == nil) are never pruned.
     public func prune() {
+        markVanishedProcessesExited()
         let cutoff = Date().addingTimeInterval(-retentionWindow)
         var pidsToRemove: [pid_t] = []
 
