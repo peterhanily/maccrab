@@ -189,6 +189,11 @@ public actor AgentLineageService {
         let startTime: Date
         var events: EventRing
         var lastActivity: Date
+
+        mutating func record(_ event: AgentEvent) {
+            events.append(event)
+            lastActivity = event.timestamp
+        }
     }
 
     private var sessions: [Int32: SessionRecord] = [:]
@@ -331,10 +336,10 @@ public actor AgentLineageService {
     /// which memmoved the entire tail array every time we overflowed
     /// the cap.
     public func record(aiPid: Int32, event: AgentEvent) {
-        guard var record = sessions[aiPid] else { return }
-        record.events.append(event)
-        record.lastActivity = event.timestamp
-        sessions[aiPid] = record
+        // Mutate in place. Copying the record out left its ring storage
+        // shared with the dictionary, so every append copied all of it
+        // (2,000 slots, about 140 KiB) before writing one event.
+        sessions[aiPid]?.record(event)
     }
 
     /// Bulk-record helper for when the caller already knows the AI pid.
@@ -466,13 +471,12 @@ public actor AgentLineageService {
         // Defence in depth for the fork fix in EventLoop, which removes the
         // dominant ghost SOURCE; this makes the cap fail gracefully regardless.
         let victim = sessions.values
-            .sorted { lhs, rhs in
-                let lhsEmpty = lhs.events.snapshotOrdered().isEmpty
-                let rhsEmpty = rhs.events.snapshotOrdered().isEmpty
+            .min { lhs, rhs in
+                let lhsEmpty = lhs.events.currentCount == 0
+                let rhsEmpty = rhs.events.currentCount == 0
                 if lhsEmpty != rhsEmpty { return lhsEmpty }
                 return lhs.lastActivity < rhs.lastActivity
             }
-            .first
         if let victim {
             sessions[victim.aiPid] = nil
             logger.info("Evicted inactive AI session \(victim.aiPid) to stay under max-sessions cap")
