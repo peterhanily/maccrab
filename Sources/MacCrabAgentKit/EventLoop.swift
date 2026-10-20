@@ -1487,22 +1487,11 @@ enum EventLoop {
                 let responseEngine = state.responseEngine
                 let behaviorWarmingUp = state.isWarmingUp
                 let detachedEvent = enrichedEvent
+                let notarizationFollowUps = state.notarizationFollowUpLifecycle
                 stageStartedNanos = DispatchTime.now().uptimeNanoseconds
-                let notarizationAdmission = await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
-                    label: "notarization-check"
-                ) {
-                    let notarResult: NotarizationChecker.NotarizationResult
-                    if DaemonWorkInlineContext.isRunningOnLane {
-                        // The plane is saturated and this runs on the lane:
-                        // never wait on spctl here. A miss leaves this exec
-                        // unassessed; the next one on an idle plane warms it.
-                        guard let cached = await notarizationChecker
-                            .cachedResultForOverload(binaryPath: execPath) else { return }
-                        notarResult = cached
-                    } else {
-                        notarResult = await notarizationChecker.check(binaryPath: execPath)
-                    }
-
+                // spctl's verdict for this exec drives the revoked-cert alert,
+                // the not-notarized indicator and sandbox analysis.
+                let assessNotarization: @Sendable (NotarizationChecker.NotarizationResult) async -> Void = { notarResult in
                     // v1.17.2: a REVOKED Developer-ID cert (spctl 'revoked') is
                     // near-certainly malicious (AMOS/Atomic Stealer post-takedown).
                     // The developer_cert_revoked YAML rule keys on the enriched
@@ -1580,6 +1569,28 @@ enum EventLoop {
                                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                                 }
                             }
+                        }
+                    }
+                }
+                let notarizationAdmission = await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
+                    label: "notarization-check"
+                ) {
+                    guard DaemonWorkInlineContext.isRunningOnLane else {
+                        await assessNotarization(await notarizationChecker.check(binaryPath: execPath))
+                        return
+                    }
+                    // The plane is saturated and this runs on the lane: never
+                    // wait on spctl here. The cold first exec is the one that
+                    // matters, so a miss is assessed off the lane on the
+                    // bounded follow-up plane; only when that is full too does
+                    // the exec stay unassessed.
+                    if let cached = await notarizationChecker.cachedResultForOverload(binaryPath: execPath) {
+                        await assessNotarization(cached)
+                        return
+                    }
+                    notarizationFollowUps.submit(label: "notarization-follow-up") {
+                        await DaemonWorkInlineContext.$isRunningOnLane.withValue(false) {
+                            await assessNotarization(await notarizationChecker.check(binaryPath: execPath))
                         }
                     }
                 }

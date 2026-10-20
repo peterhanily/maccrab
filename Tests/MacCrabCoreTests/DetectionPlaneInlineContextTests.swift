@@ -34,6 +34,36 @@ struct DetectionPlaneInlineContextTests {
         #expect(!DaemonWorkInlineContext.isRunningOnLane)
     }
 
+    @Test("a follow-up submitted from a lane-inline run completes off the lane")
+    func followUpRunsOffLane() async throws {
+        let lifecycle = DaemonTimerLifecycle(maximumInFlightHandlers: 1)
+        let followUps = DaemonTimerLifecycle(maximumInFlightHandlers: 1)
+        let flag = Flag()
+        let gate = AsyncStream<Void>.makeStream()
+        #expect(await lifecycle.submitOrRunInlineOnOverload(label: "occupant") {
+            for await _ in gate.stream { break }
+        } == .accepted)
+        #expect(await lifecycle.submitOrRunInlineOnOverload(label: "notarization-check") {
+            followUps.submit(label: "notarization-follow-up") {
+                await DaemonWorkInlineContext.$isRunningOnLane.withValue(false) {
+                    flag.record(DaemonWorkInlineContext.isRunningOnLane)
+                }
+            }
+        } == .ranInlineOnOverload)
+        // Shutdown cancels work that has not started, as on every plane, so
+        // wait for the follow-up to finish first.
+        let deadline = Date().addingTimeInterval(5)
+        while followUps.snapshot().completedHandlers < 1, Date() < deadline {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        #expect(await followUps.shutdown(deadline: 5), "the follow-up plane joins its work")
+        gate.continuation.yield()
+        gate.continuation.finish()
+        _ = await lifecycle.shutdown(deadline: 5)
+        #expect(flag.recorded == [false])
+        #expect(followUps.snapshot().completedHandlers == 1)
+    }
+
     @Test("a lane-inline notarization lookup never assesses and counts its miss")
     func overloadLookupIsCacheOnly() async {
         let checker = NotarizationChecker()

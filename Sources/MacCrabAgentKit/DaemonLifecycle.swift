@@ -682,7 +682,9 @@ enum DaemonShutdownCoordinator {
         async let outputs = state.outputWorkLifecycle.shutdown(
             deadline: workBudget
         )
-        let workResults = await (detection, advisory, outputs)
+        async let notarizationFollowUps = state.notarizationFollowUpLifecycle
+            .shutdown(deadline: workBudget)
+        let workResults = await (detection, advisory, outputs, notarizationFollowUps)
 
         // The output lane is joined, so no further send() can land. Drain the
         // batching sinks (S3, SFTP) that hold alerts in memory until flush();
@@ -775,7 +777,7 @@ enum DaemonShutdownCoordinator {
             monitorPlane: producerResults.4,
             startupPlane: producerResults.5,
             heavyEnrichmentPlane: heavyEnrichment.clean,
-            detectionWorkPlane: workResults.0,
+            detectionWorkPlane: workResults.0 && workResults.3,
             advisoryWorkPlane: workResults.1,
             outputWorkPlane: workResults.2,
             uebaPersistence: uebaPersistence,

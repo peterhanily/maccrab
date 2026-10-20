@@ -728,6 +728,14 @@ final class DaemonState {
     let outputWorkLifecycle = DaemonTimerLifecycle(
         maximumInFlightHandlers: 128
     )
+    /// A notarization lookup that runs inline on an event lane never waits on
+    /// spctl; a cache miss there is assessed on this plane instead, so a first
+    /// exec seen while the detection plane is saturated still gets its
+    /// revoked-cert, not-notarized and sandbox checks. Joined with the
+    /// detection plane at shutdown.
+    let notarizationFollowUpLifecycle = DaemonTimerLifecycle(
+        maximumInFlightHandlers: 32
+    )
 
     // MARK: - Core Engines
     let enricher: EventEnricher
