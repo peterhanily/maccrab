@@ -72,7 +72,9 @@ public enum JournalExpiryBackpressurePolicy {
 
     /// A pass that spent its backpressure budget used to end as a failure,
     /// leaving its backlog to the next cadence, which label coalescing pushes
-    /// up to ten minutes out when the pass overlaps a tick.
+    /// up to ten minutes out when the pass overlaps a tick. A continuation is
+    /// a new pass with a fresh cutoff and budgets, so each keeps the bound
+    /// above.
     public static let continuationDelaySeconds: TimeInterval = 30
     public static let maximumContinuationsPerPass = 8
 

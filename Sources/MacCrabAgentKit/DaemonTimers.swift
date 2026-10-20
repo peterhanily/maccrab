@@ -2854,7 +2854,7 @@ enum DaemonTimers {
             ].map(String.init).joined(separator: ":")
         }
 
-        // Both callers hold beginSizeCapPrune through these probes. A WAL
+        // Both callers hold acquireSizeCapPrune through these probes. A WAL
         // checkpoint can lower family bytes without reclaiming the main file;
         // only successful incremental work plus a new main-file low-water can
         // earn a bounded continuation. Unknown/slack-zero remains conservative.
@@ -2915,7 +2915,7 @@ enum DaemonTimers {
                 let alertsRetention = max(1, state.storage.alertsRetentionDays)
                 // v1.12.6: serialize scheduled sweeps with the early-fire
                 // watchdog (and any inbox flush-request) via the shared
-                // beginSizeCapPrune guard on EventStore. Without this,
+                // acquireSizeCapPrune guard on EventStore. Without this,
                 // a watchdog burst on a wedged host could stack on top
                 // of an in-flight scheduled sweep, doubling the I/O
                 // load just when the disk is most pressured.
@@ -2982,10 +2982,13 @@ enum DaemonTimers {
         )
         eventJournalExpiryTimer.setEventHandler {
             timerLifecycle.submit(label: "event-journal-expiry") {
-                // One admitted timer task owns one immutable cutoff. Advancing
-                // Date() between quanta can chase an old backlog indefinitely
-                // and makes the five-minute overhang proof ill-defined.
-                let retainedThrough = Date()
+                // Each pass owns one immutable cutoff. Advancing Date()
+                // between quanta can chase an old backlog indefinitely and
+                // makes the five-minute overhang proof ill-defined. A
+                // continuation after a spent backpressure budget is a new
+                // pass, with its own cutoff and budgets, as the next tick
+                // would be.
+                var retainedThrough = Date()
                 var reportedCoalescing = false
                 var reportedLeaseBackpressure = false
                 var totalExpired = 0
@@ -3102,6 +3105,7 @@ enum DaemonTimers {
                             } catch {
                                 return
                             }
+                            retainedThrough = Date()
                             consecutiveWaitSeconds = 0
                             cumulativeWaitSeconds = 0
                             continue
@@ -3149,7 +3153,7 @@ enum DaemonTimers {
         // and a numeric compare; only schedules a sweep on the cold
         // path (over-threshold).
         //
-        // Reentrancy: shares the EventStore `beginSizeCapPrune` guard
+        // Reentrancy: shares the EventStore `acquireSizeCapPrune` guard
         // with the scheduled sweep + inbox flush-request handler, so
         // the watchdog cannot stack on top of an in-flight sweep.
         let sizeCapWatchdogTimer = DispatchSource.makeTimerSource(queue: .global())
@@ -8610,8 +8614,8 @@ func recoverAlertStoreBeforeProducers(
 ///
 /// v1.9.0 (audit Stab-M1): returns `true` when the sweep actually
 /// ran, `false` when it was skipped because another sweep was
-/// already in progress (`EventStore.beginSizeCapPrune` returned
-/// false). Callers (SIGUSR2 handler) use the return value to avoid
+/// already in progress (`EventStore.acquireSizeCapPrune` did not
+/// return `.acquired`). Callers (SIGUSR2 handler) use the return value to avoid
 /// overwriting the running sweep's pending status snapshot with a
 /// stale "after" measurement.
 @discardableResult
@@ -8884,7 +8888,7 @@ func reprobeAlertStoreAtActivationBoundary(
 ///   fallback) before and after VACUUM so the main .db file (what
 ///   the Settings UI measures) actually reflects the shrink.
 /// - **Reentrancy-safe.** Hourly timer + on-demand "prune now"
-///   can collide; guard via `EventStore.beginSizeCapPrune()`.
+///   can collide; guard via `EventStore.acquireSizeCapPrune()`.
 /// - **Structured log output.** Every sweep emits one line with
 ///   starting/ending sizes, rows pruned, disk-space decision, and
 ///   vacuum result. Operators can `log show --predicate 'subsystem
@@ -8929,8 +8933,11 @@ private func enforceDatabaseSizeCap(
     // (audit Stab-M1): return false so the SIGUSR2 caller can skip
     // the status-snapshot write — pre-fix the second SIGUSR2 within
     // ~2 s of the first wrote a stale `bytesAfter` mid-sweep.
-    guard await eventStore.beginSizeCapPrune() else {
-        logger.info("Size-cap enforcer: another sweep already active, skipping")
+    // Journal expiry yields to a waiting sweep at its next quantum; a single
+    // attempt lost to it for the whole of a backlog drain, so an on-demand
+    // sweep (dashboard flush, SIGHUP after lowering the cap, SIGUSR2) waits.
+    guard await acquireSizeCapSweep(eventStore: eventStore, waitSeconds: 60) else {
+        logger.info("Size-cap enforcer: another size-cap sweep is active, or journal expiry did not yield within 60 s; skipping")
         return false
     }
     let result = await { () async -> Bool in

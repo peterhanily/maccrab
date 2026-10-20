@@ -212,10 +212,10 @@ struct EventStoreSizeCapTests {
         let fixture = try makeTempStore()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        #expect(await fixture.store.beginSizeCapPrune())
-        #expect(await fixture.store.beginSizeCapPrune() == false)
+        #expect(await fixture.store.acquireSizeCapPrune() == .acquired)
+        #expect(await fixture.store.acquireSizeCapPrune() == .heldBySweep)
         await fixture.store.endSizeCapPrune()
-        #expect(await fixture.store.beginSizeCapPrune())
+        #expect(await fixture.store.acquireSizeCapPrune() == .acquired)
         await fixture.store.endSizeCapPrune()
     }
 
@@ -257,7 +257,7 @@ struct EventStoreSizeCapTests {
             range: 0..<16,
             sourceTime: Date().addingTimeInterval(-60 * 60)
         )
-        #expect(await fixture.store.beginSizeCapPrune())
+        #expect(await fixture.store.acquireSizeCapPrune() == .acquired)
         let deleted = try await fixture.store.pruneOldest(count: 16)
         await fixture.store.endSizeCapPrune()
 

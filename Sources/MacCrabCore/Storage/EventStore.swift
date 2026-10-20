@@ -21170,8 +21170,8 @@ public actor EventStore {
     // guard, two invocations serialize behind the actor but each
     // runs a full prune + VACUUM pass — wasteful at best, unhelpful
     // at worst (second pass re-scans an already-pruned DB). The
-    // guard returns `nil` from `beginSizeCapPrune()` when another
-    // pass is already in flight.
+    // guard's `acquireSizeCapPrune()` refuses when another pass is
+    // already in flight.
 
     private var _isPruningForSizeCap = false
     /// Journal expiry re-acquires the exclusion between quanta within one
@@ -21183,15 +21183,6 @@ public actor EventStore {
     private var journalExpiryPendingTicks: UInt64 = 0
     private var journalExpiryLeaseDeferrals: UInt64 = 0
     private var journalExpiryFailedPasses: UInt64 = 0
-
-    /// Acquire the size-cap pruning exclusion. Returns `nil` if
-    /// another pass is already active. Callers that receive `nil`
-    /// should simply log and return.
-    public func beginSizeCapPrune() -> Bool {
-        if _isPruningForSizeCap { return false }
-        _isPruningForSizeCap = true
-        return true
-    }
 
     /// Journal expiry uses the same exclusion as legacy convergence, but a
     /// missed tick is conserved rather than discarded for another five-minute
