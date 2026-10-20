@@ -306,10 +306,13 @@ public struct EventInsertFilter: Sendable {
             // v1.21.6: suppress in-window duplicates of platform-daemon
             // chatter (see DuplicateWindow). Five minutes keeps one exact
             // exemplar per distinct (category, action, process, target) tuple
-            // per window; the aggregates tier retains counts and detection
-            // evaluates every instance regardless. Measured 16.4x duplication
-            // on field hardware — this is the difference between the default
-            // family cap holding a busy Mac and it being unreachable.
+            // per window, and detection evaluates every instance regardless.
+            // Suppressed instances are not journaled, so they are also absent
+            // from the 30-day aggregates, which journal expiry alone writes:
+            // aggregate counts for this chatter are lower bounds. Measured
+            // 16.4x duplication on field hardware — this is the difference
+            // between the default family cap holding a busy Mac and it
+            // being unreachable.
             duplicateWindowSeconds: 300
         )
     }
