@@ -252,6 +252,11 @@ enum EventLoop {
     private static let credentialFenceExemptReleaseTools: Set<String> = [
         "sign_update", "generate_keys",
     ]
+    /// Apple's ssh tools read the login keychain for `UseKeychain`
+    /// passphrases, which now reaches CredentialFence for an agent's `git
+    /// push`. Only the genuine binaries in SIP-protected /usr/bin qualify: a
+    /// renamed copy of cp named `ssh` must still be caught copying a keychain.
+    private static let keychainReadingSSHTools: Set<String> = ["ssh", "ssh-add", "scp", "sftp"]
 
     static func isCredentialFenceExempt(
         _ event: Event,
@@ -260,6 +265,10 @@ enum EventLoop {
         let process = event.process
         let path = process.executable
         let subject = (path as NSString).lastPathComponent
+        if keychainReadingSSHTools.contains(subject),
+           let file = event.file?.path, ExactSubstringSearch.contains(file, "/Library/Keychains/") {
+            return path.hasPrefix("/usr/bin/") && process.isPlatformBinary
+        }
         if credentialFenceExemptAppleTools.contains(subject) {
             let anchored = credentialFenceAppleToolLocations.contains { path.hasPrefix($0) }
                 || (path.hasPrefix("/Applications/Xcode") && path.contains(".app/Contents/Developer/"))

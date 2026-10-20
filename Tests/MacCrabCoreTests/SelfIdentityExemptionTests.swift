@@ -72,5 +72,10 @@ struct SelfIdentityExemptionTests {
             signer: .devId, teamId: NoiseFilter.macCrabTeamId), developmentEngine: false))
         #expect(EventLoop.isCredentialFenceExempt(event("/Users/u/src/.build/artifacts/sparkle/Sparkle/bin/sign_update")))
         #expect(!EventLoop.isCredentialFenceExempt(event("/usr/bin/cp", platform: true)))
+        // UseKeychain: Apple's ssh reading the login keychain (the fixture's
+        // file), but not a renamed copy outside /usr/bin.
+        #expect(EventLoop.isCredentialFenceExempt(event("/usr/bin/ssh", platform: true)))
+        #expect(!EventLoop.isCredentialFenceExempt(event("/tmp/ssh", platform: true)))
+        #expect(!EventLoop.isCredentialFenceExempt(event("/opt/homebrew/bin/ssh", signer: .adHoc)))
     }
 }
