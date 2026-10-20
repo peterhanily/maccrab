@@ -2993,6 +2993,7 @@ enum DaemonTimers {
                 // draining, leaving nothing for the refusal it exists to absorb.
                 var consecutiveWaitSeconds: TimeInterval = 0
                 var cumulativeWaitSeconds: TimeInterval = 0
+                var continuations = 0
                 while !Task.isCancelled {
                     var acquired = false
                     while !Task.isCancelled {
@@ -3080,9 +3081,36 @@ enum DaemonTimers {
                             cumulativeWaitSeconds += waited
                             continue
                         }
-                        await state.eventStore.recordJournalExpiryFailure()
-                        logger.fault("Event journal expiry failed: \(error.localizedDescription, privacy: .public)")
-                        return
+                        let backlogRemains = (try? await state.eventStore
+                            .hasJournalExpiryBacklog(retainedThrough: retainedThrough)) ?? true
+                        switch JournalExpiryBackpressurePolicy.afterAbandon(
+                            error: error,
+                            continuations: continuations,
+                            backlogRemains: backlogRemains
+                        ) {
+                        case .continueAfterDelay:
+                            continuations += 1
+                            await state.eventStore.recordJournalExpiryLeaseDeferral()
+                            logger.notice("Event journal expiry: backpressure budget spent with backlog left; continuing in \(Int(JournalExpiryBackpressurePolicy.continuationDelaySeconds), privacy: .public) s (continuation \(continuations, privacy: .public)).")
+                            do {
+                                try await Task.sleep(for: .seconds(
+                                    JournalExpiryBackpressurePolicy.continuationDelaySeconds
+                                ))
+                            } catch {
+                                return
+                            }
+                            consecutiveWaitSeconds = 0
+                            cumulativeWaitSeconds = 0
+                            continue
+                        case .deferToNextPass:
+                            await state.eventStore.recordJournalExpiryLeaseDeferral()
+                            logger.notice("Event journal expiry: backpressure persisted after \(continuations, privacy: .public) continuations; the next pass resumes the backlog.")
+                            return
+                        case .fail:
+                            await state.eventStore.recordJournalExpiryFailure()
+                            logger.fault("Event journal expiry failed: \(error.localizedDescription, privacy: .public)")
+                            return
+                        }
                     } catch {
                         await state.eventStore.recordJournalExpiryFailure()
                         await state.eventStore.endSizeCapPrune()

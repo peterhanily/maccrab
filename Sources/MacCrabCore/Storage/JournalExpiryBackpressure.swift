@@ -59,6 +59,34 @@ public enum JournalExpiryBackpressurePolicy {
         }
         return .conserveAndRetry
     }
+
+    /// What a pass does once `decide` abandons it.
+    public enum AbandonedPassOutcome: Sendable, Equatable {
+        /// Wait `continuationDelaySeconds`, then continue with fresh budgets.
+        case continueAfterDelay
+        /// Backpressure, not failure: the next cadence resumes the backlog.
+        case deferToNextPass
+        /// A non-transient error.
+        case fail
+    }
+
+    /// A pass that spent its backpressure budget used to end as a failure,
+    /// leaving its backlog to the next cadence, which label coalescing pushes
+    /// up to ten minutes out when the pass overlaps a tick.
+    public static let continuationDelaySeconds: TimeInterval = 30
+    public static let maximumContinuationsPerPass = 8
+
+    public static func afterAbandon(
+        error: EventStoreError,
+        continuations: Int,
+        backlogRemains: Bool
+    ) -> AbandonedPassOutcome {
+        guard error.isTransientBackpressure else { return .fail }
+        guard backlogRemains, continuations < maximumContinuationsPerPass else {
+            return .deferToNextPass
+        }
+        return .continueAfterDelay
+    }
 }
 
 extension EventStoreError {

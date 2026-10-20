@@ -151,4 +151,16 @@ struct BootJournalExpirySweepTests {
         await #expect(throws: EventStoreError.self) { _ = try await run(fatal) }
         #expect(fatal.conserved == 0)
     }
+
+    @Test("a pass that spent its backpressure budget continues or defers; only a real error fails")
+    func abandonedPassOutcome() {
+        let busy = EventStoreError.busy("writer lock")
+        let lease = EventStoreError.memoryLeaseUnavailable("lease committed")
+        typealias Policy = JournalExpiryBackpressurePolicy
+        #expect(Policy.afterAbandon(error: busy, continuations: 0, backlogRemains: true) == .continueAfterDelay)
+        #expect(Policy.afterAbandon(error: lease, continuations: 7, backlogRemains: true) == .continueAfterDelay)
+        #expect(Policy.afterAbandon(error: busy, continuations: 8, backlogRemains: true) == .deferToNextPass)
+        #expect(Policy.afterAbandon(error: busy, continuations: 0, backlogRemains: false) == .deferToNextPass)
+        #expect(Policy.afterAbandon(error: .stepFailed("corrupt"), continuations: 0, backlogRemains: true) == .fail)
+    }
 }
