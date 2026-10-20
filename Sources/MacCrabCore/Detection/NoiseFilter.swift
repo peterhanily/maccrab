@@ -410,28 +410,31 @@ public enum NoiseFilter {
     }
 
     /// True when the event's ACTOR is one of MacCrab's own processes
-    /// (app, sysext, legacy daemon, CLI, MCP server) — by process name or
-    /// by executable path, including ad-hoc-signed dev builds.
-    public static func isMacCrabProcess(event: Event) -> Bool {
-        let name = event.process.name.lowercased()
-        if name == "maccrab" ||
-           name == "com.maccrab.agent" ||
-           name == "maccrabd" ||
-           name == "maccrabctl" ||
-           name == "maccrab-mcp" {
+    /// (app, sysext, legacy daemon, CLI, MCP server).
+    ///
+    /// Identity is MacCrab's code-signing team, which the kernel attests for
+    /// ES events. A name or path is forgeable: copying a payload to
+    /// `~/maccrabd`, or into a user-writable /Applications/MacCrab.app,
+    /// silenced every rule for that process, because Gate 4a drops all
+    /// severities. Development builds are ad-hoc signed without a team, so
+    /// their anchored build paths count only while this engine is one too.
+    public static func isMacCrabProcess(
+        event: Event,
+        developmentEngine: Bool = engineIsDevelopmentBuild
+    ) -> Bool {
+        if let signature = event.process.codeSignature,
+           signature.teamId == macCrabTeamId,
+           signature.signerType == .devId || signature.signerType == .appStore {
             return true
         }
-        let path = event.process.executable
-        if path.hasPrefix("/Applications/MacCrab.app/") ||
-           path.hasPrefix("/Library/SystemExtensions/") && path.contains("com.maccrab.agent") ||
-           path.contains("/maccrab.app/") ||  // ad-hoc-signed dev builds
-           path.hasSuffix("/maccrabd") ||
-           path.hasSuffix("/maccrabctl") ||
-           path.hasSuffix("/maccrab-mcp") {
-            return true
-        }
-        return false
+        return developmentEngine && AlertSink.isMacCrabSelfNoise(event.process.executable)
     }
+
+    /// Whether this engine runs from a SwiftPM or Xcode build directory.
+    public static let engineIsDevelopmentBuild: Bool = {
+        let path = Bundle.main.executablePath ?? CommandLine.arguments.first ?? ""
+        return path.contains("/.build/") || path.contains("/DerivedData/")
+    }()
 
     /// True when the event's FILE subject is inside one of MacCrab's
     /// managed directories (system + user Application Support). Actor-

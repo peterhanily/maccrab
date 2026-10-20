@@ -84,12 +84,13 @@ private func attributedFileWrite(
     path: String,
     processPath: String,
     processName: String? = nil,
-    signer: SignerType? = nil
+    signer: SignerType? = nil,
+    teamId: String? = nil
 ) -> Event {
     let codeSig: CodeSignatureInfo? = signer.map {
         CodeSignatureInfo(
             signerType: $0,
-            teamId: nil, signingId: nil, authorities: [],
+            teamId: teamId, signingId: nil, authorities: [],
             flags: 0, isNotarized: false
         )
     }
@@ -512,7 +513,9 @@ struct MacCrabSelfTests {
         let event = attributedFileWrite(
             path: "/tmp/out.log",
             processPath: "/Library/SystemExtensions/ABCD/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent",
-            processName: "com.maccrab.agent"
+            processName: "com.maccrab.agent",
+            signer: .devId,
+            teamId: NoiseFilter.macCrabTeamId
         )
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
         #expect(matches.isEmpty,
@@ -534,7 +537,9 @@ struct MacCrabSelfTests {
         let event = attributedFileWrite(
             path: "/Library/Application Support/com.apple.TCC/TCC.db",
             processPath: "/Applications/MacCrab.app/Contents/MacOS/MacCrab",
-            processName: "MacCrab"
+            processName: "MacCrab",
+            signer: .devId,
+            teamId: NoiseFilter.macCrabTeamId
         )
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
         #expect(matches.isEmpty,
@@ -624,11 +629,37 @@ struct MacCrabSelfTests {
         let event = attributedFileWrite(
             path: "\(NSHomeDirectory())/Library/Messages/chat.db",
             processPath: "/Applications/MacCrab.app/Contents/MacOS/MacCrab",
-            processName: "MacCrab"
+            processName: "MacCrab",
+            signer: .devId,
+            teamId: NoiseFilter.macCrabTeamId
         )
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
         #expect(matches.isEmpty,
                 "an operator-run MacCrab scan suppresses every severity")
+    }
+
+    @Test("A MacCrab name or path without MacCrab's team signature silences nothing")
+    func forgedSelfIdentityStillFires() async throws {
+        for (path, name, signer, team) in [
+            ("/Users/u/maccrabd", "maccrabd", nil, nil),
+            ("/tmp/com.maccrab.agent", "com.maccrab.agent", SignerType.adHoc, nil),
+            ("/Applications/MacCrab.app/Contents/MacOS/evil", "evil", nil, nil),
+            ("/Applications/MacCrab.app/Contents/MacOS/MacCrab", "MacCrab", .devId, "ABCDE12345"),
+        ] as [(String, String, SignerType?, String?)] {
+            let event = attributedFileWrite(path: "/tmp/payload", processPath: path,
+                                            processName: name, signer: signer, teamId: team)
+            #expect(!NoiseFilter.isMacCrabProcess(event: event, developmentEngine: false), "\(path)")
+            var matches = [RuleMatch(ruleId: "test.high", ruleName: "High", severity: .high,
+                                     description: "", mitreTechniques: [], tags: [])]
+            NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+            if !path.hasPrefix("/Applications/MacCrab.app/") || team != nil {
+                #expect(matches.count == 1, "\(path)")
+            }
+        }
+        let genuine = attributedFileWrite(path: "/tmp/x",
+            processPath: "/Applications/MacCrab.app/Contents/MacOS/MacCrab",
+            signer: .devId, teamId: NoiseFilter.macCrabTeamId)
+        #expect(NoiseFilter.isMacCrabProcess(event: genuine, developmentEngine: false))
     }
 
     @Test("Events on non-MacCrab paths still fire normally")
