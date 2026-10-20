@@ -228,16 +228,36 @@ func handleGetBrowserExtensions(_ args: [String: Any]) -> Any {
 final class CompiledRuleFileIndex: @unchecked Sendable {
     static let shared = CompiledRuleFileIndex()
 
+    /// Modification times of the rule directories at the last build. A
+    /// compile adds, removes or renames files, which changes them.
+    private struct Stamp: Equatable {
+        let rules: timespec?
+        let sequences: timespec?
+
+        static func == (a: Stamp, b: Stamp) -> Bool {
+            func same(_ x: timespec?, _ y: timespec?) -> Bool {
+                x?.tv_sec == y?.tv_sec && x?.tv_nsec == y?.tv_nsec
+            }
+            return same(a.rules, b.rules) && same(a.sequences, b.sequences)
+        }
+    }
+
     private let lock = NSLock()
     private var directory: String?
+    private var stamp: Stamp?
     private var paths: [String: String] = [:]
 
     func rule(id: String, in compiledDir: String) -> [String: Any]? {
-        if let path = cachedPath(id: id, in: compiledDir), let json = Self.load(path), (json["id"] as? String) == id {
+        let cached = cachedPath(id: id, in: compiledDir)
+        if let cached, let json = Self.load(cached), (json["id"] as? String) == id {
             return json
         }
-        // Missing or stale entry (rules changed): rebuild once.
-        rebuild(compiledDir)
+        // A stale entry means the rules changed: rebuild. An id with no entry
+        // rebuilds only when the directories changed, so an alert whose rule
+        // is no longer in the corpus does not reopen every file on each call.
+        let current = Self.stamp(compiledDir)
+        guard cached != nil || !isCurrent(compiledDir, stamp: current) else { return nil }
+        rebuild(compiledDir, stamp: current)
         guard let path = cachedPath(id: id, in: compiledDir), let json = Self.load(path),
               (json["id"] as? String) == id else { return nil }
         return json
@@ -249,12 +269,18 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return paths[id]
     }
 
-    private func rebuild(_ compiledDir: String) {
+    private func isCurrent(_ compiledDir: String, stamp current: Stamp) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return directory == compiledDir && stamp == current
+    }
+
+    private func rebuild(_ compiledDir: String, stamp current: Stamp) {
         var next: [String: String] = [:]
         let fm = FileManager.default
-        if let files = try? fm.contentsOfDirectory(atPath: compiledDir) {
-            for file in files where file.hasSuffix(".json") && file != "manifest.json" {
-                let path = compiledDir + "/" + file
+        for dir in [compiledDir, compiledDir + "/sequences"] {
+            guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for file in files.sorted() where file.hasSuffix(".json") && file != "manifest.json" {
+                let path = dir + "/" + file
                 if let id = Self.load(path)?["id"] as? String, next[id] == nil {
                     next[id] = path
                 }
@@ -262,8 +288,17 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         }
         lock.lock()
         directory = compiledDir
+        stamp = current
         paths = next
         lock.unlock()
+    }
+
+    private static func stamp(_ compiledDir: String) -> Stamp {
+        func modified(_ path: String) -> timespec? {
+            var st = stat()
+            return stat(path, &st) == 0 ? st.st_mtimespec : nil
+        }
+        return Stamp(rules: modified(compiledDir), sequences: modified(compiledDir + "/sequences"))
     }
 
     private static func load(_ path: String) -> [String: Any]? {
@@ -271,4 +306,3 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 }
-
