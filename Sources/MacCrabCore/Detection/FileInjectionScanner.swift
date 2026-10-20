@@ -132,8 +132,12 @@ public actor FileInjectionScanner {
             return nil
         }
 
-        guard !snapshot.data.isEmpty,
-              let content = String(data: snapshot.data, encoding: .utf8) else { return nil }
+        guard !snapshot.data.isEmpty else { return nil }
+        let content = DetectionTextDecoding.lossyUTF8(
+            snapshot.data,
+            maximumBytes: Self.maxFileSize,
+            endsAtTruncation: false
+        )
 
         // Unicode controls also carry ordinary emoji and multilingual text.
         // Exempt their bounded, recognized contexts before counting signals.

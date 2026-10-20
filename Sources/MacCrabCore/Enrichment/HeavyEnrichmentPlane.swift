@@ -275,18 +275,28 @@ public struct HeavyFileContentEvidence: Sendable, Equatable {
     /// the heavy plane.  The old FileContentEnricher token bucket returned nil
     /// on overload, losing the only event that proved a completed write.  Plane
     /// admission now makes overload explicit and conserves every accepted read.
+    ///
+    /// `hardLinkOwnerUID` names the event's actor. A hard-linked file is read
+    /// only when that non-root actor owns it, because it could read the file
+    /// itself; otherwise linking a payload would hide it from content rules.
     public static func read(
         path: String,
         maximumBytes: Int,
-        maximumFileSize: Int64
+        maximumFileSize: Int64,
+        hardLinkOwnerUID: UInt32? = nil
     ) -> HeavyFileContentEvidence? {
         guard case .success(let snapshot) = BoundedRegularFileReader.readPrefixOutcome(
             at: path,
-            maximumBytes: maximumBytes
-        ), snapshot.sizeBytes <= maximumFileSize,
-           let content = String(data: snapshot.data, encoding: .utf8) else {
+            maximumBytes: maximumBytes,
+            hardLinkOwnerUID: hardLinkOwnerUID
+        ), snapshot.sizeBytes <= maximumFileSize else {
             return nil
         }
+        let content = DetectionTextDecoding.lossyUTF8(
+            snapshot.data,
+            maximumBytes: maximumBytes,
+            endsAtTruncation: snapshot.sizeBytes > Int64(snapshot.data.count)
+        )
         return HeavyFileContentEvidence(
             content: content,
             fileIdentity: HeavyEnrichmentFileIdentity(snapshot: snapshot)

@@ -138,10 +138,15 @@ public actor PromptIntentBridge {
     /// home) since the lineage paths we want to read are
     /// per-user dotfiles + CLAUDE.md / README context.
     private static let defaultFileReader: FileReader = { path in
-        guard let data = try? SecureFileIO.readBytes(at: path, maxBytes: 64 * 1024, scope: "/Users/") else {
+        let maximumBytes = 64 * 1024
+        guard let data = try? SecureFileIO.readBytes(at: path, maxBytes: maximumBytes, scope: "/Users/") else {
             return nil
         }
-        return String(data: data, encoding: .utf8)
+        return DetectionTextDecoding.lossyUTF8(
+            data,
+            maximumBytes: maximumBytes,
+            endsAtTruncation: data.count >= maximumBytes
+        )
     }
 
     // MARK: - Public API

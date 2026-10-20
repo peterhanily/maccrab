@@ -551,6 +551,7 @@ public actor EventEnricher {
             return .complete(nil)
         }
 
+        let actorUID = event.process.userId
         let offer = await heavyEnrichmentPlane.offer(
             component: .fileContent,
             binding: binding,
@@ -561,7 +562,8 @@ public actor EventEnricher {
             let evidence = HeavyFileContentEvidence.read(
                 path: path,
                 maximumBytes: maximumBytes,
-                maximumFileSize: maximumFileSize
+                maximumFileSize: maximumFileSize,
+                hardLinkOwnerUID: actorUID
             )
             // The path may legitimately be replaced or rewritten after the ES
             // close event but before this deferred descriptor read. Reject that

@@ -94,14 +94,21 @@ public enum BoundedRegularFileReader {
     /// Unlike `readOutcome`, a larger file is accepted and `Snapshot.sizeBytes`
     /// reports its full descriptor size. This preserves header/content-probe
     /// semantics without reintroducing path-based preflight races.
+    ///
+    /// A file with more than one link is normally an unsafe carrier: root
+    /// would copy the content of whatever inode a user linked into place.
+    /// `hardLinkOwnerUID` accepts a linked file only when that non-root UID
+    /// owns it, so the reader learns nothing its owner could not read.
     public static func readPrefixOutcome(
         at path: String,
-        maximumBytes: Int
+        maximumBytes: Int,
+        hardLinkOwnerUID: UInt32? = nil
     ) -> Outcome {
         readOutcome(
             at: path,
             maximumBytes: maximumBytes,
             allowPrefix: true,
+            hardLinkOwnerUID: hardLinkOwnerUID,
             afterDirectoryOpened: nil,
             afterMetadataValidated: nil
         )
@@ -142,6 +149,7 @@ public enum BoundedRegularFileReader {
         at path: String,
         maximumBytes: Int,
         allowPrefix: Bool,
+        hardLinkOwnerUID: UInt32? = nil,
         afterDirectoryOpened: ((String, Int32) -> Void)?,
         afterMetadataValidated: ((Int32) -> Void)? = nil
     ) -> Outcome {
@@ -211,8 +219,9 @@ public enum BoundedRegularFileReader {
         guard Darwin.fstat(descriptor, &before) == 0 else {
             return .rejected(.ioFailure)
         }
+        let ownedLink = hardLinkOwnerUID.map { $0 != 0 && before.st_uid == $0 } ?? false
         guard (before.st_mode & S_IFMT) == S_IFREG,
-              before.st_nlink == 1,
+              before.st_nlink == 1 || ownedLink,
               before.st_size >= 0 else {
             return .rejected(.unsafeCarrier)
         }

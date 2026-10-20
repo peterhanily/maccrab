@@ -169,6 +169,10 @@ public actor FileContentEnricher {
             logger.debug("Skipped oversized file at \(path, privacy: .private)")
             return nil
         }
-        return String(data: snapshot.data, encoding: .utf8)
+        return DetectionTextDecoding.lossyUTF8(
+            snapshot.data,
+            maximumBytes: maxBytes,
+            endsAtTruncation: snapshot.sizeBytes > Int64(snapshot.data.count)
+        )
     }
 }
