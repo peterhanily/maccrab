@@ -235,3 +235,31 @@ struct EventEnricherFoldTests {
         #expect(enriched.process.ancestors.contains { $0.name == "parentproc" })
     }
 }
+
+@Suite("ProcessLineage exit-order eviction")
+struct ProcessLineageExitOrderEvictionTests {
+    @Test("at the cap the earliest exit is evicted first; reused and pruned pids are skipped")
+    func evictsEarliestExit() async {
+        let lineage = ProcessLineage(retentionWindow: 3600, maxProcessCount: 4)
+        let start = Date()
+        for pid in Int32(1)...4 {
+            await lineage.recordProcess(pid: pid, ppid: 0, path: "/bin/p\(pid)", name: "p\(pid)", startTime: start)
+        }
+        await lineage.recordExit(pid: 3)
+        await lineage.recordExit(pid: 1)
+        await lineage.recordExit(pid: 2)
+        // pid 3 is reused by a running process: its exit entry is stale.
+        await lineage.recordProcess(pid: 3, ppid: 0, path: "/bin/new3", name: "new3", startTime: start)
+
+        await lineage.recordProcess(pid: 5, ppid: 0, path: "/bin/p5", name: "p5", startTime: start)
+        #expect(await lineage.path(of: 1) == nil, "the earliest live exit goes first")
+        #expect(await lineage.path(of: 3) == "/bin/new3")
+        await lineage.recordProcess(pid: 6, ppid: 0, path: "/bin/p6", name: "p6", startTime: start)
+        #expect(await lineage.path(of: 2) == nil)
+        // No exited node left: the oldest running process goes.
+        await lineage.recordProcess(pid: 7, ppid: 0, path: "/bin/p7", name: "p7",
+                                    startTime: start.addingTimeInterval(10))
+        #expect(await lineage.nodeCount == 4)
+        #expect(await lineage.path(of: 7) == "/bin/p7")
+    }
+}

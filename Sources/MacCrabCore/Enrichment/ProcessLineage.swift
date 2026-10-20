@@ -113,6 +113,15 @@ public actor ProcessLineage {
     /// zombie PIDs accumulating during high-fork-rate workloads.
     private let maxProcessCount: Int
 
+    /// Exited nodes in the order their exits were recorded, so eviction pops
+    /// the oldest exit instead of copying and scanning every exited node on
+    /// each insert at the cap (about 1 ms per fork, on an actor every event
+    /// awaits). An entry is stale once its node is pruned, evicted or its pid
+    /// reused (the stored exit time no longer matches); stale entries are
+    /// skipped when they reach the front.
+    private var exitOrder: [(pid: pid_t, exitTime: Date)] = []
+    private var exitOrderHead = 0
+
     // MARK: Storage
 
     /// Primary index: pid -> node.
@@ -254,10 +263,33 @@ public actor ProcessLineage {
     /// running process with the oldest start time.
     private func evictLRUProcess() {
         // Prefer an exited process (least valuable for lineage queries)
-        if let victim = nodes.values.filter({ $0.exitTime != nil }).min(by: { ($0.exitTime ?? .distantPast) < ($1.exitTime ?? .distantPast) }) {
+        while exitOrderHead < exitOrder.count {
+            let entry = exitOrder[exitOrderHead]
+            exitOrderHead += 1
+            if let node = nodes[entry.pid], node.exitTime == entry.exitTime {
+                removeNode(pid: entry.pid)
+                compactExitOrderIfNeeded()
+                return
+            }
+        }
+        compactExitOrderIfNeeded()
+        if let victim = nodes.values.min(by: { $0.startTime < $1.startTime }) {
             removeNode(pid: victim.pid)
-        } else if let victim = nodes.values.min(by: { $0.startTime < $1.startTime }) {
-            removeNode(pid: victim.pid)
+        }
+    }
+
+    /// Drop consumed entries, and rebuild from the live exited nodes if
+    /// stale entries (pruned or reused pids behind the front) pile up.
+    private func compactExitOrderIfNeeded() {
+        if exitOrderHead > 0, exitOrderHead * 2 >= exitOrder.count {
+            exitOrder.removeFirst(exitOrderHead)
+            exitOrderHead = 0
+        }
+        if exitOrder.count > 2 * maxProcessCount + 1_024 {
+            exitOrder = nodes.values.compactMap { node in
+                node.exitTime.map { (node.pid, $0) }
+            }.sorted { $0.exitTime < $1.exitTime }
+            exitOrderHead = 0
         }
     }
 
@@ -354,7 +386,10 @@ public actor ProcessLineage {
     /// - Parameter pid: Process ID of the exiting process.
     public func recordExit(pid: pid_t) {
         guard nodes[pid] != nil else { return }
-        nodes[pid]?.exitTime = Date()
+        let now = Date()
+        nodes[pid]?.exitTime = now
+        exitOrder.append((pid, now))
+        compactExitOrderIfNeeded()
     }
 
     // MARK: Queries
