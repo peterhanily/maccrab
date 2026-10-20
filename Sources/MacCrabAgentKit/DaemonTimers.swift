@@ -2919,7 +2919,10 @@ enum DaemonTimers {
                 // a watchdog burst on a wedged host could stack on top
                 // of an in-flight scheduled sweep, doubling the I/O
                 // load just when the disk is most pressured.
-                guard await state.eventStore.beginSizeCapPrune() else {
+                guard await acquireSizeCapSweep(
+                    eventStore: state.eventStore,
+                    waitSeconds: 300
+                ) else {
                     logger.info("Tier-rollup scheduled sweep: another sweep already in flight, skipping.")
                     return
                 }
@@ -3184,7 +3187,10 @@ enum DaemonTimers {
                 // absent progress retains the 2/4/8/16/32-minute backoff so an
                 // irreducible store cannot recreate the full rewrite loop.
                 guard watchdogBackoff.mayFire() else { return }
-                guard await state.eventStore.beginSizeCapPrune() else {
+                guard await acquireSizeCapSweep(
+                    eventStore: state.eventStore,
+                    waitSeconds: 60
+                ) else {
                     // A scheduled sweep is already running. The
                     // scheduled sweep will bring us back under the cap
                     // — no need to queue another.
@@ -8881,6 +8887,33 @@ func reprobeAlertStoreAtActivationBoundary(
 ///   vacuum result. Operators can `log show --predicate 'subsystem
 ///   == "com.maccrab.agent"'` and see exactly what the enforcer
 ///   did.
+/// Acquire the shared maintenance exclusion for a size-cap sweep. While
+/// journal expiry holds it the sweep waits, and expiry gives way at its next
+/// quantum; another sweep in flight still means skip. Every exit that does
+/// not acquire withdraws the wait, which would otherwise block expiry.
+private func acquireSizeCapSweep(
+    eventStore: EventStore,
+    waitSeconds: TimeInterval
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(waitSeconds))
+    while true {
+        switch await eventStore.acquireSizeCapPrune() {
+        case .acquired:
+            return true
+        case .heldBySweep:
+            await eventStore.withdrawSizeCapPruneWait()
+            return false
+        case .heldByJournalExpiry:
+            guard !Task.isCancelled, clock.now < deadline else {
+                await eventStore.withdrawSizeCapPruneWait()
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+    }
+}
+
 private func enforceDatabaseSizeCap(
     dbPath: String,
     boundary: EventsSizeCapBoundary,

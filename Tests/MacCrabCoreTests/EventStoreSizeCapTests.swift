@@ -219,6 +219,34 @@ struct EventStoreSizeCapTests {
         await fixture.store.endSizeCapPrune()
     }
 
+    @Test("a sweep refused by journal expiry gets the next acquisition; a sweep refused by a sweep skips")
+    func sweepWaitsOutJournalExpiry() async throws {
+        let fixture = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let store = fixture.store
+
+        #expect(await store.beginJournalExpiryPrune())
+        #expect(await store.acquireSizeCapPrune() == .heldByJournalExpiry)
+        await store.endSizeCapPrune()
+        // Expiry's next quantum yields to the waiting sweep.
+        #expect(await store.beginJournalExpiryPrune() == false)
+        #expect(await store.acquireSizeCapPrune() == .acquired)
+        #expect(await store.beginJournalExpiryPrune() == false)
+        // A second sweep never waits on a sweep.
+        #expect(await store.acquireSizeCapPrune() == .heldBySweep)
+        await store.endSizeCapPrune()
+        #expect(await store.beginJournalExpiryPrune())
+        await store.endSizeCapPrune()
+
+        // A withdrawn wait stops blocking expiry.
+        #expect(await store.beginJournalExpiryPrune())
+        #expect(await store.acquireSizeCapPrune() == .heldByJournalExpiry)
+        await store.withdrawSizeCapPruneWait()
+        await store.endSizeCapPrune()
+        #expect(await store.beginJournalExpiryPrune())
+        await store.endSizeCapPrune()
+    }
+
     @Test("generic pruning remains retention-safe while the advisory guard is held")
     func guardCannotBypassJournalRetention() async throws {
         let fixture = try makeTempStore()

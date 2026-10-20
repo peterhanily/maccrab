@@ -21174,6 +21174,12 @@ public actor EventStore {
     // pass is already in flight.
 
     private var _isPruningForSizeCap = false
+    /// Journal expiry re-acquires the exclusion between quanta within one
+    /// actor hop, so a scheduled sweep that asked once was refused every time
+    /// and its next attempt was an hour away. A sweep refused by expiry
+    /// registers as waiting, and expiry gives way at its next quantum.
+    private var journalExpiryHoldsMaintenance = false
+    private var sizeCapSweepWaiting = false
     private var journalExpiryPendingTicks: UInt64 = 0
     private var journalExpiryLeaseDeferrals: UInt64 = 0
     private var journalExpiryFailedPasses: UInt64 = 0
@@ -21191,9 +21197,34 @@ public actor EventStore {
     /// missed tick is conserved rather than discarded for another five-minute
     /// period. The timer keeps its task pending and retries promptly.
     public func beginJournalExpiryPrune() -> Bool {
-        if _isPruningForSizeCap { return false }
+        if _isPruningForSizeCap || sizeCapSweepWaiting { return false }
         _isPruningForSizeCap = true
+        journalExpiryHoldsMaintenance = true
         return true
+    }
+
+    public enum SizeCapPruneAcquisition: Sendable, Equatable {
+        case acquired
+        /// Another size-cap sweep is converging; skip this one.
+        case heldBySweep
+        /// Journal expiry holds it; this sweep is now waiting and expiry will
+        /// yield at its next quantum. Poll again, or withdraw the wait.
+        case heldByJournalExpiry
+    }
+
+    public func acquireSizeCapPrune() -> SizeCapPruneAcquisition {
+        guard _isPruningForSizeCap else {
+            _isPruningForSizeCap = true
+            sizeCapSweepWaiting = false
+            return .acquired
+        }
+        guard journalExpiryHoldsMaintenance else { return .heldBySweep }
+        sizeCapSweepWaiting = true
+        return .heldByJournalExpiry
+    }
+
+    public func withdrawSizeCapPruneWait() {
+        sizeCapSweepWaiting = false
     }
 
     /// Count one coalesced scheduler tick, not every 250-ms acquisition poll.
@@ -21228,6 +21259,7 @@ public actor EventStore {
     /// a `defer` block so it runs even on throws.
     public func endSizeCapPrune() {
         _isPruningForSizeCap = false
+        journalExpiryHoldsMaintenance = false
     }
 
     // MARK: - Mid-run corruption self-heal (C-04)
