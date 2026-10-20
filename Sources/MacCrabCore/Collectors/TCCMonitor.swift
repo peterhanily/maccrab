@@ -163,8 +163,10 @@ public actor TCCMonitor {
     /// Debounce interval to coalesce rapid database writes (in seconds).
     private let debounceInterval: TimeInterval
 
-    /// Tracks the last time a change was processed to implement debouncing.
-    private var lastChangeTime: Date = .distantPast
+    /// Monotonic time the last change pass read the databases. A wall clock
+    /// set back made the debounce sleep for the whole step.
+    private var lastChangeUptime: TimeInterval?
+    private let uptime: @Sendable () -> TimeInterval
 
     /// One change pass at a time. Concurrent passes diffed against the same
     /// snapshot and emitted every transition twice, and an older pass that
@@ -216,10 +218,12 @@ public actor TCCMonitor {
 
     init(
         entriesReaderForTesting: (@Sendable () -> [String: TCCEntry])?,
-        debounceInterval: TimeInterval = 0.5
+        debounceInterval: TimeInterval = 0.5,
+        uptime: @escaping @Sendable () -> TimeInterval = { Foundation.ProcessInfo.processInfo.systemUptime }
     ) {
         self.entriesReaderForTesting = entriesReaderForTesting
         self.debounceInterval = debounceInterval
+        self.uptime = uptime
         self.snapshotWriter = CoalescingSnapshotWriter(
             category: "tcc-permission-snapshot",
             persistence: Self.persistPermissionSnapshot
@@ -512,12 +516,14 @@ public actor TCCMonitor {
         // Coalesce tccd's burst of writes for one user action by waiting out
         // the rest of the interval, then reading once. A write inside the
         // interval used to be skipped until some later write.
-        let elapsed = Date().timeIntervalSince(lastChangeTime)
-        if elapsed < debounceInterval {
-            try? await Task.sleep(for: .seconds(debounceInterval - elapsed))
+        if let last = lastChangeUptime {
+            let elapsed = max(0, uptime() - last)
+            if elapsed < debounceInterval {
+                try? await Task.sleep(for: .seconds(debounceInterval - elapsed))
+            }
         }
         guard lifecyclePhase == .running, !Task.isCancelled else { return }
-        lastChangeTime = Date()
+        lastChangeUptime = uptime()
 
         let currentEntries = await Task.detached(priority: .utility) { [self] in
             entriesReaderForTesting?() ?? readAllEntries()

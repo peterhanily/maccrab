@@ -27,20 +27,25 @@ public actor NetworkBlocker {
     /// Cached result of the last enforcement probe, so `stats()` on the
     /// heartbeat path does not shell out to pfctl every tick.
     private var lastEnforcement: PFEnforcement.Status?
-    private var lastEnforcementProbedAt: Date = .distantPast
+    private var lastEnforcementProbedAt: TimeInterval = 0
     /// `stats()` reuses a probe this long; `enforcement()` is always live.
     static let statsProbeLifetime: TimeInterval = 300
 
     private let probe: @Sendable (String) -> PFEnforcement.Status
-    private let now: @Sendable () -> Date
+    /// Monotonic seconds. A wall clock set back would make the cached probe
+    /// look fresh until the clock caught up again.
+    private let now: @Sendable () -> TimeInterval
 
     public init() {
-        self.init(probe: { PFEnforcement.probe(anchorName: $0) }, now: { Date() })
+        self.init(
+            probe: { PFEnforcement.probe(anchorName: $0) },
+            now: { Foundation.ProcessInfo.processInfo.systemUptime }
+        )
     }
 
     init(
         probe: @escaping @Sendable (String) -> PFEnforcement.Status,
-        now: @escaping @Sendable () -> Date
+        now: @escaping @Sendable () -> TimeInterval
     ) {
         self.probe = probe
         self.now = now
@@ -158,7 +163,7 @@ public actor NetworkBlocker {
         // so every 30 s heartbeat used to fork pfctl. Reuse a recent probe.
         let pf: PFEnforcement.Status
         if let cached = lastEnforcement,
-           now().timeIntervalSince(lastEnforcementProbedAt) < Self.statsProbeLifetime {
+           now() - lastEnforcementProbedAt < Self.statsProbeLifetime {
             pf = cached
         } else {
             pf = probeEnforcement()

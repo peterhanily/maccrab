@@ -76,4 +76,45 @@ struct TCCMonitorChangePassTests {
         #expect(emitted.filter { $0 == "tcc_revoke" }.count == 1)
         _ = await monitor.stopAndJoin()
     }
+
+    @Test("a change inside the debounce interval is read once the interval ends, not skipped")
+    func trailingDebounce() async throws {
+        let source = Source()
+        let monitor = TCCMonitor(entriesReaderForTesting: { source.read() }, debounceInterval: 0.2)
+        await monitor.start()
+        let entry = grant("com.example.debounce")
+        source.set([entry.identityKey: entry])
+        await monitor.databaseChangedForTesting()
+        source.set([:])
+        let clock = ContinuousClock()
+        let started = clock.now
+        await monitor.databaseChangedForTesting()
+        #expect(clock.now - started >= .milliseconds(150), "the second write waits out the interval")
+        let emitted = await actions(from: monitor, within: .milliseconds(300))
+        #expect(emitted.filter { $0 == "tcc_grant" }.count == 1)
+        #expect(emitted.filter { $0 == "tcc_revoke" }.count == 1)
+        _ = await monitor.stopAndJoin()
+    }
+
+    @Test("a clock that jumps backwards never stretches the debounce past its interval")
+    func backwardClockKeepsTheBound() async throws {
+        final class Uptime: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value: TimeInterval = 10_000
+            var now: TimeInterval { lock.lock(); defer { lock.unlock() }; return value }
+            func set(_ v: TimeInterval) { lock.lock(); value = v; lock.unlock() }
+        }
+        let uptime = Uptime()
+        let source = Source()
+        let monitor = TCCMonitor(entriesReaderForTesting: { source.read() }, debounceInterval: 0.2,
+                                 uptime: { uptime.now })
+        await monitor.start()
+        await monitor.databaseChangedForTesting()
+        uptime.set(1)  // an injected clock stepping back by hours
+        let clock = ContinuousClock()
+        let started = clock.now
+        await monitor.databaseChangedForTesting()
+        #expect(clock.now - started < .seconds(2))
+        _ = await monitor.stopAndJoin()
+    }
 }

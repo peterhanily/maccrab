@@ -8,10 +8,10 @@ import Testing
 struct NetworkBlockerStatsProbeTests {
     private final class Clock: @unchecked Sendable {
         private let lock = NSLock()
-        private var current = Date(timeIntervalSince1970: 1_700_000_000)
+        private var current: TimeInterval = 1_000
         private var probes = 0
         func advance(_ seconds: TimeInterval) { lock.lock(); current += seconds; lock.unlock() }
-        var now: Date { lock.lock(); defer { lock.unlock() }; return current }
+        var now: TimeInterval { lock.lock(); defer { lock.unlock() }; return current }
         func probed() { lock.lock(); probes += 1; lock.unlock() }
         var probeCount: Int { lock.lock(); defer { lock.unlock() }; return probes }
     }
