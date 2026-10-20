@@ -120,7 +120,8 @@ struct RootSubprocessSurfaceTests {
         ]
         for path in migrated {
             let text = try source(path)
-            #expect(text.contains("BoundedPrivilegedProcessRunner.run("),
+            #expect(text.contains("BoundedPrivilegedProcessRunner.run(")
+                        || text.contains("BoundedPrivilegedProcessRunner.runAsync("),
                     "\(path) lost the common deadline/output/environment boundary")
             if !path.hasSuffix("EsloggerCollector.swift") {
                 #expect(!text.contains("waitUntilExit()"), "legacy wait returned in \(path)")

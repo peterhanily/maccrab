@@ -778,7 +778,8 @@ public actor ResponseEngine {
             "MACCRAB_MITRE_TECHNIQUES": alert.mitreTechniques ?? "",
         ], uniquingKeysWith: { _, alertValue in alertValue })
 
-        guard let result = BoundedPrivilegedProcessRunner.run(
+        // Up to 30 s: wait on a dispatch thread, not a cooperative-pool one.
+        guard let result = await BoundedPrivilegedProcessRunner.runAsync(
             executable: "/bin/sh",
             arguments: ["--", trustedScript],
             environment: environment,
