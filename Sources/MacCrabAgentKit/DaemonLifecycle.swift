@@ -305,6 +305,13 @@ struct DaemonTimerLifecycleSnapshot: Sendable, Equatable {
     }
 }
 
+/// Whether derived work is running inline on an event lane because the
+/// detection plane was saturated. Work that would otherwise wait on a slow,
+/// shared resource can then take a non-waiting path.
+enum DaemonWorkInlineContext {
+    @TaskLocal static var isRunningOnLane = false
+}
+
 enum DaemonWorkSubmissionResult: Sendable, Equatable {
     case accepted
     case ranInlineOnOverload
@@ -432,7 +439,9 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
             operation: operation
         )
         if admission == .ranInlineOnOverload {
-            await operation()
+            await DaemonWorkInlineContext.$isRunningOnLane.withValue(true) {
+                await operation()
+            }
         }
         return admission
     }

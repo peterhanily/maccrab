@@ -55,6 +55,8 @@ public actor NotarizationChecker {
         public let diagnosticLogsSuppressed: UInt64
         public let cacheSize: Int
         public let assessmentsInFlightOrQueued: Int
+        /// Lane-inline checks that found no cached result and skipped spctl.
+        public let overloadCacheMisses: UInt64
     }
 
     // MARK: - Cache
@@ -95,6 +97,7 @@ public actor NotarizationChecker {
     private var cacheHits: UInt64 = 0
     private var cacheMisses: UInt64 = 0
     private var cacheIdentityInvalidations: UInt64 = 0
+    private var overloadCacheMisses: UInt64 = 0
     private var coalescedChecks: UInt64 = 0
     private var saturatedChecks: UInt64 = 0
     private var assessmentsCompleted: UInt64 = 0
@@ -283,6 +286,18 @@ public actor NotarizationChecker {
         return outcome.result
     }
 
+    /// For a check running inline on an event lane: the cached result, or nil
+    /// (counted) without assessing. An inline `check` could wait behind up to
+    /// 127 queued spctl assessments, five at a time, each up to 15 s, while
+    /// the lane's queue evicted unevaluated events.
+    public func cachedResultForOverload(binaryPath: String) -> NotarizationResult? {
+        guard let result = cachedResult(binaryPath: binaryPath) else {
+            increment(&overloadCacheMisses)
+            return nil
+        }
+        return result
+    }
+
     /// Synchronous, fork-free cache lookup for the hot enrichment path.
     ///
     /// Returns a result WITHOUT ever invoking `spctl`:
@@ -338,7 +353,8 @@ public actor NotarizationChecker {
             diagnosticLogsEmitted: diagnosticLogsEmitted,
             diagnosticLogsSuppressed: diagnosticLogsSuppressed,
             cacheSize: cache.count,
-            assessmentsInFlightOrQueued: assessments.count
+            assessmentsInFlightOrQueued: assessments.count,
+            overloadCacheMisses: overloadCacheMisses
         )
     }
 

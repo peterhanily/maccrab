@@ -1487,7 +1487,17 @@ enum EventLoop {
                 let notarizationAdmission = await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
                     label: "notarization-check"
                 ) {
-                    let notarResult = await notarizationChecker.check(binaryPath: execPath)
+                    let notarResult: NotarizationChecker.NotarizationResult
+                    if DaemonWorkInlineContext.isRunningOnLane {
+                        // The plane is saturated and this runs on the lane:
+                        // never wait on spctl here. A miss leaves this exec
+                        // unassessed; the next one on an idle plane warms it.
+                        guard let cached = await notarizationChecker
+                            .cachedResultForOverload(binaryPath: execPath) else { return }
+                        notarResult = cached
+                    } else {
+                        notarResult = await notarizationChecker.check(binaryPath: execPath)
+                    }
 
                     // v1.17.2: a REVOKED Developer-ID cert (spctl 'revoked') is
                     // near-certainly malicious (AMOS/Atomic Stealer post-takedown).
