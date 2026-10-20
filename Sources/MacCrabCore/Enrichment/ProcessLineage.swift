@@ -15,8 +15,9 @@ struct LineageNode: Sendable {
     /// Process ID.
     let pid: pid_t
 
-    /// Parent process ID.
-    let ppid: pid_t
+    /// Parent process ID. Reset to launchd when the parent's pid is reused,
+    /// as the kernel reparents orphans.
+    var ppid: pid_t
 
     /// Full path to the executable on disk.
     let path: String
@@ -227,6 +228,17 @@ public actor ProcessLineage {
         // If this pid was previously tracked (pid reuse), clean up old entry.
         if let old = nodes[pid] {
             childrenIndex[old.ppid]?.remove(pid)
+            // A pid whose process was seen exiting has been reused. Its old
+            // children still name it as parent; walking them would climb into
+            // the new, unrelated process (e.g. a `claude` that took the pid
+            // and made a long-lived orphan an "AI child"). The kernel
+            // reparented them to launchd; mirror that.
+            if old.exitTime != nil, let orphans = childrenIndex.removeValue(forKey: pid) {
+                for child in orphans where nodes[child]?.ppid == pid {
+                    nodes[child]?.ppid = 1
+                    childrenIndex[1, default: []].insert(child)
+                }
+            }
         }
 
         let node = LineageNode(

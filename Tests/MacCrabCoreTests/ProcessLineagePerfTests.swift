@@ -263,3 +263,28 @@ struct ProcessLineageExitOrderEvictionTests {
         #expect(await lineage.path(of: 7) == "/bin/p7")
     }
 }
+
+@Suite("ProcessLineage pid reuse")
+struct ProcessLineagePidReuseTests {
+    @Test("children of an exited process do not inherit the process that reuses its pid")
+    func reusedPidDoesNotAdoptOldChildren() async {
+        let lineage = ProcessLineage()
+        let start = Date()
+        await lineage.recordProcess(pid: 1, ppid: 0, path: "/sbin/launchd", name: "launchd", startTime: start)
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/bin/zsh", name: "zsh", startTime: start)
+        await lineage.recordProcess(pid: 200, ppid: 100, path: "/usr/bin/caffeinate", name: "caffeinate", startTime: start)
+        #expect(await lineage.ancestors(of: 200).map(\.pid) == [100, 1])
+
+        await lineage.recordExit(pid: 100)
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/usr/local/bin/claude", name: "claude",
+                                    startTime: start.addingTimeInterval(60))
+        #expect(await lineage.ancestors(of: 200).map(\.executable) == ["/sbin/launchd"])
+
+        // An exec of a live process (no exit seen) keeps its children.
+        await lineage.recordProcess(pid: 300, ppid: 100, path: "/bin/sh", name: "sh", startTime: start)
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/usr/local/bin/node", name: "node",
+                                    startTime: start.addingTimeInterval(60))
+        #expect(await lineage.ancestors(of: 300).first?.executable == "/usr/local/bin/node")
+    }
+}
+
