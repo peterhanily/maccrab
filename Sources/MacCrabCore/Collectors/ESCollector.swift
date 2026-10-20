@@ -1038,6 +1038,11 @@ public final class ESCollector: @unchecked Sendable {
     private static func bridgeDynamicAIProcessStart(
         message: UnsafePointer<es_message_t>
     ) {
+        // Runs for every message on the kernel dequeue thread: bail out before
+        // copying the message or reading the clock unless it starts a process.
+        let eventType = message.pointee.event_type
+        guard eventType == ES_EVENT_TYPE_NOTIFY_EXEC
+                || eventType == ES_EVENT_TYPE_NOTIFY_FORK else { return }
         let msg = message.pointee
         let now = DispatchTime.now().uptimeNanoseconds
         let graceNanos: UInt64 = 2_000_000_000
