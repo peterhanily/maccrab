@@ -243,13 +243,18 @@ struct V2DataTableViewportTests {
         // An End jump on a loaded host can land before the estimate settles or
         // before realization is published, so repeat it (bounded) until the
         // last row exists; an unreachable last row still fails below.
+        // Bounded by time rather than a count of main-queue hops: under a
+        // full-suite load eight hops were not always enough.
         let lastIdentifier = "fixture.499.\(layout.columns.count - 1)"
-        for _ in 0..<8 {
+        let clock = ContinuousClock()
+        let realizationDeadline = clock.now.advanced(by: .seconds(5))
+        repeat {
             scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, document.frame.maxY - scroll.contentView.bounds.height)))
             scroll.reflectScrolledClipView(scroll.contentView)
             await layoutBoundary(host)
             if try descendants(host).contains(where: { $0.identifier?.rawValue == lastIdentifier }) { break }
-        }
+            try await Task.sleep(for: .milliseconds(20))
+        } while clock.now < realizationDeadline
         let last = try probe(499, layout.columns.count - 1, host: host, requireVisible: false)
         let before = last.convert(last.bounds, to: scroll.contentView)
         let beforeClip = scroll.contentView.bounds

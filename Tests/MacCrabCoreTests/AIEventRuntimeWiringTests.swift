@@ -121,8 +121,9 @@ struct AIEventRuntimeWiringTests {
         let helperStart = try #require(collector.range(of:
             "static func shouldDropBeforeWorker(\n        eventType: UInt32"))
         let helper = collector[helperStart.lowerBound...]
+        // Final for every process not positively attributed to an AI session.
         let keychainGate = try #require(helper.range(of:
-            "if isPlatformBinary && isKeychainPath(path) { return true }"))
+            "if isPlatformBinary && isKeychainPath(path),"))
         let dynamicDecision = try #require(helper.range(of:
             "dynamicAIRegistry.shouldAdmitEndpointSecurityOpen("))
         #expect(keychainGate.lowerBound < dynamicDecision.lowerBound)

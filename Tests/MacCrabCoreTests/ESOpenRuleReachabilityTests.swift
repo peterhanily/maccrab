@@ -363,6 +363,7 @@ struct ESOpenRuleReachabilityTests {
             "690711f9-8a8d-49e4-9124-0710e7d26398", // executable write into .claude
             "d1a2b3c4-2031-4000-a000-000000002031", // config content write
             "21a8021e-abb7-4791-8d68-eab80a49edb4", // node-ipc package content write
+            "d1a2b3c4-2030-4000-a000-000000002030", // SKILL.md poisoned content write
         ]
         let expectedSequenceWriteCloseRules: Set<String> = [
             "e1f2a3b4-0020-4000-b000-000000000020", // npm descendant payload write
