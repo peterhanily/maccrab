@@ -176,6 +176,47 @@ public enum BoundedPrivilegedProcessRunner {
         "LC_ALL": "C",
     ]
 
+    private static let asyncQueue = DispatchQueue(
+        label: "com.maccrab.privileged-process.async",
+        qos: .utility,
+        attributes: .concurrent
+    )
+
+    /// `run` for async callers. The runner polls the child every 10 ms with
+    /// usleep, so even a short command held a cooperative-pool thread for
+    /// its whole lifetime; periodic monitors ran several per scan. This
+    /// waits on a dispatch thread at the caller's priority instead.
+    public static func runAsync(
+        executable: String,
+        arguments: [String],
+        environment: [String: String] = minimalEnvironment,
+        workingDirectory: String = "/",
+        timeout: TimeInterval,
+        maximumOutputBytes: Int?,
+        mergeStandardErrorIntoOutput: Bool = true,
+        standardInputData: Data? = nil
+    ) async -> Result? {
+        await BlockingWorkOffload.perform(
+            on: asyncQueue,
+            qos: BlockingWorkOffload.dispatchQoS(
+                waitedOnAt: Task.currentPriority,
+                floor: .utility
+            ),
+            flags: .enforceQoS
+        ) {
+            run(
+                executable: executable,
+                arguments: arguments,
+                environment: environment,
+                workingDirectory: workingDirectory,
+                timeout: timeout,
+                maximumOutputBytes: maximumOutputBytes,
+                mergeStandardErrorIntoOutput: mergeStandardErrorIntoOutput,
+                standardInputData: standardInputData
+            )
+        }
+    }
+
     public static func run(
         executable: String,
         arguments: [String],

@@ -151,12 +151,26 @@ public actor BTMSnapshotMonitor {
 
     // MARK: - Scan
 
+    /// `sfltool dumpbtm` can take up to 20 s and its output 16 MiB to parse.
+    /// A detached task is still a cooperative-pool thread; this waits on a
+    /// dispatch thread at the scan's priority instead.
+    private static let scanQueue = DispatchQueue(
+        label: "com.maccrab.btm-snapshot.scan",
+        qos: .utility
+    )
+
     private func scan() async {
-        let suspicious: [BTMRecord] = await Task.detached(priority: .utility) {
-            () -> [BTMRecord] in
+        let suspicious: [BTMRecord] = await BlockingWorkOffload.perform(
+            on: Self.scanQueue,
+            qos: BlockingWorkOffload.dispatchQoS(
+                waitedOnAt: Task.currentPriority,
+                floor: .utility
+            ),
+            flags: .enforceQoS
+        ) {
             guard let output = Self.runDumpBTM() else { return [] }
             return Self.suspiciousRecords(Self.parseDumpBTM(output))
-        }.value
+        }
         guard lifecyclePhase == .running, !Task.isCancelled else { return }
         for record in suspicious {
             let key = record.uuid.isEmpty ? (record.identifier ?? record.name) : record.uuid

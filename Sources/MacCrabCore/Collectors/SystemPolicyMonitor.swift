@@ -173,22 +173,22 @@ public actor SystemPolicyMonitor {
 
     // MARK: - Full Scan
 
-    private func fullScan() {
-        checkSIPStatus()
-        checkAMFIBootArgs()
-        checkAuthPlugins()
-        checkPluginDirectories()
+    private func fullScan() async {
+        await checkSIPStatus()
+        await checkAMFIBootArgs()
+        await checkAuthPlugins()
+        await checkPluginDirectories()
         checkXProtectVersion()
         scanDownloadsForMissingQuarantine()
-        checkXPCServices()
-        checkMDMProfiles()
-        checkAPFSSnapshots()
+        await checkXPCServices()
+        await checkMDMProfiles()
+        await checkAPFSSnapshots()
     }
 
     // MARK: - SIP Status
 
-    private func checkSIPStatus() {
-        let status = runCommand("/usr/bin/csrutil", args: ["status"])
+    private func checkSIPStatus() async {
+        let status = await runCommand("/usr/bin/csrutil", args: ["status"])
         let isDisabled = status.contains("disabled") || status.contains("Custom Configuration")
 
         if isDisabled && lastSIPStatus != "disabled" {
@@ -208,8 +208,8 @@ public actor SystemPolicyMonitor {
 
     // MARK: - AMFI Boot Args
 
-    private func checkAMFIBootArgs() {
-        let bootArgs = runCommand("/usr/sbin/nvram", args: ["boot-args"]).lowercased()
+    private func checkAMFIBootArgs() async {
+        let bootArgs = await runCommand("/usr/sbin/nvram", args: ["boot-args"]).lowercased()
         // Match keys are lowercase to compare against the lowercased boot-args.
         // (v1.21.4 review: `PE_i_can_has_debugger` was an UPPERCASE literal that
         // could never match the lowercased read — a pre-existing dead flag,
@@ -246,7 +246,7 @@ public actor SystemPolicyMonitor {
 
     // MARK: - Authorization Plugins
 
-    private func checkAuthPlugins() {
+    private func checkAuthPlugins() async {
         let pluginDir = "/Library/Security/SecurityAgentPlugins"
         guard let items = try? FileManager.default.contentsOfDirectory(atPath: pluginDir) else { return }
 
@@ -256,7 +256,7 @@ public actor SystemPolicyMonitor {
                 knownPlugins.insert(fullPath)
 
                 // Check code signature
-                let sigInfo = runCommand("/usr/bin/codesign", args: ["-dvv", fullPath])
+                let sigInfo = await runCommand("/usr/bin/codesign", args: ["-dvv", fullPath])
                 let isApple = sigInfo.contains("Apple") && sigInfo.contains("Authority=Software Signing")
 
                 if !isApple {
@@ -275,7 +275,7 @@ public actor SystemPolicyMonitor {
 
     // MARK: - Plugin Directories
 
-    private func checkPluginDirectories() {
+    private func checkPluginDirectories() async {
         var directories: [(
             path: String,
             type: PolicyEventType,
@@ -315,7 +315,7 @@ public actor SystemPolicyMonitor {
                 if !knownPlugins.contains(fullPath) {
                     knownPlugins.insert(fullPath)
 
-                    let sigInfo = runCommand("/usr/bin/codesign", args: ["-dv", fullPath])
+                    let sigInfo = await runCommand("/usr/bin/codesign", args: ["-dv", fullPath])
                     let isUnsigned = sigInfo.contains("not signed") || sigInfo.contains("invalid")
 
                     if isUnsigned {
@@ -340,7 +340,7 @@ public actor SystemPolicyMonitor {
         // signed auth providers entirely; lower the rest to
         // informational (the sysext still records the enumeration, the
         // operator just doesn't get a red alert in the dashboard).
-        let ctkOutput = runCommand("/usr/bin/pluginkit", args: ["-m", "-p", "com.apple.ctk-tokens"])
+        let ctkOutput = await runCommand("/usr/bin/pluginkit", args: ["-m", "-p", "com.apple.ctk-tokens"])
         let ctkLines = ctkOutput.split(separator: "\n")
         for line in ctkLines {
             let lineStr = String(line)
@@ -554,8 +554,8 @@ public actor SystemPolicyMonitor {
 
     private var knownXPCServices: Set<String> = []
 
-    private func checkXPCServices() {
-        let output = runCommand("/bin/launchctl", args: ["list"])
+    private func checkXPCServices() async {
+        let output = await runCommand("/bin/launchctl", args: ["list"])
         let lines = output.split(separator: "\n")
 
         for line in lines.dropFirst() { // Skip header
@@ -588,9 +588,9 @@ public actor SystemPolicyMonitor {
 
     // MARK: - MDM Profile Detection
 
-    private func checkMDMProfiles() {
+    private func checkMDMProfiles() async {
         // Enumerate current profiles from the profiles CLI (triggers MDM refresh)
-        _ = runCommand("/usr/bin/profiles", args: ["list", "-output", "stdout-xml"])
+        _ = await runCommand("/usr/bin/profiles", args: ["list", "-output", "stdout-xml"])
         inspectMDMProfiles(at: "/var/db/ConfigurationProfiles")
     }
 
@@ -694,8 +694,8 @@ public actor SystemPolicyMonitor {
 
     private var knownSnapshots: Set<String> = []
 
-    private func checkAPFSSnapshots() {
-        let output = runCommand("/usr/bin/tmutil", args: ["listlocalsnapshots", "/"])
+    private func checkAPFSSnapshots() async {
+        let output = await runCommand("/usr/bin/tmutil", args: ["listlocalsnapshots", "/"])
         let lines = output.split(separator: "\n").map(String.init)
 
         for line in lines {
@@ -761,8 +761,8 @@ public actor SystemPolicyMonitor {
         return paths
     }
 
-    private nonisolated func runCommand(_ path: String, args: [String], timeout: TimeInterval = 10) -> String {
-        guard let result = BoundedPrivilegedProcessRunner.run(
+    private nonisolated func runCommand(_ path: String, args: [String], timeout: TimeInterval = 10) async -> String {
+        guard let result = await BoundedPrivilegedProcessRunner.runAsync(
             executable: path,
             arguments: args,
             timeout: timeout,

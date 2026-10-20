@@ -187,8 +187,8 @@ public actor SDRDeviceMonitor {
 
     // MARK: - USB SDR Device Scanning
 
-    private func scanSDRDevices() {
-        let devices = getUSBDevices()
+    private func scanSDRDevices() async {
+        let devices = await getUSBDevices()
 
         for device in devices {
             for sdr in Self.knownSDRDevices {
@@ -293,9 +293,10 @@ public actor SDRDeviceMonitor {
         let locationID: String
     }
 
-    private nonisolated func getUSBDevices() -> [USBDevice] {
-        // Use system_profiler for reliable USB enumeration
-        guard let result = BoundedPrivilegedProcessRunner.run(
+    private nonisolated func getUSBDevices() async -> [USBDevice] {
+        // Use system_profiler for reliable USB enumeration. It takes 0.3-2 s,
+        // so it waits on a dispatch thread, not the actor or the pool.
+        guard let result = await BoundedPrivilegedProcessRunner.runAsync(
             executable: "/usr/sbin/system_profiler",
             arguments: ["SPUSBDataType", "-json"],
             timeout: 20,
