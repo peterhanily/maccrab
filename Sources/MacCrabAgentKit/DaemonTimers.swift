@@ -3406,7 +3406,10 @@ enum DaemonTimers {
             // Joinable even though the body itself has no actor hops. A
             // shutdown must not race its temp-file publication with the final
             // heartbeat/store boundary.
-            livenessLifecycle.submit(label: "liveness-heartbeat") {
+            // High priority: the body has no awaits, but it still runs as a
+            // pool task, and utility work queued ahead of it delayed the one
+            // file the dashboard's "engine silent" banner is gated on.
+            livenessLifecycle.submit(label: "liveness-heartbeat", priority: .high) {
             //
             // v1.8.0 audit: wrap JSONSerialization in autoreleasepool.
             // DispatchSource timer event handlers run on a long-lived

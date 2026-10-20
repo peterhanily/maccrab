@@ -760,7 +760,9 @@ enum MonitorTasks {
                 }
                 await Task.yield()
             }
-            _ = await state.dnsCollector.stopAndJoin(deadline: 0.75)
+            // At least the collector's own join: a capture read can run its
+            // full 1 s BPF timeout before observing cancellation.
+            _ = await state.dnsCollector.stopAndJoin()
         }
     }
 }

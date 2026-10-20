@@ -359,6 +359,7 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
     func submit(
         label: String,
         maximumConcurrentHandlersForLabel: Int? = nil,
+        priority: TaskPriority = .utility,
         operation: @escaping @Sendable () async -> Void
     ) -> Bool {
         lock.lock()
@@ -400,7 +401,7 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
         // Keep the lock held until insertion. A very short task may reach
         // complete(id:) immediately, but it cannot remove itself before its
         // handle is present in the ledger.
-        let task = Task(priority: .utility) { [weak self] in
+        let task = Task(priority: priority) { [weak self] in
             guard !Task.isCancelled else {
                 self?.complete(id: id)
                 return

@@ -533,8 +533,12 @@ enum DaemonSetup {
         detail: [String: Any] = [:]
     ) {
         let identity = DaemonProcessIdentity.current
+        let clock = identity.heartbeatClockSample()
         let payload: [String: Any] = [
-            "written_at_unix": Date().timeIntervalSince1970,
+            "written_at_unix": clock.writtenAtUnix,
+            // Readiness readers require the monotonic engine uptime the
+            // runtime heartbeat carries; the boot payload omitted it.
+            "engine_uptime_seconds": clock.engineUptimeSeconds,
             "started_at_unix": startedAt.timeIntervalSince1970,
             "engine_pid": identity.pid,
             "engine_started_at_unix": identity.startedAtUnix,
@@ -1151,9 +1155,12 @@ enum DaemonSetup {
             let eventsDatabasePath = supportDir + "/events.db"
             let outcome = try await BootJournalExpirySweep.run(
                 expire: {
+                    // Small quanta: the work budget and phase renewal are
+                    // checked between calls, and a 1,024-block call could
+                    // carry the first check well past the 60 s budget.
                     try await eventStore.expireJournalBlocks(
                         retainedThrough: retainedThrough,
-                        maximumBlocks: 1_024
+                        maximumBlocks: 128
                     )
                 },
                 // Boot's own tight backpressure budget rather than the runtime

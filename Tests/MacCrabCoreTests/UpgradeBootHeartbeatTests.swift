@@ -29,6 +29,8 @@ struct UpgradeBootHeartbeatTests {
         ) as? [String: Any])
         #expect(payload["boot_phase"] as? String == "upgrading_store")
         #expect(payload["liveness"] as? Bool == false)
+        let uptime = try #require(payload["engine_uptime_seconds"] as? Double)
+        #expect(uptime >= 0)
         #expect(payload["engine_pid"] as? Int == DaemonProcessIdentity.current.pid)
         #expect(payload["upgrade_source_events"] as? Int == 128)
         #expect(payload["upgrade_remaining_events"] as? Int == 64)
