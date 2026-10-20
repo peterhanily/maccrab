@@ -467,3 +467,19 @@ struct ProtectedFileLaneTests {
     }
 }
 
+
+@Suite("Process mutes keep EXEC and BTM visible")
+struct ExecVisibleProcessMuteTests {
+    @Test("the /System/ and xpcproxy mutes cover every subscribable type but EXEC and BTM add")
+    func muteTypesExemptExecAndBTM() {
+        let muted = Set(ESCollector.execVisibleProcessMuteTypes.map(\.rawValue))
+        #expect(!muted.contains(ES_EVENT_TYPE_NOTIFY_EXEC.rawValue))
+        #expect(!muted.contains(ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD.rawValue))
+        for type in [ES_EVENT_TYPE_NOTIFY_FORK, ES_EVENT_TYPE_NOTIFY_EXIT, ES_EVENT_TYPE_NOTIFY_OPEN,
+                     ES_EVENT_TYPE_NOTIFY_WRITE, ES_EVENT_TYPE_NOTIFY_CLOSE, ES_EVENT_TYPE_NOTIFY_SIGNAL,
+                     ES_EVENT_TYPE_NOTIFY_MPROTECT, ES_EVENT_TYPE_NOTIFY_GET_TASK_READ] {
+            #expect(muted.contains(type.rawValue), "\(type.rawValue) must stay muted for /System/")
+        }
+        #expect(ESCollector.execVisibleProcessMutes == ["/System/", "/usr/libexec/xpcproxy"])
+    }
+}

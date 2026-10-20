@@ -468,6 +468,27 @@ public final class ESCollector: @unchecked Sendable {
         "/Volumes/com.apple.TimeMachine",
     ]
 
+    /// Process mutes that must leave EXEC and BTM events visible. A process
+    /// mute covers every event whose acting process matches. `/System/` thus
+    /// silenced backgroundtaskmanagementd, which delivers every BTM add (the
+    /// only sensor for SMAppService persistence), and an exec event's process
+    /// is the image before the exec, so muting xpcproxy hid the exec of every
+    /// launchd-started program, LaunchAgent payloads included.
+    static let execVisibleProcessMutes: Set<String> = ["/System/", "/usr/libexec/xpcproxy"]
+
+    static let processMuteExemptRawValues: Set<UInt32> = [
+        ES_EVENT_TYPE_NOTIFY_EXEC.rawValue,
+        ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD.rawValue,
+    ]
+
+    /// Every type a client may ever subscribe, including demand-gated families
+    /// added later, except EXEC and BTM.
+    static let execVisibleProcessMuteTypes: [es_event_type_t] = fullSubscription(
+        subscribeFileOpen: true,
+        subscribeIntrospection: true,
+        subscribeMemoryProtection: true
+    ).filter { !processMuteExemptRawValues.contains($0.rawValue) }
+
     /// Literal paths to mute (exact match).
     private static let mutedPathLiterals: [String] = [
         "/usr/libexec/xpcproxy",
@@ -1976,26 +1997,11 @@ public final class ESCollector: @unchecked Sendable {
             guard let client = context.client else { continue }
 
             for path in Self.mutedPathLiterals {
-                let rc = es_mute_path_literal(client, path)
-                if rc != ES_RETURN_SUCCESS {
-                    logger.warning("Failed to mute path: \(path) on \(context.label)")
-                }
+                muteProcessPath(path, prefix: false, client: client, label: context.label)
             }
 
-            // For prefix-based paths we use es_mute_path_prefix when available.
-            // The function was introduced alongside es_mute_path_literal.
             for path in Self.mutedPaths {
-                if path.hasSuffix("/") {
-                    let rc = es_mute_path_prefix(client, path)
-                    if rc != ES_RETURN_SUCCESS {
-                        logger.warning("Failed to mute path prefix: \(path) on \(context.label)")
-                    }
-                } else {
-                    let rc = es_mute_path_literal(client, path)
-                    if rc != ES_RETURN_SUCCESS {
-                        logger.warning("Failed to mute path literal: \(path) on \(context.label)")
-                    }
-                }
+                muteProcessPath(path, prefix: path.hasSuffix("/"), client: client, label: context.label)
             }
 
             // v1.21.4 Phase-1 Mitigation A: mute MacCrab's own forensic-copy
@@ -2011,6 +2017,28 @@ public final class ESCollector: @unchecked Sendable {
                 // is ever delivered (strictly cheaper than the userspace drop).
                 muteNoisyLogSinkWrites(client: client)
             }
+        }
+    }
+
+    private func muteProcessPath(_ path: String, prefix: Bool, client: OpaquePointer, label: String) {
+        let rc: es_return_t
+        if Self.execVisibleProcessMutes.contains(path) {
+            rc = Self.execVisibleProcessMuteTypes.withUnsafeBufferPointer { types in
+                es_mute_path_events(
+                    client,
+                    path,
+                    prefix ? ES_MUTE_PATH_TYPE_PREFIX : ES_MUTE_PATH_TYPE_LITERAL,
+                    types.baseAddress!,
+                    types.count
+                )
+            }
+        } else if prefix {
+            rc = es_mute_path_prefix(client, path)
+        } else {
+            rc = es_mute_path_literal(client, path)
+        }
+        if rc != ES_RETURN_SUCCESS {
+            logger.warning("Failed to mute path \(path) (prefix: \(prefix)) on \(label)")
         }
     }
 
