@@ -11462,6 +11462,12 @@ public actor EventStore {
             let durableRows = inputDispositions.reduce(into: 0) { count, disposition in
                 if case .durable = disposition { count += 1 }
             }
+            // A duplicate-window exemplar recorded for an event that did not
+            // commit would suppress its tuple's repeats with none journaled.
+            insertFilter?.forgetDuplicateExemplars(Set(inputDispositions.compactMap {
+                if case .uncommitted(let eventID) = $0 { return eventID }
+                return nil
+            }))
             let durableTransactions = databaseWasReplaced
                 ? 0 : committedTransactions
             throw EventBatchInsertFailure(

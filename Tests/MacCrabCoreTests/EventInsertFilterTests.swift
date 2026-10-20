@@ -19,7 +19,8 @@ struct EventInsertFilterTests {
     private func makeProcessEvent(
         name: String = "innocuous",
         executable: String = "/bin/innocuous",
-        filePath: String? = nil
+        filePath: String? = nil,
+        teamId: String? = nil
     ) -> Event {
         let proc = ProcessInfo(
             pid: 100, ppid: 1, rpid: 1,
@@ -28,6 +29,7 @@ struct EventInsertFilterTests {
             workingDirectory: "/",
             userId: 501, userName: "u", groupId: 20,
             startTime: Date(),
+            codeSignature: teamId.map { CodeSignatureInfo(signerType: .devId, teamId: $0) },
             ancestors: [],
             isPlatformBinary: false
         )
@@ -186,10 +188,18 @@ struct EventInsertFilterTests {
     // Self-process filtering by name closes that loop.
     func defaultFilterDropsOwnProcesses() {
         let filter = EventInsertFilter.defaultFilter(supportDir: "/Library/Application Support/MacCrab")
-        let cli = makeProcessEvent(name: "maccrabctl", filePath: "/Users/alice/Documents/notes.md")
-        let dev = makeProcessEvent(name: "maccrabd", filePath: "/Users/alice/Documents/notes.md")
+        let cli = makeProcessEvent(name: "maccrabctl",
+            executable: "/Applications/MacCrab.app/Contents/Resources/bin/maccrabctl",
+            filePath: "/Users/alice/Documents/notes.md", teamId: NoiseFilter.macCrabTeamId)
+        let dev = makeProcessEvent(name: "maccrabd",
+            executable: "/Users/alice/maccrab/.build/debug/maccrabd",
+            filePath: "/Users/alice/Documents/notes.md")
         #expect(filter.shouldDrop(event: cli))
-        #expect(filter.shouldDrop(event: dev))
+        #expect(filter.shouldDrop(event: dev) == NoiseFilter.engineIsDevelopmentBuild)
+        // A payload that merely calls itself maccrabd keeps its events.
+        let impostor = makeProcessEvent(name: "maccrabd", executable: "/Users/alice/maccrabd",
+                                        filePath: "/Users/alice/Documents/notes.md")
+        #expect(!filter.shouldDrop(event: impostor))
     }
 
     @Test("Custom process-name filter drops by process regardless of path")
@@ -285,6 +295,21 @@ struct EventInsertFilterDuplicateWindowTests {
         #expect(filter.shouldDrop(event: chatterEvent(at: 1_700_000_010)))
         #expect(filter.shouldDrop(event: chatterEvent(at: 1_700_000_200)))
         #expect(filter.counters.duplicateSnapshot() == 2)
+    }
+
+    @Test("A retried exemplar is not its own duplicate; an uncommitted one is forgotten")
+    func retriedExemplarJournals() {
+        let filter = windowFilter()
+        let exemplar = chatterEvent(at: 1_700_000_000)
+        #expect(!filter.shouldDrop(event: exemplar))
+        // Its transaction failed and the writer retries the same event.
+        #expect(!filter.shouldDrop(event: exemplar),
+                "a retry of the exemplar must journal, not be filtered as its own duplicate")
+        #expect(filter.shouldDrop(event: chatterEvent(at: 1_700_000_010)))
+        // The retry failed for good: the next instance becomes the exemplar.
+        filter.forgetDuplicateExemplars([exemplar.id])
+        #expect(!filter.shouldDrop(event: chatterEvent(at: 1_700_000_020)))
+        #expect(filter.shouldDrop(event: chatterEvent(at: 1_700_000_030)))
     }
 
     @Test("The window lapses: a repeat after expiry becomes a fresh exemplar")

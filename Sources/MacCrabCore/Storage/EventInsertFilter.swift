@@ -110,7 +110,11 @@ public struct EventInsertFilter: Sendable {
         /// per-process-seeded 64-bit hash and <= `capacity` live keys, an
         /// accidental collision (which would suppress one unrelated event) is
         /// ~1e-12 — and the exemplar of the colliding key is journaled anyway.
-        private var lastExemplar: [Int: TimeInterval] = [:]
+        private struct Exemplar {
+            let time: TimeInterval
+            let eventID: UUID
+        }
+        private var lastExemplar: [Int: Exemplar] = [:]
 
         init(windowSeconds: TimeInterval, capacity: Int) {
             self.windowSeconds = max(1, windowSeconds)
@@ -119,22 +123,33 @@ public struct EventInsertFilter: Sendable {
 
         /// True when this key repeats within the window (suppress it); false
         /// when it is novel or the window lapsed (journal it as the exemplar).
-        func isDuplicate(key: Int, now: TimeInterval) -> Bool {
+        /// The exemplar is recorded before its transaction commits, so a retry
+        /// of that same event is never judged a duplicate of itself.
+        func isDuplicate(key: Int, now: TimeInterval, eventID: UUID) -> Bool {
             lock.lock(); defer { lock.unlock() }
-            if let last = lastExemplar[key], now - last < windowSeconds {
-                return true
+            if let last = lastExemplar[key], now - last.time < windowSeconds {
+                return last.eventID != eventID
             }
             if lastExemplar.count >= capacity {
                 // Purge expired entries first; if the working set genuinely
                 // exceeds capacity, drop arbitrary entries. Both fail open.
-                lastExemplar = lastExemplar.filter { now - $0.value < windowSeconds }
+                lastExemplar = lastExemplar.filter { now - $0.value.time < windowSeconds }
                 while lastExemplar.count >= capacity,
                       let victim = lastExemplar.keys.first {
                     lastExemplar.removeValue(forKey: victim)
                 }
             }
-            lastExemplar[key] = now
+            lastExemplar[key] = Exemplar(time: now, eventID: eventID)
             return false
+        }
+
+        /// Forget exemplars whose transaction did not commit, so the next
+        /// instance of each tuple becomes its exemplar instead of a duplicate
+        /// of an event that was never journaled. Fails open, like eviction.
+        func forget(exemplars eventIDs: Set<UUID>) {
+            guard !eventIDs.isEmpty else { return }
+            lock.lock(); defer { lock.unlock() }
+            lastExemplar = lastExemplar.filter { !eventIDs.contains($0.value.eventID) }
         }
     }
 
@@ -143,14 +158,21 @@ public struct EventInsertFilter: Sendable {
 
     public let counters: Counters
 
+    /// MacCrab's own CLI and development daemon. A name alone is forgeable
+    /// (any binary can call itself maccrabd and keep its events out of the
+    /// journal), so these drop only for a verified MacCrab process.
+    let macCrabProcessNames: Set<String>
+
     public init(
         pathSubstrings: [String] = [],
         processNames: Set<String> = [],
+        macCrabProcessNames: Set<String> = [],
         duplicateWindowSeconds: TimeInterval? = nil,
         duplicateWindowCapacity: Int = 4_096
     ) {
         self.pathSubstrings = pathSubstrings
         self.processNames = processNames
+        self.macCrabProcessNames = macCrabProcessNames
         self.duplicateWindow = duplicateWindowSeconds.map {
             DuplicateWindow(windowSeconds: $0, capacity: duplicateWindowCapacity)
         }
@@ -166,6 +188,11 @@ public struct EventInsertFilter: Sendable {
             counters.recordDropped()
             return true
         }
+        if macCrabProcessNames.contains(event.process.name),
+           NoiseFilter.isMacCrabProcess(event: event) {
+            counters.recordDropped()
+            return true
+        }
         if let filePath = event.file?.path {
             for substring in pathSubstrings {
                 if ExactSubstringSearch.contains(filePath, substring) {
@@ -178,13 +205,19 @@ public struct EventInsertFilter: Sendable {
            Self.isDuplicateEligible(event),
            window.isDuplicate(
                 key: Self.duplicateKey(event),
-                now: event.timestamp.timeIntervalSince1970
+                now: event.timestamp.timeIntervalSince1970,
+                eventID: event.id
            ) {
             counters.recordSuppressedDuplicate()
             return true
         }
         counters.recordPassed()
         return false
+    }
+
+    /// See `DuplicateWindow.forget(exemplars:)`.
+    public func forgetDuplicateExemplars(_ eventIDs: Set<UUID>) {
+        duplicateWindow?.forget(exemplars: eventIDs)
     }
 
     /// Only routine platform-binary process/file chatter may be suppressed as
@@ -266,7 +299,7 @@ public struct EventInsertFilter: Sendable {
                 // broad Library/Metadata or CoreSpotlight blind spot.
                 "/Library/Metadata/CoreSpotlight/SpotlightKnowledge/",
             ],
-            processNames: [
+            macCrabProcessNames: [
                 "maccrabctl",                        // own CLI
                 "maccrabd",                          // own dev/legacy daemon
             ],
