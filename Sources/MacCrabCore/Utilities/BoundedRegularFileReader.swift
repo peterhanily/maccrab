@@ -90,6 +90,14 @@ public enum BoundedRegularFileReader {
         )
     }
 
+    /// Whether a file with more than one link may be read for `actorUID`:
+    /// only one that this non-root actor owns. Root-owned content is never
+    /// copied through a link, even for a root actor.
+    static func acceptsLinkedFile(ownerUID: uid_t, actorUID: UInt32?) -> Bool {
+        guard let actorUID, actorUID != 0 else { return false }
+        return ownerUID == actorUID
+    }
+
     /// Read at most `maximumBytes` from the start of a stable regular file.
     /// Unlike `readOutcome`, a larger file is accepted and `Snapshot.sizeBytes`
     /// reports its full descriptor size. This preserves header/content-probe
@@ -219,9 +227,9 @@ public enum BoundedRegularFileReader {
         guard Darwin.fstat(descriptor, &before) == 0 else {
             return .rejected(.ioFailure)
         }
-        let ownedLink = hardLinkOwnerUID.map { $0 != 0 && before.st_uid == $0 } ?? false
         guard (before.st_mode & S_IFMT) == S_IFREG,
-              before.st_nlink == 1 || ownedLink,
+              before.st_nlink == 1
+                || acceptsLinkedFile(ownerUID: before.st_uid, actorUID: hardLinkOwnerUID),
               before.st_size >= 0 else {
             return .rejected(.unsafeCarrier)
         }

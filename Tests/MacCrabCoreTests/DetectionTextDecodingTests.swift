@@ -84,6 +84,11 @@ struct DetectionTextDecodingTests {
         // actor is root: the store is readable by the console user.
         #expect(BoundedRegularFileReader.readPrefixOutcome(
             at: path, maximumBytes: 4096, hardLinkOwnerUID: 0) == .rejected(.unsafeCarrier))
+        // A root-owned file cannot be made here, so pin the decision itself.
+        #expect(!BoundedRegularFileReader.acceptsLinkedFile(ownerUID: 0, actorUID: 0))
+        #expect(BoundedRegularFileReader.acceptsLinkedFile(ownerUID: 501, actorUID: 501))
+        #expect(!BoundedRegularFileReader.acceptsLinkedFile(ownerUID: 501, actorUID: 502))
+        #expect(!BoundedRegularFileReader.acceptsLinkedFile(ownerUID: 501, actorUID: nil))
     }
 
     @Test("the injection scanner and the content enricher see carriers past a stray byte")
