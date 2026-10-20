@@ -17,6 +17,7 @@ struct EventPrivacySanitizerASCIIMatcherTests {
         "xoxr-", "xoxs-", "npm_", "pmak-", "whsec_", "sg.",
         "key-", "cf", "dop_v1_", "hrku-", "vrcl_", "vercel_", "eyj",
         "sk_live_", "sk_test_", "pk_live_", "pk_test_", "rk_live_", "rk_test_",
+        "-u", "pass:", "sshpass",
     ]
     private static let sensitiveKeys = [
         "password", "passwd", "secret", "token", "apikey", "authorization",
@@ -28,6 +29,7 @@ struct EventPrivacySanitizerASCIIMatcherTests {
         if value.utf8.count < 8 {
             return lowered.contains("-p") || lowered.contains("key")
                 || lowered.contains("auth") || lowered.contains("://")
+                || lowered.contains("-u") || lowered.contains("pass:")
         }
         if value.utf8.allSatisfy({ $0 < 128 }) {
             let search = lowered as NSString

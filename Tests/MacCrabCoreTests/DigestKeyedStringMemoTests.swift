@@ -30,6 +30,8 @@ struct DigestKeyedStringMemoTests {
     private static func referenceArguments(_ arguments: [String]) -> [String] {
         var result: [String] = []
         var redactNext = false
+        var redactNextFlag = ""
+        var userPairNext = false
         var optionsEnded = false
         for argument in arguments {
             if optionsEnded { result.append(CommandSanitizer.applyRedactors(argument)); continue }
@@ -41,12 +43,29 @@ struct DigestKeyedStringMemoTests {
             let flag = lowered.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
                 .first.map(String.init) ?? lowered
             let isSensitiveFlag = referenceSensitiveFlags.contains(flag)
-            if redactNext, !isSensitiveFlag { result.append("[REDACTED]"); redactNext = false; continue }
+            if userPairNext {
+                userPairNext = false
+                if let colon = argument.firstIndex(of: ":"),
+                   case let rest = argument[argument.index(after: colon)...],
+                   !rest.isEmpty, !rest.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                    result.append("\(argument[...colon])[REDACTED]"); continue
+                }
+            }
+            if redactNext, !isSensitiveFlag {
+                redactNext = false
+                let pathShaped = ["/", "./", "../", "~/"].contains { argument.hasPrefix($0) }
+                result.append(redactNextFlag == "-p" && pathShaped
+                    ? CommandSanitizer.applyRedactors(argument) : "[REDACTED]")
+                continue
+            }
+            if ["-u", "--user", "--proxy-user"].contains(lowered) {
+                result.append(argument); userPairNext = true; redactNext = false; continue
+            }
             if isSensitiveFlag {
                 if argument.contains("=") {
                     result.append("\(argument.prefix { $0 != "=" })=[REDACTED]"); redactNext = false
                 } else {
-                    result.append(argument); redactNext = true
+                    result.append(argument); redactNext = true; redactNextFlag = flag
                 }
                 continue
             }

@@ -52,15 +52,35 @@ enum CommandSanitizer {
     /// `--access-key=VALUE`, `--secret-key=VALUE`
     /// Handles `=value`, `="value"`, `='value'`, or `= value` (space-separated).
     private static let longFlagEquals = try! NSRegularExpression(
-        pattern: #"--(password|secret|api[_-]?key|token|auth|key|credential|access[_-]?key|secret[_-]?key)\s*=\s*('[^']*'|"[^"]*"|[^\s]+)"#,
+        pattern: #"--(password|passwd|secret|api[_-]?key|token|auth|key|credential|access[_-]?key|secret[_-]?key|private[_-]?key)\s*=\s*('[^']*'|"[^"]*"|[^\s]+)"#,
         options: .caseInsensitive
     )
 
     /// Long flags with space-separated value:
     /// `--password VALUE`, `--token VALUE`, etc.
     private static let longFlagSpace = try! NSRegularExpression(
-        pattern: #"--(password|secret|api[_-]?key|token|auth|credential|access[_-]?key|secret[_-]?key)\s+('[^']*'|"[^"]*"|[^\s]+)"#,
+        pattern: #"--(password|passwd|secret|api[_-]?key|token|auth|key|credential|access[_-]?key|secret[_-]?key|private[_-]?key)\s+('[^']*'|"[^"]*"|[^\s]+)"#,
         options: .caseInsensitive
+    )
+
+    /// `sshpass -p VALUE` and `sshpass -pVALUE`. sshpass's `-p` always takes
+    /// the password; in a bare string another program's `-p` is ambiguous.
+    private static let sshpassPassword = try! NSRegularExpression(
+        pattern: #"(\bsshpass\b[^\n]*?\s-p)\s*('[^']*'|"[^"]*"|\S+)"#,
+        options: []
+    )
+
+    /// `user:password` after curl/wget-style `-u`, `--user` or `--proxy-user`.
+    /// A numeric remainder is a uid:gid pair (`docker run -u 501:20`).
+    private static let userPasswordFlag = try! NSRegularExpression(
+        pattern: #"((?:^|\s)(?:--user|--proxy-user|-u)(?:\s+|=)?['"]?[^\s:'"]+:)(?![0-9]+['"]?(?:\s|$))([^\s'"]+)"#,
+        options: []
+    )
+
+    /// OpenSSL passphrase arguments: `-passin pass:VALUE`, `-passout pass:VALUE`.
+    private static let opensslPass = try! NSRegularExpression(
+        pattern: #"((?:^|\s)pass:)(\S+)"#,
+        options: []
     )
 
     /// URLs with embedded credentials: `://user:pass@host`
@@ -166,6 +186,20 @@ enum CommandSanitizer {
             withTemplate: "--$1 [REDACTED]"
         )
 
+        // 5b. Program- and pair-specific password arguments
+        result = sshpassPassword.stringByReplacingMatches(
+            in: result, options: [], range: fullRange(),
+            withTemplate: "$1 [REDACTED]"
+        )
+        result = userPasswordFlag.stringByReplacingMatches(
+            in: result, options: [], range: fullRange(),
+            withTemplate: "$1[REDACTED]"
+        )
+        result = opensslPass.stringByReplacingMatches(
+            in: result, options: [], range: fullRange(),
+            withTemplate: "$1[REDACTED]"
+        )
+
         // 6. URL credentials: `://user:pass@host`
         result = urlCredentials.stringByReplacingMatches(
             in: result, options: [], range: fullRange(),
@@ -207,6 +241,8 @@ enum CommandSanitizer {
         var result: [String] = []
         result.reserveCapacity(arguments.count)
         var redactNext = false
+        var redactNextFlag = ""
+        var userPairNext = false
         var optionsEnded = false
 
         for argument in arguments {
@@ -243,8 +279,28 @@ enum CommandSanitizer {
             ).first.map(String.init) ?? lowered
             let isSensitiveFlag = sensitiveArgumentFlags.contains(flag)
 
+            if userPairNext {
+                userPairNext = false
+                if let redacted = redactingUserPassword(argument) {
+                    result.append(redacted)
+                    continue
+                }
+            }
             if redactNext, !isSensitiveFlag {
-                result.append("[REDACTED]")
+                redactNext = false
+                // A standalone `-p` is a password for mysql-style tools but a
+                // flag for mkdir, cp and install, whose next token is a path.
+                // No password-taking tool documents a path-shaped value.
+                if redactNextFlag == "-p", isPathShaped(argument) {
+                    result.append(sanitize(argument))
+                } else {
+                    result.append("[REDACTED]")
+                }
+                continue
+            }
+            if userPairFlags.contains(lowered) {
+                result.append(argument)
+                userPairNext = true
                 redactNext = false
                 continue
             }
@@ -262,6 +318,7 @@ enum CommandSanitizer {
                     // token, preserving deterministic option structure.
                     result.append(argument)
                     redactNext = true
+                    redactNextFlag = flag
                 }
                 continue
             }
@@ -270,4 +327,36 @@ enum CommandSanitizer {
         }
         return result
     }
+
+    /// The stored command line must be at least as redacted as argv. The ES
+    /// collector builds it as argv joined by spaces; that form is rebuilt from
+    /// the redacted arguments, so a flag and its value in separate tokens
+    /// (`sshpass -p VALUE`) are redacted as argv redacts them.
+    static func sanitize(commandLine: String, arguments: [String]) -> String {
+        guard !arguments.isEmpty,
+              commandLine == arguments.joined(separator: " ") else {
+            return sanitize(commandLine)
+        }
+        return sanitize(sanitize(arguments: arguments).joined(separator: " "))
+    }
+
+    private static let userPairFlags: Set<String> = ["-u", "--user", "--proxy-user"]
+
+    private static func isPathShaped(_ value: String) -> Bool {
+        value.hasPrefix("/") || value.hasPrefix("./") || value.hasPrefix("../")
+            || value.hasPrefix("~/")
+    }
+
+    /// `alice:secret` -> `alice:[REDACTED]`; nil when the token is not a
+    /// `user:password` pair (no colon, or a numeric uid:gid remainder).
+    private static func redactingUserPassword(_ value: String) -> String? {
+        guard let colon = value.firstIndex(of: ":") else { return nil }
+        let remainder = value[value.index(after: colon)...]
+        guard !remainder.isEmpty, !remainder.allSatisfy(\.isASCIIDigit) else { return nil }
+        return "\(value[...colon])[REDACTED]"
+    }
+}
+
+private extension Character {
+    var isASCIIDigit: Bool { isASCII && isNumber }
 }

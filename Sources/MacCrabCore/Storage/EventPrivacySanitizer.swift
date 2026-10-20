@@ -38,11 +38,13 @@ public enum EventPrivacySanitizer {
         // Deliberate policy expansion: the existing Stripe redactor accepts
         // these underscore prefixes, which the earlier "sk-" hint missed.
         "sk_live_", "sk_test_", "pk_live_", "pk_test_", "rk_live_", "rk_test_",
+        // curl/wget `-u user:password`, OpenSSL `pass:VALUE`, sshpass.
+        "-u", "pass:", "sshpass",
     ]
 
     private static let asciiCredentialHints = ASCIIMatcher(credentialHints)
     private static let asciiShortCredentialHints = ASCIIMatcher([
-        "-p", "key", "auth", "://",
+        "-p", "key", "auth", "://", "-u", "pass:",
     ])
     private static let asciiSensitiveKeys = ASCIIMatcher([
         "password", "passwd", "secret", "token", "apikey", "authorization",
@@ -98,16 +100,23 @@ public enum EventPrivacySanitizer {
 
     private static func sanitizeEventFields(_ event: Event) -> Event {
         let process = event.process
+        let safeArguments = CommandSanitizer.sanitize(arguments: process.args)
+        // The ES command line is argv joined by spaces. Rebuild it from the
+        // redacted arguments so it is never less redacted than `args`.
+        let commandLineIsArgv = !process.args.isEmpty
+            && process.commandLine == process.args.joined(separator: " ")
         let safeProcess = ProcessInfo(
             pid: process.pid,
             ppid: process.ppid,
             rpid: process.rpid,
             name: process.name,
             executable: process.executable,
-            commandLine: sanitizeString(process.commandLine),
-            args: CommandSanitizer.sanitize(arguments: process.args).map(
-                sanitizeString
+            commandLine: sanitizeString(
+                commandLineIsArgv
+                    ? safeArguments.joined(separator: " ")
+                    : process.commandLine
             ),
+            args: safeArguments.map(sanitizeString),
             workingDirectory: process.workingDirectory,
             userId: process.userId,
             userName: process.userName,
@@ -219,6 +228,7 @@ public enum EventPrivacySanitizer {
             let lowered = value.lowercased()
             return lowered.contains("-p") || lowered.contains("key")
                 || lowered.contains("auth") || lowered.contains("://")
+                || lowered.contains("-u") || lowered.contains("pass:")
         }
         let lowered = value.lowercased()
         if value.utf8.allSatisfy({ $0 < 128 }) {

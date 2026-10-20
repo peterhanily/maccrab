@@ -279,7 +279,7 @@ public actor FileOutput: Output {
                 self.action = event.eventAction
                 self.processPid = event.process.pid
                 self.processPath = event.process.executable
-                self.processCommandLine = CommandSanitizer.sanitize(event.process.commandLine)
+                self.processCommandLine = CommandSanitizer.sanitize(commandLine: event.process.commandLine, arguments: event.process.args)
             }
         }
     }
