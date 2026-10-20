@@ -2862,7 +2862,7 @@ enum EventLoop {
                 // path/host/rule allowlist can't silence a must-fire critical
                 // (active C2 / credential-theft) detection — only an explicit
                 // rule+process entry can.
-                if await state.suppressionManager.isSuppressed(match: match, processPath: event.process.executable) {
+                if await state.isSuppressed(match, event: event) {
                     continue
                 }
                 // Per-rule dedup is reserved transactionally inside

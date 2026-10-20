@@ -653,6 +653,12 @@ public actor EventEnricher {
         heavyEnrichmentPlane.hasDeferredResults
     }
 
+    /// The executable's SHA-256 if the hasher already holds it for the bytes
+    /// now on disk. Never hashes, so it is safe on the event path.
+    public func cachedExecutableSHA256(path: String) async -> String? {
+        await processHasher?.cachedSHA256(path: path)
+    }
+
     /// Number of processes currently tracked in the lineage graph.
     public func lineageNodeCount() async -> Int {
         await lineage.nodeCount

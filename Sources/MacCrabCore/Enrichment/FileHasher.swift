@@ -40,10 +40,18 @@ public actor FileHasher {
 
     // MARK: - Private state
 
+    /// Device, inode and change time join size and mtime: a same-size
+    /// rewrite with a restored mtime must not keep serving the old digest,
+    /// which would hide the new bytes from hash IOCs.
     private struct CacheKey: Hashable {
         let path: String
-        let mtime: Double
+        let device: UInt64
+        let inode: UInt64
         let size: Int64
+        let mtimeSeconds: Int
+        let mtimeNanoseconds: Int
+        let ctimeSeconds: Int
+        let ctimeNanoseconds: Int
     }
 
     private let logger = Logger(subsystem: "com.maccrab.enrichment", category: "file-hasher")
@@ -74,31 +82,16 @@ public actor FileHasher {
     /// Returns the SHA-256 hex digest of `path`, or `nil` if the file is
     /// unavailable, too large, on a network mount, or errors during I/O.
     public func hash(path: String) -> String? {
-        let fm = FileManager.default
-
-        // Type, size, mtime in one call.
-        guard let attrs = try? fm.attributesOfItem(atPath: path) else {
-            statsStore.skippedMissing += 1
-            return nil
-        }
-
-        // Regular files only.
-        guard let fileType = attrs[.type] as? FileAttributeType,
-              fileType == .typeRegular else {
+        // Type, size and identity in one call. lstat: regular files only, as
+        // before, so a symlink is never followed.
+        guard let key = Self.cacheKey(path: path) else {
             statsStore.skippedMissing += 1
             return nil
         }
 
         // Size cap.
-        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        if size > maxFileBytes {
+        if key.size > maxFileBytes {
             statsStore.skippedSize += 1
-            return nil
-        }
-
-        // Modification date for cache key.
-        guard let mtimeDate = attrs[.modificationDate] as? Date else {
-            statsStore.skippedMissing += 1
             return nil
         }
 
@@ -108,7 +101,6 @@ public actor FileHasher {
             return nil
         }
 
-        let key = CacheKey(path: path, mtime: mtimeDate.timeIntervalSince1970, size: size)
         if let cached = cache[key] {
             statsStore.hits += 1
             touch(key)
@@ -124,6 +116,33 @@ public actor FileHasher {
         statsStore.misses += 1
         insert(key, digest: digest)
         return digest
+    }
+
+    /// The cached digest for the bytes now at `path`, without hashing on a
+    /// miss. For hot paths that may use a digest but must not compute one.
+    public func cachedHash(path: String) -> String? {
+        guard let key = Self.cacheKey(path: path), let cached = cache[key] else {
+            return nil
+        }
+        touch(key)
+        return cached
+    }
+
+    private static func cacheKey(path: String) -> CacheKey? {
+        var st = stat()
+        guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
+            return nil
+        }
+        return CacheKey(
+            path: path,
+            device: UInt64(st.st_dev),
+            inode: UInt64(st.st_ino),
+            size: Int64(st.st_size),
+            mtimeSeconds: st.st_mtimespec.tv_sec,
+            mtimeNanoseconds: st.st_mtimespec.tv_nsec,
+            ctimeSeconds: st.st_ctimespec.tv_sec,
+            ctimeNanoseconds: st.st_ctimespec.tv_nsec
+        )
     }
 
     /// Current observability counters (copy).

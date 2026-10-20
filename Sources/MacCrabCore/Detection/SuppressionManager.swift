@@ -286,6 +286,20 @@ public actor SuppressionManager {
 
     /// Returns true iff the given alert+event pair matches any unexpired entry.
     /// Respects TTL — entries whose expiresAt has passed never match.
+    /// Whether any rule+hash entry exists for `ruleId`, so a caller can look
+    /// up a digest only when one could match.
+    public func hasHashScope(ruleId: String) -> Bool {
+        !(byRuleHash[ruleId]?.isEmpty ?? true)
+    }
+
+    /// This host's name, as `maccrabctl allow --host` names it. Read once with
+    /// gethostname(2): `ProcessInfo.hostName` can block on a reverse lookup.
+    public static let localHostName: String = {
+        var buffer = [CChar](repeating: 0, count: 256)
+        guard gethostname(&buffer, buffer.count) == 0 else { return "" }
+        return String(cString: buffer)
+    }()
+
     public func isSuppressed(ruleId: String, processPath: String) -> Bool {
         matchingSuppression(ruleId: ruleId, processPath: processPath,
                             processSHA256: nil, hostname: nil) != nil
@@ -349,10 +363,14 @@ public actor SuppressionManager {
            let entry = firstUnexpired(for: .path(path), now: now) {
             return entry
         }
-        // host
-        if let host = hostname, byHost.contains(host),
-           let entry = firstUnexpired(for: .host(host), now: now) {
-            return entry
+        // host: the full name or its first label (`mac.local` or `mac`).
+        if let host = hostname, !host.isEmpty {
+            let shortName = host.split(separator: ".", maxSplits: 1).first.map(String.init)
+            for candidate in [host, shortName].compactMap({ $0 }) where byHost.contains(candidate) {
+                if let entry = firstUnexpired(for: .host(candidate), now: now) {
+                    return entry
+                }
+            }
         }
         return nil
     }

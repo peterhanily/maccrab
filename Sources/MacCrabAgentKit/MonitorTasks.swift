@@ -115,7 +115,7 @@ enum MonitorTasks {
                     for match in matches {
                         // Match-aware: broad allowlists can't silence a must-fire
                         // critical (active C2 / credential-theft) detection.
-                        if await state.suppressionManager.isSuppressed(match: match, processPath: enriched.process.executable) { continue }
+                        if await state.isSuppressed(match, event: enriched) { continue }
                         let alert = Alert(
                             ruleId: match.ruleId, ruleTitle: match.ruleName, severity: match.severity,
                             eventId: enriched.id.uuidString, processPath: enriched.process.executable,

@@ -1646,3 +1646,21 @@ private func recoverEssentialSourceOrStayDegraded(
     DaemonExitRequest.requestRelaunch()
     return true
 }
+
+extension DaemonState {
+    /// Suppression check across every scope: rule, path, rule+path,
+    /// rule+hash and host. A digest is looked up, never computed, and only
+    /// when a rule+hash entry for this rule could match.
+    func isSuppressed(_ match: RuleMatch, event: Event) async -> Bool {
+        var sha256 = event.process.hashes?.sha256
+        if sha256 == nil, await suppressionManager.hasHashScope(ruleId: match.ruleId) {
+            sha256 = await enricher.cachedExecutableSHA256(path: event.process.executable)
+        }
+        return await suppressionManager.isSuppressed(
+            match: match,
+            processPath: event.process.executable,
+            processSHA256: sha256,
+            hostname: SuppressionManager.localHostName
+        )
+    }
+}
