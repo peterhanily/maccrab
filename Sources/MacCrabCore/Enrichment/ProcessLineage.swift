@@ -27,8 +27,9 @@ struct LineageNode: Sendable {
     /// Full command line.
     let commandLine: String
 
-    /// Code signer type (if known).
-    let signerType: String?
+    /// Code signer type (if known). An unverified `.apple` claim for a
+    /// non-platform binary is held as unknown until verification answers.
+    var signerType: String?
 
     /// Timestamp when the process was first observed (exec/fork).
     let startTime: Date
@@ -554,6 +555,16 @@ public actor ProcessLineage {
     }
 
     /// Get the signer type for a specific process (if tracked).
+    /// Records a verified signer for a tracked process. A pid since reused by
+    /// another executable keeps its own node.
+    public func recordVerifiedSignerType(pid: pid_t, path: String, signerType: String) {
+        guard var node = nodes[pid], node.path == path, node.signerType != signerType else {
+            return
+        }
+        node.signerType = signerType
+        nodes[pid] = node
+    }
+
     public func signerType(of pid: pid_t) -> String? {
         nodes[pid]?.signerType
     }

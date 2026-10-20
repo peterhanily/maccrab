@@ -181,6 +181,14 @@ public actor EventEnricher {
         let codeSignature = codeSignatureResolution.value
         if let state = codeSignatureResolution.coverage {
             heavyCoverage[.codeSignature] = state
+        } else if Self.lineageSignerType(proc) == nil, let codeSignature {
+            // Children read the parent's signer as ParentSignerType, so a
+            // verified verdict replaces the unknown recorded in step 1.
+            await lineage.recordVerifiedSignerType(
+                pid: proc.pid,
+                path: proc.executable,
+                signerType: codeSignature.signerType.rawValue
+            )
         }
 
         let hashResolution = await resolveHashes(for: event, binding: binding)
@@ -590,6 +598,15 @@ public actor EventEnricher {
 
     // MARK: Lineage Updates
 
+    /// The signer a child may read as `ParentSignerType`. The collector's
+    /// `.apple` for a non-platform binary is a spoofable claim (any binary can
+    /// name itself com.apple.*), so it stays unknown until verified.
+    static func lineageSignerType(_ process: ProcessInfo) -> String? {
+        guard let signature = process.codeSignature else { return nil }
+        if signature.signerType == .apple, !process.isPlatformBinary { return nil }
+        return signature.signerType.rawValue
+    }
+
     /// Update the lineage graph based on the event's category and action.
     private func updateLineage(for event: Event) async {
         let proc = event.process
@@ -604,7 +621,7 @@ public actor EventEnricher {
                 name: proc.name,
                 startTime: proc.startTime,
                 commandLine: proc.commandLine,
-                signerType: proc.codeSignature?.signerType.rawValue
+                signerType: Self.lineageSignerType(proc)
             )
 
         case (.process, "exit"):
@@ -623,7 +640,7 @@ public actor EventEnricher {
                     name: proc.name,
                     startTime: proc.startTime,
                     commandLine: proc.commandLine,
-                    signerType: proc.codeSignature?.signerType.rawValue
+                    signerType: Self.lineageSignerType(proc)
                 )
             }
         }
