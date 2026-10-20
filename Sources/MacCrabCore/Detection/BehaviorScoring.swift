@@ -283,6 +283,18 @@ public actor BehaviorScoring {
     // and an explicit promote/rollback workflow; until then the shipped table
     // above is the sole source of weight authority.
 
+    /// Indicators derived from the process's own image, signature or command
+    /// line. The event loop reports them on every event of the process, and
+    /// the cooldown only rate-limits re-adding: a long-lived process settled
+    /// near 4.1x the weight (120 s cooldown, 300 s half-life), so
+    /// executed_from_tmp alone crossed the alert threshold after about six
+    /// minutes of ordinary activity, with no new behaviour.
+    static let oncePerProcessIndicators: Set<String> = [
+        "unsigned_binary", "unsigned_dev_tooling", "executed_from_tmp",
+        "ai_tool_spawns_shell", "ai_tool_runs_sudo",
+        "ai_tool_installs_unknown_pkg", "ai_tool_downloads_and_exec",
+    ]
+
     // MARK: - Initialization
 
     public init(
@@ -357,6 +369,13 @@ public actor BehaviorScoring {
         if entry.rawScore < alertThreshold {
             alerted.remove(key)
             abandonPendingThreshold(for: key)
+        }
+
+        // Indicators describing the process itself, not an action, are true
+        // for its whole lifetime and count once per process.
+        if Self.oncePerProcessIndicators.contains(indicator.name),
+           entry.indicatorLastAdd[indicator.name] != nil {
+            return pendingThresholds[key]
         }
 
         // Indicator cooldown: a single indicator of the same name contributes
