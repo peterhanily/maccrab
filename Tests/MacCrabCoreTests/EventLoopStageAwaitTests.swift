@@ -92,9 +92,10 @@ struct EventLoopStageAwaitTests {
     func laneLoopWiring() throws {
         let eventLoop = try Self.repositorySource("Sources/MacCrabAgentKit/EventLoop.swift")
         for stage in EventPipelineStage.allCases where stage != .other {
-            let marker = "stageAwaits.record(.\(stage), startedAt:"
-            #expect(eventLoop.components(separatedBy: marker).count - 1 == 1,
-                    "stage \(stage) must be timed exactly once in the lane loop")
+            // Rules overlap sequences, so rules are charged by explicit nanos.
+            let charges = eventLoop.components(separatedBy: "stageAwaits.record(.\(stage), startedAt:").count - 1
+                + eventLoop.components(separatedBy: "stageAwaits.add(.\(stage), nanos:").count - 1
+            #expect(charges == 1, "stage \(stage) must be timed exactly once in the lane loop")
         }
         #expect(!eventLoop.contains("await bridge.process(enrichedEvent)"),
                 "the lane must not await TraceGraph ingestion inline")

@@ -491,18 +491,25 @@ struct EventPipelineTelemetryTests {
         let reached = try #require(eventLoopSource.range(
             of: "recordRuleEvaluationReached("
         ))
+        // Rules and sequences evaluate concurrently between the two marks;
+        // sequence matches are appended after the rule matches.
         let singleRules = try #require(eventLoopSource.range(
-            of: "state.ruleEngine.evaluate(enrichedEvent)"
+            of: "state.ruleEngine.evaluate(evaluatedEvent)"
         ))
         let sequenceRules = try #require(eventLoopSource.range(
-            of: "state.sequenceEngine.evaluate(enrichedEvent)"
+            of: "sequenceEngine.evaluate(evaluatedEvent)"
+        ))
+        let joined = try #require(eventLoopSource.range(
+            of: "primaryMatches.append(contentsOf: sequenceMatches)"
         ))
         let completed = try #require(eventLoopSource.range(
             of: "recordRuleEvaluationCompleted("
         ))
         #expect(reached.lowerBound < singleRules.lowerBound)
-        #expect(singleRules.lowerBound < sequenceRules.lowerBound)
-        #expect(sequenceRules.lowerBound < completed.lowerBound)
+        #expect(reached.lowerBound < sequenceRules.lowerBound)
+        #expect(singleRules.lowerBound < joined.lowerBound)
+        #expect(sequenceRules.lowerBound < joined.lowerBound)
+        #expect(joined.lowerBound < completed.lowerBound)
     }
 
     private func makeEvent(

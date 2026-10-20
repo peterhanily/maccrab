@@ -2531,15 +2531,20 @@ enum EventLoop {
                 category: enrichedEvent.eventCategory
             )
 
-            // Layer 1: Single-event Sigma rules
+            // Layer 1 (single-event Sigma rules) and Layer 2 (temporal
+            // sequence rules) are independent actors over the same immutable
+            // event, so they run concurrently; matches keep their order. The
+            // section's wall time is charged once: rules by their own
+            // duration, sequences by any wait beyond it.
             stageStartedNanos = DispatchTime.now().uptimeNanoseconds
-            var primaryMatches = await state.ruleEngine.evaluate(enrichedEvent)
-            stageAwaits.record(.rules, startedAt: stageStartedNanos)
-
-            // Layer 2: Temporal sequence rules (Phase 2)
-            stageStartedNanos = DispatchTime.now().uptimeNanoseconds
-            let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
-            stageAwaits.record(.sequences, startedAt: stageStartedNanos)
+            let evaluatedEvent = enrichedEvent
+            let sequenceEngine = state.sequenceEngine
+            async let sequenceEvaluation = sequenceEngine.evaluate(evaluatedEvent)
+            var primaryMatches = await state.ruleEngine.evaluate(evaluatedEvent)
+            let rulesEndedNanos = DispatchTime.now().uptimeNanoseconds
+            let sequenceMatches = await sequenceEvaluation
+            stageAwaits.add(.rules, nanos: rulesEndedNanos &- stageStartedNanos)
+            stageAwaits.record(.sequences, startedAt: rulesEndedNanos)
             primaryMatches.append(contentsOf: sequenceMatches)
             state.eventPipelineTelemetry.recordRuleEvaluationCompleted(
                 lane: lane,
