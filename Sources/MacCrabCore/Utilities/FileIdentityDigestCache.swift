@@ -6,7 +6,9 @@ import Darwin
 /// Self-defense re-reads the engine binary and every compiled rule file on a
 /// 15 s tick. Hashing is only needed when one of them changed, and every
 /// write changes the change time, which an unprivileged writer cannot
-/// restore. Bounded; a full cache is cleared, which only costs re-hashing.
+/// restore. Root can, with exact control of the clock, so a digest is reused
+/// at most `maximumReuses` times before the file is hashed again. Bounded; a
+/// full cache is cleared, which only costs re-hashing.
 final class FileIdentityDigestCache: @unchecked Sendable {
     struct Identity: Equatable {
         let device: UInt64
@@ -19,11 +21,13 @@ final class FileIdentityDigestCache: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var entries: [String: (identity: Identity, digest: String)] = [:]
+    private var entries: [String: (identity: Identity, digest: String, reuses: Int)] = [:]
     private let capacity: Int
+    private let maximumReuses: Int
 
-    init(capacity: Int = 4_096) {
+    init(capacity: Int = 4_096, maximumReuses: Int = 20) {
         self.capacity = max(1, capacity)
+        self.maximumReuses = max(0, maximumReuses)
     }
 
     /// The file's current identity, following symlinks like the hashing read.
@@ -46,7 +50,8 @@ final class FileIdentityDigestCache: @unchecked Sendable {
     func sha256(of path: String, compute: (String) -> String?) -> String? {
         guard let before = Self.identity(of: path) else { return nil }
         lock.lock()
-        if let entry = entries[path], entry.identity == before {
+        if let entry = entries[path], entry.identity == before, entry.reuses < maximumReuses {
+            entries[path]?.reuses += 1
             lock.unlock()
             return entry.digest
         }
@@ -57,7 +62,7 @@ final class FileIdentityDigestCache: @unchecked Sendable {
             if entries.count >= capacity, entries[path] == nil {
                 entries.removeAll(keepingCapacity: true)
             }
-            entries[path] = (before, digest)
+            entries[path] = (before, digest, 0)
             lock.unlock()
         }
         return digest

@@ -28,4 +28,18 @@ struct FileIdentityDigestCacheTests {
         #expect(computations == 2)
         #expect(cache.sha256(of: NSTemporaryDirectory() + "absent-\(UUID().uuidString)", compute: compute) == nil)
     }
+
+    @Test("an unchanged file is hashed again after the reuse limit")
+    func reuseLimitForcesRehash() throws {
+        let path = NSTemporaryDirectory() + "maccrab_digest_reuse_\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try Data(repeating: 0x41, count: 4096).write(to: URL(fileURLWithPath: path))
+        let cache = FileIdentityDigestCache(maximumReuses: 3)
+        var computations = 0
+        let compute: (String) -> String? = { computations += 1; return FileHasher.computeSHA256(path: $0) }
+        for _ in 0..<4 { _ = cache.sha256(of: path, compute: compute) }
+        #expect(computations == 1, "one hash, then three reuses")
+        _ = cache.sha256(of: path, compute: compute)
+        #expect(computations == 2, "the fourth reuse hashes again")
+    }
 }
