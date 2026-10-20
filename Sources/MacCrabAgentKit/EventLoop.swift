@@ -2098,7 +2098,7 @@ enum EventLoop {
 
             // === Git security monitoring ===
             if enrichedEvent.eventCategory == .process || enrichedEvent.eventCategory == .file {
-                if let gitEvent = await state.gitSecurityMonitor.checkProcess(
+                if let gitEvent = state.gitSecurityMonitor.checkProcess(
                     name: enrichedEvent.process.name,
                     path: enrichedEvent.process.executable,
                     pid: enrichedEvent.process.pid,

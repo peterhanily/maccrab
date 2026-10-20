@@ -33,8 +33,11 @@ public actor GitSecurityMonitor {
 
     public init() {}
 
-    /// Check a process event for git security threats.
-    public func checkProcess(
+    /// Check a process event for git security threats. Pure over its
+    /// arguments, so it runs without an actor hop on every event, and its
+    /// substring tests use the exact byte search rather than Foundation's
+    /// per-Character comparison.
+    public nonisolated func checkProcess(
         name: String,
         path: String,
         pid: Int32,
@@ -44,8 +47,8 @@ public actor GitSecurityMonitor {
     ) -> GitSecurityEvent? {
 
         // 1. Git credential helper abuse
-        if commandLine.contains("git credential") &&
-           (commandLine.contains("fill") || commandLine.contains("approve")) {
+        if ExactSubstringSearch.contains(commandLine, "git credential") &&
+           (ExactSubstringSearch.contains(commandLine, "fill") || ExactSubstringSearch.contains(commandLine, "approve")) {
             // Non-git process invoking credential helper
             if !path.hasSuffix("/git") && !path.hasSuffix("/git-credential-osxkeychain") {
                 return GitSecurityEvent(
@@ -76,10 +79,10 @@ public actor GitSecurityMonitor {
 
         // 3. Git hook execution from untrusted location
         if let filePath = filePath,
-           filePath.contains(".git/hooks/"),
-           commandLine.contains("/sh") || commandLine.contains("/bash") || commandLine.contains("/zsh") {
+           ExactSubstringSearch.contains(filePath, ".git/hooks/"),
+           ExactSubstringSearch.contains(commandLine, "/sh") || ExactSubstringSearch.contains(commandLine, "/bash") || ExactSubstringSearch.contains(commandLine, "/zsh") {
             // Check if the hook is in a temp or downloads directory
-            if filePath.contains("/tmp/") || filePath.contains("/Downloads/") || filePath.contains("/Users/Shared/") {
+            if ExactSubstringSearch.contains(filePath, "/tmp/") || ExactSubstringSearch.contains(filePath, "/Downloads/") || ExactSubstringSearch.contains(filePath, "/Users/Shared/") {
                 return GitSecurityEvent(
                     type: .maliciousGitHook,
                     processName: name, processPath: path, pid: pid,
@@ -96,9 +99,9 @@ public actor GitSecurityMonitor {
             // dependency resolver writes .git/config into vendored package dirs
             // (.build/checkouts/, .swiftpm/, DerivedData/) during builds. Those
             // are not user gitconfigs and not tamper signals.
-            let isVendoredCheckout = filePath.contains("/.build/checkouts/")
-                || filePath.contains("/.swiftpm/")
-                || filePath.contains("/DerivedData/")
+            let isVendoredCheckout = ExactSubstringSearch.contains(filePath, "/.build/checkouts/")
+                || ExactSubstringSearch.contains(filePath, "/.swiftpm/")
+                || ExactSubstringSearch.contains(filePath, "/DerivedData/")
             if isVendoredCheckout {
                 return nil
             }
