@@ -262,6 +262,31 @@ public struct HeavyProcessHashEvidence: Sendable, Equatable {
     }
 }
 
+/// Blocking leaf work of heavy enrichment (hashing, directory-service
+/// lookups, file reads, sysctl) runs here at the waiting worker's priority.
+/// A worker awaiting it then holds no cooperative-pool thread: the plane's
+/// four workers used to occupy four of the pool's ten threads during exec
+/// storms, and a timed-out worker kept its thread until the call returned.
+enum HeavyEnrichmentBlockingWork {
+    private static let queue = DispatchQueue(
+        label: "com.maccrab.heavy-enrichment.blocking",
+        qos: .utility,
+        attributes: .concurrent
+    )
+
+    static func run<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+        await BlockingWorkOffload.perform(
+            on: queue,
+            qos: BlockingWorkOffload.dispatchQoS(
+                waitedOnAt: Task.currentPriority,
+                floor: .utility
+            ),
+            flags: .enforceQoS,
+            body
+        )
+    }
+}
+
 public struct HeavyFileContentEvidence: Sendable, Equatable {
     public let content: String
     public let fileIdentity: HeavyEnrichmentFileIdentity

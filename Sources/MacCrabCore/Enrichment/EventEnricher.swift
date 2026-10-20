@@ -493,7 +493,10 @@ public actor EventEnricher {
             guard HeavyEnrichmentLiveProcessIdentity.matches(binding) else {
                 return .environment(nil)
             }
-            let value = EnvCapture.capture(pid: binding.processID)
+            let pid = binding.processID
+            let value = await HeavyEnrichmentBlockingWork.run {
+                EnvCapture.capture(pid: pid)
+            }
             guard HeavyEnrichmentLiveProcessIdentity.matches(binding) else {
                 return .environment(nil)
             }
@@ -531,7 +534,9 @@ public actor EventEnricher {
         ) {
             // Publication belongs to the plane's accepted terminal result,
             // not this syscall: cancellation cannot retract an inline cache.
-            .userName(cache.name(for: uid, cacheResult: false))
+            .userName(await HeavyEnrichmentBlockingWork.run {
+                cache.name(for: uid, cacheResult: false)
+            })
         }
         switch offer {
         case .cacheHit(.userName(let value)):
@@ -567,12 +572,14 @@ public actor EventEnricher {
         ) {
             let maximumBytes = scanner.maxBytes
             let maximumFileSize = scanner.maxFileSize
-            let evidence = HeavyFileContentEvidence.read(
-                path: path,
-                maximumBytes: maximumBytes,
-                maximumFileSize: maximumFileSize,
-                hardLinkOwnerUID: actorUID
-            )
+            let evidence = await HeavyEnrichmentBlockingWork.run {
+                HeavyFileContentEvidence.read(
+                    path: path,
+                    maximumBytes: maximumBytes,
+                    maximumFileSize: maximumFileSize,
+                    hardLinkOwnerUID: actorUID
+                )
+            }
             // The path may legitimately be replaced or rewritten after the ES
             // close event but before this deferred descriptor read. Reject that
             // stale snapshot inside the worker as an ordinary unavailable

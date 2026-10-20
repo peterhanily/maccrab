@@ -81,7 +81,7 @@ public actor FileHasher {
 
     /// Returns the SHA-256 hex digest of `path`, or `nil` if the file is
     /// unavailable, too large, on a network mount, or errors during I/O.
-    public func hash(path: String) -> String? {
+    public func hash(path: String) async -> String? {
         // Type, size and identity in one call. lstat: regular files only, as
         // before, so a symlink is never followed.
         guard let key = Self.cacheKey(path: path) else {
@@ -107,14 +107,20 @@ public actor FileHasher {
             return cached
         }
 
-        // Cache miss: compute.
-        guard let digest = Self.computeSHA256(path: path) else {
+        // Cache miss: compute off the actor and the cooperative pool. Up to
+        // 256 MiB is read; concurrent misses for other files proceed.
+        guard let digest = await HeavyEnrichmentBlockingWork.run({
+            Self.computeSHA256(path: path)
+        }) else {
             statsStore.errors += 1
             return nil
         }
 
         statsStore.misses += 1
-        insert(key, digest: digest)
+        // Cache only a digest of bytes that stayed in place while hashing.
+        if Self.cacheKey(path: path) == key {
+            insert(key, digest: digest)
+        }
         return digest
     }
 
