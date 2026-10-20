@@ -154,6 +154,8 @@ struct EventQuerySessionTests {
             return
         }
         #expect(budget.snapshot().nonblockingRejectionsTotal > rejectionsBeforeRead)
+        #expect(app.hasCachedEventStoreForTesting,
+                "memory pressure is transient: the shared reader and its index are kept")
         let tick = session.retryTick
         held.removeAll()
         session.pollTick()

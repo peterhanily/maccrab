@@ -1917,6 +1917,22 @@ final class AppState: ObservableObject, EventQueryReading {
         return EventReaderLease(id: id, store: store)
     }
 
+    /// Runs one read on a leased reader. A busy or memory-pressure refusal
+    /// says nothing about the reader, so it is kept: retiring it made every
+    /// window rebuild the journal index, which takes seconds, and cancelled
+    /// their reads. Decode, integrity and completeness failures still retire it.
+    private func readKeepingLeaseOnPressure<T>(
+        _ successful: inout Bool,
+        _ read: () async throws -> T
+    ) async throws -> T {
+        do {
+            return try await read()
+        } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
+            successful = true
+            throw error
+        }
+    }
+
     private func finishEventReaderLease(
         _ lease: EventReaderLease, successful: Bool, mayRetainIdle: Bool = true
     ) {
@@ -2783,8 +2799,8 @@ final class AppState: ObservableObject, EventQueryReading {
             var searchOwnership: EventSearchSnapshot?
             var warning: String?
             if let text = query.filter, query.isSearch {
-                let snapshot = try await store.searchSnapshot(
-                    text: text, since: query.since, until: query.until, limit: limit)
+                let snapshot = try await readKeepingLeaseOnPressure(&successful) { try await store.searchSnapshot(
+                    text: text, since: query.since, until: query.until, limit: limit) }
                 successful = true // partial search coverage is an explicit supported result
                 #if DEBUG
                 await eventReaderDidReturnForTesting?(.searchQuery)
@@ -2801,8 +2817,8 @@ final class AppState: ObservableObject, EventQueryReading {
             } else {
                 // Apply the upper boundary before LIMIT, so newer events cannot
                 // crowd a historical investigation window out of the result.
-                let snapshot = try await store.exactEventsSnapshot(
-                    since: query.since, until: query.until, category: query.category, limit: limit)
+                let snapshot = try await readKeepingLeaseOnPressure(&successful) { try await store.exactEventsSnapshot(
+                    since: query.since, until: query.until, category: query.category, limit: limit) }
                 successful = snapshot.isComplete
                 #if DEBUG
                 await eventReaderDidReturnForTesting?(.exactQuery)
@@ -2909,7 +2925,7 @@ final class AppState: ObservableObject, EventQueryReading {
         var successful = false
         defer { finishEventReaderLease(lease, successful: successful) }
         let store = lease.store
-        let page = try await store.exactEventsPageSnapshot(before: cursor, category: query.category, pageSize: pageSize)
+        let page = try await readKeepingLeaseOnPressure(&successful) { try await store.exactEventsPageSnapshot(before: cursor, category: query.category, pageSize: pageSize) }
         successful = true // Core rejects an incomplete exact page before returning
         #if DEBUG
         await eventReaderDidReturnForTesting?(.olderPage)
@@ -3452,10 +3468,10 @@ final class AppState: ObservableObject, EventQueryReading {
             var successful = false
             defer { finishEventReaderLease(lease, successful: successful) }
             let store = lease.store
-            let snapshot = try await store.exactEventsSnapshot(
+            let snapshot = try await readKeepingLeaseOnPressure(&successful) { try await store.exactEventsSnapshot(
                 since: lastEventTimestamp,
                 limit: 200
-            )
+            ) }
             successful = snapshot.isComplete
             #if DEBUG
             await eventReaderDidReturnForTesting?(.incremental)
@@ -3519,7 +3535,7 @@ final class AppState: ObservableObject, EventQueryReading {
             var successful = false
             defer { finishEventReaderLease(lease, successful: successful) }
             let store = lease.store
-            let snapshot = try await store.exactEventSnapshot(id: uuid)
+            let snapshot = try await readKeepingLeaseOnPressure(&successful) { try await store.exactEventSnapshot(id: uuid) }
             successful = true
             #if DEBUG
             await eventReaderDidReturnForTesting?(.eventLookup)
@@ -3572,7 +3588,7 @@ final class AppState: ObservableObject, EventQueryReading {
         let lease = try beginEventReaderLease()
         var successful = false
         defer { finishEventReaderLease(lease, successful: successful) }
-        let rows = try await lease.store.aggregates(sinceDay: sinceDay, category: category)
+        let rows = try await readKeepingLeaseOnPressure(&successful) { try await lease.store.aggregates(sinceDay: sinceDay, category: category) }
         successful = true
         #if DEBUG
         await eventReaderDidReturnForTesting?(.aggregates)
@@ -3611,8 +3627,8 @@ final class AppState: ObservableObject, EventQueryReading {
             let lease = try beginEventReaderLease()
             var successful = false
             defer { finishEventReaderLease(lease, successful: successful) }
-            let snapshot = try await lease.store.histogramSnapshot(spanSeconds: spanSeconds, stepSeconds: stepSeconds,
-                                                                   endingAt: endingAt, category: category)
+            let snapshot = try await readKeepingLeaseOnPressure(&successful) { try await lease.store.histogramSnapshot(spanSeconds: spanSeconds, stepSeconds: stepSeconds,
+                                                                   endingAt: endingAt, category: category) }
             successful = true // incomplete histogram coverage remains explicitly labelled below
             #if DEBUG
             await eventReaderDidReturnForTesting?(.histogram)

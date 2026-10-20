@@ -369,6 +369,14 @@ final class EventQuerySession: ObservableObject {
                 eventSearchCoverageWarning = String(localized: "events.readInterrupted", defaultValue: "Event read was interrupted. Refresh to retry.")
                 readiness.complete(.deferred, for: readyTicket)
             }
+        } catch let error as EventStoreError where AppState.isTransientReadPressure(error) {
+            // The engine was busy or under memory pressure: retry on the next
+            // poll instead of stopping at a failure.
+            if accepts(generation, epoch: epoch) {
+                retryNeeded = true
+                eventSearchCoverageWarning = String(localized: "events.readInterrupted", defaultValue: "Event read was interrupted. Refresh to retry.")
+                readiness.complete(.deferred, for: readyTicket)
+            }
         } catch {
             guard accepts(generation, epoch: epoch) else { return }
             eventSearchCoverageWarning = String(localized: "events.readFailed", defaultValue: "Couldn’t load events.") + "\n" + error.localizedDescription
