@@ -11,16 +11,24 @@ struct CompiledRuleFileIndexTests {
         try json.write(to: URL(fileURLWithPath: path))
     }
 
-    @Test("rules and sequence rules resolve; an unknown id does not rebuild until the rules change")
+    @Test("every rule directory resolves; an unknown id does not rebuild until the rules change")
     func lookups() throws {
-        let dir = NSTemporaryDirectory() + "maccrab-rule-index-\(UUID().uuidString)"
-        try FileManager.default.createDirectory(atPath: dir + "/sequences", withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let root = NSTemporaryDirectory() + "maccrab-rule-index-\(UUID().uuidString)"
+        let dir = root + "/compiled_rules"
+        for sub in ["/sequences", "/graph", "/auto_generated"] {
+            try FileManager.default.createDirectory(atPath: dir + sub, withIntermediateDirectories: true)
+        }
+        try FileManager.default.createDirectory(atPath: root + "/user_rules", withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
         try write("rule.a", to: dir + "/a.json")
         try write("seq.b", to: dir + "/sequences/b.json")
+        try write("graph.g", to: dir + "/graph/g.json")
+        try write("auto.x", to: dir + "/auto_generated/x.json")
+        try write("user.u", to: root + "/user_rules/u.json")
         let index = CompiledRuleFileIndex()
-        #expect(index.rule(id: "rule.a", in: dir)?["id"] as? String == "rule.a")
-        #expect(index.rule(id: "seq.b", in: dir)?["id"] as? String == "seq.b")
+        for id in ["rule.a", "seq.b", "graph.g", "auto.x", "user.u"] {
+            #expect(index.rule(id: id, in: dir)?["id"] as? String == id, "\(id)")
+        }
 
         // Add a file, then restore the directory's exact mtime: an id with no
         // entry must not rebuild while the directories look unchanged.

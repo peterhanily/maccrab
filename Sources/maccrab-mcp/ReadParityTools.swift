@@ -231,15 +231,22 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     /// Modification times of the rule directories at the last build. A
     /// compile adds, removes or renames files, which changes them.
     private struct Stamp: Equatable {
-        let rules: timespec?
-        let sequences: timespec?
+        let directories: [timespec?]
 
         static func == (a: Stamp, b: Stamp) -> Bool {
-            func same(_ x: timespec?, _ y: timespec?) -> Bool {
-                x?.tv_sec == y?.tv_sec && x?.tv_nsec == y?.tv_nsec
-            }
-            return same(a.rules, b.rules) && same(a.sequences, b.sequences)
+            a.directories.count == b.directories.count
+                && zip(a.directories, b.directories).allSatisfy { x, y in
+                    x?.tv_sec == y?.tv_sec && x?.tv_nsec == y?.tv_nsec
+                }
         }
+    }
+
+    /// Every directory the engine loads compiled rules from: single-event,
+    /// sequence, graph and auto-generated rules, and the user rules beside
+    /// the compiled corpus.
+    private static func ruleDirectories(_ compiledDir: String) -> [String] {
+        [compiledDir, compiledDir + "/sequences", compiledDir + "/graph", compiledDir + "/auto_generated",
+         (compiledDir as NSString).deletingLastPathComponent + "/user_rules"]
     }
 
     private let lock = NSLock()
@@ -277,7 +284,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     private func rebuild(_ compiledDir: String, stamp current: Stamp) {
         var next: [String: String] = [:]
         let fm = FileManager.default
-        for dir in [compiledDir, compiledDir + "/sequences"] {
+        for dir in Self.ruleDirectories(compiledDir) {
             guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
             for file in files.sorted() where file.hasSuffix(".json") && file != "manifest.json" {
                 let path = dir + "/" + file
@@ -298,7 +305,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
             var st = stat()
             return stat(path, &st) == 0 ? st.st_mtimespec : nil
         }
-        return Stamp(rules: modified(compiledDir), sequences: modified(compiledDir + "/sequences"))
+        return Stamp(directories: ruleDirectories(compiledDir).map(modified))
     }
 
     private static func load(_ path: String) -> [String: Any]? {
