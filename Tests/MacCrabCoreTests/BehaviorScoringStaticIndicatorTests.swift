@@ -37,4 +37,25 @@ struct BehaviorScoringStaticIndicatorTests {
         }
         #expect(await scorer.score(forPid: 8, path: "/tmp/agent2") > 3)
     }
+
+    @Test("a slow-burn action long after the static indicators still crosses the threshold")
+    func staticWeightDoesNotDecay() async {
+        let clock = Clock()
+        let scorer = BehaviorScoring(alertThreshold: 10, criticalThreshold: 20, decayHalfLife: 300,
+                                     maxTrackedProcesses: 100, now: { clock.now })
+        _ = await scorer.addIndicator(.init(name: "executed_from_tmp", weight: 4),
+                                      forProcess: 9, path: "/tmp/implant")
+        _ = await scorer.addIndicator(.init(name: "unsigned_binary", weight: 3),
+                                      forProcess: 9, path: "/tmp/implant")
+        // Quiet for an hour apart from events that re-report the static class.
+        for _ in 0..<30 {
+            clock.advance(120)
+            _ = await scorer.addIndicator(.init(name: "executed_from_tmp", weight: 4),
+                                          forProcess: 9, path: "/tmp/implant")
+        }
+        #expect(await scorer.score(forPid: 9, path: "/tmp/implant") == 7)
+        let crossing = await scorer.addIndicator(.init(name: "writes_launch_agent", weight: 5),
+                                                 forProcess: 9, path: "/tmp/implant")
+        #expect(crossing?.totalScore == 12)
+    }
 }

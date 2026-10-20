@@ -75,7 +75,11 @@ public actor BehaviorScoring {
     }
 
     private struct ProcessScore {
+        /// Action indicators, decaying with `decayHalfLife`.
         var rawScore: Double = 0
+        /// Process-static indicators, counted once and not decayed: they hold
+        /// for the process's whole lifetime.
+        var staticScore: Double = 0
         var lastUpdate: Date = Date()
         var indicators: [Indicator] = []
         /// Per-indicator-name last-add timestamp for cooldown suppression.
@@ -83,6 +87,8 @@ public actor BehaviorScoring {
         /// indicator (e.g. `ai_tool_unapproved_network`) on every HTTPS
         /// request can walk itself past the alert threshold trivially.
         var indicatorLastAdd: [String: Date] = [:]
+
+        var totalScore: Double { staticScore + rawScore }
     }
 
     /// Minimum time between counting the same indicator twice for the same
@@ -288,7 +294,9 @@ public actor BehaviorScoring {
     /// the cooldown only rate-limits re-adding: a long-lived process settled
     /// near 4.1x the weight (120 s cooldown, 300 s half-life), so
     /// executed_from_tmp alone crossed the alert threshold after about six
-    /// minutes of ordinary activity, with no new behaviour.
+    /// minutes of ordinary activity, with no new behaviour. They count once
+    /// and do not decay, so a later action by the same process adds to the
+    /// full weight whenever it happens.
     static let oncePerProcessIndicators: Set<String> = [
         "unsigned_binary", "unsigned_dev_tooling", "executed_from_tmp",
         "ai_tool_spawns_shell", "ai_tool_runs_sudo",
@@ -366,7 +374,7 @@ public actor BehaviorScoring {
         // This uses the full alertThreshold (not a fraction) so that the re-alert
         // condition is consistent with the firing condition — no dead zone where
         // new indicators are silently ignored.
-        if entry.rawScore < alertThreshold {
+        if entry.totalScore < alertThreshold {
             alerted.remove(key)
             abandonPendingThreshold(for: key)
         }
@@ -404,7 +412,11 @@ public actor BehaviorScoring {
         }
 
         // Add the new indicator
-        entry.rawScore += effectiveWeight
+        if Self.oncePerProcessIndicators.contains(indicator.name) {
+            entry.staticScore += effectiveWeight
+        } else {
+            entry.rawScore += effectiveWeight
+        }
         entry.lastUpdate = timestamp
         entry.indicators.append(indicator)
 
@@ -430,10 +442,10 @@ public actor BehaviorScoring {
             return pending
         }
 
-        if score.rawScore >= alertThreshold && !alerted.contains(key) {
+        if score.totalScore >= alertThreshold && !alerted.contains(key) {
 
             let severity: Severity
-            if score.rawScore >= criticalThreshold {
+            if score.totalScore >= criticalThreshold {
                 severity = .critical
             } else {
                 severity = .high
@@ -449,7 +461,7 @@ public actor BehaviorScoring {
                 deliveryToken: nextThresholdToken,
                 processPath: path,
                 pid: pid,
-                totalScore: score.rawScore,
+                totalScore: score.totalScore,
                 indicators: score.indicators.map { ($0.name, $0.weight, $0.detail) },
                 severity: severity,
                 createdAt: timestamp
@@ -459,7 +471,7 @@ public actor BehaviorScoring {
             thresholdTokenToProcess[result.deliveryToken] = key
             thresholdCrossingsTotal &+= 1
 
-            logger.warning("Behavioral score threshold crossed: \(path) (PID \(pid)) score=\(score.rawScore)")
+            logger.warning("Behavioral score threshold crossed: \(path) (PID \(pid)) score=\(score.totalScore)")
             return result
         }
 
@@ -653,7 +665,7 @@ public actor BehaviorScoring {
     private func decayedScore(_ score: ProcessScore, at timestamp: Date) -> Double {
         // Match applyDecay: a backward wall-clock correction cannot add score.
         let elapsed = max(0, timestamp.timeIntervalSince(score.lastUpdate))
-        return score.rawScore * pow(0.5, elapsed / decayHalfLife)
+        return score.staticScore + score.rawScore * pow(0.5, elapsed / decayHalfLife)
     }
 
     private func evictIfNeeded(at timestamp: Date) {
