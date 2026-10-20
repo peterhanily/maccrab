@@ -54,6 +54,47 @@ public enum ExactSubstringSearch {
         return verdict ?? nil
     }
 
+    /// `needles.contains { contains(haystack, $0) }`, with the haystack's
+    /// plain-ASCII scan done once rather than once per needle. A rule
+    /// predicate with many values used to re-scan the same field each time.
+    public static func containsAny(_ haystack: String, _ needles: [String]) -> Bool {
+        guard !needles.isEmpty else { return false }
+        let plainHaystack = haystack.utf8.withContiguousStorageIfAvailable {
+            isPlainASCII($0)
+        } ?? false
+        for needle in needles {
+            if plainHaystack, let verdict = plainNeedleContains(haystack, needle) {
+                if verdict { return true }
+            } else if haystack.contains(needle) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// `plainASCIIContains` for a haystack already proven plain ASCII.
+    private static func plainNeedleContains(_ haystack: String, _ needle: String) -> Bool? {
+        guard !needle.isEmpty else { return nil }
+        let verdict = needle.utf8.withContiguousStorageIfAvailable { needleBytes -> Bool? in
+            guard isPlainASCII(needleBytes) else { return nil }
+            let inner = haystack.utf8.withContiguousStorageIfAvailable { haystackBytes -> Bool in
+                guard needleBytes.count <= haystackBytes.count,
+                      let haystackBase = haystackBytes.baseAddress,
+                      let needleBase = needleBytes.baseAddress else {
+                    return false
+                }
+                return memmem(
+                    haystackBase,
+                    haystackBytes.count,
+                    needleBase,
+                    needleBytes.count
+                ) != nil
+            }
+            return inner
+        }
+        return verdict ?? nil
+    }
+
     /// No byte above 0x7F and no carriage return: one byte per Character.
     @inline(__always)
     static func isPlainASCII(_ bytes: UnsafeBufferPointer<UInt8>) -> Bool {

@@ -112,4 +112,35 @@ struct ExactSubstringSearchTests {
         #expect(matches > 15_000)
         #expect(matches < 60_000)
     }
+
+    @Test("containsAny matches per-needle contains for many needles, hazards included")
+    func containsAnyParity() {
+        var g = Generator(state: 0x5EED_2026_1020_0002)
+        var anyTrue = 0
+        for iteration in 0..<20_000 {
+            let hazards = iteration % 3 != 0
+            let haystack = randomString(&g, hazards: hazards, maxPieces: 18)
+            var needles: [String] = []
+            for _ in 0..<(1 + g.below(6)) {
+                if g.below(3) == 0, !haystack.isEmpty {
+                    let scalars = Array(haystack.unicodeScalars)
+                    let start = g.below(scalars.count)
+                    let end = start + g.below(min(8, scalars.count - start) + 1)
+                    var view = String.UnicodeScalarView()
+                    view.append(contentsOf: scalars[start..<end])
+                    needles.append(String(view))
+                } else {
+                    needles.append(randomString(&g, hazards: hazards, maxPieces: 3))
+                }
+            }
+            let expected = needles.contains { haystack.contains($0) }
+            #expect(ExactSubstringSearch.containsAny(haystack, needles) == expected,
+                    "\(haystack.debugDescription) / \(needles.map(\.debugDescription))")
+            if expected { anyTrue += 1 }
+        }
+        #expect(anyTrue > 2_000 && anyTrue < 20_000)
+        #expect(!ExactSubstringSearch.containsAny("abc", []))
+        #expect(!ExactSubstringSearch.containsAny("abc", [""]))
+        #expect(ExactSubstringSearch.containsAny("a\r\nb", ["\n"]) == "a\r\nb".contains("\n"))
+    }
 }

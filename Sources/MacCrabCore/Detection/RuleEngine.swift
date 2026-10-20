@@ -1499,7 +1499,7 @@ public actor RuleEngine {
             return lowercasedValues.contains { fieldLower == $0 }
 
         case .contains:
-            return lowercasedValues.contains { ExactSubstringSearch.contains(fieldLower, $0) }
+            return ExactSubstringSearch.containsAny(fieldLower, lowercasedValues)
 
         case .startswith:
             return lowercasedValues.contains { fieldLower.hasPrefix($0) }
