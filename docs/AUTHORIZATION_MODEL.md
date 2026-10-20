@@ -118,7 +118,7 @@ line. The mutating verbs:
 | `builtin-rule-setting-*` | Enables/disables a built-in rule or overrides its severity | id must start with `maccrab.` |
 | `set-daemon-config-*` | Sets one **whitelisted** `daemon_config.json` key | Only keys in an allow-list (thresholds, poll intervals, ES subscription toggles, etc.); value type-checked; effective on next config reload/restart |
 | `llm-config-*` | Updates LLM backend config (non-secret keys only) | Non-loopback endpoints **default-denied** unless `allow_remote_endpoint=true`; only the newest authorized request applies; written `0600` root-owned |
-| `set-agent-capabilities-*` | Sets the human's MCP agent capability grants (`config` / `authoring` / `response`) | Engine is the **only** writer of `mcp_capabilities.json` (root-owned `0644`), so an agent running as the console user cannot grant *itself* a tier |
+| `set-agent-capabilities-*` | Sets the human's MCP agent capability grants (`config` / `authoring` / `response`) | Engine is the **only** writer of `mcp_capabilities.json` (root-owned `0644`), so an agent running as the console user cannot grant *itself* a tier. Requests here can only revoke; grants are read only from the root-only `<support-dir>/inbox-root` (`0700`), which `sudo maccrabctl agent-capabilities` writes |
 | `record-clipboard-*` | Records a clipboard payload captured in user context (ClickFix correlation) | |
 | `flush-request-*` | Forces a storage size-cap sweep | Processed last (slow) |
 
@@ -131,7 +131,10 @@ Notes on the sharper edges:
   (a strict loopback validator rejects tricks like `127.0.0.1.evil.com`).
 - **`set-agent-capabilities`** is the only path that grants MCP agent power, and
   the engine — not the agent — owns the grants file. The MCP server trusts that
-  file *solely because it is root-owned*.
+  file *solely because it is root-owned*. A grant is honoured only from the
+  root-only `inbox-root` directory: a root-owned file in the `1777` inbox does
+  not prove root wrote it, since any user can hard-link a root-owned file there,
+  including a saved copy of an earlier grants file.
 
 ---
 

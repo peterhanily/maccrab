@@ -129,8 +129,10 @@ private func printAgentCapabilitiesUsage() {
 
 private let installedCapabilitiesPath =
     "/Library/Application Support/MacCrab/mcp_capabilities.json"
-private let installedInboxPath =
-    "/Library/Application Support/MacCrab/inbox"
+/// Root-only: the engine accepts capability grants only from here, since any
+/// user can place a root-owned file in the 1777 inbox by hard-linking one.
+private let installedRootInboxPath =
+    "/Library/Application Support/MacCrab/inbox-root"
 private let maximumCapabilitiesBytes: off_t = 64 * 1024
 
 /// Read only a regular, singly-linked, root-owned, non-writable-by-others file.
@@ -212,15 +214,15 @@ private func queueRootOwnedAgentCapabilities(_ document: AgentCapabilitiesDocume
     guard geteuid() == 0 else {
         throw AgentCapabilitiesCLIError.invalidState("root authorization is required")
     }
-    try validateOrCreateInstalledInbox()
+    try validateOrCreateInstalledRootInbox()
 
     let payload = try JSONSerialization.data(
         withJSONObject: document.dictionary,
         options: [.sortedKeys]
     )
     let token = "\(getpid())-\(UUID().uuidString)"
-    let temporaryPath = installedInboxPath + "/.set-agent-capabilities-\(token).tmp"
-    let finalPath = installedInboxPath + "/set-agent-capabilities-\(token).json"
+    let temporaryPath = installedRootInboxPath + "/.set-agent-capabilities-\(token).tmp"
+    let finalPath = installedRootInboxPath + "/set-agent-capabilities-\(token).json"
     let fd = open(
         temporaryPath,
         O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
@@ -260,35 +262,30 @@ private func queueRootOwnedAgentCapabilities(_ document: AgentCapabilitiesDocume
     writeSucceeded = true
 }
 
-private func validateOrCreateInstalledInbox() throws {
+private func validateOrCreateInstalledRootInbox() throws {
     var info = stat()
-    if lstat(installedInboxPath, &info) != 0 {
+    if lstat(installedRootInboxPath, &info) != 0 {
         guard errno == ENOENT else {
             throw AgentCapabilitiesCLIError.io(
-                "cannot inspect capability inbox: errno \(errno)")
+                "cannot inspect the root capability inbox: errno \(errno)")
         }
-        try FileManager.default.createDirectory(
-            atPath: installedInboxPath,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o1777]
-        )
-        guard lstat(installedInboxPath, &info) == 0 else {
+        guard mkdir(installedRootInboxPath, 0o700) == 0 || errno == EEXIST,
+              lstat(installedRootInboxPath, &info) == 0 else {
             throw AgentCapabilitiesCLIError.io(
-                "cannot verify newly-created capability inbox: errno \(errno)")
+                "cannot create the root capability inbox: errno \(errno)")
         }
     }
     guard (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == 0 else {
         throw AgentCapabilitiesCLIError.unsafePath(
-            "refusing capability inbox that is not a root-owned directory: \(installedInboxPath)")
+            "refusing capability inbox that is not a root-owned directory: \(installedRootInboxPath)")
     }
-    guard chmod(installedInboxPath, 0o1777) == 0,
-          lstat(installedInboxPath, &info) == 0,
+    guard chmod(installedRootInboxPath, 0o700) == 0,
+          lstat(installedRootInboxPath, &info) == 0,
           (info.st_mode & S_IFMT) == S_IFDIR,
           info.st_uid == 0,
-          (info.st_mode & S_ISVTX) != 0,
-          (info.st_mode & S_IWOTH) != 0
+          (info.st_mode & 0o7777) == 0o700
     else {
         throw AgentCapabilitiesCLIError.unsafePath(
-            "cannot establish the root-owned sticky capability inbox")
+            "cannot establish the root-only capability inbox")
     }
 }

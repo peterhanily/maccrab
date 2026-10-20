@@ -1948,6 +1948,20 @@ enum DaemonTimers {
         let examinedEntryCount: Int
     }
 
+    /// Creates `path` as a 0700 directory owned by this process's effective
+    /// uid and verifies it without following a symlink. False leaves the
+    /// root channel closed.
+    static func ensureRootInboxDirectory(at path: String) -> Bool {
+        if mkdir(path, 0o700) != 0, errno != EEXIST { return false }
+        var st = stat()
+        guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR,
+              st.st_uid == geteuid() else { return false }
+        if (st.st_mode & 0o7777) != 0o700 {
+            guard chmod(path, 0o700) == 0 else { return false }
+        }
+        return true
+    }
+
     /// One source of truth for the names the poller will claim. The read-cap
     /// policy below and the partitioning in the timer both derive from this
     /// list, preventing a newly added request shape from silently bypassing the
@@ -5607,6 +5621,14 @@ enum DaemonTimers {
         } catch {
             print("[inbox] failed to ensure inbox dir at \(inboxDir): \(error.localizedDescription)")
         }
+        // Capability grants arrive only through this root-only directory: no
+        // other user can create a request in it or link a file into it, as
+        // they can into the 1777 inbox. If it cannot be established, grants
+        // stay unavailable and revokes still work.
+        let rootInboxDir = state.supportDir + "/inbox-root"
+        if !ensureRootInboxDirectory(at: rootInboxDir) {
+            print("[inbox] root-only request directory unavailable at \(rootInboxDir); capability grants are disabled")
+        }
 
         let inboxScanner = InboxDirectoryScanner(path: inboxDir)
         let inboxPoller = DispatchSource.makeTimerSource(queue: .global())
@@ -5656,6 +5678,17 @@ enum DaemonTimers {
                     maxEntries: maxInboxDrainPerTick
                 )
                 let files = scan.requestNames
+                // Root-authored capability changes. Few and root-only, so a
+                // bounded listing is enough; the directory is re-verified
+                // each tick.
+                if ensureRootInboxDirectory(at: rootInboxDir) {
+                    let rootRequests = ((try? FileManager.default.contentsOfDirectory(atPath: rootInboxDir)) ?? [])
+                        .filter { $0.hasPrefix("set-agent-capabilities-") && $0.hasSuffix(".json") }
+                        .sorted()
+                        .prefix(64)
+                    await handleSetAgentCapabilitiesRequests(
+                        Array(rootRequests), inboxDir: rootInboxDir, state: state, rootChannel: true)
+                }
                 // A previous SIGHUP may have been refused while runtime work
                 // capacity was full. Retry accepted requests on the existing
                 // poll tick, even after their inbox files have been consumed.
@@ -5690,9 +5723,9 @@ enum DaemonTimers {
                 let removeRuleReqs = files.filter { $0.hasPrefix("remove-rule-") && $0.hasSuffix(".json") }
                 // Agent-control state changes. Root owns
                 // mcp_capabilities.json, but ownership of a file in this 1777
-                // inbox does not prove dashboard use or human presence. The
-                // handler therefore permits non-root revokes only; grants
-                // require a root-owned request.
+                // inbox does not prove dashboard use, human presence, or even
+                // that root wrote it. Requests here can only revoke; grants
+                // arrive through the root-only inbox-root directory above.
                 let agentCapReqs = files.filter { $0.hasPrefix("set-agent-capabilities-") && $0.hasSuffix(".json") }
                 // v1.21.4 (audit): the dashboard's "Clear Now" retention button
                 // and the Agent-Traces receiver toggle drop these — the app
@@ -6512,7 +6545,8 @@ enum DaemonTimers {
     static func evaluateAgentCapabilityRequest(
         fileOwnerUID: Int,
         payload: [String: Any],
-        previousGrants: [String: Bool]
+        previousGrants: [String: Bool],
+        rootChannel: Bool = false
     ) -> AgentCapabilityRequestDecision {
         let names = ["config", "authoring", "response"]
         let grants = Dictionary(uniqueKeysWithValues: names.map {
@@ -6522,7 +6556,11 @@ enum DaemonTimers {
             (grants[$0] ?? false) && !(previousGrants[$0] ?? false)
         }
 
-        guard fileOwnerUID == 0 || newlyGranted.isEmpty else {
+        // A root-owned file in the 1777 inbox does not prove root wrote a
+        // request: any user can hard-link a root-owned inode there, such as
+        // a saved copy of an earlier mcp_capabilities.json, whose shape is a
+        // valid request. Grants come only through the root-only channel.
+        guard (rootChannel && fileOwnerUID == 0) || newlyGranted.isEmpty else {
             return .rejectNonRootGrant(attempted: newlyGranted)
         }
         return .apply(grants: grants, newlyGranted: newlyGranted)
@@ -6534,7 +6572,7 @@ enum DaemonTimers {
     /// necessary but is not authorization to GRANT a capability; the policy
     /// above restricts false -> true transitions to root-owned requests.
     private static func handleSetAgentCapabilitiesRequests(
-        _ names: [String], inboxDir: String, state: DaemonState
+        _ names: [String], inboxDir: String, state: DaemonState, rootChannel: Bool = false
     ) async {
         guard !names.isEmpty else { return }
         let fm = FileManager.default
@@ -6555,7 +6593,7 @@ enum DaemonTimers {
             let prevGrants: [String: Bool] = (try? Data(contentsOf: URL(fileURLWithPath: capPath)))
                 .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Bool] } ?? [:]
             let decision = evaluateAgentCapabilityRequest(
-                fileOwnerUID: uid, payload: json, previousGrants: prevGrants
+                fileOwnerUID: uid, payload: json, previousGrants: prevGrants, rootChannel: rootChannel
             )
             guard case let .apply(grants, newlyGranted) = decision else {
                 if case let .rejectNonRootGrant(attempted) = decision {
