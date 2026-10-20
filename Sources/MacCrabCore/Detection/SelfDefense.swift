@@ -887,9 +887,13 @@ public actor SelfDefense {
     /// process, eliminating that subprocess flood while producing a
     /// byte-identical hex digest.
     private nonisolated static func sha256(fileAt path: String) -> String? {
-        guard FileManager.default.fileExists(atPath: path) else { return nil }
-        return FileHasher.computeSHA256(path: path)
+        digestCache.sha256(of: path) { FileHasher.computeSHA256(path: $0) }
     }
+
+    /// The 15 s integrity tick re-hashed the engine binary and every rule
+    /// file (30-100 ms each tick, for the life of the daemon); a digest is
+    /// now reused until the file's identity changes.
+    private nonisolated static let digestCache = FileIdentityDigestCache()
 
     // MARK: - Self-update detection (v1.12.1 FP fix)
 
