@@ -61,6 +61,10 @@ public actor FileHasher {
     private var cache: [CacheKey: String] = [:]
     /// Front of the list is most recently used.
     private var lru: [CacheKey] = []
+    /// The hash in flight for each (path, identity). The actor suspends
+    /// while hashing, so N processes exec'ing one new binary would otherwise
+    /// read it N times; later misses for the same bytes wait for this one.
+    private var inFlight: [CacheKey: Task<String?, Never>] = [:]
     private var statsStore = Stats()
 
     // MARK: - Init
@@ -107,11 +111,21 @@ public actor FileHasher {
             return cached
         }
 
+        if let pending = inFlight[key] {
+            let digest = await pending.value
+            if digest == nil { statsStore.errors += 1 } else { statsStore.hits += 1 }
+            return digest
+        }
+
         // Cache miss: compute off the actor and the cooperative pool. Up to
         // 256 MiB is read; concurrent misses for other files proceed.
-        guard let digest = await HeavyEnrichmentBlockingWork.run({
-            Self.computeSHA256(path: path)
-        }) else {
+        let task = Task<String?, Never> {
+            await HeavyEnrichmentBlockingWork.run({ Self.computeSHA256(path: path) })
+        }
+        inFlight[key] = task
+        let computed = await task.value
+        inFlight.removeValue(forKey: key)
+        guard let digest = computed else {
             statsStore.errors += 1
             return nil
         }
@@ -170,7 +184,12 @@ public actor FileHasher {
     }
 
     private func insert(_ key: CacheKey, digest: String) {
-        cache[key] = digest
+        // Idempotent: a duplicate key in `lru` would later evict the live
+        // entry and leave the other copy dangling.
+        if cache.updateValue(digest, forKey: key) != nil {
+            touch(key)
+            return
+        }
         lru.insert(key, at: 0)
         while lru.count > capacity {
             let evicted = lru.removeLast()

@@ -54,4 +54,27 @@ struct SuppressionScopeWiringTests {
         let rewritten = try #require(await hasher.hash(path: path))
         #expect(rewritten != original)
     }
+
+    @Test("concurrent misses for one file hash it once and leave one LRU entry")
+    func concurrentMissesHashOnce() async throws {
+        let dir = NSTemporaryDirectory() + "maccrab_hash_join_\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let a = dir + "/a", b = dir + "/b"
+        try Data(repeating: 0x41, count: 4 << 20).write(to: URL(fileURLWithPath: a))
+        try Data(repeating: 0x42, count: 4096).write(to: URL(fileURLWithPath: b))
+        let hasher = FileHasher(capacity: 2)
+        let digests = await withTaskGroup(of: String?.self) { group in
+            for _ in 0..<8 { group.addTask { await hasher.hash(path: a) } }
+            var all: [String?] = []
+            for await digest in group { all.append(digest) }
+            return all
+        }
+        #expect(Set(digests).count == 1 && digests.allSatisfy { $0 != nil })
+        #expect(await hasher.stats().misses == 1)
+        _ = await hasher.hash(path: b)
+        _ = await hasher.hash(path: a)
+        #expect(await hasher.stats().misses == 2, "a is still cached after b joins a two-entry cache")
+        #expect(await hasher.cacheCount() == 2)
+    }
 }
