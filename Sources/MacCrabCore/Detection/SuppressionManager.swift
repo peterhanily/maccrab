@@ -284,14 +284,6 @@ public actor SuppressionManager {
 
     // MARK: - Queries
 
-    /// Returns true iff the given alert+event pair matches any unexpired entry.
-    /// Respects TTL — entries whose expiresAt has passed never match.
-    /// Whether any rule+hash entry exists for `ruleId`, so a caller can look
-    /// up a digest only when one could match.
-    public func hasHashScope(ruleId: String) -> Bool {
-        !(byRuleHash[ruleId]?.isEmpty ?? true)
-    }
-
     /// This host's name, as `maccrabctl allow --host` names it. Read once with
     /// gethostname(2): `ProcessInfo.hostName` can block on a reverse lookup.
     public static let localHostName: String = {
@@ -300,6 +292,8 @@ public actor SuppressionManager {
         return String(cString: buffer)
     }()
 
+    /// Returns true iff the given alert+event pair matches any unexpired entry.
+    /// Respects TTL — entries whose expiresAt has passed never match.
     public func isSuppressed(ruleId: String, processPath: String) -> Bool {
         matchingSuppression(ruleId: ruleId, processPath: processPath,
                             processSHA256: nil, hostname: nil) != nil

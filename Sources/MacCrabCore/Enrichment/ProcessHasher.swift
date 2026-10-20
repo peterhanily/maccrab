@@ -71,11 +71,6 @@ public actor ProcessHasher {
         await fileHasher.hash(path: path)
     }
 
-    /// The cached SHA-256 for the bytes now at `path`; never hashes on a miss.
-    public func cachedSHA256(path: String) async -> String? {
-        await fileHasher.cachedHash(path: path)
-    }
-
     /// Underlying FileHasher (for sharing across collectors).
     public func underlyingFileHasher() -> FileHasher { fileHasher }
 }

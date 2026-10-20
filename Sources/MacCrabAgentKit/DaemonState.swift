@@ -1657,17 +1657,16 @@ private func recoverEssentialSourceOrStayDegraded(
 
 extension DaemonState {
     /// Suppression check across every scope: rule, path, rule+path,
-    /// rule+hash and host. A digest is looked up, never computed, and only
-    /// when a rule+hash entry for this rule could match.
+    /// rule+hash and host. A rule+hash entry matches only the SHA-256 the
+    /// event carries for its own process. A digest looked up by path is of
+    /// whatever file is there now: a payload could rename an allow-listed
+    /// binary onto its own path, run it once to cache that digest, and have
+    /// its own later events suppressed as the allow-listed binary.
     func isSuppressed(_ match: RuleMatch, event: Event) async -> Bool {
-        var sha256 = event.process.hashes?.sha256
-        if sha256 == nil, await suppressionManager.hasHashScope(ruleId: match.ruleId) {
-            sha256 = await enricher.cachedExecutableSHA256(path: event.process.executable)
-        }
-        return await suppressionManager.isSuppressed(
+        await suppressionManager.isSuppressed(
             match: match,
             processPath: event.process.executable,
-            processSHA256: sha256,
+            processSHA256: event.process.hashes?.sha256,
             hostname: SuppressionManager.localHostName
         )
     }

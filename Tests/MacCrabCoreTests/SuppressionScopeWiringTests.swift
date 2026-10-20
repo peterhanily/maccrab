@@ -15,16 +15,13 @@ struct SuppressionScopeWiringTests {
     private let match = RuleMatch(ruleId: "rule.x", ruleName: "X", severity: .high,
                                   description: "", mitreTechniques: [], tags: [])
 
-    @Test("a rule+hash entry applies to the digest and reports its presence")
+    @Test("a rule+hash entry applies to the digest")
     func hashScope() async throws {
         let (mgr, dir) = try manager()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let digest = String(repeating: "ab", count: 32)
-        #expect(!(await mgr.hasHashScope(ruleId: "rule.x")))
         _ = await mgr.add(Suppression(scope: .ruleHash(ruleId: "rule.x", sha256: digest),
                                       source: .cli, reason: "test"))
-        #expect(await mgr.hasHashScope(ruleId: "rule.x"))
-        #expect(!(await mgr.hasHashScope(ruleId: "rule.y")))
         #expect(await mgr.isSuppressed(match: match, processPath: "/any", processSHA256: digest))
         #expect(!(await mgr.isSuppressed(match: match, processPath: "/any", processSHA256: nil)))
     }
@@ -41,22 +38,19 @@ struct SuppressionScopeWiringTests {
         #expect(!(await mgr.isSuppressed(match: match, processPath: "/p", hostname: "")))
     }
 
-    @Test("the hasher serves a cached digest without hashing, and a restored-mtime rewrite misses")
+    @Test("a same-size rewrite with a restored mtime is hashed again, not served from the cache")
     func hasherCacheIdentity() async throws {
         let path = NSTemporaryDirectory() + "maccrab_hash_\(UUID().uuidString)"
         defer { try? FileManager.default.removeItem(atPath: path) }
         try Data(repeating: 0x41, count: 4096).write(to: URL(fileURLWithPath: path))
         let hasher = FileHasher()
-        #expect(await hasher.cachedHash(path: path) == nil)
         let original = try #require(await hasher.hash(path: path))
-        #expect(await hasher.cachedHash(path: path) == original)
 
         let mtime = try FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date
         let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
         try handle.write(contentsOf: Data(repeating: 0x42, count: 4096))
         try handle.close()
         try FileManager.default.setAttributes([.modificationDate: try #require(mtime)], ofItemAtPath: path)
-        #expect(await hasher.cachedHash(path: path) == nil)
         let rewritten = try #require(await hasher.hash(path: path))
         #expect(rewritten != original)
     }

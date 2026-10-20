@@ -124,16 +124,6 @@ public actor FileHasher {
         return digest
     }
 
-    /// The cached digest for the bytes now at `path`, without hashing on a
-    /// miss. For hot paths that may use a digest but must not compute one.
-    public func cachedHash(path: String) -> String? {
-        guard let key = Self.cacheKey(path: path), let cached = cache[key] else {
-            return nil
-        }
-        touch(key)
-        return cached
-    }
-
     private static func cacheKey(path: String) -> CacheKey? {
         var st = stat()
         guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
