@@ -263,7 +263,13 @@ public actor OTLPOutput: Output {
             attrs.append(otelAttribute(key: "event.category", value: event.eventCategory.rawValue))
             attrs.append(otelAttribute(key: "event.action", value: event.eventAction))
             if !event.process.commandLine.isEmpty {
-                attrs.append(otelAttribute(key: "process.command_line", value: event.process.commandLine))
+                attrs.append(otelAttribute(
+                    key: "process.command_line",
+                    value: CommandSanitizer.sanitize(
+                        commandLine: event.process.commandLine,
+                        arguments: event.process.args
+                    )
+                ))
             }
             if let net = event.network {
                 attrs.append(otelAttribute(key: "net.peer.ip", value: net.destinationIp))

@@ -171,7 +171,8 @@ struct AlertTriggerRepresentationTests {
         let source = event(
             commandLine: "/usr/bin/fixture --benign different-capture",
             args: [
-                "/usr/bin/fixture",
+                // sshpass takes its password through a separated `-p`.
+                "/usr/local/bin/sshpass",
                 "safe-before",
                 "--password", "plaincredential",
                 "safe-middle",

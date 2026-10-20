@@ -47,6 +47,49 @@ struct CommandLineRedactionParityTests {
         #expect(sudo.commandLine == "/usr/bin/sudo -u alice id")
     }
 
+    @Test("-p and -P values stay visible unless the program takes a password there")
+    func portAndPidValuesStayVisible() throws {
+        for argv in [
+            ["/usr/bin/ssh", "-p", "2222", "host"],
+            ["/usr/bin/nc", "-l", "-p", "4444"],
+            ["/usr/sbin/lsof", "-p", "123"],
+            ["/usr/local/bin/docker", "run", "-p", "8080:80", "image"],
+            ["/usr/bin/scp", "-P", "2222", "f", "h:"],
+            ["/usr/bin/xargs", "-P", "4", "echo"],
+            ["/bin/mkdir", "-p", "build/x"],
+            ["/usr/bin/find", "/", "-perm", "-4000", "-print"],
+            ["/usr/local/bin/mysql", "-h", "db", "-P", "3306"],
+        ] {
+            let process = try stored(argv)
+            #expect(process.commandLine == argv.joined(separator: " "), "\(process.commandLine)")
+            #expect(process.args == argv)
+        }
+    }
+
+    @Test("password -p forms are redacted after a password program, through wrappers too")
+    func passwordPForms() throws {
+        for (argv, secret) in [
+            (["/usr/local/bin/mysql", "-uroot", "-pS3cret", "db"], "S3cret"),
+            (["/usr/bin/sudo", "mysql", "-pS3cret"], "S3cret"),
+            (["/usr/local/bin/kubectl", "exec", "pod", "--", "mysql", "-pS3cret"], "S3cret"),
+            (["/usr/local/bin/mongosh", "-u", "admin", "-p", "S3cret"], "S3cret"),
+            (["/usr/bin/zip", "-P", "S3cret", "out.zip", "f"], "S3cret"),
+            (["/opt/homebrew/bin/7z", "a", "-pS3cret", "out.7z", "f"], "S3cret"),
+            (["/usr/local/bin/sshpass", "-p", "/S3cret", "ssh", "host"], "/S3cret"),
+            (["/usr/bin/curl", "-u", "admin:123456", "https://x.invalid"], "123456"),
+            (["/usr/bin/curl", "-p", "-u", "alice:wonderland", "https://x.invalid"], "wonderland"),
+        ] {
+            let process = try stored(argv)
+            #expect(!process.commandLine.contains(secret), "\(process.commandLine)")
+            #expect(!process.args.contains { $0.contains(secret) }, "\(process.args)")
+        }
+        // `mysql -p` prompts for the password; the next option is not its value.
+        let prompt = try stored(["/usr/local/bin/mysql", "-p", "-u", "root"])
+        #expect(prompt.args == ["/usr/local/bin/mysql", "-p", "-u", "root"])
+        #expect(CommandSanitizer.sanitize("curl -u admin:123456 https://x.invalid").contains("admin:[REDACTED]"))
+        #expect(CommandSanitizer.sanitize("docker run -u 501:20 image").contains("501:20"))
+    }
+
     @Test("bare strings without argv still cover sshpass, -u pairs and pass:")
     func bareStrings() {
         for (line, secret) in [

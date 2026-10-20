@@ -17,7 +17,7 @@ enum CommandSanitizer {
         "--password", "--passwd", "--secret", "--token", "--auth",
         "--credential", "--api-key", "--api_key", "--apikey", "--key",
         "--access-key", "--access_key", "--secret-key", "--secret_key",
-        "--private-key", "--private_key", "-p",
+        "--private-key", "--private_key",
     ]
 
     // MARK: - Pre-compiled Patterns
@@ -71,9 +71,10 @@ enum CommandSanitizer {
     )
 
     /// `user:password` after curl/wget-style `-u`, `--user` or `--proxy-user`.
-    /// A numeric remainder is a uid:gid pair (`docker run -u 501:20`).
+    /// Only an all-numeric pair is a uid:gid (`docker run -u 501:20`); a
+    /// numeric password after a named user (`-u admin:123456`) is redacted.
     private static let userPasswordFlag = try! NSRegularExpression(
-        pattern: #"((?:^|\s)(?:--user|--proxy-user|-u)(?:\s+|=)?['"]?[^\s:'"]+:)(?![0-9]+['"]?(?:\s|$))([^\s'"]+)"#,
+        pattern: #"((?:^|\s)(?:--user|--proxy-user|-u)(?:\s+|=)?['"]?(?![0-9]+:[0-9]+['"]?(?:\s|$))[^\s:'"]+:)([^\s'"]+)"#,
         options: []
     )
 
@@ -238,16 +239,37 @@ enum CommandSanitizer {
     /// from argv, or stores a sensitive flag and its value in separate array
     /// elements.
     static func sanitize(arguments: [String]) -> [String] {
+        sanitize(arguments: arguments, leaf: sanitize)
+    }
+
+    /// The argv walk with its per-token redactor as a parameter, so the memo
+    /// parity test can run the same walk over the uncached suite.
+    static func sanitize(arguments: [String], leaf: (String) -> String) -> [String] {
         var result: [String] = []
         result.reserveCapacity(arguments.count)
         var redactNext = false
-        var redactNextFlag = ""
+        var redactNextIsPasswordP = false
         var userPairNext = false
         var optionsEnded = false
+        // Whether a program seen so far takes its password through `-p` or
+        // `-P`. A wrapper (`sudo`, `docker exec db`) puts it after argv[0].
+        var lowerPIsPassword = false
+        var upperPIsPassword = false
 
         for argument in arguments {
+            if !argument.hasPrefix("-"), !redactNext, !userPairNext {
+                let program = programName(argument)
+                if passwordLowerPPrograms.contains(program) {
+                    lowerPIsPassword = true
+                    optionsEnded = false  // a new command's argv: `kubectl exec pod -- mysql`
+                }
+                if passwordUpperPPrograms.contains(program) {
+                    upperPIsPassword = true
+                    optionsEnded = false
+                }
+            }
             if optionsEnded {
-                result.append(sanitize(argument))
+                result.append(leaf(argument))
                 continue
             }
             if argument == "--" {
@@ -257,28 +279,6 @@ enum CommandSanitizer {
                 continue
             }
 
-            let lowered = argument.lowercased()
-            // In argv, unlike a reconstructed command-line string, token
-            // boundaries make MySQL's compact `-pVALUE` form unambiguous as a
-            // single option/value unit. Conservatively redact every non-empty
-            // compact `-p` token, including alphabetic passwords. This may hide
-            // an unrelated one-dash option such as `-path`; at-rest credential
-            // safety wins over preserving that uncommon spelling. `--` above
-            // remains the explicit escape hatch for positional arguments.
-            if lowered.hasPrefix("-p"),
-               !lowered.hasPrefix("--"),
-               argument.count > 2 {
-                result.append("\(argument.prefix(2))[REDACTED]")
-                redactNext = false
-                continue
-            }
-            let flag = lowered.split(
-                separator: "=",
-                maxSplits: 1,
-                omittingEmptySubsequences: false
-            ).first.map(String.init) ?? lowered
-            let isSensitiveFlag = sensitiveArgumentFlags.contains(flag)
-
             if userPairNext {
                 userPairNext = false
                 if let redacted = redactingUserPassword(argument) {
@@ -286,15 +286,37 @@ enum CommandSanitizer {
                     continue
                 }
             }
+            let lowered = argument.lowercased()
+            let flag = lowered.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            ).first.map(String.init) ?? lowered
+            let isSensitiveFlag = sensitiveArgumentFlags.contains(flag)
+
             if redactNext, !isSensitiveFlag {
                 redactNext = false
-                // A standalone `-p` is a password for mysql-style tools but a
-                // flag for mkdir, cp and install, whose next token is a path.
-                // No password-taking tool documents a path-shaped value.
-                if redactNextFlag == "-p", isPathShaped(argument) {
-                    result.append(sanitize(argument))
-                } else {
+                // An option after a password `-p` is the next option, not the
+                // value: `mysql -p -u root` prompts for the password.
+                if !(redactNextIsPasswordP && argument.hasPrefix("-")) {
                     result.append("[REDACTED]")
+                    continue
+                }
+            }
+
+            // `-p` / `-P` take a password only for the programs above. For
+            // everything else they are a port (ssh, nc, docker), a pid (lsof),
+            // parents (mkdir) or a find predicate (-perm, -print), which the
+            // stored command line keeps for hunting.
+            if !argument.hasPrefix("--"),
+               (lowerPIsPassword && argument.hasPrefix("-p"))
+                || (upperPIsPassword && argument.hasPrefix("-P")) {
+                if argument.count > 2 {
+                    result.append("\(argument.prefix(2))[REDACTED]")
+                } else {
+                    result.append(argument)
+                    redactNext = true
+                    redactNextIsPasswordP = true
                 }
                 continue
             }
@@ -318,11 +340,11 @@ enum CommandSanitizer {
                     // token, preserving deterministic option structure.
                     result.append(argument)
                     redactNext = true
-                    redactNextFlag = flag
+                    redactNextIsPasswordP = false
                 }
                 continue
             }
-            result.append(sanitize(argument))
+            result.append(leaf(argument))
             redactNext = false
         }
         return result
@@ -342,17 +364,38 @@ enum CommandSanitizer {
 
     private static let userPairFlags: Set<String> = ["-u", "--user", "--proxy-user"]
 
-    private static func isPathShaped(_ value: String) -> Bool {
-        value.hasPrefix("/") || value.hasPrefix("./") || value.hasPrefix("../")
-            || value.hasPrefix("~/")
+    /// Programs whose `-p` takes a password, separated (`sshpass -p VALUE`,
+    /// `mongosh -p VALUE`) or compact (`mysql -pVALUE`, `7z a -pVALUE`).
+    private static let passwordLowerPPrograms: Set<String> = [
+        "mysql", "mysqladmin", "mysqldump", "mysqlimport", "mysqlshow",
+        "mysqlcheck", "mysqlpump", "mysqlsh", "mysqlbinlog", "mysqlslap",
+        "mariadb", "mariadb-admin", "mariadb-dump", "mariadb-import",
+        "mariadb-show", "mariadb-check", "mariadb-binlog",
+        "sshpass", "mongo", "mongosh", "mongodump", "mongorestore",
+        "mongoexport", "mongoimport", "mongofiles", "mongostat", "mongotop",
+        "7z", "7za", "7zr", "7zz", "rar", "unrar",
+    ]
+
+    /// Programs whose `-P` takes a password (`zip -P VALUE`).
+    private static let passwordUpperPPrograms: Set<String> = ["zip", "unzip", "zipcloak"]
+
+    /// Lowercased basename of an argv token.
+    private static func programName(_ token: String) -> String {
+        let base = token.lastIndex(of: "/").map { token[token.index(after: $0)...] } ?? token[...]
+        return base.lowercased()
     }
 
     /// `alice:secret` -> `alice:[REDACTED]`; nil when the token is not a
-    /// `user:password` pair (no colon, or a numeric uid:gid remainder).
+    /// `user:password` pair: no colon, or a numeric uid:gid (`501:20`). A
+    /// numeric password after a named user (`admin:123456`) is redacted.
     private static func redactingUserPassword(_ value: String) -> String? {
         guard let colon = value.firstIndex(of: ":") else { return nil }
+        let user = value[..<colon]
         let remainder = value[value.index(after: colon)...]
-        guard !remainder.isEmpty, !remainder.allSatisfy(\.isASCIIDigit) else { return nil }
+        guard !remainder.isEmpty else { return nil }
+        if !user.isEmpty, user.allSatisfy(\.isASCIIDigit), remainder.allSatisfy(\.isASCIIDigit) {
+            return nil
+        }
         return "\(value[...colon])[REDACTED]"
     }
 }

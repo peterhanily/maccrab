@@ -323,7 +323,7 @@ public enum OCSFMapper {
         OCSFProcess(
             pid: Int(p.pid),
             name: p.name,
-            cmdLine: p.commandLine,
+            cmdLine: CommandSanitizer.sanitize(commandLine: p.commandLine, arguments: p.args),
             createdTime: milliseconds(p.startTime),
             file: OCSFFile(
                 path: p.executable,

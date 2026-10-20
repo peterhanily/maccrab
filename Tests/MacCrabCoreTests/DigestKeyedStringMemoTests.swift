@@ -17,62 +17,10 @@ struct DigestKeyedStringMemoTests {
         String(repeating: "x --password=hunter2 ", count: 300),  // above the memo's input bound
     ]
 
-    /// Independent copy of `sanitize(arguments:)`'s token walk with the
-    /// uncached redactor suite as its leaf, so memoized argv output is checked
-    /// against the suite rather than against itself.
-    private static let referenceSensitiveFlags: Set<String> = [
-        "--password", "--passwd", "--secret", "--token", "--auth",
-        "--credential", "--api-key", "--api_key", "--apikey", "--key",
-        "--access-key", "--access_key", "--secret-key", "--secret_key",
-        "--private-key", "--private_key", "-p",
-    ]
-
+    /// The argv walk over the uncached redactor suite, so memoized argv
+    /// output is checked against the suite rather than against itself.
     private static func referenceArguments(_ arguments: [String]) -> [String] {
-        var result: [String] = []
-        var redactNext = false
-        var redactNextFlag = ""
-        var userPairNext = false
-        var optionsEnded = false
-        for argument in arguments {
-            if optionsEnded { result.append(CommandSanitizer.applyRedactors(argument)); continue }
-            if argument == "--" { result.append(argument); redactNext = false; optionsEnded = true; continue }
-            let lowered = argument.lowercased()
-            if lowered.hasPrefix("-p"), !lowered.hasPrefix("--"), argument.count > 2 {
-                result.append("\(argument.prefix(2))[REDACTED]"); redactNext = false; continue
-            }
-            let flag = lowered.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                .first.map(String.init) ?? lowered
-            let isSensitiveFlag = referenceSensitiveFlags.contains(flag)
-            if userPairNext {
-                userPairNext = false
-                if let colon = argument.firstIndex(of: ":"),
-                   case let rest = argument[argument.index(after: colon)...],
-                   !rest.isEmpty, !rest.allSatisfy({ $0.isASCII && $0.isNumber }) {
-                    result.append("\(argument[...colon])[REDACTED]"); continue
-                }
-            }
-            if redactNext, !isSensitiveFlag {
-                redactNext = false
-                let pathShaped = ["/", "./", "../", "~/"].contains { argument.hasPrefix($0) }
-                result.append(redactNextFlag == "-p" && pathShaped
-                    ? CommandSanitizer.applyRedactors(argument) : "[REDACTED]")
-                continue
-            }
-            if ["-u", "--user", "--proxy-user"].contains(lowered) {
-                result.append(argument); userPairNext = true; redactNext = false; continue
-            }
-            if isSensitiveFlag {
-                if argument.contains("=") {
-                    result.append("\(argument.prefix { $0 != "=" })=[REDACTED]"); redactNext = false
-                } else {
-                    result.append(argument); redactNext = true; redactNextFlag = flag
-                }
-                continue
-            }
-            result.append(CommandSanitizer.applyRedactors(argument))
-            redactNext = false
-        }
-        return result
+        CommandSanitizer.sanitize(arguments: arguments, leaf: CommandSanitizer.applyRedactors)
     }
 
     @Test("command redaction replays exactly what the redactor suite produces")
