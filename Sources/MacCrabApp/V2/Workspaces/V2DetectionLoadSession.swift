@@ -70,14 +70,33 @@ final class V2DetectionLoadSession: ObservableObject {
     private var generation = UUID()
     private let onJoin: ((Tab) -> Void)?
 
-    init(onJoin: ((Tab) -> Void)? = nil) { self.onJoin = onJoin }
+    /// The recorded-session list decodes the whole retained event journal in
+    /// one read transaction. Reloaded on every 5 s refresh tick it could hold
+    /// a core, and the engine's WAL checkpoint, for as long as the tab was
+    /// open, so a result is reused for `agentsReuseInterval` per provider and
+    /// event-query epoch.
+    static let agentsReuseInterval: Duration = .seconds(60)
+    private struct AgentsResult {
+        let provider: ObjectIdentifier
+        let epoch: UInt64
+        let at: ContinuousClock.Instant
+        let rows: [V2AgentSession]
+    }
+    private var agentsResult: AgentsResult?
+    private let now: () -> ContinuousClock.Instant
+
+    init(onJoin: ((Tab) -> Void)? = nil, now: @escaping () -> ContinuousClock.Instant = { ContinuousClock.now }) {
+        self.onJoin = onJoin
+        self.now = now
+    }
 
     func invalidate() {
         generation = UUID()
+        agentsResult = nil
         for flight in flights.values { flight.task.cancel() }
     }
 
-    func load(tab: Tab, provider: any V2DataProvider) async -> Snapshot? {
+    func load(tab: Tab, provider: any V2DataProvider, epoch: UInt64 = 0) async -> Snapshot? {
         let directory = provider.dataDir
         return await load(tab: tab, providerID: ObjectIdentifier(provider), operations: Operations(
             rules: {
@@ -87,11 +106,26 @@ final class V2DetectionLoadSession: ObservableObject {
                     V2DetectionRuleSnapshot.prepare(rules, directory: directory)
                 }.value
             }, browser: { await provider.extensions() }, mcp: { await provider.mcpServers() },
-            agents: { await provider.agentSessions(limit: 50) }))
+            agents: { await provider.agentSessions(limit: 50) }), epoch: epoch)
     }
 
-    func load(tab: Tab, providerID: ObjectIdentifier, operations: Operations) async -> Snapshot? {
+    func load(tab: Tab, providerID: ObjectIdentifier, operations: Operations, epoch: UInt64 = 0) async -> Snapshot? {
         guard !Task.isCancelled else { return nil }
+        if tab == .agents, let reused = agentsResult, reused.provider == providerID, reused.epoch == epoch,
+           now() - reused.at < Self.agentsReuseInterval {
+            // As a fresh read would: older requests and other tabs' work end.
+            generation = UUID()
+            for (other, flight) in flights where other != tab { flight.task.cancel() }
+            return .agents(reused.rows)
+        }
+        let result = await read(tab: tab, providerID: providerID, operations: operations)
+        if tab == .agents, case .agents(let rows)? = result {
+            agentsResult = AgentsResult(provider: providerID, epoch: epoch, at: now(), rows: rows)
+        }
+        return result
+    }
+
+    private func read(tab: Tab, providerID: ObjectIdentifier, operations: Operations) async -> Snapshot? {
         let request = UUID()
         generation = request
         for (other, flight) in flights where other != tab { flight.task.cancel() }

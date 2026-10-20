@@ -176,3 +176,35 @@ struct V2DetectionLoadSessionTests {
         #expect(await cancelled.value == nil)
     }
 }
+
+@Suite("Detection recorded sessions are not re-read on every refresh tick")
+@MainActor
+struct V2DetectionAgentsReuseTests {
+    private final class ProviderIdentity {}
+    private final class Clock {
+        var instant = ContinuousClock.now
+    }
+
+    @Test("a recorded-session read is reused within the interval and repeated after it")
+    func agentsReadIsReused() async {
+        let clock = Clock(), identity = ProviderIdentity()
+        let session = V2DetectionLoadSession(now: { clock.instant })
+        var reads = 0
+        let operations = V2DetectionLoadSession.Operations(
+            rules: { .prepare([], directory: nil) }, browser: { [] }, mcp: { [] },
+            agents: { reads += 1; return [] })
+        for _ in 0..<12 {  // a minute of 5 s ticks
+            _ = await session.load(tab: .agents, providerID: ObjectIdentifier(identity), operations: operations)
+            clock.instant = clock.instant.advanced(by: .seconds(4))
+        }
+        #expect(reads == 1)
+        clock.instant = clock.instant.advanced(by: .seconds(20))
+        _ = await session.load(tab: .agents, providerID: ObjectIdentifier(identity), operations: operations)
+        #expect(reads == 2, "the interval elapsed")
+        _ = await session.load(tab: .agents, providerID: ObjectIdentifier(identity), operations: operations, epoch: 1)
+        #expect(reads == 3, "a new event-query epoch reads again")
+        session.invalidate()
+        _ = await session.load(tab: .agents, providerID: ObjectIdentifier(identity), operations: operations, epoch: 1)
+        #expect(reads == 4, "leaving the workspace discards the result")
+    }
+}

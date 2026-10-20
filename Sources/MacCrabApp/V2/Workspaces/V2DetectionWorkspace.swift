@@ -222,7 +222,8 @@ public struct V2DetectionWorkspace: View {
                 return
             }
             presentation.leave()
-            guard let snapshot = await loads.load(tab: .init(tab), provider: provider),
+            guard let snapshot = await loads.load(tab: .init(tab), provider: provider,
+                                                  epoch: appState.eventQueryEpoch),
                   !Task.isCancelled,
                   ObjectIdentifier(state.provider) == ObjectIdentifier(provider),
                   selectedTab == tab else { return }
