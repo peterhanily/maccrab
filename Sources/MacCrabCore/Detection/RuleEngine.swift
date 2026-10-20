@@ -1167,7 +1167,11 @@ public actor RuleEngine {
         _ event: Event,
         dependencyFilter: HeavyEnrichmentDependencyMask?
     ) -> [RuleMatch] {
-        let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
+        let category = mapEventCategoryToLogsource(
+            event.eventCategory,
+            eventType: event.eventType,
+            action: event.eventAction
+        )
         guard let rules = enabledRuleIndex[category] else { return [] }
 
         var matches: [RuleMatch] = []
@@ -1885,13 +1889,19 @@ public actor RuleEngine {
     /// used for rule indexing.
     private func mapEventCategoryToLogsource(
         _ category: EventCategory,
-        eventType: EventType
+        eventType: EventType,
+        action: String
     ) -> String {
         switch category {
         case .process:
             switch eventType {
             case .creation, .start:
-                return "process_creation"
+                // A fork is not a process creation in the Sigma sense: the
+                // child still runs its parent's image with an empty command
+                // line, so image-only rules fired again on every fork and a
+                // shell-step sequence seed matched every forked shell. No
+                // rule selects forks; lineage reads them outside the engines.
+                return action == "fork" ? "process_fork" : "process_creation"
             case .end:
                 return "process_termination"
             default:

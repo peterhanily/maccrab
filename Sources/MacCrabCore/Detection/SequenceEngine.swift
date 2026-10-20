@@ -2939,7 +2939,11 @@ public actor SequenceEngine {
         dependencyFilter: HeavyEnrichmentDependencyMask?,
         countEvaluations: Bool
     ) -> [EventEvaluationPlan] {
-        let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
+        let category = mapEventCategoryToLogsource(
+            event.eventCategory,
+            eventType: event.eventType,
+            action: event.eventAction
+        )
         let unresolvedMask = HeavyEnrichmentRuleCoverage.unresolvedMask(in: event)
 
         // Find rule IDs that have at least one step matching this category.
@@ -3203,13 +3207,19 @@ public actor SequenceEngine {
     /// Map an event's category and type to the Sigma logsource category string.
     private func mapEventCategoryToLogsource(
         _ category: EventCategory,
-        eventType: EventType
+        eventType: EventType,
+        action: String
     ) -> String {
         switch category {
         case .process:
             switch eventType {
             case .creation, .start:
-                return "process_creation"
+                // A fork is not a process creation in the Sigma sense: the
+                // child still runs its parent's image with an empty command
+                // line, so image-only rules fired again on every fork and a
+                // shell-step sequence seed matched every forked shell. No
+                // rule selects forks; lineage reads them outside the engines.
+                return action == "fork" ? "process_fork" : "process_creation"
             case .end:
                 return "process_termination"
             default:
