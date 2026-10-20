@@ -51,4 +51,38 @@ struct JournalIndexFailureScopeTests {
         #expect(try await store.count() == 2)
         #expect(rebuilds.count == 0, "a certain rollback must not force a full index rebuild")
     }
+
+    private func chatter(at timestamp: Date) -> Event {
+        let process = MacCrabCore.ProcessInfo(
+            pid: 100, ppid: 1, rpid: 1, name: "bluetoothd", executable: "/usr/sbin/bluetoothd",
+            commandLine: "/usr/sbin/bluetoothd", args: [], workingDirectory: "/",
+            userId: 0, userName: "root", groupId: 0, startTime: timestamp,
+            ancestors: [], isPlatformBinary: true)
+        return Event(timestamp: timestamp, eventCategory: .process, eventType: .info,
+                     eventAction: "unified_log_event", process: process)
+    }
+
+    @Test("a duplicate-window exemplar whose transaction failed does not suppress the next instance")
+    func failedExemplarIsForgotten() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("journal-exemplar-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try EventStore(path: directory.appendingPathComponent("events.db").path,
+                                   liveMemoryBudget: .isolatedProductionEquivalentForTesting())
+        _ = try await store.recoverJournalBeforeProducers()
+        await store.setInsertFilter(EventInsertFilter(duplicateWindowSeconds: 300))
+
+        let now = Date()
+        await store.setJournalBlockPreCommitFailureForTesting { throw Injected() }
+        await #expect(throws: (any Error).self) {
+            _ = try await store.insert(events: [chatter(at: now)], lane: .priority)
+        }
+        await store.setJournalBlockPreCommitFailureForTesting(nil)
+        // A later instance of the same tuple is a different event. The store
+        // must have forgotten the exemplar that never committed.
+        #expect(try await store.insert(events: [chatter(at: now.addingTimeInterval(1))],
+                                       lane: .priority).persistedCount == 1)
+        #expect(try await store.count() == 1)
+    }
 }
