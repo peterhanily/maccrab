@@ -958,8 +958,13 @@ public final class ESCollector: @unchecked Sendable {
             guard let path else { return true }
             // Keep the platform-keychain safe drop independent and FIRST: a
             // broad/unknown dynamic snapshot must not re-admit securityd's
-            // constant own-keychain noise.
-            if isPlatformBinary && isKeychainPath(path) { return true }
+            // constant own-keychain noise. A positively attributed AI process
+            // is the exception: an agent copying login.keychain-db with cp,
+            // ditto or zip (the AMOS pattern) must reach CredentialFence.
+            if isPlatformBinary && isKeychainPath(path),
+               !(processID.map { dynamicAIRegistry.isAttributedDynamicAIProcess($0) } ?? false) {
+                return true
+            }
             // v1.22.7: the callback already classified the raw path bytes
             // against the same allowlists (`protectedOpenPathMarkers`); reuse
             // that verdict when it is carried, recompute only when it is not

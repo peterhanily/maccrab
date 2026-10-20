@@ -2454,6 +2454,28 @@ public final class FileEventInterestPolicyRegistry: @unchecked Sendable {
         }
     }
 
+    /// Whether `processID` is positively attributed to an AI session: in grace,
+    /// or named by the current snapshot. Unlike `isKnownDynamicAIProcess`, a
+    /// broad demand or unknown state never counts, so callers may use it to
+    /// relax a drop that must otherwise hold for every process.
+    public func isAttributedDynamicAIProcess(
+        _ processID: Int32,
+        nowUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> Bool {
+        state.withLock { locked in
+            if let expiry = locked.dynamicAIGrace[processID],
+               nowUptimeNanoseconds <= expiry {
+                return true
+            }
+            let snapshot = locked.dynamicAI
+            guard snapshot.state == .current,
+                  nowUptimeNanoseconds <= snapshot.validUntilUptimeNanoseconds else {
+                return false
+            }
+            return snapshot.attributedProcessIDs.contains(processID)
+        }
+    }
+
     /// Must be called before a honeyfile/honey-prompt manifest reload, deploy,
     /// or removal begins. The callback then admits until a complete post-
     /// mutation union is atomically published.

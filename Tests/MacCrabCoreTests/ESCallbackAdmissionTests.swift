@@ -103,6 +103,33 @@ struct ESCallbackAdmissionTests {
         ))
     }
 
+    @Test("an AI-attributed platform tool copying a keychain is admitted; others still drop")
+    func attributedAIKeychainCopySurvives() {
+        let keychain = "/Users/x/Library/Keychains/login.keychain-db"
+        let registry = dynamicRegistry(.currentCanonical(
+            validUntilUptimeNanoseconds: UInt64.max,
+            sessions: [DynamicAIFileEventSession(
+                rootProcessID: 42, childProcessIDs: [43], projectRoots: ["/Users/x/project"])]
+        ))
+        // `cp`, an Apple platform binary, run by the agent's child.
+        #expect(!ESCollector.shouldDropBeforeWorker(
+            eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue, path: keychain,
+            isPlatformBinary: true, processID: 43, dynamicAIRegistry: registry))
+        // securityd and every other unattributed platform binary still drop.
+        #expect(ESCollector.shouldDropBeforeWorker(
+            eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue, path: keychain,
+            isPlatformBinary: true, processID: 99, dynamicAIRegistry: registry))
+        // A grace PID counts as attributed; unknown state never does.
+        registry.grantDynamicAIGrace(processID: 77, validUntilUptimeNanoseconds: UInt64.max)
+        #expect(!ESCollector.shouldDropBeforeWorker(
+            eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue, path: keychain,
+            isPlatformBinary: true, processID: 77, dynamicAIRegistry: registry))
+        _ = registry.publishDynamicAI(DynamicAIFileEventDemandSnapshot.unknown)
+        #expect(ESCollector.shouldDropBeforeWorker(
+            eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue, path: keychain,
+            isPlatformBinary: true, processID: 43, dynamicAIRegistry: registry))
+    }
+
     @Test("platform keychain noise drops but non-platform keychain access survives")
     func keychainPlatformGateParity() {
         let keychain = "/Users/x/Library/Keychains/login.keychain-db"
