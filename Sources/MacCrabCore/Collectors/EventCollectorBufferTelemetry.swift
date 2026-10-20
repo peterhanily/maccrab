@@ -31,13 +31,30 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
     /// the injection-evidence weld all need in order and persisted) and
     /// `btm_add` (the only sensor for a ghost login item). A dynamic-AI OPEN
     /// is the one exception, decided per event in `finalLane(for:)`.
+    ///
+    /// `setmode` is rare too: the ES callback keeps only mode changes that
+    /// grant execution or setuid/setgid, the `chmod +x` of a dropped payload,
+    /// which then stays in order with its exec. `setowner` is unfiltered (an
+    /// installer's `chown -R` emits thousands) and stays on the file lane.
     public static func routesToFile(_ category: EventCategory, action: String) -> Bool {
         guard category == .file else { return false }
         switch action {
-        case "open", "btm_add": return false
+        case "open", "btm_add", "setmode": return false
         default: return true
         }
     }
+
+    /// Persistence locations. Any file event under one rides the priority
+    /// lane: the file lane evicts its oldest events under overload, and an
+    /// agent could read a few thousand files to push its own LaunchAgent
+    /// write out of the lane before it was evaluated. These events are rare
+    /// next to bulk file traffic.
+    static let persistencePathMarkers = [
+        "/LaunchAgents/", "/LaunchDaemons/", "/StartupItems/",
+        "/Library/Security/SecurityAgentPlugins/", "/Library/ScriptingAdditions/",
+        "/.ssh/authorized_keys", "/etc/sudoers", "/usr/lib/cron/tabs/", "/var/at/tabs/",
+        "/.zshrc", "/.zshenv", "/.zprofile", "/.bashrc", "/.bash_profile", "/.profile",
+    ]
 
     /// The per-event lane. v1.22.7: an `open` stamped
     /// `open_admission = dynamic_ai` rides the FILE lane. Measured on the
@@ -56,7 +73,14 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
            event.enrichments[openAdmissionEnrichmentKey] == dynamicAIOpenAdmission {
             return .file
         }
-        return routesToFile(event.eventCategory, action: event.eventAction) ? .file : .priority
+        guard routesToFile(event.eventCategory, action: event.eventAction) else {
+            return .priority
+        }
+        if let path = event.file?.path,
+           ExactSubstringSearch.containsAny(path, persistencePathMarkers) {
+            return .priority
+        }
+        return .file
     }
 }
 

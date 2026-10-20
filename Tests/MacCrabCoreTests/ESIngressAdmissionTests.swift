@@ -439,3 +439,31 @@ struct ESIngressAdmissionTests {
         #expect(t.coalescedOnWorkerByType().isEmpty)
     }
 }
+
+@Suite("Protected file events ride the priority lane")
+struct ProtectedFileLaneTests {
+    private func fileEvent(_ action: String, _ path: String) -> Event {
+        let process = MacCrabCore.ProcessInfo(
+            pid: 77, ppid: 1, rpid: 1, name: "node", executable: "/usr/local/bin/node",
+            commandLine: "node", args: [], workingDirectory: "/", userId: 501, userName: "u",
+            groupId: 20, startTime: Date())
+        return Event(eventCategory: .file, eventType: .change, eventAction: action,
+                     process: process, file: FileInfo(path: path, action: .write))
+    }
+
+    @Test("exec-granting mode changes and persistence writes cannot be evicted by a file flood")
+    func protectedClassRidesPriority() {
+        #expect(EventPipelineLane.finalLane(for: fileEvent("setmode", "/tmp/payload")) == .priority)
+        #expect(EventPipelineLane.finalLane(for: fileEvent("setowner", "/tmp/payload")) == .file,
+                "an unfiltered chown -R must not flood the priority lane")
+        for path in ["/Users/x/Library/LaunchAgents/com.evil.plist", "/Library/LaunchDaemons/x.plist",
+                     "/Users/x/.zshrc", "/Users/x/.ssh/authorized_keys", "/private/etc/sudoers.d/x"] {
+            for action in ["create", "write", "rename", "close_modified"] {
+                #expect(EventPipelineLane.finalLane(for: fileEvent(action, path)) == .priority, "\(action) \(path)")
+            }
+        }
+        #expect(EventPipelineLane.finalLane(for: fileEvent("write", "/Users/x/project/main.swift")) == .file)
+        #expect(EventPipelineLane.finalLane(for: fileEvent("close_modified", "/tmp/build/out.o")) == .file)
+    }
+}
+
