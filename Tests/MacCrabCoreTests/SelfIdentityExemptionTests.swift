@@ -212,18 +212,14 @@ struct SelfIdentityExemptionTests {
                 event: event, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
                 developmentEngine: false, collectorSignature: collectorSignature) != nil
         }
-        // Enrichment withholds these team-signed Apple tools' signatures until
+        // Enrichment withholds an Apple team-signed tool's signature until
         // `anchor apple` re-verification lands; the event carries none.
         let helper = event("/Library/Developer/CommandLineTools/usr/libexec/git-core/git-credential-osxkeychain")
         #expect(!finding(helper, collector("com.apple.git-credential-osxkeychain")))
         let notarytool = event("/Applications/Xcode.app/Contents/Developer/usr/bin/notarytool")
-        #expect(EventLoop.isCredentialFenceExempt(
-            notarytool, developmentEngine: false, collectorSignature: collector("com.apple.gke.notary.tool")))
-        #expect(!finding(notarytool, collector("com.apple.gke.notary.tool")))
         // The kernel's identifier still names what the binary really is.
         let copiedTool = event("/Applications/Xcode-x.app/Contents/Developer/usr/bin/security")
-        #expect(!EventLoop.isCredentialFenceExempt(
-            copiedTool, developmentEngine: false, collectorSignature: collector("com.apple.git")))
+        #expect(!EventLoop.isCredentialFenceExempt(copiedTool, developmentEngine: false))
         #expect(finding(copiedTool, collector("com.apple.git")))
         #expect(finding(helper, collector("com.apple.git")))
         // With neither signature the identity is unknown, not ad-hoc.
@@ -244,8 +240,6 @@ struct SelfIdentityExemptionTests {
                               signingId: signingId, authorities: [], flags: 0x3, isNotarized: false)
         }
         let stapler = event("/tmp/x/stapler")
-        #expect(!EventLoop.isCredentialFenceExempt(
-            stapler, developmentEngine: false, collectorSignature: forged("com.apple.stapler")))
         #expect(EventLoop.credentialFenceFinding(
             event: stapler, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
             developmentEngine: false, collectorSignature: forged("com.apple.stapler")) != nil)
@@ -255,11 +249,12 @@ struct SelfIdentityExemptionTests {
             developmentEngine: false, collectorSignature: forged("com.apple.git-credential-osxkeychain")) != nil)
     }
 
-    @Test("Unverified, an Apple tool's exemption covers only the keychain")
-    func unverifiedAppleToolExemptionIsKeychainOnly() {
+    @Test("Unverified, an Apple tool is not exempt; only the git helper's keychain ownership waits on the kernel")
+    func unverifiedAppleToolIsNotExempt() {
         let fence = CredentialFence()
+        let team = CredentialFence.appleDeveloperToolsTeamId
         let collector = CodeSignatureInfo(
-            signerType: .apple, teamId: CredentialFence.appleDeveloperToolsTeamId,
+            signerType: .apple, teamId: team,
             signingId: "com.apple.gke.notary.tool", authorities: [], flags: 0x1, isNotarized: false)
         let path = "/Applications/Xcode.app/Contents/Developer/usr/bin/notarytool"
         func finding(_ file: String) -> Bool {
@@ -267,12 +262,24 @@ struct SelfIdentityExemptionTests {
                 event: event(path, file: file), fence: fence, toolName: "Claude Code", toolType: .claudeCode,
                 developmentEngine: false, collectorSignature: collector) != nil
         }
-        #expect(!finding("/Users/u/Library/Keychains/login.keychain-db"))
+        // A forged team could not be taken back once the verdict lands.
+        #expect(finding("/Users/u/Library/Keychains/login.keychain-db"))
         #expect(finding("/Users/u/.aws/credentials"))
-        // Once verified, the exemption is not limited to the keychain.
-        let verified = event(path, signer: .apple, teamId: CredentialFence.appleDeveloperToolsTeamId,
-                             signingId: "com.apple.gke.notary.tool", file: "/Users/u/.aws/credentials")
-        #expect(EventLoop.isCredentialFenceExempt(verified, developmentEngine: false, collectorSignature: collector))
+        // Verified, the genuine tool is exempt for any credential.
+        for file in ["/Users/u/Library/Keychains/login.keychain-db", "/Users/u/.aws/credentials"] {
+            let verified = event(path, signer: .apple, teamId: team,
+                                 signingId: "com.apple.gke.notary.tool", file: file)
+            #expect(EventLoop.isCredentialFenceExempt(verified, developmentEngine: false))
+        }
+        // The kernel's identity stands in only for git's helper: a withheld
+        // signature naming a browser team does not make an owner meanwhile.
+        let browser = event("/tmp/x/Google Chrome")
+        #expect(EventLoop.credentialFenceFinding(
+            event: browser, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+            developmentEngine: false,
+            collectorSignature: CodeSignatureInfo(
+                signerType: .apple, teamId: "EQHXZ8M8AV", signingId: "com.apple.chrome",
+                authorities: [], flags: 0x1, isNotarized: false)) != nil)
     }
 
     @Test("A verdict that downgraded the claim wins over the kernel's signature")
@@ -287,8 +294,7 @@ struct SelfIdentityExemptionTests {
         // signer, so a failed `anchor apple` check looks like this.
         let notarytool = event("/tmp/x/notarytool", signer: .devId, teamId: team,
                                signingId: "com.apple.gke.notary.tool")
-        #expect(!EventLoop.isCredentialFenceExempt(
-            notarytool, developmentEngine: false, collectorSignature: claim("com.apple.gke.notary.tool")))
+        #expect(!EventLoop.isCredentialFenceExempt(notarytool, developmentEngine: false))
         #expect(EventLoop.credentialFenceFinding(
             event: notarytool, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
             developmentEngine: false, collectorSignature: claim("com.apple.gke.notary.tool")) != nil)
