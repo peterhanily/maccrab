@@ -267,10 +267,22 @@ enum EventLoop {
         "ssh": "com.apple.ssh", "ssh-add": "com.apple.ssh-add",
     ]
 
+    /// CS_ADHOC from <sys/codesign.h>: an ad-hoc signature names whatever
+    /// team and identifier its author chose.
+    private static let csAdhoc: UInt32 = 0x0000_0002
+
     /// `collectorSignature` is the Endpoint Security signature from before
     /// enrichment. Enrichment withholds an Apple team-signed tool's signature
     /// until its `anchor apple` re-verification completes, but the kernel's
-    /// team and signing identifier still name that tool exactly.
+    /// team and signing identifier still name that tool exactly. It stands in
+    /// only while the event carries no signature, and never when ad-hoc.
+    private static func pendingVerificationSignature(
+        _ process: MacCrabCore.ProcessInfo, collector: CodeSignatureInfo?
+    ) -> CodeSignatureInfo? {
+        guard process.codeSignature == nil, let collector, collector.flags & csAdhoc == 0 else { return nil }
+        return collector
+    }
+
     static func isCredentialFenceExempt(
         _ event: Event,
         developmentEngine: Bool = NoiseFilter.engineIsDevelopmentBuild,
@@ -279,7 +291,8 @@ enum EventLoop {
         let process = event.process
         let path = process.executable
         let subject = (path as NSString).lastPathComponent
-        let signature = process.codeSignature ?? collectorSignature
+        let pending = pendingVerificationSignature(process, collector: collectorSignature)
+        let signature = process.codeSignature ?? pending
         let readsKeychain = event.file.map { ExactSubstringSearch.contains($0.path, "/Library/Keychains/") } ?? false
         if let sshIdentifier = keychainReadingSSHTools[subject], readsKeychain {
             return path.hasPrefix("/usr/bin/") && process.isPlatformBinary
@@ -288,6 +301,10 @@ enum EventLoop {
         if let identifiers = credentialFenceExemptAppleTools[subject] {
             guard let signature, let signingId = signature.signingId,
                   identifiers.contains(signingId) else { return false }
+            // Unverified, the kernel identity covers only the keychain reads it
+            // is kept for. A genuine tool reading another credential store
+            // before its verification lands may still alert.
+            if pending != nil, !readsKeychain { return false }
             return process.isPlatformBinary
                 || (signature.teamId == CredentialFence.appleDeveloperToolsTeamId && signature.signerType == .apple)
         }
@@ -326,7 +343,8 @@ enum EventLoop {
             aiToolName: toolName,
             aiToolType: toolType,
             accessingBinary: (process.executable as NSString).lastPathComponent,
-            accessorIdentity: (process.codeSignature ?? collectorSignature).map {
+            accessorIdentity: (process.codeSignature
+                ?? pendingVerificationSignature(process, collector: collectorSignature)).map {
                 CredentialFence.AccessorIdentity(
                     isPlatformBinary: process.isPlatformBinary,
                     teamId: $0.teamId,

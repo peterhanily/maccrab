@@ -235,6 +235,72 @@ struct SelfIdentityExemptionTests {
         #expect(finding(downgraded, collector("com.apple.git-credential-osxkeychain")))
     }
 
+    @Test("An ad-hoc kernel signature never stands in for a withheld one")
+    func adHocCollectorNeverStandsIn() {
+        let fence = CredentialFence()
+        // CS_VALID | CS_ADHOC: an ad-hoc code directory can carry any team.
+        let forged = { (signingId: String) in
+            CodeSignatureInfo(signerType: .apple, teamId: CredentialFence.appleDeveloperToolsTeamId,
+                              signingId: signingId, authorities: [], flags: 0x3, isNotarized: false)
+        }
+        let stapler = event("/tmp/x/stapler")
+        #expect(!EventLoop.isCredentialFenceExempt(
+            stapler, developmentEngine: false, collectorSignature: forged("com.apple.stapler")))
+        #expect(EventLoop.credentialFenceFinding(
+            event: stapler, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+            developmentEngine: false, collectorSignature: forged("com.apple.stapler")) != nil)
+        let helper = event("/tmp/x/git-credential-osxkeychain")
+        #expect(EventLoop.credentialFenceFinding(
+            event: helper, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+            developmentEngine: false, collectorSignature: forged("com.apple.git-credential-osxkeychain")) != nil)
+    }
+
+    @Test("Unverified, an Apple tool's exemption covers only the keychain")
+    func unverifiedAppleToolExemptionIsKeychainOnly() {
+        let fence = CredentialFence()
+        let collector = CodeSignatureInfo(
+            signerType: .apple, teamId: CredentialFence.appleDeveloperToolsTeamId,
+            signingId: "com.apple.gke.notary.tool", authorities: [], flags: 0x1, isNotarized: false)
+        let path = "/Applications/Xcode.app/Contents/Developer/usr/bin/notarytool"
+        func finding(_ file: String) -> Bool {
+            EventLoop.credentialFenceFinding(
+                event: event(path, file: file), fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+                developmentEngine: false, collectorSignature: collector) != nil
+        }
+        #expect(!finding("/Users/u/Library/Keychains/login.keychain-db"))
+        #expect(finding("/Users/u/.aws/credentials"))
+        // Once verified, the exemption is not limited to the keychain.
+        let verified = event(path, signer: .apple, teamId: CredentialFence.appleDeveloperToolsTeamId,
+                             signingId: "com.apple.gke.notary.tool", file: "/Users/u/.aws/credentials")
+        #expect(EventLoop.isCredentialFenceExempt(verified, developmentEngine: false, collectorSignature: collector))
+    }
+
+    @Test("A verdict that downgraded the claim wins over the kernel's signature")
+    func verifiedDowngradeWins() {
+        let fence = CredentialFence()
+        let team = CredentialFence.appleDeveloperToolsTeamId
+        func claim(_ signingId: String) -> CodeSignatureInfo {
+            CodeSignatureInfo(signerType: .apple, teamId: team, signingId: signingId,
+                              authorities: [], flags: 0x1, isNotarized: false)
+        }
+        // Enrichment keeps the kernel's team and identifier and lowers only the
+        // signer, so a failed `anchor apple` check looks like this.
+        let notarytool = event("/tmp/x/notarytool", signer: .devId, teamId: team,
+                               signingId: "com.apple.gke.notary.tool")
+        #expect(!EventLoop.isCredentialFenceExempt(
+            notarytool, developmentEngine: false, collectorSignature: claim("com.apple.gke.notary.tool")))
+        #expect(EventLoop.credentialFenceFinding(
+            event: notarytool, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+            developmentEngine: false, collectorSignature: claim("com.apple.gke.notary.tool")) != nil)
+        // Keychain ownership judges team and identifier, not the signer, so the
+        // git helper with the same shape still owns the keychain.
+        let helper = event("/tmp/x/git-credential-osxkeychain", signer: .devId, teamId: team,
+                           signingId: "com.apple.git-credential-osxkeychain")
+        #expect(EventLoop.credentialFenceFinding(
+            event: helper, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+            developmentEngine: false, collectorSignature: claim("com.apple.git-credential-osxkeychain")) == nil)
+    }
+
     @Test("A cold code-signing cache does not report Apple's git credential helper")
     func coldCacheGitHelperIsNotReported() async {
         let path = "/private/tmp/maccrab-identity-\(UUID().uuidString)/git-credential-osxkeychain"
