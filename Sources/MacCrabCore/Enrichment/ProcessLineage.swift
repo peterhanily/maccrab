@@ -128,17 +128,21 @@ public actor ProcessLineage {
     /// binaries leaves such nodes "running"; once no recorded exit is left to
     /// evict, eviction checks these for liveness before taking the oldest
     /// running process, which would be launchd, a login shell or an agent's
-    /// root. Stale entries are skipped like `exitOrder`'s.
+    /// root. Stale entries are skipped like `exitOrder`'s, and a node still
+    /// alive past `livenessGrace` leaves the queue: it is long-lived, and the
+    /// liveness sweep marks it once it exits.
     private var unobservedExits: [(pid: pid_t, startTime: Date)] = []
     private var unobservedExitsHead = 0
     private static let maximumLivenessChecksPerEviction = 64
 
-    /// Removed nodes whose children are still tracked. The children keep
-    /// naming the removed pid, so a descendant check bound to it still holds
-    /// (an `npm postinstall` shell exits, its detached RAT calls home). They
-    /// are reparented to launchd only when another process takes the pid; a
-    /// running node evicted under the cap that later execs keeps them.
-    private var removedParents: [pid_t: (startTime: Date, exited: Bool)] = [:]
+    /// Removed nodes whose children are still tracked, by start time. The
+    /// children keep naming the removed pid, so a descendant check bound to it
+    /// still holds (an `npm postinstall` shell exits, its detached RAT calls
+    /// home). They are reparented to launchd only when another process, which
+    /// starts later, takes the pid. The same process recorded again keeps
+    /// them: an evicted node that execs, or an exited one re-recorded by its
+    /// own late file event.
+    private var removedParents: [pid_t: Date] = [:]
 
     // MARK: Storage
 
@@ -306,9 +310,13 @@ public actor ProcessLineage {
             // the new, unrelated process (e.g. a `claude` that took the pid
             // and made a long-lived orphan an "AI child"). The kernel
             // reparented them to launchd; mirror that.
-            if old.exitTime != nil { adoptOrphans(of: pid) }
-        } else if let removed = removedParents.removeValue(forKey: pid),
-                  removed.exited || abs(removed.startTime.timeIntervalSince(startTime)) > 1 {
+            // A running node whose exit never arrived (a muted /System/ exit)
+            // is reused too when the new process started later.
+            if old.exitTime != nil || abs(old.startTime.timeIntervalSince(startTime)) > 1 {
+                adoptOrphans(of: pid)
+            }
+        } else if let removedStart = removedParents.removeValue(forKey: pid),
+                  abs(removedStart.timeIntervalSince(startTime)) > 1 {
             adoptOrphans(of: pid)
         }
 
@@ -327,6 +335,7 @@ public actor ProcessLineage {
         childrenIndex[ppid, default: []].insert(pid)
         if path.hasPrefix("/System/") {
             unobservedExits.append((pid, startTime))
+            compactUnobservedExitsIfNeeded()
         }
 
         // Structural change: a new/overwritten node can alter the ancestor
@@ -375,24 +384,30 @@ public actor ProcessLineage {
         }
     }
 
-    /// Evict the first exit-unobservable node found dead, checking at most
-    /// `maximumLivenessChecksPerEviction` live candidates; live ones go to the
-    /// back of the queue.
+    /// Evict the first exit-unobservable node found dead. A live node younger
+    /// than `livenessGrace` goes to the back of the queue, at most
+    /// `maximumLivenessChecksPerEviction` per eviction; an older live node
+    /// leaves the queue for good, so the hundreds of long-lived /System/
+    /// processes in a session cost one check each instead of using up every
+    /// eviction's budget and letting it fall back to launchd.
     private func evictVanishedUnobservedProcess() -> Bool {
-        var checks = 0
+        var rotations = 0
+        let settled = Date().addingTimeInterval(-Self.livenessGrace)
         let pending = unobservedExits.count - unobservedExitsHead
         defer { compactUnobservedExitsIfNeeded() }
-        for _ in 0..<pending where checks < Self.maximumLivenessChecksPerEviction {
+        for _ in 0..<pending where rotations < Self.maximumLivenessChecksPerEviction {
             let entry = unobservedExits[unobservedExitsHead]
             unobservedExitsHead += 1
             guard let node = nodes[entry.pid], node.exitTime == nil,
                   node.startTime == entry.startTime else { continue }
-            checks += 1
             if !processIsRunning(entry.pid, entry.startTime) {
                 removeNode(pid: entry.pid)
                 return true
             }
-            unobservedExits.append(entry)
+            if entry.startTime >= settled {
+                rotations += 1
+                unobservedExits.append(entry)
+            }
         }
         return false
     }
@@ -402,10 +417,16 @@ public actor ProcessLineage {
             unobservedExits.removeFirst(unobservedExitsHead)
             unobservedExitsHead = 0
         }
+        // At most one valid entry per node, so dropping stale (pruned,
+        // exited, reused) and repeated (an exec re-recording the node) ones
+        // keeps the queue below the bound.
         if unobservedExits.count > 2 * maxProcessCount + 1_024 {
-            unobservedExits = nodes.values.compactMap { node in
-                node.exitTime == nil && node.path.hasPrefix("/System/") ? (node.pid, node.startTime) : nil
-            }.sorted { $0.startTime < $1.startTime }
+            var queued = Set<pid_t>()
+            unobservedExits = unobservedExits[unobservedExitsHead...].filter { entry in
+                guard let node = nodes[entry.pid], node.exitTime == nil,
+                      node.startTime == entry.startTime else { return false }
+                return queued.insert(entry.pid).inserted
+            }
             unobservedExitsHead = 0
         }
     }
@@ -458,7 +479,7 @@ public actor ProcessLineage {
         // The children keep the removed pid as their parent; see
         // `removedParents`.
         if childrenIndex[pid]?.isEmpty == false {
-            removedParents[pid] = (node.startTime, node.exitTime != nil)
+            removedParents[pid] = node.startTime
         }
 
         // Removing a node shortens the chain of any descendant that walked
@@ -514,6 +535,9 @@ public actor ProcessLineage {
 
     /// Diagnostic surface for v1.10 wiring tests.
     public var pendingPromotionCount: Int { pendingPromotions.count }
+
+    /// Queued exit-unobservable entries, for the bound test.
+    var unobservedExitQueueLength: Int { unobservedExits.count - unobservedExitsHead }
 
     /// Record that a process has exited.
     ///
