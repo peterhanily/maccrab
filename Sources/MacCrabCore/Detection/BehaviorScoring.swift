@@ -598,7 +598,10 @@ public actor BehaviorScoring {
         processStart: Date? = nil
     ) -> ScoringResult? {
         addIndicators(
-            names.map { Indicator(name: $0.name, weight: Self.weights[$0.name] ?? 3.0, detail: $0.detail) },
+            names.map { name, detail in
+                let weight = Self.weights[name] ?? 3.0
+                return Indicator(name: name, weight: weight, detail: detail)
+            },
             forProcess: pid,
             path: path,
             processStart: processStart
