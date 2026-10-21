@@ -352,7 +352,7 @@ public enum SecureFileIO {
                 Darwin.openat(
                     parentDescriptor,
                     $0,
-                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY,
                     mode_t(0o600)
                 )
             }

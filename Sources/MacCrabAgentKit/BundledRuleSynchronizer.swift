@@ -972,7 +972,7 @@ enum BundledRuleSynchronizer {
         expected: stat,
         isDirectory: Bool
     ) throws {
-        let flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | (isDirectory ? O_DIRECTORY : 0)
+        let flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY | (isDirectory ? O_DIRECTORY : 0)
         let descriptor = path.withCString { Darwin.open($0, flags) }
         guard descriptor >= 0 else {
             throw SyncError.io("secure open failed for \(path): \(posixMessage(errno))")
@@ -1022,7 +1022,7 @@ enum BundledRuleSynchronizer {
         maximumBytes: Int
     ) throws -> Data {
         let descriptor = url.path.withCString {
-            Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY)
         }
         guard descriptor >= 0 else {
             throw SyncError.io("open failed for \(url.path): \(posixMessage(errno))")
@@ -1071,7 +1071,7 @@ enum BundledRuleSynchronizer {
             guard type == S_IFDIR || type == S_IFREG else {
                 throw SyncError.invalid("cannot normalize non-file entry: \(url.path)")
             }
-            let descriptorFlags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+            let descriptorFlags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY
                 | (type == S_IFDIR ? O_DIRECTORY : 0)
             let descriptor = url.path.withCString { Darwin.open($0, descriptorFlags) }
             guard descriptor >= 0 else {

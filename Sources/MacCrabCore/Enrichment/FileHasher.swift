@@ -242,7 +242,7 @@ public actor FileHasher {
         matching key: CacheKey,
         afterIdentityCheckForTesting: ((Int32) -> Void)? = nil
     ) -> String? {
-        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
         var opened = stat()
@@ -294,42 +294,32 @@ public actor FileHasher {
     /// per-file `/usr/bin/shasum` subprocesses. The cached `hash(path:)`
     /// instance method remains the preferred entry point for enrichment.
     nonisolated public static func computeSHA256(path: String) -> String? {
-        let url = URL(fileURLWithPath: path)
-        let handle: FileHandle
-        do {
-            handle = try FileHandle(forReadingFrom: url)
-        } catch {
-            return nil
-        }
-        defer { try? handle.close() }
+        // A final symlink is still followed, as before. The open never waits
+        // on a FIFO and never makes a terminal the root engine's controlling
+        // tty (a session leader adopts the first tty it opens without
+        // O_NOCTTY), and only a regular file is read.
+        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
 
         var hasher = SHA256()
         let chunkSize = 64 * 1024
-        do {
-            // v1.7.9: per-iteration autoreleasepool — `handle.read(upToCount:)`
-            // returns autoreleased NSConcreteData per chunk. Hashing a 1 GB
-            // binary at 64 KB/chunk = 16K autoreleased Data objects. Called
-            // from per-file-event paths, accumulates fast — heap evidence
-            // on a v1.7.8 install showed 135K × 16 KB NSConcreteData = 2.22 GB
-            // private heap as the dominant leak after the v1.7.7 collector
-            // wraps. Drains per chunk so memory peak stays at one buffer's
-            // worth regardless of file size.
-            while true {
-                var done = false
-                try autoreleasepool {
-                    if let data = try handle.read(upToCount: chunkSize), !data.isEmpty {
-                        hasher.update(data: data)
-                    } else {
-                        done = true
-                    }
-                }
-                if done { break }
+        var buffer = [UInt8](repeating: 0, count: chunkSize)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                read(descriptor, bytes.baseAddress, chunkSize)
             }
-        } catch {
-            return nil
+            if count < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
+            if count == 0 { break }
+            buffer.withUnsafeBytes { bytes in
+                hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes[..<count]))
+            }
         }
-
-        let digest = hasher.finalize()
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

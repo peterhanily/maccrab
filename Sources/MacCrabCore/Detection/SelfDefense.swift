@@ -410,7 +410,7 @@ public actor SelfDefense {
         let callbackLogger = self.logger
 
         for monitored in monitoredPaths {
-            let fd = open(monitored.path, O_EVTONLY)
+            let fd = open(monitored.path, O_EVTONLY | O_NOCTTY)
             guard fd >= 0 else {
                 logger.warning("Cannot monitor \(monitored.path): open failed")
                 continue
@@ -862,7 +862,7 @@ public actor SelfDefense {
         let lineData = line.data(using: .utf8) ?? Data()
 
         for logPath in logLocations {
-            let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+            let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND | O_NOCTTY, 0o600)
             if fd >= 0 {
                 lineData.withUnsafeBytes { ptr in
                     _ = write(fd, ptr.baseAddress!, ptr.count)

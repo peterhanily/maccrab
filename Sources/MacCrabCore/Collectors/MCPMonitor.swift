@@ -326,7 +326,7 @@ public actor MCPMonitor {
         for (tool, path) in Self.resolvedConfigPaths() {
             guard FileManager.default.fileExists(atPath: path) else { continue }
 
-            let fd = open(path, O_EVTONLY)
+            let fd = open(path, O_EVTONLY | O_NOCTTY)
             guard fd >= 0 else {
                 logger.warning("MCP monitor: cannot open \(path) for watching")
                 continue

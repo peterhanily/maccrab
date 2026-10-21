@@ -450,7 +450,7 @@ public actor TCCMonitor {
     ///
     /// Watches for `.write` events and triggers a diff when the file changes.
     private func installWatcher(path: String, label: String) {
-        let fd = Darwin.open(path, O_EVTONLY)
+        let fd = Darwin.open(path, O_EVTONLY | O_NOCTTY)
         guard fd >= 0 else {
             logger.warning("Cannot watch \(label) TCC database at \(path) — file not accessible (fd < 0).")
             return

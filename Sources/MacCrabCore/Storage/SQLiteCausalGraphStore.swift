@@ -1923,7 +1923,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         allowMissing: Bool
     ) throws -> Bool {
         let fd = name.withCString {
-            Darwin.openat(parentFD, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            Darwin.openat(parentFD, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY)
         }
         if fd < 0 {
             let openErrno = errno
@@ -1965,7 +1965,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             let createdFD = leaf.withCString {
                 Darwin.openat(
                     parentFD, $0,
-                    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY,
                     mode_t(0o640)
                 )
             }

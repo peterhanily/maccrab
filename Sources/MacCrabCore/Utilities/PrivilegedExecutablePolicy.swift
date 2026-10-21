@@ -509,7 +509,7 @@ public final class PrivatePrivilegedCommandFile {
         let descriptor = path.withCString {
             Darwin.open(
                 $0,
-                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY,
                 mode_t(S_IRUSR | S_IWUSR)
             )
         }
@@ -570,7 +570,7 @@ public final class PrivatePrivilegedCommandFile {
             Darwin.openat(
                 rootDescriptor,
                 $0,
-                O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+                O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY
             )
         }
         guard descriptor >= 0 else { return false }

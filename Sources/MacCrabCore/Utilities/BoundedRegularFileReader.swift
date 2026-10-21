@@ -211,11 +211,14 @@ public enum BoundedRegularFileReader {
             afterDirectoryOpened?(openedPath, directoryDescriptor)
         }
 
+        // O_NOCTTY: the root engine is a session leader with no controlling
+        // terminal, so a tty leaf opened without it would become one, and
+        // whoever holds its master could signal the engine.
         let descriptor = leaf.withCString {
             Darwin.openat(
                 directoryDescriptor,
                 $0,
-                O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+                O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY
             )
         }
         guard descriptor >= 0 else {

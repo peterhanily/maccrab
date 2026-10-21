@@ -238,7 +238,7 @@ public enum SafeTraceBundleResolver {
 
         for (index, component) in components.enumerated() {
             let isLeaf = index == components.count - 1
-            var flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+            var flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY
             if !isLeaf { flags |= O_DIRECTORY }
             let descriptor = component.withCString {
                 Darwin.openat(parent, $0, flags)
@@ -413,7 +413,7 @@ public enum SafeTraceBundleResolver {
                     Darwin.openat(
                         frame.sourceDescriptor,
                         $0,
-                        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+                        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY
                     )
                 }
                 guard childSource >= 0 else {
@@ -675,7 +675,7 @@ public enum SafeTraceBundleResolver {
             Darwin.openat(
                 destinationParent,
                 $0,
-                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY,
                 mode_t(0o600)
             )
         }

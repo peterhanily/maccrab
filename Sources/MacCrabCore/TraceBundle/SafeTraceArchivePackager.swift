@@ -625,7 +625,7 @@ private final class AtomicFileDestination {
                 Darwin.openat(
                     parentDescriptor,
                     $0,
-                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY,
                     mode_t(0o600)
                 )
             }
@@ -703,7 +703,7 @@ private final class AtomicFileDestination {
             Darwin.openat(
                 parentDescriptor,
                 $0,
-                O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+                O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY
             )
         }
         guard descriptor >= 0 else {

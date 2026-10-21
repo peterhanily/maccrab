@@ -1989,7 +1989,7 @@ enum DaemonTimers {
     }
 
     private static func markRootInboxTainted(_ marker: String) {
-        let descriptor = open(marker, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        let descriptor = open(marker, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY, 0o600)
         if descriptor >= 0 { close(descriptor) }
     }
 
@@ -7587,7 +7587,7 @@ enum DaemonTimers {
         guard maxBytes >= 0, maxBytes <= maximumInboxRequestBytes else { return nil }
         // O_CLOEXEC keeps a privileged inbox descriptor out of any helper or
         // sandbox-host process spawned concurrently by the daemon.
-        let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
         var st = stat()

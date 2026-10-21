@@ -890,7 +890,7 @@ enum SequenceCheckpointFileStore {
             Darwin.openat(
                 parent,
                 $0,
-                O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY
             )
         }
         guard descriptor >= 0 else {

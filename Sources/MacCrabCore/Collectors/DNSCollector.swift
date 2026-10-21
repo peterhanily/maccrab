@@ -488,7 +488,7 @@ public actor DNSCollector {
     ) {
         var bpfFd: Int32 = -1
         for index in 0..<20 {
-            bpfFd = Darwin.open("/dev/bpf\(index)", O_RDONLY)
+            bpfFd = Darwin.open("/dev/bpf\(index)", O_RDONLY | O_NOCTTY)
             if bpfFd >= 0 { break }
         }
         guard bpfFd >= 0 else {
