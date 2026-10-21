@@ -188,6 +188,17 @@ public struct V2SystemWorkspace: View {
                         impact: String(localized: "ui.final.lifecycle4.impact", defaultValue: "A security decision was rejected after close, shed, left unjoined, or could not be accounted for completely. Some derived detections may be missing; lossless inline overload fallback and intentional coalescing are not counted as loss.")
                     )
                 }
+                // A shed notarization follow-up is a lost security decision
+                // too: the same banner, with that plane's counters.
+                if let notarizationFollowUp = heartbeat?.notarizationFollowUpLifecycle,
+                   notarizationFollowUp.detectionProtectionDegraded {
+                    lifecycleDegradedBanner(
+                        notarizationFollowUp,
+                        title: String(localized: "ui.final.lifecycle4.title", defaultValue: "Protection degraded — detection work lost"),
+                        workLabel: String(localized: "ui.final.lifecycle4.workLabel", defaultValue: "detection task"),
+                        impact: String(localized: "ui.final.lifecycle4.impact", defaultValue: "A security decision was rejected after close, shed, left unjoined, or could not be accounted for completely. Some derived detections may be missing; lossless inline overload fallback and intentional coalescing are not counted as loss.")
+                    )
+                }
                 if let advisory = heartbeat?.advisoryWorkLifecycle,
                    advisory.featureDegraded {
                     lifecycleDegradedBanner(

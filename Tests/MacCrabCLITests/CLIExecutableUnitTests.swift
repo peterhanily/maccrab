@@ -658,6 +658,7 @@ struct MacCrabCtlUnitTests {
             "timer_lifecycle", "liveness_timer_lifecycle",
             "startup_work_lifecycle", "detection_work_lifecycle",
             "advisory_work_lifecycle", "output_work_lifecycle",
+            "notarization_follow_up_lifecycle",
         ]
         for object in lifecycleObjects {
             #expect(timers.contains("\"\(object)\""))
@@ -682,6 +683,7 @@ struct MacCrabCtlUnitTests {
             #expect(surface.contains("advisoryWorkLifecycle"))
             #expect(surface.contains("outputWorkLifecycle"))
             #expect(surface.contains("otlpReceiverLifecycle"))
+            #expect(surface.contains("notarizationFollowUpLifecycle"))
         }
         #expect(appState.contains("detectionWorkProtectionUnavailable"))
         #expect(workspace.contains("lifecycleDegradedBanner"))

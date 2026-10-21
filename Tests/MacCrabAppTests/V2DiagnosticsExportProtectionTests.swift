@@ -56,6 +56,40 @@ struct V2DiagnosticsExportProtectionTests {
         #expect(checkpoint["restore_status"] as? String == "rejected")
     }
 
+    @Test("A shed notarization follow-up degrades protection and is named in the reasons")
+    func notarizationFollowUpShed() throws {
+        var raw = ready(Date())
+        raw["notarization_follow_up_lifecycle"] = [
+            "accepting": true, "offered_handlers_total": 40, "accepted_handlers_total": 32,
+            "completed_handlers_total": 32, "rejected_handlers_total": 0,
+            "closed_rejected_handlers_total": 0, "overload_shed_handlers_total": 8,
+            "coalesced_handlers_total": 0, "coalesced_by_label": [String: Int](),
+            "rejected_by_label": [String: Int](), "inline_fallback_handlers_total": 0,
+            "inline_fallbacks_by_label": [String: Int](), "in_flight_handlers": 0,
+            "maximum_in_flight_handlers": 32, "conserves_accepted_handlers": true,
+            "conserves_offered_handlers": true,
+        ] as [String: Any]
+        let protection = try #require(try export(raw)["protection"] as? [String: Any])
+        #expect(protection["resolved_from_heartbeat"] as? String == "degraded")
+        #expect((protection["reasons"] as? [String])?.contains("notarization_follow_up_degraded") == true)
+        #expect(protection["notarization_follow_up_degraded"] as? Bool == true)
+        // The menu bar's own heartbeat read counts it the same way.
+        let shed = try #require(raw["notarization_follow_up_lifecycle"] as? [String: Any])
+        #expect(AppState.detectionProtectionDegraded(in: ["notarization_follow_up_lifecycle": shed]) == true)
+        var healthy = shed
+        healthy["overload_shed_handlers_total"] = 0
+        healthy["offered_handlers_total"] = 32
+        #expect(AppState.detectionProtectionDegraded(in: ["notarization_follow_up_lifecycle": healthy,
+                                                          "detection_work_lifecycle": healthy]) == false)
+        #expect(AppState.detectionProtectionDegraded(in: [:]) == nil)
+        // Both heartbeat payloads the menu bar reads go through it.
+        let appState = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/MacCrabApp/AppState.swift"), encoding: .utf8)
+        #expect(appState.contains("var richDetectionWorkLifecycleDegraded: Bool? = Self.detectionProtectionDegraded(in: json)"))
+        #expect(appState.contains("if let degraded = Self.detectionProtectionDegraded(in: richJSON) {"))
+    }
+
     @Test("An old alert write failure is reported as history, not as a current reason")
     func historicalFailure() throws {
         var raw = ready(Date())

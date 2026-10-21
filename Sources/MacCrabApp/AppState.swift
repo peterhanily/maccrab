@@ -343,6 +343,20 @@ final class AppState: ObservableObject, EventQueryReading {
         return status.featureDegraded
     }
 
+    /// The detection plane's protection verdict in one heartbeat payload. A
+    /// shed notarization follow-up is an unchecked first launch, so it
+    /// degrades protection as a lost detection decision does. Nil when the
+    /// payload has neither.
+    nonisolated static func detectionProtectionDegraded(in payload: [String: Any]) -> Bool? {
+        if let notarizationFollowUpLifecycle = payload["notarization_follow_up_lifecycle"] as? [String: Any],
+           detectionWorkLifecycleDegraded(from: notarizationFollowUpLifecycle) == true {
+            return true
+        }
+        return (payload["detection_work_lifecycle"] as? [String: Any]).flatMap {
+            detectionWorkLifecycleDegraded(from: $0)
+        }
+    }
+
     nonisolated private static func detectionWorkLifecycleDegraded(
         from raw: [String: Any]
     ) -> Bool? {
@@ -610,10 +624,7 @@ final class AppState: ObservableObject, EventQueryReading {
         var richStartupWorkLifecycleDegraded: Bool? = inlineStartupWorkLifecycle.flatMap {
             Self.featureWorkLifecycleDegraded(from: $0)
         }
-        let inlineDetectionWorkLifecycle = json["detection_work_lifecycle"] as? [String: Any]
-        var richDetectionWorkLifecycleDegraded: Bool? = inlineDetectionWorkLifecycle.flatMap {
-            Self.detectionWorkLifecycleDegraded(from: $0)
-        }
+        var richDetectionWorkLifecycleDegraded: Bool? = Self.detectionProtectionDegraded(in: json)
         let inlineAdvisoryWorkLifecycle = json["advisory_work_lifecycle"] as? [String: Any]
         var richAdvisoryWorkLifecycleDegraded: Bool? = inlineAdvisoryWorkLifecycle.flatMap {
             Self.featureWorkLifecycleDegraded(from: $0)
@@ -729,8 +740,8 @@ final class AppState: ObservableObject, EventQueryReading {
             if let startup = richJSON["startup_work_lifecycle"] as? [String: Any] {
                 richStartupWorkLifecycleDegraded = Self.featureWorkLifecycleDegraded(from: startup)
             }
-            if let detection = richJSON["detection_work_lifecycle"] as? [String: Any] {
-                richDetectionWorkLifecycleDegraded = Self.detectionWorkLifecycleDegraded(from: detection)
+            if let degraded = Self.detectionProtectionDegraded(in: richJSON) {
+                richDetectionWorkLifecycleDegraded = degraded
             }
             if let advisory = richJSON["advisory_work_lifecycle"] as? [String: Any] {
                 richAdvisoryWorkLifecycleDegraded = Self.featureWorkLifecycleDegraded(from: advisory)

@@ -3150,9 +3150,10 @@ enum DaemonTimers {
                             } catch {
                                 return
                             }
-                            retainedThrough = Date()
-                            consecutiveWaitSeconds = 0
-                            cumulativeWaitSeconds = 0
+                            let fresh = JournalExpiryBackpressurePolicy.continuation(at: Date())
+                            retainedThrough = fresh.retainedThrough
+                            consecutiveWaitSeconds = fresh.consecutiveWaitSeconds
+                            cumulativeWaitSeconds = fresh.cumulativeWaitSeconds
                             continue
                         case .deferToNextPass:
                             await state.eventStore.recordJournalExpiryLeaseDeferral()
@@ -4756,6 +4757,7 @@ enum DaemonTimers {
             let detectionWorkPlane = state.detectionWorkLifecycle.snapshot()
             let advisoryWorkPlane = state.advisoryWorkLifecycle.snapshot()
             let outputWorkPlane = state.outputWorkLifecycle.snapshot()
+            let notarizationFollowUpPlane = state.notarizationFollowUpLifecycle.snapshot()
             let heavyEnrichmentPlane = await state.enricher
                 .heavyEnrichmentSnapshot()
             let deferredEnrichmentBuffer = await state.deferredEnrichmentBuffer
@@ -5148,6 +5150,10 @@ enum DaemonTimers {
                     workLifecycleDictionary(advisoryWorkPlane),
                 "output_work_lifecycle":
                     workLifecycleDictionary(outputWorkPlane),
+                // A full plane drops a first launch's revoked-certificate and
+                // notarization check; it was otherwise counted nowhere.
+                "notarization_follow_up_lifecycle":
+                    workLifecycleDictionary(notarizationFollowUpPlane),
                 "heavy_enrichment_plane": heavyEnrichmentPlaneDict,
                 "deferred_enrichment_buffer":
                     deferredEnrichmentBufferDict,
@@ -9116,7 +9122,8 @@ func reprobeAlertStoreAtActivationBoundary(
 /// journal expiry holds it the sweep waits, and expiry gives way at its next
 /// quantum; another sweep in flight still means skip. Every exit that does
 /// not acquire withdraws the wait, which would otherwise block expiry.
-private func acquireSizeCapSweep(
+/// Internal so its waiting and withdrawal are tested against a real store.
+func acquireSizeCapSweep(
     eventStore: EventStore,
     waitSeconds: TimeInterval
 ) async -> Bool {

@@ -200,7 +200,29 @@ public enum BoundedPrivilegedProcessRunner {
         mergeStandardErrorIntoOutput: Bool = true,
         standardInputData: Data? = nil
     ) async -> Result? {
-        await asyncLimit.acquire()
+        await runAsync(
+            executable: executable, arguments: arguments, environment: environment,
+            workingDirectory: workingDirectory, timeout: timeout,
+            maximumOutputBytes: maximumOutputBytes,
+            mergeStandardErrorIntoOutput: mergeStandardErrorIntoOutput,
+            standardInputData: standardInputData, permits: asyncLimit
+        )
+    }
+
+    /// `runAsync` with its permits as a parameter, so a test can bound them
+    /// without sharing the process-wide limit.
+    static func runAsync(
+        executable: String,
+        arguments: [String],
+        environment: [String: String] = minimalEnvironment,
+        workingDirectory: String = "/",
+        timeout: TimeInterval,
+        maximumOutputBytes: Int?,
+        mergeStandardErrorIntoOutput: Bool = true,
+        standardInputData: Data? = nil,
+        permits: AsyncPermits
+    ) async -> Result? {
+        await permits.acquire()
         let result = await BlockingWorkOffload.perform(
             on: asyncQueue,
             qos: BlockingWorkOffload.dispatchQoS(
@@ -220,7 +242,7 @@ public enum BoundedPrivilegedProcessRunner {
                 standardInputData: standardInputData
             )
         }
-        await asyncLimit.release()
+        await permits.release()
         return result
     }
 

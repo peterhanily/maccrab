@@ -107,6 +107,8 @@ extension V2DiagnosticsExport {
         if heartbeat.sequenceCheckpoint?.degraded == true { reasons.append("sequence_checkpoint_degraded") }
         if heartbeat.timerLifecycle?.featureDegraded == true { reasons.append("maintenance_timer_degraded") }
         if detectionWorkDegraded == true { reasons.append("detection_work_degraded") }
+        let notarizationFollowUpDegraded = heartbeat.notarizationFollowUpLifecycle?.detectionProtectionDegraded
+        if notarizationFollowUpDegraded == true { reasons.append("notarization_follow_up_degraded") }
         if heartbeat.alertEvidenceBudget?.captureDegraded == true { reasons.append("alert_evidence_capture_degraded") }
         if heartbeat.alertEvidenceBudget?.transitionDegraded == true { reasons.append("alert_evidence_transition_degraded") }
         if heartbeat.alertWritesRequireAttention { reasons.append("alert_write_failure_recent") }
@@ -127,6 +129,7 @@ extension V2DiagnosticsExport {
             "browser_inventory_degraded": flag(heartbeat.browserInventory?.degraded),
             "maintenance_timer_degraded": flag(heartbeat.timerLifecycle?.featureDegraded),
             "detection_work_degraded": flag(detectionWorkDegraded),
+            "notarization_follow_up_degraded": flag(notarizationFollowUpDegraded),
             "alert_evidence_capture_degraded": flag(heartbeat.alertEvidenceBudget?.captureDegraded),
             "alert_evidence_transition_degraded": flag(heartbeat.alertEvidenceBudget?.transitionDegraded),
             "alert_insert_errors_total": count(heartbeat.alertInsertErrorsTotal),

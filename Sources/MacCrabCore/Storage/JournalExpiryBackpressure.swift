@@ -78,6 +78,19 @@ public enum JournalExpiryBackpressurePolicy {
     public static let continuationDelaySeconds: TimeInterval = 30
     public static let maximumContinuationsPerPass = 8
 
+    /// Where a continuation starts: a cutoff taken now and unspent budgets.
+    /// Keeping the abandoned pass's cutoff would only chase the backlog it
+    /// already failed to drain, with the budgets it already spent.
+    public struct PassStart: Sendable, Equatable {
+        public let retainedThrough: Date
+        public let consecutiveWaitSeconds: TimeInterval
+        public let cumulativeWaitSeconds: TimeInterval
+    }
+
+    public static func continuation(at now: Date) -> PassStart {
+        PassStart(retainedThrough: now, consecutiveWaitSeconds: 0, cumulativeWaitSeconds: 0)
+    }
+
     public static func afterAbandon(
         error: EventStoreError,
         continuations: Int,

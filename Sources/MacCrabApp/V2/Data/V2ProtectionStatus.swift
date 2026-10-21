@@ -90,6 +90,7 @@ enum V2MenuBarProtectionStatus: Equatable {
                 || heartbeat.timerLifecycle?.featureDegraded == true
                 || (heartbeat.detectionWorkLifecycle?.detectionProtectionDegraded
                     ?? heartbeat.legacyDerivedWorkLifecycle?.featureDegraded) == true
+                || heartbeat.notarizationFollowUpLifecycle?.detectionProtectionDegraded == true
                 || heartbeat.alertEvidenceBudget?.captureDegraded == true
                 || heartbeat.alertEvidenceBudget?.transitionDegraded == true
                 || heartbeat.alertWritesRequireAttention ? .degraded : .active

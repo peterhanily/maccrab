@@ -91,6 +91,10 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// Notification and external-output fan-out. Loss means delivery may be
     /// incomplete while alert detection and local persistence continue.
     public let outputWorkLifecycle: TimerLifecycle?
+    /// Notarization and revoked-certificate checks that a saturated detection
+    /// lane handed off instead of running inline. A shed here is an unchecked
+    /// first launch, so it is a protection gap like the detection plane's.
+    public let notarizationFollowUpLifecycle: TimerLifecycle?
     /// Compatibility only for pre-split engines. New lanes are never filled
     /// from this aggregate because doing so would hide which class lost work.
     public let legacyDerivedWorkLifecycle: TimerLifecycle?
@@ -263,6 +267,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case detectionWorkLifecycle = "detection_work_lifecycle"
         case advisoryWorkLifecycle = "advisory_work_lifecycle"
         case outputWorkLifecycle = "output_work_lifecycle"
+        case notarizationFollowUpLifecycle = "notarization_follow_up_lifecycle"
         case legacyDerivedWorkLifecycle = "derived_work_lifecycle"
         case otlpReceiverLifecycle = "otlp_receiver_lifecycle"
         case prevention
