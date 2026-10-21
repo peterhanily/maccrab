@@ -180,6 +180,98 @@ struct BehaviorScoringStaticFloodTests {
         #expect(await scorer.lifecycleInvariantFailures().isEmpty)
     }
 
+    @Test("one event's indicators land together, so an insert between them cannot split the crossing")
+    func eventIndicatorsLandTogether() async throws {
+        let clock = Clock()
+        let scorer = scorer(clock)
+        // Every slot holds a small action residue.
+        for pid in 1...50 {
+            _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 1),
+                                          forProcess: Int32(pid), path: "/usr/bin/curl")
+        }
+        clock.advance(1)
+        // Applied one call at a time, an insert landing between sudo and the
+        // install evicts the static-only entry and the 10 never forms.
+        _ = await scorer.addIndicator(.init(name: "ai_tool_runs_sudo", weight: 6), forProcess: 900, path: "/usr/bin/sudo")
+        _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 1), forProcess: 901, path: "/usr/bin/nc")
+        let split = await scorer.addIndicator(.init(name: "ai_tool_installs_unknown_pkg", weight: 4),
+                                              forProcess: 900, path: "/usr/bin/sudo")
+        #expect(split == nil, "the hazard the event-level batch removes")
+        // Applied together, they cross.
+        let together = await scorer.addIndicators(
+            [.init(name: "ai_tool_runs_sudo", weight: 6), .init(name: "ai_tool_installs_unknown_pkg", weight: 4)],
+            forProcess: 902, path: "/usr/bin/sudo")
+        #expect(together != nil)
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+        // The event loop reports an AI child's indicators in one call.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let eventLoop = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"), encoding: .utf8)
+        let start = try #require(eventLoop.range(of: "private static func enforceAIChildBehaviorGuards("))
+        let end = try #require(eventLoop.range(
+            of: "// Prompt injection scanning", range: start.upperBound..<eventLoop.endIndex))
+        let body = eventLoop[start.upperBound..<end.lowerBound]
+        #expect(body.components(separatedBy: "BehaviorScoreAlertEmitter.record(").count == 2)
+        #expect(body.contains("indicators: indicators"))
+    }
+
+    @Test("an exit storm keeps the exit queue proportional to the table")
+    func exitQueueStaysBounded() async {
+        let clock = Clock()
+        let capacity = 100
+        let scorer = scorer(clock, capacity: capacity)
+        var longest = 0
+        for pid in 1...50_000 {
+            _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 1),
+                                          forProcess: Int32(pid), path: "/private/tmp/storm/payload")
+            await scorer.processExited(pid: Int32(pid))
+            longest = max(longest, await scorer.exitQueueLength)
+        }
+        #expect(longest <= 4 * capacity, "queue reached \(longest)")
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+        // The surviving exited scores still leave after the grace.
+        clock.advance(601)
+        await scorer.processExited(pid: 60_000)
+        #expect(await scorer.score(forPid: 50_000, path: "/private/tmp/storm/payload") == 0)
+    }
+
+    @Test("a later process reusing an exited pid and path starts a new generation")
+    func reusedPidStartsANewGeneration() async throws {
+        let clock = Clock()
+        let scorer = scorer(clock)
+        let path = "/opt/homebrew/bin/node"
+        let firstStart = clock.now
+        let first = await scorer.addIndicators(
+            [.init(name: "ai_tool_runs_sudo", weight: 6), .init(name: "ai_tool_installs_unknown_pkg", weight: 4)],
+            forProcess: 70, path: path, processStart: firstStart)
+        let token = try #require(first?.deliveryToken)
+        #expect(await scorer.resolveThreshold(deliveryToken: token, as: .committed))
+        clock.advance(1)
+        await scorer.processExited(pid: 70)
+        // A late event of the exited process keeps its score (and, after the
+        // quiet period, alerts again; deliver that too).
+        clock.advance(1)
+        if let late = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2),
+                                                forProcess: 70, path: path, processStart: firstStart) {
+            #expect(await scorer.resolveThreshold(deliveryToken: late.deliveryToken, as: .committed))
+        }
+        #expect(await scorer.score(forPid: 70, path: path) >= 11.9)
+        // A process with the same pid and path that started after the exit
+        // is scored on its own: unlatched, live and without the old weight.
+        clock.advance(1)
+        let second = await scorer.addIndicators(
+            [.init(name: "ai_tool_runs_sudo", weight: 6), .init(name: "ai_tool_installs_unknown_pkg", weight: 4)],
+            forProcess: 70, path: path, processStart: clock.now)
+        #expect(second != nil)
+        #expect(await scorer.score(forPid: 70, path: path) < 10.5)
+        // No longer exited: the old exit does not drop it after the grace.
+        clock.advance(601)
+        await scorer.processExited(pid: 71)
+        #expect(await scorer.score(forPid: 70, path: path) >= 10)
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
     @Test("the daemon prunes scores on a timer and reports exits")
     func wiring() throws {
         let root = URL(fileURLWithPath: #filePath)

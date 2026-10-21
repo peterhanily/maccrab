@@ -614,31 +614,23 @@ enum EventLoop {
         aiType: AIToolType?
     ) async {
         let process = event.process
+        // One event's indicators reach the score together: an entry holding
+        // only the first could be evicted before the second lands.
+        var indicators: [(name: String, detail: String)] = []
 
         // AI child spawning a shell -- track it
         let shellNames = ["/bash", "/zsh", "/sh", "/dash", "/fish"]
         if shellNames.contains(where: { process.executable.hasSuffix($0) }) {
-            await BehaviorScoreAlertEmitter.record(
-                state: state,
-                event: event,
-                named: "ai_tool_spawns_shell",
-                detail: "\(aiType?.displayName ?? "AI tool") spawned \(process.name)",
-                forProcess: process.pid,
-                path: process.executable
-            )
+            indicators.append(("ai_tool_spawns_shell", "\(aiType?.displayName ?? "AI tool") spawned \(process.name)"))
         }
 
         // AI child running sudo
         if process.executable.hasSuffix("/sudo")
             || process.commandLine.hasPrefix("sudo ") {
-            await BehaviorScoreAlertEmitter.record(
-                state: state,
-                event: event,
-                named: "ai_tool_runs_sudo",
-                detail: "\(aiType?.displayName ?? "AI tool") child running sudo: \(process.commandLine.prefix(100))",
-                forProcess: process.pid,
-                path: process.executable
-            )
+            indicators.append((
+                "ai_tool_runs_sudo",
+                "\(aiType?.displayName ?? "AI tool") child running sudo: \(process.commandLine.prefix(100))"
+            ))
         }
 
         // AI child installing packages
@@ -650,14 +642,7 @@ enum EventLoop {
         if packageCommands.contains(where: {
             ExactSubstringSearch.contains(lowercasedCommandLine, $0)
         }) {
-            await BehaviorScoreAlertEmitter.record(
-                state: state,
-                event: event,
-                named: "ai_tool_installs_unknown_pkg",
-                detail: process.commandLine.prefix(200).description,
-                forProcess: process.pid,
-                path: process.executable
-            )
+            indicators.append(("ai_tool_installs_unknown_pkg", process.commandLine.prefix(200).description))
         }
 
         // AI child downloading and executing
@@ -665,14 +650,7 @@ enum EventLoop {
         let executionPipes = ["| sh", "| bash", "| zsh", "-o /tmp", "-O /tmp"]
         if downloadCommands.contains(where: { ExactSubstringSearch.contains(process.commandLine, $0) })
             && executionPipes.contains(where: { ExactSubstringSearch.contains(process.commandLine, $0) }) {
-            await BehaviorScoreAlertEmitter.record(
-                state: state,
-                event: event,
-                named: "ai_tool_downloads_and_exec",
-                detail: process.commandLine.prefix(200).description,
-                forProcess: process.pid,
-                path: process.executable
-            )
+            indicators.append(("ai_tool_downloads_and_exec", process.commandLine.prefix(200).description))
         }
 
         // AI child writing to persistence locations
@@ -682,15 +660,18 @@ enum EventLoop {
                 ".zshrc", ".bashrc", ".bash_profile",
             ]
             if persistencePaths.contains(where: { ExactSubstringSearch.contains(file.path, $0) }) {
-                await BehaviorScoreAlertEmitter.record(
-                    state: state,
-                    event: event,
-                    named: "ai_tool_persistence_write",
-                    detail: "AI tool writing to \(file.path)",
-                    forProcess: process.pid,
-                    path: process.executable
-                )
+                indicators.append(("ai_tool_persistence_write", "AI tool writing to \(file.path)"))
             }
+        }
+
+        if !indicators.isEmpty {
+            await BehaviorScoreAlertEmitter.record(
+                state: state,
+                event: event,
+                indicators: indicators,
+                forProcess: process.pid,
+                path: process.executable
+            )
         }
 
         // Prompt injection scanning is alert-producing and therefore also

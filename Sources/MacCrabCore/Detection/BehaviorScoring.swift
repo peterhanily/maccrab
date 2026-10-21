@@ -54,8 +54,10 @@ public actor BehaviorScoring {
     /// Exited processes keep their scores this long for events still in
     /// flight on the other lane, then leave so a later process reusing the
     /// pid and path does not inherit their static weight or alert latch. The
-    /// file lane can lag the exit by minutes near saturation; exited scores
-    /// are the first evicted, so the wait costs no live process its slot.
+    /// file lane can lag the exit by minutes near saturation, and exited
+    /// scores are the first evicted. A process that reuses the pid and path
+    /// within the wait starts a new generation when its caller knows its start
+    /// time; without one it inherits the exited score until the wait ends.
     private static let exitGrace: TimeInterval = 600
     private var exitQueue: [(pid: Int32, at: Date)] = []
     private var exitQueueHead = 0
@@ -353,12 +355,29 @@ public actor BehaviorScoring {
 
     /// Add an indicator to a process's behavioral score.
     /// Returns a ScoringResult if the score crossed the alert threshold.
+    /// `processStart` is the process's start time when the caller knows it.
     @discardableResult
     public func addIndicator(
         _ indicator: Indicator,
         forProcess pid: Int32,
-        path: String
+        path: String,
+        processStart: Date? = nil
     ) -> ScoringResult? {
+        addIndicators([indicator], forProcess: pid, path: path, processStart: processStart)
+    }
+
+    /// Add several indicators observed on one event in a single step, so the
+    /// table cannot evict the entry between them: an agent child's `sudo npm
+    /// install` is two static indicators, and an insert landing between two
+    /// separate calls evicted the first before the second could cross.
+    @discardableResult
+    public func addIndicators(
+        _ indicators: [Indicator],
+        forProcess pid: Int32,
+        path: String,
+        processStart: Date? = nil
+    ) -> ScoringResult? {
+        guard !indicators.isEmpty else { return nil }
         let key = ProcessKey(pid: pid, path: path)
         let timestamp = now()
         // A score-table eviction must not turn a failed delivery into a new
@@ -369,6 +388,16 @@ public actor BehaviorScoring {
                 return pending
             }
             abandonPendingThreshold(for: key)
+        }
+
+        // A later process reusing an exited process's pid and path is a new
+        // generation: it must not inherit that score, latch or exit mark. The
+        // exited process's own late events started before it exited.
+        if let processStart, let exitedAt = processScores[key]?.exitedAt, processStart > exitedAt {
+            processScores[key] = ProcessScore(lastUpdate: timestamp)
+            alerted.remove(key)
+            if let index = insertionOrder.firstIndex(of: key) { insertionOrder.remove(at: index) }
+            insertionOrder.append(key)
         }
 
         // Initialize or get existing score
@@ -400,51 +429,57 @@ public actor BehaviorScoring {
             }
         }
 
-        // Indicators describing the process itself, not an action, are true
-        // for its whole lifetime and count once per process.
-        if Self.oncePerProcessIndicators.contains(indicator.name),
-           entry.indicatorLastAdd[indicator.name] != nil {
-            return pendingThresholds[key]
-        }
+        var added = false
+        for indicator in indicators {
+            // Indicators describing the process itself, not an action, are
+            // true for its whole lifetime and count once per process.
+            if Self.oncePerProcessIndicators.contains(indicator.name),
+               entry.indicatorLastAdd[indicator.name] != nil {
+                continue
+            }
 
-        // Indicator cooldown: a single indicator of the same name contributes
-        // at most once per `indicatorCooldown` seconds per process. Different
-        // indicators still accumulate freely — the goal is to prevent a single
-        // repeating benign signal (e.g. "ai_tool_unapproved_network" firing
-        // on every HTTPS request) from walking the score up on its own.
-        if let last = entry.indicatorLastAdd[indicator.name],
-           timestamp.timeIntervalSince(last) < Self.indicatorCooldown {
-            return pendingThresholds[key]
-        }
-        entry.indicatorLastAdd[indicator.name] = timestamp
+            // Indicator cooldown: a single indicator of the same name
+            // contributes at most once per `indicatorCooldown` seconds per
+            // process. Different indicators still accumulate freely — the goal
+            // is to prevent a single repeating benign signal (e.g.
+            // "ai_tool_unapproved_network" firing on every HTTPS request) from
+            // walking the score up on its own.
+            if let last = entry.indicatorLastAdd[indicator.name],
+               timestamp.timeIntervalSince(last) < Self.indicatorCooldown {
+                continue
+            }
+            entry.indicatorLastAdd[indicator.name] = timestamp
 
-        // v1.12.0 dev-mode gate: when MACCRAB_DEV_MODE=1, halve the
-        // contribution of `ai_tool_*` indicators. Rationale: on a
-        // developer's machine, Claude Code / Cursor / Cline run all
-        // day and legitimately spawn shells, run sudo, install
-        // packages, modify shell rc files. Their full weights walk
-        // the score past the 10/20 alert/critical thresholds in
-        // normal operation. Halved weights still catch genuinely
-        // adversarial AI-agent behavior (cumulative >2-3 hits) but
-        // don't fire on the operator's everyday agent use.
-        var effectiveWeight = indicator.weight
-        if Self.devMode && indicator.name.hasPrefix("ai_tool_") {
-            effectiveWeight = indicator.weight / 2.0
-        }
+            // v1.12.0 dev-mode gate: when MACCRAB_DEV_MODE=1, halve the
+            // contribution of `ai_tool_*` indicators. Rationale: on a
+            // developer's machine, Claude Code / Cursor / Cline run all
+            // day and legitimately spawn shells, run sudo, install
+            // packages, modify shell rc files. Their full weights walk
+            // the score past the 10/20 alert/critical thresholds in
+            // normal operation. Halved weights still catch genuinely
+            // adversarial AI-agent behavior (cumulative >2-3 hits) but
+            // don't fire on the operator's everyday agent use.
+            var effectiveWeight = indicator.weight
+            if Self.devMode && indicator.name.hasPrefix("ai_tool_") {
+                effectiveWeight = indicator.weight / 2.0
+            }
 
-        // Add the new indicator
-        if Self.oncePerProcessIndicators.contains(indicator.name) {
-            entry.staticScore += effectiveWeight
-        } else {
-            entry.rawScore += effectiveWeight
+            // Add the new indicator
+            if Self.oncePerProcessIndicators.contains(indicator.name) {
+                entry.staticScore += effectiveWeight
+            } else {
+                entry.rawScore += effectiveWeight
+            }
+            entry.indicators.append(indicator)
+
+            // Cap indicators per process
+            if entry.indicators.count > 50 {
+                entry.indicators.removeFirst()
+            }
+            added = true
         }
+        guard added else { return pendingThresholds[key] }
         entry.lastUpdate = timestamp
-        entry.indicators.append(indicator)
-
-        // Cap indicators per process
-        if entry.indicators.count > 50 {
-            entry.indicators.removeFirst()
-        }
 
         processScores[key] = entry
 
@@ -548,13 +583,25 @@ public actor BehaviorScoring {
         named name: String,
         detail: String = "",
         forProcess pid: Int32,
-        path: String
+        path: String,
+        processStart: Date? = nil
     ) -> ScoringResult? {
-        let weight = Self.weights[name] ?? 3.0
-        return addIndicator(
-            Indicator(name: name, weight: weight, detail: detail),
+        addIndicators(named: [(name, detail)], forProcess: pid, path: path, processStart: processStart)
+    }
+
+    /// Convenience: add standard indicators observed on one event, by name.
+    @discardableResult
+    public func addIndicators(
+        named names: [(name: String, detail: String)],
+        forProcess pid: Int32,
+        path: String,
+        processStart: Date? = nil
+    ) -> ScoringResult? {
+        addIndicators(
+            names.map { Indicator(name: $0.name, weight: Self.weights[$0.name] ?? 3.0, detail: $0.detail) },
             forProcess: pid,
-            path: path
+            path: path,
+            processStart: processStart
         )
     }
 
@@ -578,7 +625,8 @@ public actor BehaviorScoring {
         severity: Severity,
         ruleTitle: String,
         forProcess pid: Int32,
-        path: String
+        path: String,
+        processStart: Date? = nil
     ) -> ScoringResult? {
         if NoiseFilter.isTrustedBrowserHelper(path: path) {
             return nil
@@ -591,7 +639,8 @@ public actor BehaviorScoring {
         case .critical:      indicatorName = "sigma_rule_match_critical"
         case .informational: return nil
         }
-        return addIndicator(named: indicatorName, detail: ruleTitle, forProcess: pid, path: path)
+        return addIndicator(named: indicatorName, detail: ruleTitle, forProcess: pid, path: path,
+                            processStart: processStart)
     }
 
     /// Get the current score for a process.
@@ -623,9 +672,33 @@ public actor BehaviorScoring {
                 processScores[key]?.exitedAt = timestamp
             }
             exitQueue.append((pid, timestamp))
+            if exitQueue.count - exitQueueHead > 4 * max(1, maxTrackedProcesses) {
+                compactExitQueue()
+            }
         }
         dropExitedScores(at: timestamp)
     }
+
+    /// An exit storm at capacity evicts exited scores within seconds while
+    /// their queue entries wait out the grace, so the queue would grow with
+    /// the exit rate rather than the table. Keep only pids that still hold an
+    /// exited score, each at its latest exit (which covers its earlier ones),
+    /// and release the old storage.
+    private func compactExitQueue() {
+        var latest: [Int32: Int] = [:]
+        for index in exitQueueHead..<exitQueue.count {
+            let pid = exitQueue[index].pid
+            if keysByPid[pid]?.contains(where: { processScores[$0]?.exitedAt != nil }) == true {
+                latest[pid] = index
+            }
+        }
+        let kept = Set(latest.values)
+        exitQueue = (exitQueueHead..<exitQueue.count).compactMap { kept.contains($0) ? exitQueue[$0] : nil }
+        exitQueueHead = 0
+    }
+
+    /// Exit-queue entries still waiting out the grace; for capacity fixtures.
+    var exitQueueLength: Int { exitQueue.count - exitQueueHead }
 
     private func dropExitedScores(at timestamp: Date) {
         let cutoff = timestamp.addingTimeInterval(-Self.exitGrace)

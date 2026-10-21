@@ -16,18 +16,25 @@ enum BehaviorScoreAlertEmitter {
         forProcess pid: Int32,
         path: String
     ) async {
-        await record(
-            behaviorScoring: state.behaviorScoring,
-            alertSink: state.alertSink,
-            notifier: state.notifier,
-            responseEngine: state.responseEngine,
-            event: event,
-            isWarmingUp: state.isWarmingUp,
-            named: name,
-            detail: detail,
-            forProcess: pid,
-            path: path
-        )
+        await record(state: state, event: event, indicators: [(name, detail)], forProcess: pid, path: path)
+    }
+
+    /// Several indicators seen on one event, applied to the score in one step.
+    static func record(
+        state: DaemonState,
+        event: Event?,
+        indicators: [(name: String, detail: String)],
+        forProcess pid: Int32,
+        path: String
+    ) async {
+        guard !indicators.isEmpty,
+              let crossing = await state.behaviorScoring.addIndicators(
+                  named: indicators,
+                  forProcess: pid,
+                  path: path,
+                  processStart: processStart(of: event, pid: pid)
+              ) else { return }
+        await emit(crossing, state: state, event: event)
     }
 
     static func record(
@@ -46,7 +53,8 @@ enum BehaviorScoreAlertEmitter {
             named: name,
             detail: detail,
             forProcess: pid,
-            path: path
+            path: path,
+            processStart: processStart(of: event, pid: pid)
         ) else { return }
         await emit(
             crossing,
@@ -68,9 +76,18 @@ enum BehaviorScoreAlertEmitter {
             severity: match.severity,
             ruleTitle: match.ruleName,
             forProcess: event.process.pid,
-            path: event.process.executable
+            path: event.process.executable,
+            processStart: event.process.startTime
         ) else { return }
         await emit(crossing, state: state, event: event)
+    }
+
+    /// The scored process's start time, when the event is that process's: it
+    /// tells a later process reusing an exited pid and path from the exited
+    /// process's own late events.
+    private static func processStart(of event: Event?, pid: Int32) -> Date? {
+        guard let event, event.process.pid == pid else { return nil }
+        return event.process.startTime
     }
 
     static func emit(
