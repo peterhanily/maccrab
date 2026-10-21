@@ -195,8 +195,9 @@ public enum TraceDashboardKeyExchange {
         if let ready = tryExisting() { return ready }
 
         guard let recipient = try? dashboardPrivateKeyForCurrentSession(),
+              let inboxDir = try? InboxDirectories.preparedRequestDirectory(dataDir: supportDir),
               writeKeyRequest(
-                inboxDir: supportDir + "/inbox",
+                inboxDir: inboxDir,
                 publicKey: recipient.publicKey.rawRepresentation,
                 requester: requester
               )

@@ -62,3 +62,32 @@ struct AgentCapabilitiesCommandTests {
         #expect(help.contains("agent-capabilities <show|set|disable-all>"))
     }
 }
+
+@Suite("Root-only request inbox from the CLI")
+struct RootRequestInboxCLITests {
+    @Test("under sudo requests go to the engine's root-only inbox, otherwise to the public one")
+    func requestInboxFollowsTheUser() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-inbox-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        #expect(try requestInboxDirectory(dataDir: base, effectiveUID: 0) == base + "/inbox-root")
+        #expect(try requestInboxDirectory(dataDir: base, effectiveUID: 501) == base + "/inbox")
+        let mode = try FileManager.default.attributesOfItem(atPath: base + "/inbox-root")[.posixPermissions] as? Int
+        #expect(mode == 0o700)
+        // The capability command writes where the installed engine reads.
+        #expect(installedRootInboxPath == "/Library/Application Support/MacCrab/inbox-root")
+    }
+
+    @Test("every CLI request writer goes through the shared inbox choice")
+    func writersShareTheInboxChoice() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        for file in ["MacCrabCtl.swift", "RollupCommand.swift", "RuleMutateCommands.swift",
+                     "ResponseCommands.swift", "ConfigCommands.swift", "RuleChannelCommands.swift"] {
+            let source = try String(
+                contentsOf: root.appendingPathComponent("Sources/maccrabctl/" + file), encoding: .utf8)
+            #expect(source.contains("requestInboxDirectory("), "\(file)")
+        }
+    }
+}

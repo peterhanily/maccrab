@@ -33,13 +33,16 @@ public enum RuntimeConfigurationFiles {
 
     /// Submission establishes only that a request was placed in the inbox.
     /// The daemon writes its separately owned durable outcome after validation.
+    /// `inboxDirectory` defaults to the public inbox; a root caller passes the
+    /// root-only one (`InboxDirectories.preparedRequestDirectory`).
     public static func submit(
-        operation: String, payload: [String: Any], directory: String, requestID: UUID = UUID()
+        operation: String, payload: [String: Any], directory: String, requestID: UUID = UUID(),
+        inboxDirectory: String? = nil
     ) throws -> UUID {
         guard ["set-daemon-config", "reload-rules", "remove-suppression"].contains(operation) else {
             throw RuntimeConfigContractError("Unsupported runtime request operation")
         }
-        let inbox = directory + "/inbox"
+        let inbox = inboxDirectory ?? directory + "/" + InboxDirectories.publicName
         try FileManager.default.createDirectory(atPath: inbox, withIntermediateDirectories: true)
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         let path = inbox + "/" + operation + "-" + requestID.uuidString + ".json"

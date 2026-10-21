@@ -85,11 +85,12 @@ struct InboxGateTests {
 
     // MARK: - isAuthorizedInboxRequest (uid gate)
 
-    @Test("Root authorized; stat-failure and a non-console uid rejected")
+    @Test("Root authorized only on the root channel; stat-failure and a non-console uid rejected")
     func authGate() {
-        #expect(DaemonTimers.isAuthorizedInboxRequest(uid: 0))            // root
-        #expect(DaemonTimers.isAuthorizedInboxRequest(uid: -1) == false)  // stat failed
-        #expect(DaemonTimers.isAuthorizedInboxRequest(uid: 99999) == false) // not root, not console
+        #expect(DaemonTimers.isAuthorizedInboxRequest(uid: 0, rootChannel: true))              // root, root-only inbox
+        #expect(DaemonTimers.isAuthorizedInboxRequest(uid: 0, rootChannel: false) == false)    // root, 1777 inbox
+        #expect(DaemonTimers.isAuthorizedInboxRequest(uid: -1, rootChannel: false) == false)   // stat failed
+        #expect(DaemonTimers.isAuthorizedInboxRequest(uid: 99999, rootChannel: false) == false) // not root, not console
     }
 
     // MARK: - readIdRequest local-DoS hardening (v1.21.4 audit HIGH)

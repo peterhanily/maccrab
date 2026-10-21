@@ -8,6 +8,7 @@
 
 import Foundation
 import Darwin
+import MacCrabCore
 
 struct AgentCapabilitiesDocument: Equatable {
     static let tierNames = ["config", "authoring", "response"]
@@ -131,8 +132,8 @@ private let installedCapabilitiesPath =
     "/Library/Application Support/MacCrab/mcp_capabilities.json"
 /// Root-only: the engine accepts capability grants only from here, since any
 /// user can place a root-owned file in the 1777 inbox by hard-linking one.
-private let installedRootInboxPath =
-    "/Library/Application Support/MacCrab/inbox-root"
+let installedRootInboxPath = InboxDirectories.requestDirectory(
+    dataDir: "/Library/Application Support/MacCrab", effectiveUID: 0)
 private let maximumCapabilitiesBytes: off_t = 64 * 1024
 
 /// Read only a regular, singly-linked, root-owned, non-writable-by-others file.
@@ -214,7 +215,8 @@ private func queueRootOwnedAgentCapabilities(_ document: AgentCapabilitiesDocume
     guard geteuid() == 0 else {
         throw AgentCapabilitiesCLIError.invalidState("root authorization is required")
     }
-    try validateOrCreateInstalledRootInbox()
+    _ = try InboxDirectories.preparedRequestDirectory(
+        dataDir: (installedRootInboxPath as NSString).deletingLastPathComponent, effectiveUID: 0)
 
     let payload = try JSONSerialization.data(
         withJSONObject: document.dictionary,
@@ -262,30 +264,3 @@ private func queueRootOwnedAgentCapabilities(_ document: AgentCapabilitiesDocume
     writeSucceeded = true
 }
 
-private func validateOrCreateInstalledRootInbox() throws {
-    var info = stat()
-    if lstat(installedRootInboxPath, &info) != 0 {
-        guard errno == ENOENT else {
-            throw AgentCapabilitiesCLIError.io(
-                "cannot inspect the root capability inbox: errno \(errno)")
-        }
-        guard mkdir(installedRootInboxPath, 0o700) == 0 || errno == EEXIST,
-              lstat(installedRootInboxPath, &info) == 0 else {
-            throw AgentCapabilitiesCLIError.io(
-                "cannot create the root capability inbox: errno \(errno)")
-        }
-    }
-    guard (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == 0 else {
-        throw AgentCapabilitiesCLIError.unsafePath(
-            "refusing capability inbox that is not a root-owned directory: \(installedRootInboxPath)")
-    }
-    guard chmod(installedRootInboxPath, 0o700) == 0,
-          lstat(installedRootInboxPath, &info) == 0,
-          (info.st_mode & S_IFMT) == S_IFDIR,
-          info.st_uid == 0,
-          (info.st_mode & 0o7777) == 0o700
-    else {
-        throw AgentCapabilitiesCLIError.unsafePath(
-            "cannot establish the root-only capability inbox")
-    }
-}

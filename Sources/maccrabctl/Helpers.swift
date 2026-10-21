@@ -39,6 +39,13 @@ extension Severity {
     }
 }
 
+/// The inbox for this command's requests to the engine: the root-only inbox
+/// under `sudo`, since the engine no longer accepts root ownership in the 1777
+/// inbox, and the public one otherwise.
+func requestInboxDirectory(dataDir: String = maccrabDataDir(), effectiveUID: uid_t = geteuid()) throws -> String {
+    try InboxDirectories.preparedRequestDirectory(dataDir: dataDir, effectiveUID: effectiveUID)
+}
+
 /// Resolve the MacCrab data directory.
 /// Prefers the system dir (root daemon) when its DB is newer, since the
 /// user dir may contain stale data from a previous non-root run.

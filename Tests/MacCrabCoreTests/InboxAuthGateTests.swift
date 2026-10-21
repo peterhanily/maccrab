@@ -14,14 +14,18 @@ import Foundation
 @Suite("Inbox authorization gate (v1.19.1)")
 struct InboxAuthGateTests {
 
-    @Test("root (uid 0) is always authorized")
+    @Test("root (uid 0) is authorized only through the root-only inbox")
     func rootAuthorized() {
-        #expect(DaemonTimers.isAuthorizedInboxRequest(uid: 0))
+        #expect(DaemonTimers.isAuthorizedInboxRequest(uid: 0, rootChannel: true))
+        // In the 1777 inbox a user can rename in a saved link to a root-owned
+        // inode, so root ownership there proves nothing.
+        #expect(!DaemonTimers.isAuthorizedInboxRequest(uid: 0, rootChannel: false))
     }
 
     @Test("a stat-failure / negative uid is rejected")
     func negativeRejected() {
-        #expect(!DaemonTimers.isAuthorizedInboxRequest(uid: -1))
+        #expect(!DaemonTimers.isAuthorizedInboxRequest(uid: -1, rootChannel: false))
+        #expect(!DaemonTimers.isAuthorizedInboxRequest(uid: -1, rootChannel: true))
     }
 
     @Test("isAdminUID rejects a known non-admin system account (nobody)")
@@ -39,6 +43,7 @@ struct InboxAuthGateTests {
         // can't match it — and even if it somehow did, it isn't an admin. Either
         // way the gate must reject it (the 1777 inbox must not honor arbitrary
         // uids).
-        #expect(!DaemonTimers.isAuthorizedInboxRequest(uid: 999999))
+        #expect(!DaemonTimers.isAuthorizedInboxRequest(uid: 999999, rootChannel: false))
+        #expect(!DaemonTimers.isAuthorizedInboxRequest(uid: 999999, rootChannel: true))
     }
 }

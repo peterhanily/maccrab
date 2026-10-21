@@ -217,11 +217,7 @@ private func saveActionsConfig(_ config: ActionConfigJSON) throws {
 /// uses. Returns true if the request was queued.
 @discardableResult
 private func queueActionsReload() -> Bool {
-    let inboxDir = maccrabDataDir() + "/inbox"
-    let fm = FileManager.default
-    if !fm.fileExists(atPath: inboxDir) {
-        try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
-    }
+    guard let inboxDir = try? requestInboxDirectory() else { return false }
     let path = inboxDir + "/reload-rules-\(UUID().uuidString).json"
     let payload: [String: Any] = [
         "requestedAt": ISO8601DateFormatter().string(from: Date()),

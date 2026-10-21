@@ -81,8 +81,13 @@ private func triggerDaemonRollup(olderThanHours: Double) async {
         return
     }
 
-    let inboxDir = dataDir + "/inbox"
-    try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+    let inboxDir: String
+    do {
+        inboxDir = try requestInboxDirectory(dataDir: dataDir)
+    } catch {
+        print("Tier rollup: could not queue a flush request: \(error.localizedDescription)")
+        return
+    }
     let payload: [String: Any] = [
         "schema_version": 1,
         "requested_at_unix": Date().timeIntervalSince1970,

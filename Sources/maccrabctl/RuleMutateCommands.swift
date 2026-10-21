@@ -239,11 +239,13 @@ private func safeUserRuleBasename(_ raw: String) -> String? {
 /// or an error string. The daemon authorizes by file-owner uid and
 /// re-validates the payload — this is a queue, not a trusted command.
 func dropCtlInboxRequest(verb: String, payload: [String: Any]) -> String? {
-    let inboxDir = maccrabDataDir() + "/inbox"
-    let fm = FileManager.default
-    if !fm.fileExists(atPath: inboxDir) {
-        try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+    let inboxDir: String
+    do {
+        inboxDir = try requestInboxDirectory()
+    } catch {
+        return error.localizedDescription
     }
+    let fm = FileManager.default
     guard JSONSerialization.isValidJSONObject(payload),
           let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
         return "could not serialize request payload"

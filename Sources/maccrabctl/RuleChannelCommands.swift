@@ -21,7 +21,10 @@ func dispatchRules(args: [String]) async {
             guard rest.isEmpty || rest == ["--json"] else {
                 throw RuntimeConfigContractError("Usage: maccrabctl rules reload [--json]")
             }
-            let id = try RuntimeConfigurationFiles.submit(operation: "reload-rules", payload: [:], directory: maccrabDataDir())
+            let directory = maccrabDataDir()
+            let id = try RuntimeConfigurationFiles.submit(
+                operation: "reload-rules", payload: [:], directory: directory,
+                inboxDirectory: requestInboxDirectory(dataDir: directory))
             if rest.contains("--json") {
                 try printCLIJSONObject(["schema_version": 1, "state": "pending", "operation": "reload-rules", "request_id": id.uuidString])
             } else {

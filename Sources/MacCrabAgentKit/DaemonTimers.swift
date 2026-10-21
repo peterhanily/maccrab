@@ -1949,8 +1949,9 @@ enum DaemonTimers {
     }
 
     /// Creates `path` as a 0700 directory owned by this process's effective
-    /// uid and verifies it without following a symlink. False leaves the
-    /// root channel closed.
+    /// uid and verifies it without following a symlink, and with no extended
+    /// ACL (an entry could let another user add or rename a request in
+    /// despite the mode). False leaves the root channel closed.
     static func ensureRootInboxDirectory(at path: String) -> Bool {
         if mkdir(path, 0o700) != 0, errno != EEXIST { return false }
         var st = stat()
@@ -1959,7 +1960,7 @@ enum DaemonTimers {
         if (st.st_mode & 0o7777) != 0o700 {
             guard chmod(path, 0o700) == 0 else { return false }
         }
-        return true
+        return InboxDirectories.isPrivateDirectory(at: path)
     }
 
     /// One source of truth for the names the poller will claim. The read-cap
@@ -5627,13 +5628,15 @@ enum DaemonTimers {
         } catch {
             print("[inbox] failed to ensure inbox dir at \(inboxDir): \(error.localizedDescription)")
         }
-        // Capability grants arrive only through this root-only directory: no
-        // other user can create a request in it or link a file into it, as
-        // they can into the 1777 inbox. If it cannot be established, grants
-        // stay unavailable and revokes still work.
-        let rootInboxDir = state.supportDir + "/inbox-root"
+        // Root-authored requests (`sudo maccrabctl …`) and capability grants
+        // arrive only through this root-only directory: no other user can
+        // create a request in it or rename one in, as they can in the 1777
+        // inbox, where root ownership proves nothing. If it cannot be
+        // established, root requests and grants are unavailable; revokes
+        // still work.
+        let rootInboxDir = state.supportDir + "/" + InboxDirectories.rootName
         if !ensureRootInboxDirectory(at: rootInboxDir) {
-            print("[inbox] root-only request directory unavailable at \(rootInboxDir); capability grants are disabled")
+            print("[inbox] root-only request directory unavailable at \(rootInboxDir); root requests and capability grants are disabled")
         }
 
         let inboxScanner = InboxDirectoryScanner(path: inboxDir)
@@ -5684,15 +5687,14 @@ enum DaemonTimers {
                     maxEntries: maxInboxDrainPerTick
                 )
                 let files = scan.requestNames
-                // Root-authored capability changes. Few and root-only, so a
-                // bounded listing is enough; the directory is re-verified
-                // each tick.
+                // Root-authored requests. Few and root-only, so a bounded
+                // listing is enough; the directory is re-verified each tick.
                 if ensureRootInboxDirectory(at: rootInboxDir) {
                     let rootRequests = ((try? FileManager.default.contentsOfDirectory(atPath: rootInboxDir)) ?? [])
-                        .filter { $0.hasPrefix("set-agent-capabilities-") && $0.hasSuffix(".json") }
+                        .filter(isClaimedInboxRequestName)
                         .sorted()
                         .prefix(64)
-                    await handleSetAgentCapabilitiesRequests(
+                    await dispatchInboxRequests(
                         Array(rootRequests), inboxDir: rootInboxDir, state: state, rootChannel: true)
                 }
                 // A previous SIGHUP may have been refused while runtime work
@@ -5703,68 +5705,7 @@ enum DaemonTimers {
                     kill(getpid(), SIGHUP)
                 }
                 guard !files.isEmpty else { return }
-
-                // Partition by request type so we drain in a defined order
-                // (mutations first, flush last — flush can take seconds).
-                let suppressAlertReqs = files.filter { $0.hasPrefix("suppress-alert-") && $0.hasSuffix(".json") }
-                let unsuppressAlertReqs = files.filter { $0.hasPrefix("unsuppress-alert-") && $0.hasSuffix(".json") }
-                let removeSuppressionReqs = files.filter { $0.hasPrefix("remove-suppression-") && $0.hasSuffix(".json") }
-                let deleteAlertReqs = files.filter { $0.hasPrefix("delete-alert-") && $0.hasSuffix(".json") }
-                let suppressCampaignReqs = files.filter { $0.hasPrefix("suppress-campaign-") && $0.hasSuffix(".json") }
-                let refreshIntelReqs = files.filter { $0.hasPrefix("refresh-intel-") && $0.hasSuffix(".json") }
-                let reloadRulesReqs = files.filter { $0.hasPrefix("reload-rules-") && $0.hasSuffix(".json") }
-                let llmConfigReqs = files.filter { $0.hasPrefix("llm-config-") && $0.hasSuffix(".json") }
-                let flushRequests = files.filter { $0.hasPrefix("flush-request-") && $0.hasSuffix(".json") }
-                // v1.18: ClickFix clipboard payloads recorded in USER context (the
-                // menubar app can read the GUI pasteboard; the root sysext cannot)
-                // and dropped here for the exec-correlation half to use.
-                let recordClipboardReqs = files.filter { $0.hasPrefix("record-clipboard-") && $0.hasSuffix(".json") }
-                // v1.18: per-built-in-rule enable/disable + severity override.
-                let builtinRuleReqs = files.filter { $0.hasPrefix("builtin-rule-setting-") && $0.hasSuffix(".json") }
-                // v1.18 agent control-plane (MCP skill): set a whitelisted
-                // daemon_config key, install a compiled user rule, remove a
-                // user rule. Same uid/symlink auth gate + audit as every verb.
-                let setDaemonConfigReqs = files.filter { $0.hasPrefix("set-daemon-config-") && $0.hasSuffix(".json") }
-                let installRuleReqs = files.filter { $0.hasPrefix("install-rule-") && $0.hasSuffix(".json") }
-                let removeRuleReqs = files.filter { $0.hasPrefix("remove-rule-") && $0.hasSuffix(".json") }
-                // Agent-control state changes. Root owns
-                // mcp_capabilities.json, but ownership of a file in this 1777
-                // inbox does not prove dashboard use, human presence, or even
-                // that root wrote it. Requests here can only revoke; grants
-                // arrive through the root-only inbox-root directory above.
-                let agentCapReqs = files.filter { $0.hasPrefix("set-agent-capabilities-") && $0.hasSuffix(".json") }
-                // v1.21.4 (audit): the dashboard's "Clear Now" retention button
-                // and the Agent-Traces receiver toggle drop these — the app
-                // (uid-501) can't write the root-owned alerts.db / config, so it
-                // routes through the same authorized inbox IPC as delete-alert.
-                let pruneAlertsReqs = files.filter { $0.hasPrefix("prune-alerts-") && $0.hasSuffix(".json") }
-                let agentTracesReqs = files.filter { $0.hasPrefix("apply-agent-traces-") && $0.hasSuffix(".json") }
-                let traceDashboardKeyReqs = files.filter { $0.hasPrefix("trace-dashboard-key-") && $0.hasSuffix(".json") }
-                // v1.21.4: the Prevention tab's per-module enable/disable toggle.
-                // The app (uid-501) can't mutate the root-owned prevention state
-                // nor SIGHUP the sysext, so it routes through this same
-                // authorized inbox IPC.
-                let preventionConfigReqs = files.filter { $0.hasPrefix("prevention-config-") && $0.hasSuffix(".json") }
-
-                await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
-                await handleUnsuppressAlertRequests(unsuppressAlertReqs, inboxDir: inboxDir, state: state)
-                await handleRemoveSuppressionRequests(removeSuppressionReqs, inboxDir: inboxDir, state: state)
-                await handleDeleteAlertRequests(deleteAlertReqs, inboxDir: inboxDir, state: state)
-                await handleSuppressCampaignRequests(suppressCampaignReqs, inboxDir: inboxDir, state: state)
-                await handleRefreshIntelRequests(refreshIntelReqs, inboxDir: inboxDir, state: state)
-                await handleReloadRulesRequests(reloadRulesReqs, inboxDir: inboxDir, state: state)
-                await handleLLMConfigRequests(llmConfigReqs, inboxDir: inboxDir, state: state)
-                await handleRecordClipboardRequests(recordClipboardReqs, inboxDir: inboxDir, state: state)
-                await handleBuiltinRuleSettingRequests(builtinRuleReqs, inboxDir: inboxDir, state: state)
-                await handleSetDaemonConfigRequests(setDaemonConfigReqs, inboxDir: inboxDir, state: state)
-                await handleInstallRuleRequests(installRuleReqs, inboxDir: inboxDir, state: state)
-                await handleRemoveRuleRequests(removeRuleReqs, inboxDir: inboxDir, state: state)
-                await handleSetAgentCapabilitiesRequests(agentCapReqs, inboxDir: inboxDir, state: state)
-                await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
-                await handlePruneAlertsRequests(pruneAlertsReqs, inboxDir: inboxDir, state: state)
-                await handleApplyAgentTracesRequests(agentTracesReqs, inboxDir: inboxDir, state: state)
-                await handleTraceDashboardKeyRequests(traceDashboardKeyReqs, inboxDir: inboxDir, state: state)
-                await handlePreventionConfigRequests(preventionConfigReqs, inboxDir: inboxDir, state: state)
+                await dispatchInboxRequests(files, inboxDir: inboxDir, state: state, rootChannel: false)
             }
         }
         inboxPoller.resume()
@@ -6264,6 +6205,75 @@ enum DaemonTimers {
     // re-trigger on the next 5 s tick). Failures are logged but
     // don't block subsequent requests in the same tick.
 
+    /// One poll tick's requests from one channel, partitioned by verb so they
+    /// drain in a defined order (mutations first, flush last — flush can take
+    /// seconds). The root channel is the root-only inbox; every handler
+    /// authorizes by channel (`isAuthorizedInboxRequest(uid:rootChannel:)`).
+    private static func dispatchInboxRequests(
+        _ files: [String], inboxDir: String, state: DaemonState, rootChannel: Bool
+    ) async {
+        let suppressAlertReqs = files.filter { $0.hasPrefix("suppress-alert-") && $0.hasSuffix(".json") }
+        let unsuppressAlertReqs = files.filter { $0.hasPrefix("unsuppress-alert-") && $0.hasSuffix(".json") }
+        let removeSuppressionReqs = files.filter { $0.hasPrefix("remove-suppression-") && $0.hasSuffix(".json") }
+        let deleteAlertReqs = files.filter { $0.hasPrefix("delete-alert-") && $0.hasSuffix(".json") }
+        let suppressCampaignReqs = files.filter { $0.hasPrefix("suppress-campaign-") && $0.hasSuffix(".json") }
+        let refreshIntelReqs = files.filter { $0.hasPrefix("refresh-intel-") && $0.hasSuffix(".json") }
+        let reloadRulesReqs = files.filter { $0.hasPrefix("reload-rules-") && $0.hasSuffix(".json") }
+        let llmConfigReqs = files.filter { $0.hasPrefix("llm-config-") && $0.hasSuffix(".json") }
+        let flushRequests = files.filter { $0.hasPrefix("flush-request-") && $0.hasSuffix(".json") }
+        // v1.18: ClickFix clipboard payloads recorded in USER context (the
+        // menubar app can read the GUI pasteboard; the root sysext cannot)
+        // and dropped here for the exec-correlation half to use.
+        let recordClipboardReqs = files.filter { $0.hasPrefix("record-clipboard-") && $0.hasSuffix(".json") }
+        // v1.18: per-built-in-rule enable/disable + severity override.
+        let builtinRuleReqs = files.filter { $0.hasPrefix("builtin-rule-setting-") && $0.hasSuffix(".json") }
+        // v1.18 agent control-plane (MCP skill): set a whitelisted
+        // daemon_config key, install a compiled user rule, remove a
+        // user rule. Same uid/symlink auth gate + audit as every verb.
+        let setDaemonConfigReqs = files.filter { $0.hasPrefix("set-daemon-config-") && $0.hasSuffix(".json") }
+        let installRuleReqs = files.filter { $0.hasPrefix("install-rule-") && $0.hasSuffix(".json") }
+        let removeRuleReqs = files.filter { $0.hasPrefix("remove-rule-") && $0.hasSuffix(".json") }
+        // Agent-control state changes. Root owns
+        // mcp_capabilities.json, but ownership of a file in the 1777
+        // inbox does not prove dashboard use, human presence, or even
+        // that root wrote it. Public requests can only revoke; grants
+        // arrive through the root-only channel.
+        let agentCapReqs = files.filter { $0.hasPrefix("set-agent-capabilities-") && $0.hasSuffix(".json") }
+        // v1.21.4 (audit): the dashboard's "Clear Now" retention button
+        // and the Agent-Traces receiver toggle drop these — the app
+        // (uid-501) can't write the root-owned alerts.db / config, so it
+        // routes through the same authorized inbox IPC as delete-alert.
+        let pruneAlertsReqs = files.filter { $0.hasPrefix("prune-alerts-") && $0.hasSuffix(".json") }
+        let agentTracesReqs = files.filter { $0.hasPrefix("apply-agent-traces-") && $0.hasSuffix(".json") }
+        let traceDashboardKeyReqs = files.filter { $0.hasPrefix("trace-dashboard-key-") && $0.hasSuffix(".json") }
+        // v1.21.4: the Prevention tab's per-module enable/disable toggle.
+        // The app (uid-501) can't mutate the root-owned prevention state
+        // nor SIGHUP the sysext, so it routes through this same
+        // authorized inbox IPC.
+        let preventionConfigReqs = files.filter { $0.hasPrefix("prevention-config-") && $0.hasSuffix(".json") }
+
+        await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
+        await handleUnsuppressAlertRequests(unsuppressAlertReqs, inboxDir: inboxDir, state: state)
+        await handleRemoveSuppressionRequests(removeSuppressionReqs, inboxDir: inboxDir, state: state)
+        await handleDeleteAlertRequests(deleteAlertReqs, inboxDir: inboxDir, state: state)
+        await handleSuppressCampaignRequests(suppressCampaignReqs, inboxDir: inboxDir, state: state)
+        await handleRefreshIntelRequests(refreshIntelReqs, inboxDir: inboxDir, state: state)
+        await handleReloadRulesRequests(reloadRulesReqs, inboxDir: inboxDir, state: state)
+        await handleLLMConfigRequests(llmConfigReqs, inboxDir: inboxDir, state: state)
+        await handleRecordClipboardRequests(recordClipboardReqs, inboxDir: inboxDir, state: state)
+        await handleBuiltinRuleSettingRequests(builtinRuleReqs, inboxDir: inboxDir, state: state)
+        await handleSetDaemonConfigRequests(setDaemonConfigReqs, inboxDir: inboxDir, state: state)
+        await handleInstallRuleRequests(installRuleReqs, inboxDir: inboxDir, state: state)
+        await handleRemoveRuleRequests(removeRuleReqs, inboxDir: inboxDir, state: state)
+        await handleSetAgentCapabilitiesRequests(
+            agentCapReqs, inboxDir: inboxDir, state: state, rootChannel: rootChannel)
+        await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
+        await handlePruneAlertsRequests(pruneAlertsReqs, inboxDir: inboxDir, state: state)
+        await handleApplyAgentTracesRequests(agentTracesReqs, inboxDir: inboxDir, state: state)
+        await handleTraceDashboardKeyRequests(traceDashboardKeyReqs, inboxDir: inboxDir, state: state)
+        await handlePreventionConfigRequests(preventionConfigReqs, inboxDir: inboxDir, state: state)
+    }
+
     private static func handleFlushRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
@@ -6279,7 +6289,7 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             let uid = requestOwnerUID(at: path)
-            if isAuthorizedInboxRequest(uid: uid) {
+            if isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) {
                 anyAuthorized = true
                 auditLogInbox(state: state, prefix: "flush", id: name, uid: uid, result: "ok")
             } else {
@@ -6322,7 +6332,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)   // lstat — rejects symlink/hardlink forgery
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] record-clipboard REJECTED uid=\(uid) (not console-user or root)")
                 auditLogInbox(state: state, prefix: "record-clipboard", id: "-", uid: uid, result: "rejected_uid")
                 continue
@@ -6367,7 +6377,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] builtin-rule-setting REJECTED uid=\(uid)")
                 auditLogInbox(state: state, prefix: "builtin-rule-setting", id: "-", uid: uid, result: "rejected_uid")
                 continue
@@ -6413,7 +6423,7 @@ enum DaemonTimers {
                 requestID: requestID, operation: "set-daemon-config", state: .rejected,
                 engineIdentity: identity, reason: "Request could not be validated"
             )
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 receipt.reason = "Request owner is not authorized"
                 try? await state.runtimeConfigurationReporter.record(receipt)
                 auditLogInbox(state: state, prefix: "set-daemon-config", id: "-", uid: uid, result: "rejected_uid")
@@ -6586,7 +6596,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: rootChannel) else {
                 auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
@@ -6655,7 +6665,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 auditLogInbox(state: state, prefix: "install-rule", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
@@ -6705,7 +6715,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 auditLogInbox(state: state, prefix: "remove-rule", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
@@ -6738,7 +6748,7 @@ enum DaemonTimers {
             // unauthorized request is rejected + removed (via defer) WITHOUT its
             // bytes ever being read.
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] suppress-alert \(name) REJECTED uid=\(uid) (not console-user or root)")
                 auditLogInbox(state: state, prefix: "suppress-alert", id: "-", uid: uid, result: "rejected_uid")
                 continue
@@ -6771,7 +6781,7 @@ enum DaemonTimers {
             var receipt = RuntimeRequestReceipt(requestID: requestID, operation: "remove-suppression",
                 state: .rejected, engineIdentity: DaemonProcessIdentity.current.telemetryIdentity,
                 reason: "Request could not be validated")
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 receipt.reason = "Request owner is not authorized"
                 try? await state.runtimeConfigurationReporter.record(receipt)
                 auditLogInbox(state: state, prefix: "remove-suppression", id: "-", uid: uid, result: "rejected_uid")
@@ -6817,7 +6827,7 @@ enum DaemonTimers {
             // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
             // must never reach readIdRequest on an unauthorized request.
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] unsuppress-alert \(name) REJECTED uid=\(uid) (not console-user or root)")
                 auditLogInbox(state: state, prefix: "unsuppress-alert", id: "-", uid: uid, result: "rejected_uid")
                 continue
@@ -6847,7 +6857,7 @@ enum DaemonTimers {
             // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
             // must never reach readIdRequest on an unauthorized request.
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] delete-alert \(name) REJECTED uid=\(uid) (not console-user or root)")
                 auditLogInbox(state: state, prefix: "delete-alert", id: "-", uid: uid, result: "rejected_uid")
                 continue
@@ -6894,7 +6904,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 auditLogInbox(state: state, prefix: "prune-alerts", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
@@ -6957,7 +6967,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
@@ -7003,7 +7013,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 auditLogInbox(state: state, prefix: "trace-dashboard-key", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
@@ -7095,7 +7105,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
@@ -7207,7 +7217,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] refresh-intel \(name) REJECTED uid=\(uid) (not console-user or root)")
                 auditLogInbox(state: state, prefix: "refresh-intel", id: "-", uid: uid, result: "rejected_uid")
                 continue
@@ -7238,7 +7248,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] reload-rules \(name) REJECTED uid=\(uid) (not console-user or root)")
                 let receipt = RuntimeRequestReceipt(
                     requestID: RuntimeConfigurationFiles.requestID(filename: name, operation: "reload-rules") ?? UUID(),
@@ -7289,7 +7299,7 @@ enum DaemonTimers {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 auditLogInbox(state: state, prefix: "llm-config", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
@@ -7423,7 +7433,7 @@ enum DaemonTimers {
             // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
             // must never reach readIdRequest on an unauthorized request.
             let uid = requestOwnerUID(at: path)
-            guard isAuthorizedInboxRequest(uid: uid) else {
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] suppress-campaign \(name) REJECTED uid=\(uid) (not console-user or root)")
                 auditLogInbox(state: state, prefix: "suppress-campaign", id: "-", uid: uid, result: "rejected_uid")
                 continue
@@ -7626,13 +7636,18 @@ enum DaemonTimers {
     /// could blind the EDR by suppressing or deleting alerts (or
     /// fan-out-suppressing whole campaigns). We accept requests only
     /// from:
-    ///   - root (uid 0): launchd / sudo flows + the daemon itself
-    ///   - the GUI console user: the human at the keyboard, who is
-    ///     also the user running MacCrab.app
+    ///   - root (uid 0), only through the root-only inbox
+    ///     (`rootChannel`): `sudo maccrabctl` writes there
+    ///   - the GUI console user, if an admin: the human at the keyboard,
+    ///     who is also the user running MacCrab.app
     /// Anything else is rejected and audit-logged.
-    static func isAuthorizedInboxRequest(uid: Int) -> Bool {
+    static func isAuthorizedInboxRequest(uid: Int, rootChannel: Bool) -> Bool {
         if uid < 0 { return false }                  // stat failed
-        if uid == 0 { return true }                  // root
+        // Root ownership counts only in the root-only inbox. In the 1777
+        // inbox a user can rename in a saved link to a root-owned inode the
+        // engine has since replaced, so uid 0 there proves nothing.
+        if rootChannel { return uid == 0 }
+        if uid == 0 { return false }
         // v1.19.1 (audit): the console user must ALSO be an admin to issue
         // control verbs. Pre-fix any foreground console user — incl. a standard
         // non-admin user on a shared/managed Mac — could suppress/delete alerts,
@@ -7640,6 +7655,11 @@ enum DaemonTimers {
         // GUI console user AND that user is in the admin group.
         if let console = consoleUserUID(), Int(console) == uid, isAdminUID(console) { return true }
         return false
+    }
+
+    /// Whether `inboxDir` is the root-only request channel.
+    static func isRootInbox(_ inboxDir: String) -> Bool {
+        (inboxDir as NSString).lastPathComponent == InboxDirectories.rootName
     }
 
     /// Append a single line to the inbox audit log. Format is

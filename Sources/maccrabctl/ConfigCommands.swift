@@ -117,8 +117,10 @@ private func configRequestStatus(args: [String]) throws {
         else { print("\(receipt.requestID.uuidString): \(receipt.state.rawValue) — \(receipt.reason)") }
         return
     }
-    let pending = ["set-daemon-config", "reload-rules", "remove-suppression"].contains {
-        FileManager.default.fileExists(atPath: directory + "/inbox/" + $0 + "-" + id.uuidString + ".json")
+    let pending = [InboxDirectories.publicName, InboxDirectories.rootName].contains { inbox in
+        ["set-daemon-config", "reload-rules", "remove-suppression"].contains {
+            FileManager.default.fileExists(atPath: directory + "/" + inbox + "/" + $0 + "-" + id.uuidString + ".json")
+        }
     }
     if options.json {
         try printCLIJSONObject(["schema_version": 1, "request_id": id.uuidString,
@@ -136,8 +138,10 @@ private func configSet(args: [String]) throws {
     }
     let requested = try definition.parse(positional[1])
     let normalized = try definition.normalized(requested)
+    let directory = maccrabDataDir()
     let id = try RuntimeConfigurationFiles.submit(
-        operation: "set-daemon-config", payload: ["key": key, "value": requested.foundationValue], directory: maccrabDataDir()
+        operation: "set-daemon-config", payload: ["key": key, "value": requested.foundationValue], directory: directory,
+        inboxDirectory: requestInboxDirectory(dataDir: directory)
     )
     if args.contains("--json") {
         try printCLIJSONObject(["schema_version": 1, "state": "pending", "request_id": id.uuidString,

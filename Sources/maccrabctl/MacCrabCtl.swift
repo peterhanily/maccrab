@@ -294,18 +294,16 @@ struct MacCrabCtl {
                 // returned EPERM and refreshNow() never fired. The inbox
                 // dir is mode 1777 and the daemon authorizes the request
                 // by its file owner uid (console user / root).
-                let inboxDir = maccrabDataDir() + "/inbox"
-                let fm = FileManager.default
-                if !fm.fileExists(atPath: inboxDir) {
-                    try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
-                }
-                let path = inboxDir + "/refresh-intel-\(UUID().uuidString).json"
+                // Under sudo this is the root-only inbox; if it is unsafe the
+                // request is not written and the dev-daemon fallback runs.
+                let inboxDir = try? requestInboxDirectory()
+                let path = (inboxDir ?? maccrabDataDir() + "/inbox") + "/refresh-intel-\(UUID().uuidString).json"
                 let payload: [String: Any] = [
                     "queuedAt": ISO8601DateFormatter().string(from: Date()),
                     "source": "maccrabctl"
                 ]
-                let wrote = (try? JSONSerialization.data(withJSONObject: payload))
-                    .map { (try? $0.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil } ?? false
+                let wrote = inboxDir != nil && ((try? JSONSerialization.data(withJSONObject: payload))
+                    .map { (try? $0.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil } ?? false)
                 if wrote {
                     print("Refresh queued. The engine will fetch URLhaus / MalwareBazaar / Feodo within ~10s.")
                 } else {
