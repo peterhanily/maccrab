@@ -82,6 +82,33 @@ struct ProcessLineageRemovedParentTests {
         #expect(await lineage.ancestors(of: 101).map(\.executable) == ["/sbin/launchd"])
     }
 
+    @Test("a new process's sighting node keeps its own start, so liveness leaves it running")
+    func sightingNodeKeepsItsOwnStart() async throws {
+        // claude holds pid 100 since 1,500, after the evicted dropper's 1,000.
+        let lineage = ProcessLineage(retentionWindow: 0.05, maxProcessCount: 4, processIsRunning: { pid, startedAt in
+            pid != 100 || 1_500 <= startedAt.timeIntervalSince1970 + 1
+        })
+        let start = Date(timeIntervalSince1970: 1_000)
+        await lineage.recordProcess(pid: 1, ppid: 0, path: "/sbin/launchd", name: "launchd", startTime: start)
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/bin/sh", name: "sh", startTime: start)
+        await lineage.recordProcess(pid: 101, ppid: 100, path: "/tmp/rat", name: "rat", startTime: start)
+        await lineage.recordExit(pid: 100)
+        await lineage.recordProcess(pid: 102, ppid: 1, path: "/usr/bin/true", name: "true", startTime: start)
+        await lineage.recordProcess(pid: 103, ppid: 1, path: "/usr/bin/true", name: "true", startTime: start)
+        await lineage.recordExit(pid: 102)
+        // claude's network event (poll time 1,600) is enriched before its birth.
+        await lineage.recordProcessIfAbsent(pid: 100, ppid: 1, path: "/usr/local/bin/claude", name: "claude",
+                                            startTime: Date(timeIntervalSince1970: 1_600), startTimeIsBirth: false)
+        await lineage.prune()   // marks only vanished processes exited
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await lineage.prune()   // retention would remove one marked exited
+        #expect(await lineage.contains(pid: 100))
+        // Its Endpoint Security birth still releases the dropper's child.
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/usr/local/bin/claude", name: "claude",
+                                    startTime: Date(timeIntervalSince1970: 1_500))
+        #expect(await !lineage.isDescendant(101, of: 100))
+    }
+
     @Test("a sighted node removed with children keeps them when its own birth arrives")
     func removedSightingKeepsChildrenAtBirth() async {
         let lineage = ProcessLineage(maxProcessCount: 4)

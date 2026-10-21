@@ -38,6 +38,13 @@ struct LineageNode: Sendable {
     /// Timestamp when the process exited, or `nil` if still running.
     var exitTime: Date?
 
+    /// For a node first recorded from another source's sighting that took a
+    /// removed parent's pid: that parent's start. A later birth record is a
+    /// new process, and releases the removed parent's children, when it
+    /// started more than a second after this; `startTime` stays the sighting,
+    /// which liveness and eviction read.
+    var reuseReference: Date? = nil
+
     // MARK: v1.10 TraceGraph additions
     //
     // Filled in by `setProcessKey(...)` after the v1.9 collector has
@@ -306,8 +313,7 @@ public actor ProcessLineage {
         signerType: String? = nil,
         startTimeIsBirth: Bool = true
     ) {
-        // A sighting records the removed parent's start, not its own; see below.
-        var recordedStart = startTime
+        var reuseReference: Date?
         // If this pid was previously tracked (pid reuse), clean up old entry.
         if let old = nodes[pid] {
             childrenIndex[old.ppid]?.remove(pid)
@@ -320,9 +326,13 @@ public actor ProcessLineage {
             // is reused too when the new process started later. Only later:
             // a node first seen by another source holds that sighting, not its
             // birth, and its own exec reports an earlier start.
-            if startTimeIsBirth,
-               old.exitTime != nil || startTime.timeIntervalSince(old.startTime) > 1 {
-                adoptOrphans(of: pid)
+            if startTimeIsBirth {
+                let reference = old.reuseReference.map { min($0, old.startTime) } ?? old.startTime
+                if old.exitTime != nil || startTime.timeIntervalSince(reference) > 1 {
+                    adoptOrphans(of: pid)
+                }
+            } else {
+                reuseReference = old.reuseReference
             }
         } else if let removedStart = removedParents.removeValue(forKey: pid) {
             if startTimeIsBirth {
@@ -330,11 +340,10 @@ public actor ProcessLineage {
             } else {
                 // A sighting from another source carries no birth time, so it
                 // cannot tell the evicted process's late event from a new one;
-                // the next Endpoint Security event of a new process decides.
-                // Keep the removed parent's start as the node's reference, so a
-                // birth later than it still adopts even when the new process's
-                // own sighting came first.
-                recordedStart = min(startTime, removedStart)
+                // the next Endpoint Security event of a new process decides,
+                // against the removed parent's start, even when the new
+                // process's own sighting came first.
+                reuseReference = removedStart
             }
         }
 
@@ -345,14 +354,15 @@ public actor ProcessLineage {
             name: name,
             commandLine: commandLine,
             signerType: signerType,
-            startTime: recordedStart,
-            exitTime: nil
+            startTime: startTime,
+            exitTime: nil,
+            reuseReference: reuseReference
         )
 
         nodes[pid] = node
         childrenIndex[ppid, default: []].insert(pid)
         if path.hasPrefix("/System/") {
-            unobservedExits.append((pid, recordedStart))
+            unobservedExits.append((pid, startTime))
             compactUnobservedExitsIfNeeded()
         }
 
@@ -516,7 +526,7 @@ public actor ProcessLineage {
         // The children keep the removed pid as their parent; see
         // `removedParents`.
         if childrenIndex[pid]?.isEmpty == false {
-            removedParents[pid] = node.startTime
+            removedParents[pid] = node.reuseReference.map { min($0, node.startTime) } ?? node.startTime
         }
 
         // Removing a node shortens the chain of any descendant that walked
