@@ -61,6 +61,41 @@ struct RootInboxChannelTests {
         #expect(!InboxDirectories.isPrivateDirectory(at: link))
     }
 
+    @Test("whatever arrived while the root-only inbox was unsafe is discarded, not dispatched")
+    func taintedInboxIsPurged() throws {
+        let base = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let inbox = base + "/" + InboxDirectories.rootName
+        let marker = inbox + ".tainted"
+        var discarded: [String] = []
+        #expect(DaemonTimers.ensureRootInboxDirectory(at: inbox) { discarded.append($0) })
+        #expect(!FileManager.default.fileExists(atPath: marker))
+
+        // An ACL closes the channel and taints it; a request planted meanwhile
+        // is dropped once the ACL is gone, before any dispatch.
+        #expect(try chmodACL(["+a", "everyone allow add_file", inbox]) == 0)
+        #expect(!DaemonTimers.ensureRootInboxDirectory(at: inbox) { discarded.append($0) })
+        #expect(FileManager.default.fileExists(atPath: marker), "the taint survives a restart")
+        #expect(FileManager.default.createFile(atPath: inbox + "/reload-rules-a.json", contents: Data("{}".utf8)))
+        #expect(try chmodACL(["-N", inbox]) == 0)
+        #expect(DaemonTimers.ensureRootInboxDirectory(at: inbox) { discarded.append($0) })
+        #expect(try FileManager.default.contentsOfDirectory(atPath: inbox).isEmpty)
+        #expect(discarded == ["reload-rules-a.json"])
+        #expect(!FileManager.default.fileExists(atPath: marker))
+
+        // A widened mode is narrowed and its entries discarded in the same check.
+        chmod(inbox, 0o755)
+        #expect(FileManager.default.createFile(atPath: inbox + "/flush-request-b.json", contents: Data("{}".utf8)))
+        #expect(DaemonTimers.ensureRootInboxDirectory(at: inbox) { discarded.append($0) })
+        #expect(try FileManager.default.contentsOfDirectory(atPath: inbox).isEmpty)
+        #expect(discarded == ["reload-rules-a.json", "flush-request-b.json"])
+
+        // A safe directory keeps its requests.
+        #expect(FileManager.default.createFile(atPath: inbox + "/reload-rules-c.json", contents: Data("{}".utf8)))
+        #expect(DaemonTimers.ensureRootInboxDirectory(at: inbox) { discarded.append($0) })
+        #expect(try FileManager.default.contentsOfDirectory(atPath: inbox) == ["reload-rules-c.json"])
+    }
+
     @Test("each channel reaches one dispatcher, and every handler authorizes by its channel")
     func pollerWiring() throws {
         let root = URL(fileURLWithPath: #filePath)
@@ -79,6 +114,28 @@ struct RootInboxChannelTests {
             separatedBy: "isAuthorizedInboxRequest(uid: uid, rootChannel: rootChannel)").count - 1
         #expect(byDirectory == 18)
         #expect(explicit == 1, "the capability handler uses the dispatcher's channel")
+        // The root dispatch call itself, and grants handled only through the
+        // dispatcher, which sets the audit line's channel.
+        #expect(timers.range(of: #"await dispatchInboxRequests\(\s*Array\(rootRequests\)"#,
+                              options: .regularExpression) != nil)
+        let verbs = try #require(timers.range(of: "private static func dispatchInboxVerbs("))
+        let verbsBody = timers[verbs.upperBound...]
+        let verbsEnd = verbsBody.range(of: "\n    private static func ")?.lowerBound ?? verbsBody.endIndex
+        let grantCalls = timers.components(separatedBy: "handleSetAgentCapabilitiesRequests(").count - 1
+        let grantCallsInDispatcher = verbsBody[..<verbsEnd]
+            .components(separatedBy: "handleSetAgentCapabilitiesRequests(").count - 1
+        #expect(grantCallsInDispatcher == 1)
+        #expect(grantCalls == 2, "one declaration and one call, inside the dispatcher")
+        #expect(timers.contains("await $inboxAuditChannel.withValue(rootChannel ? \"root\" : \"public\")"))
+        #expect(timers.contains("source=inbox\\(channelField) prefix="))
+        #expect(timers.contains("root-only request directory is usable again"))
+        // `sudo maccrabctl trace …` asks through the inbox its user may write.
+        let exchange = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Storage/TraceDashboardKeyExchange.swift"),
+            encoding: .utf8)
+        let resolve = try #require(exchange.range(of: "public static func resolveEncryption("))
+        #expect(exchange[resolve.upperBound...].prefix(1_500)
+            .contains("InboxDirectories.preparedRequestDirectory(dataDir: supportDir)"))
         // The engine's system support directory is the one the CLI writes under.
         let setup = try String(
             contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/DaemonSetup.swift"), encoding: .utf8)

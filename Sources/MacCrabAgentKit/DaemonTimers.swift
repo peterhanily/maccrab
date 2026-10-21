@@ -1952,15 +1952,45 @@ enum DaemonTimers {
     /// uid and verifies it without following a symlink, and with no extended
     /// ACL (an entry could let another user add or rename a request in
     /// despite the mode). False leaves the root channel closed.
-    static func ensureRootInboxDirectory(at path: String) -> Bool {
+    ///
+    /// Whatever arrived while the directory was unsafe (a wrong owner, a
+    /// wider mode, an ACL) may have been planted, so the directory is marked
+    /// tainted, in a file that survives a restart, and the next safe check
+    /// discards every entry, reported through `discarded`, before any is
+    /// dispatched.
+    static func ensureRootInboxDirectory(
+        at path: String, discarded: ((String) -> Void)? = nil
+    ) -> Bool {
+        let taintMarker = path + ".tainted"
         if mkdir(path, 0o700) != 0, errno != EEXIST { return false }
         var st = stat()
         guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR,
-              st.st_uid == geteuid() else { return false }
+              st.st_uid == geteuid() else {
+            markRootInboxTainted(taintMarker)
+            return false
+        }
         if (st.st_mode & 0o7777) != 0o700 {
+            markRootInboxTainted(taintMarker)
             guard chmod(path, 0o700) == 0 else { return false }
         }
-        return InboxDirectories.isPrivateDirectory(at: path)
+        guard InboxDirectories.isPrivateDirectory(at: path) else {
+            markRootInboxTainted(taintMarker)
+            return false
+        }
+        var marker = stat()
+        if lstat(taintMarker, &marker) == 0 {
+            for name in (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? [] {
+                removeInboxEntry(at: path + "/" + name)
+                discarded?(name)
+            }
+            guard unlink(taintMarker) == 0 || errno == ENOENT else { return false }
+        }
+        return true
+    }
+
+    private static func markRootInboxTainted(_ marker: String) {
+        let descriptor = open(marker, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        if descriptor >= 0 { close(descriptor) }
     }
 
     /// One source of truth for the names the poller will claim. The read-cap
@@ -5635,7 +5665,15 @@ enum DaemonTimers {
         // established, root requests and grants are unavailable; revokes
         // still work.
         let rootInboxDir = state.supportDir + "/" + InboxDirectories.rootName
-        if !ensureRootInboxDirectory(at: rootInboxDir) {
+        let discardPlantedRootRequest: (String) -> Void = { name in
+            print("[inbox] discarded \(name) from the root-only inbox: it arrived while the directory was unsafe")
+            auditLogInbox(
+                state: state, prefix: "root-inbox", id: name, uid: -1,
+                result: "discarded_unsafe_directory", channel: "root")
+        }
+        let rootChannelUsable = OSAllocatedUnfairLock<Bool>(
+            initialState: ensureRootInboxDirectory(at: rootInboxDir, discarded: discardPlantedRootRequest))
+        if !rootChannelUsable.withLock({ $0 }) {
             print("[inbox] root-only request directory unavailable at \(rootInboxDir); root requests and capability grants are disabled")
         }
 
@@ -5688,8 +5726,19 @@ enum DaemonTimers {
                 )
                 let files = scan.requestNames
                 // Root-authored requests. Few and root-only, so a bounded
-                // listing is enough; the directory is re-verified each tick.
-                if ensureRootInboxDirectory(at: rootInboxDir) {
+                // listing is enough; the directory is re-verified each tick,
+                // and a change in its state is logged once.
+                let rootUsable = ensureRootInboxDirectory(at: rootInboxDir, discarded: discardPlantedRootRequest)
+                let rootStateChanged = rootChannelUsable.withLock { usable -> Bool in
+                    defer { usable = rootUsable }
+                    return usable != rootUsable
+                }
+                if rootStateChanged {
+                    print(rootUsable
+                        ? "[inbox] root-only request directory is usable again at \(rootInboxDir)"
+                        : "[inbox] root-only request directory unavailable at \(rootInboxDir); root requests and capability grants are disabled")
+                }
+                if rootUsable {
                     let rootRequests = ((try? FileManager.default.contentsOfDirectory(atPath: rootInboxDir)) ?? [])
                         .filter(isClaimedInboxRequestName)
                         .sorted()
@@ -6210,6 +6259,17 @@ enum DaemonTimers {
     /// seconds). The root channel is the root-only inbox; every handler
     /// authorizes by channel (`isAuthorizedInboxRequest(uid:rootChannel:)`).
     private static func dispatchInboxRequests(
+        _ files: [String], inboxDir: String, state: DaemonState, rootChannel: Bool
+    ) async {
+        await $inboxAuditChannel.withValue(rootChannel ? "root" : "public") {
+            await dispatchInboxVerbs(files, inboxDir: inboxDir, state: state, rootChannel: rootChannel)
+        }
+    }
+
+    /// The inbox channel whose requests are being handled, for the audit line.
+    @TaskLocal static var inboxAuditChannel: String?
+
+    private static func dispatchInboxVerbs(
         _ files: [String], inboxDir: String, state: DaemonState, rootChannel: Bool
     ) async {
         let suppressAlertReqs = files.filter { $0.hasPrefix("suppress-alert-") && $0.hasSuffix(".json") }
@@ -7589,11 +7649,102 @@ enum DaemonTimers {
         // handler read; sockets/devices/directories are equally invalid request
         // carriers. The opened-fd reader repeats this check after open.
         if (st.st_mode & S_IFMT) != S_IFREG { return -1 }
+        // In the 1777 inbox a user can keep a link to the console user's
+        // request and rename it back in once the engine has consumed it.
+        // Checked before the link count, so a request rejected while someone
+        // held a link to it is recorded too.
+        if isPublicInboxEntry(path) {
+            let refusal = publicInboxRefusal(
+                birthTime: TimeInterval(st.st_birthtimespec.tv_sec)
+                    + TimeInterval(st.st_birthtimespec.tv_nsec) / 1_000_000_000,
+                now: Date().timeIntervalSince1970,
+                inode: SeenInboxInodes.Inode(device: Int64(st.st_dev), number: UInt64(st.st_ino)),
+                ownedByConsoleUser: consoleUserUID() == st.st_uid,
+                seen: seenPublicInboxInodes
+            )
+            if let refusal {
+                print("[inbox] \((path as NSString).lastPathComponent) refused: \(refusal.rawValue) request")
+                return -1
+            }
+        }
         // Refuse hardlinked files: st_nlink > 1 means the inode also
         // exists elsewhere in the filesystem; the attacker may have
         // hardlinked a root-owned file into the world-writable inbox.
         if st.st_nlink > 1 { return -1 }
         return Int(st.st_uid)
+    }
+
+    /// Whether `path` names an entry of the public (1777) inbox.
+    static func isPublicInboxEntry(_ path: String) -> Bool {
+        ((path as NSString).deletingLastPathComponent as NSString).lastPathComponent
+            == InboxDirectories.publicName
+    }
+
+    /// Why a public-inbox request was refused before its owner counted.
+    enum PublicInboxRefusal: String, Equatable {
+        case stale, future, replayed
+    }
+
+    /// Rename and link keep a file's birth time, so an inode saved from an
+    /// earlier request goes stale; legitimate writers create the file, or its
+    /// dot-prefixed temp, just before renaming it in.
+    static let publicInboxRequestMaximumAge: TimeInterval = 600
+    static let publicInboxRequestFutureTolerance: TimeInterval = 60
+
+    /// Inodes of console-user requests the public inbox has seen, accepted or
+    /// rejected, so a saved link to one cannot be renamed back in while it is
+    /// still fresh. Only console-user inodes are recorded, so another user's
+    /// files cannot push them out, and APFS does not reuse an inode number
+    /// while a link to it exists. A console-user inode taken from outside the
+    /// inbox within the freshness window is still accepted; closing that needs
+    /// a per-user private inbox.
+    final class SeenInboxInodes: @unchecked Sendable {
+        struct Inode: Hashable {
+            let device: Int64
+            let number: UInt64
+        }
+
+        private let lock = NSLock()
+        private let capacity: Int
+        private var order: [Inode] = []
+        private var oldest = 0
+        private var members: Set<Inode> = []
+
+        init(capacity: Int) { self.capacity = max(1, capacity) }
+
+        /// True when `inode` was seen before; otherwise records it, forgetting
+        /// the oldest record once full.
+        func checkAndRecord(_ inode: Inode) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if members.contains(inode) { return true }
+            members.insert(inode)
+            if order.count < capacity {
+                order.append(inode)
+            } else {
+                members.remove(order[oldest])
+                order[oldest] = inode
+                oldest = (oldest + 1) % capacity
+            }
+            return false
+        }
+
+        var count: Int { lock.lock(); defer { lock.unlock() }; return members.count }
+    }
+
+    static let seenPublicInboxInodes = SeenInboxInodes(capacity: 4_096)
+
+    /// The freshness and replay decision for one public-inbox entry.
+    static func publicInboxRefusal(
+        birthTime: TimeInterval,
+        now: TimeInterval,
+        inode: SeenInboxInodes.Inode,
+        ownedByConsoleUser: Bool,
+        seen: SeenInboxInodes
+    ) -> PublicInboxRefusal? {
+        if ownedByConsoleUser, seen.checkAndRecord(inode) { return .replayed }
+        if now - birthTime > publicInboxRequestMaximumAge { return .stale }
+        if birthTime - now > publicInboxRequestFutureTolerance { return .future }
+        return nil
     }
 
     /// Returns the UID of the user logged in at the macOS GUI console.
@@ -7724,7 +7875,7 @@ enum DaemonTimers {
     }
 
     private static func auditLogInbox(
-        state: DaemonState, prefix: String, id: String, uid: Int, result: String
+        state: DaemonState, prefix: String, id: String, uid: Int, result: String, channel: String? = nil
     ) {
         let logPath = state.supportDir + "/dashboard_audit.log"
         rotateAuditLogIfNeeded(path: logPath)
@@ -7733,7 +7884,8 @@ enum DaemonTimers {
         // / result string) can't forge subsequent log lines.
         let safeId = sanitizeAuditField(id)
         let safeResult = sanitizeAuditField(result, max: 256)
-        let line = "\(_inboxAuditFmt.string(from: Date())) source=inbox prefix=\(prefix) id=\(safeId) uid=\(uid) result=\(safeResult)\n"
+        let channelField = (channel ?? inboxAuditChannel).map { " channel=\($0)" } ?? ""
+        let line = "\(_inboxAuditFmt.string(from: Date())) source=inbox\(channelField) prefix=\(prefix) id=\(safeId) uid=\(uid) result=\(safeResult)\n"
         guard let data = line.data(using: .utf8) else { return }
         let url = URL(fileURLWithPath: logPath)
         if let handle = try? FileHandle(forWritingTo: url) {

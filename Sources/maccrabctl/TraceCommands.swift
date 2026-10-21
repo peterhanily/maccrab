@@ -92,8 +92,15 @@ extension MacCrabCtl {
                 // Fail loudly and specifically. Opening keyless "worked" and
                 // then failed on every query with an opaque decode error, which
                 // read as store corruption rather than a missing key.
+                // Under sudo the request goes to the root-only inbox; say which,
+                // and whether it could be queued at all.
+                let requestDirectory = InboxDirectories.requestDirectory(dataDir: directory)
                 print("Cannot read tracegraph.db: no trace read key for uid \(getuid()).")
-                print("Asked the engine for one via \(directory)/inbox and it did not answer within 10s.")
+                if (try? InboxDirectories.preparedRequestDirectory(dataDir: directory)) == nil {
+                    print("Could not queue a key request in \(requestDirectory): it is missing, not writable, or not a private directory.")
+                } else {
+                    print("Asked the engine for one via \(requestDirectory) and it did not answer within 10s.")
+                }
                 print("(The engine seals the key to this process. Check it is running: pgrep -x com.maccrab.agent)")
                 return nil
             }
