@@ -12,7 +12,8 @@ struct SelfIdentityExemptionTests {
         signer: SignerType? = nil,
         teamId: String? = nil,
         signingId: String? = nil,
-        platform: Bool = false
+        platform: Bool = false,
+        file: String = "/Users/u/Library/Keychains/login.keychain-db"
     ) -> Event {
         let signature = signer.map {
             CodeSignatureInfo(signerType: $0, teamId: teamId, signingId: signingId,
@@ -25,7 +26,7 @@ struct SelfIdentityExemptionTests {
             codeSignature: signature, isPlatformBinary: platform)
         return Event(eventCategory: .file, eventType: .change, eventAction: "write",
                      process: process,
-                     file: FileInfo(path: "/Users/u/Library/Keychains/login.keychain-db", action: .write))
+                     file: FileInfo(path: file, action: .write))
     }
 
     @Test("AlertSink lowers severity only for a MacCrab actor it can verify")
@@ -196,5 +197,121 @@ struct SelfIdentityExemptionTests {
         #expect(!flagged("gh", nil, path: ghHosts))
         #expect(flagged("node", nil, path: "/Users/u/.netrc"))
         #expect(!flagged("git-credential-osxkeychain", nil, path: "/Users/u/.netrc"))
+    }
+
+    @Test("A signature still being re-verified keeps the identity the kernel reported")
+    func collectorIdentityCoversPendingVerification() {
+        let fence = CredentialFence()
+        let xcodeTeam = CredentialFence.appleDeveloperToolsTeamId
+        func collector(_ signingId: String) -> CodeSignatureInfo {
+            CodeSignatureInfo(signerType: .apple, teamId: xcodeTeam, signingId: signingId,
+                              authorities: [], flags: 0, isNotarized: false)
+        }
+        func finding(_ event: Event, _ collectorSignature: CodeSignatureInfo?) -> Bool {
+            EventLoop.credentialFenceFinding(
+                event: event, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+                developmentEngine: false, collectorSignature: collectorSignature) != nil
+        }
+        // Enrichment withholds these team-signed Apple tools' signatures until
+        // `anchor apple` re-verification lands; the event carries none.
+        let helper = event("/Library/Developer/CommandLineTools/usr/libexec/git-core/git-credential-osxkeychain")
+        #expect(!finding(helper, collector("com.apple.git-credential-osxkeychain")))
+        let notarytool = event("/Applications/Xcode.app/Contents/Developer/usr/bin/notarytool")
+        #expect(EventLoop.isCredentialFenceExempt(
+            notarytool, developmentEngine: false, collectorSignature: collector("com.apple.gke.notary.tool")))
+        #expect(!finding(notarytool, collector("com.apple.gke.notary.tool")))
+        // The kernel's identifier still names what the binary really is.
+        let copiedTool = event("/Applications/Xcode-x.app/Contents/Developer/usr/bin/security")
+        #expect(!EventLoop.isCredentialFenceExempt(
+            copiedTool, developmentEngine: false, collectorSignature: collector("com.apple.git")))
+        #expect(finding(copiedTool, collector("com.apple.git")))
+        #expect(finding(helper, collector("com.apple.git")))
+        // With neither signature the identity is unknown, not ad-hoc.
+        #expect(!EventLoop.isCredentialFenceExempt(notarytool, developmentEngine: false))
+        #expect(finding(helper, nil))
+        // A verified signature on the event wins over the collector's.
+        let downgraded = event("/tmp/git-credential-osxkeychain", signer: .devId, teamId: "ABCDE12345",
+                               signingId: "com.apple.git-credential-osxkeychain")
+        #expect(finding(downgraded, collector("com.apple.git-credential-osxkeychain")))
+    }
+
+    @Test("A cold code-signing cache does not report Apple's git credential helper")
+    func coldCacheGitHelperIsNotReported() async {
+        let path = "/private/tmp/maccrab-identity-\(UUID().uuidString)/git-credential-osxkeychain"
+        let signature = CodeSignatureInfo(
+            signerType: .apple, teamId: CredentialFence.appleDeveloperToolsTeamId,
+            signingId: "com.apple.git-credential-osxkeychain", flags: 0x1)
+        let process = MacCrabCore.ProcessInfo(
+            pid: 4243, ppid: 1, rpid: 1, name: "git-credential-osxkeychain",
+            executable: path, commandLine: path, args: [path], workingDirectory: "/tmp",
+            userId: 501, userName: "u", groupId: 20, startTime: Date(),
+            codeSignature: signature, isPlatformBinary: false)
+        let raw = Event(eventCategory: .file, eventType: .change, eventAction: "open",
+                        process: process,
+                        file: FileInfo(path: "/Users/u/Library/Keychains/login.keychain-db", action: .open))
+        let enricher = EventEnricher(heavyEnrichmentPlane: HeavyEnrichmentPlane(
+            configuration: .init(operationTimeoutSeconds: 30),
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()
+        ))
+        let enriched = await enricher.enrich(raw)
+        _ = await enricher.shutdownHeavyEnrichment()
+        // The `.apple`, non-platform claim waits for re-verification, so the
+        // enriched event carries no signature on a cache miss.
+        #expect(enriched.process.codeSignature == nil)
+        let fence = CredentialFence()
+        #expect(EventLoop.credentialFenceFinding(
+            event: enriched, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+            developmentEngine: false, collectorSignature: raw.process.codeSignature) == nil)
+    }
+
+    @Test("Sparkle's exemption covers only the keychain it signs with")
+    func sparkleExemptionIsKeychainOnly() {
+        let fence = CredentialFence()
+        let sparkle = "/Users/u/src/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+        func reported(_ file: String) -> Bool {
+            EventLoop.credentialFenceFinding(
+                event: event(sparkle, signer: .adHoc, signingId: "sign_update", file: file),
+                fence: fence, toolName: "Claude Code", toolType: .claudeCode, developmentEngine: false) != nil
+        }
+        #expect(!reported("/Users/u/Library/Keychains/login.keychain-db"))
+        #expect(reported("/Users/u/.aws/credentials"))
+        #expect(reported("/Users/u/.ssh/id_ed25519"))
+        #expect(!EventLoop.isCredentialFenceExempt(
+            event(sparkle, signer: .adHoc, signingId: "sign_update", file: "/Users/u/.aws/credentials")))
+    }
+
+    @Test("scp and sftp reading a private key are reported; ssh reading it is not")
+    func scpReadingSSHKeyIsReported() {
+        let fence = CredentialFence()
+        let key = "/Users/u/.ssh/id_ed25519"
+        func reported(_ path: String, _ signingId: String) -> Bool {
+            EventLoop.credentialFenceFinding(
+                event: event(path, signer: .apple, signingId: signingId, platform: true, file: key),
+                fence: fence, toolName: "Claude Code", toolType: .claudeCode, developmentEngine: false) != nil
+        }
+        #expect(reported("/usr/bin/scp", "com.apple.scp"))
+        #expect(reported("/usr/bin/sftp", "com.apple.sftp"))
+        #expect(!reported("/usr/bin/ssh", "com.apple.ssh"))
+        #expect(!reported("/usr/bin/ssh-add", "com.apple.ssh-add"))
+    }
+
+    @Test("The lane keeps the collector's signature for the AI guards")
+    func laneKeepsCollectorSignature() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let eventLoop = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"), encoding: .utf8)
+        let capture = try #require(eventLoop.range(of: "let collectorSignature = event.process.codeSignature"))
+        let enrich = try #require(eventLoop.range(of: "var enrichedEvent = await state.enricher.enrich(event)"))
+        #expect(capture.lowerBound < enrich.lowerBound)
+        // Passed into the guard and on into the fence decision.
+        let call = try #require(eventLoop.range(of: "await enforceAIFilesystemGuards("))
+        #expect(eventLoop[call.upperBound...].prefix { $0 != ")" }
+            .contains("collectorSignature: collectorSignature"))
+        let guardStart = try #require(eventLoop.range(of: "private static func enforceAIFilesystemGuards("))
+        let finding = try #require(eventLoop.range(
+            of: "credentialFenceFinding(", range: guardStart.upperBound..<eventLoop.endIndex))
+        #expect(eventLoop[finding.upperBound...].prefix { $0 != ")" }
+            .contains("collectorSignature: collectorSignature"))
     }
 }

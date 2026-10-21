@@ -252,9 +252,10 @@ enum EventLoop {
         "maccrabctl", "maccrabd", "com.maccrab.agent",
     ]
     /// Sparkle ships its release tools ad-hoc signed, so there is no identity
-    /// to bind them to. Only an ad-hoc binary with the name qualifies: a
-    /// renamed platform tool or a team-signed binary does not, though a
-    /// purpose-built ad-hoc binary with that name still would.
+    /// to bind them to. Only an ad-hoc binary with the name qualifies, and only
+    /// for the keychain it signs with: a renamed platform tool or a
+    /// team-signed binary does not, though a purpose-built ad-hoc binary with
+    /// that name could still read a keychain.
     private static let credentialFenceExemptReleaseTools: Set<String> = [
         "sign_update", "generate_keys",
     ]
@@ -266,16 +267,21 @@ enum EventLoop {
         "ssh": "com.apple.ssh", "ssh-add": "com.apple.ssh-add",
     ]
 
+    /// `collectorSignature` is the Endpoint Security signature from before
+    /// enrichment. Enrichment withholds an Apple team-signed tool's signature
+    /// until its `anchor apple` re-verification completes, but the kernel's
+    /// team and signing identifier still name that tool exactly.
     static func isCredentialFenceExempt(
         _ event: Event,
-        developmentEngine: Bool = NoiseFilter.engineIsDevelopmentBuild
+        developmentEngine: Bool = NoiseFilter.engineIsDevelopmentBuild,
+        collectorSignature: CodeSignatureInfo? = nil
     ) -> Bool {
         let process = event.process
         let path = process.executable
         let subject = (path as NSString).lastPathComponent
-        let signature = process.codeSignature
-        if let sshIdentifier = keychainReadingSSHTools[subject],
-           let file = event.file?.path, ExactSubstringSearch.contains(file, "/Library/Keychains/") {
+        let signature = process.codeSignature ?? collectorSignature
+        let readsKeychain = event.file.map { ExactSubstringSearch.contains($0.path, "/Library/Keychains/") } ?? false
+        if let sshIdentifier = keychainReadingSSHTools[subject], readsKeychain {
             return path.hasPrefix("/usr/bin/") && process.isPlatformBinary
                 && signature?.signingId == sshIdentifier
         }
@@ -288,7 +294,7 @@ enum EventLoop {
         if credentialFenceExemptMacCrabTools.contains(subject) {
             return NoiseFilter.isMacCrabProcess(event: event, developmentEngine: developmentEngine)
         }
-        if credentialFenceExemptReleaseTools.contains(subject) {
+        if credentialFenceExemptReleaseTools.contains(subject), readsKeychain {
             guard !process.isPlatformBinary, let signature else { return false }
             return signature.signerType == .adHoc && signature.teamId == nil
         }
@@ -305,11 +311,14 @@ enum EventLoop {
         fence: CredentialFence,
         toolName: String,
         toolType: AIToolType,
-        developmentEngine: Bool = NoiseFilter.engineIsDevelopmentBuild
+        developmentEngine: Bool = NoiseFilter.engineIsDevelopmentBuild,
+        collectorSignature: CodeSignatureInfo? = nil
     ) -> (type: CredentialFence.CredentialType, description: String)? {
         guard let filePath = event.file?.path,
               event.enrichments["IsHoneyfile"] != "true",
-              !isCredentialFenceExempt(event, developmentEngine: developmentEngine) else { return nil }
+              !isCredentialFenceExempt(
+                  event, developmentEngine: developmentEngine, collectorSignature: collectorSignature
+              ) else { return nil }
         let process = event.process
         // Without a signature the identity is unknown, not ad-hoc.
         return fence.checkAccessDetailed(
@@ -317,7 +326,7 @@ enum EventLoop {
             aiToolName: toolName,
             aiToolType: toolType,
             accessingBinary: (process.executable as NSString).lastPathComponent,
-            accessorIdentity: process.codeSignature.map {
+            accessorIdentity: (process.codeSignature ?? collectorSignature).map {
                 CredentialFence.AccessorIdentity(
                     isPlatformBinary: process.isPlatformBinary,
                     teamId: $0.teamId,
@@ -493,7 +502,8 @@ enum EventLoop {
     private static func enforceAIFilesystemGuards(
         state: DaemonState,
         event: Event,
-        attribution: ResolvedAIAttribution
+        attribution: ResolvedAIAttribution,
+        collectorSignature: CodeSignatureInfo?
     ) async {
         guard let filePath = event.file?.path else { return }
         let process = event.process
@@ -505,7 +515,8 @@ enum EventLoop {
                event: event,
                fence: state.credentialFence,
                toolName: toolName,
-               toolType: attribution.toolType
+               toolType: attribution.toolType,
+               collectorSignature: collectorSignature
            ) {
             let alert = Alert(
                 ruleId: "maccrab.ai-guard.credential-access",
@@ -795,7 +806,10 @@ enum EventLoop {
                 break
             }
 
-            // Enrich the event (lineage, code signing)
+            // Enrich the event (lineage, code signing). The collector's
+            // kernel-provided signature is kept for identity checks that must
+            // not wait for re-verification.
+            let collectorSignature = event.process.codeSignature
             stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             var enrichedEvent = await state.enricher.enrich(event)
             stageAwaits.record(.enricher, startedAt: stageStartedNanos)
@@ -1385,7 +1399,8 @@ enum EventLoop {
                     await enforceAIFilesystemGuards(
                         state: state,
                         event: enrichedEvent,
-                        attribution: resolvedAIAttribution
+                        attribution: resolvedAIAttribution,
+                        collectorSignature: collectorSignature
                     )
                 }
 

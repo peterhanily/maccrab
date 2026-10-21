@@ -205,8 +205,8 @@ public struct CredentialFence: Sendable {
         "ssh":              ["/.ssh/"],
         "ssh-add":          ["/.ssh/"],
         "ssh-keygen":       ["/.ssh/"],
-        "scp":              ["/.ssh/"],
-        "sftp":             ["/.ssh/"],
+        // scp and sftp own nothing here: they exec ssh, which reads the keys
+        // and config, so their own reads of ~/.ssh are transfers.
         "aws":              ["/.aws/"],
         "docker":           ["/.docker/"],
         "kubectl":          ["/.kube/"],
