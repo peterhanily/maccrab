@@ -68,6 +68,41 @@ struct ProcessLineageRemovedParentTests {
         #expect(await !lineage.isDescendant(101, of: 100))
     }
 
+    @Test("a new process's own sighting before its birth still releases the removed parent's children")
+    func sightingBeforeBirthReleasesChildren() async {
+        let lineage = await evictedDropper()
+        await lineage.recordExit(pid: 102)
+        // claude takes the dropper's pid at 1,500; its network event (poll
+        // time 1,600) is enriched before its Endpoint Security birth.
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/usr/local/bin/claude", name: "claude",
+                                    startTime: Date(timeIntervalSince1970: 1_600), startTimeIsBirth: false)
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/usr/local/bin/claude", name: "claude",
+                                    startTime: Date(timeIntervalSince1970: 1_500))
+        #expect(await !lineage.isDescendant(101, of: 100))
+        #expect(await lineage.ancestors(of: 101).map(\.executable) == ["/sbin/launchd"])
+    }
+
+    @Test("a sighted node removed with children keeps them when its own birth arrives")
+    func removedSightingKeepsChildrenAtBirth() async {
+        let lineage = ProcessLineage(maxProcessCount: 4)
+        let birth = Date(timeIntervalSince1970: 1_000)
+        await lineage.recordProcess(pid: 1, ppid: 0, path: "/sbin/launchd", name: "launchd", startTime: birth)
+        // First seen by a network poll an hour after its birth.
+        await lineage.recordProcessIfAbsent(pid: 600, ppid: 1, path: "/usr/bin/python3", name: "python3",
+                                            startTime: birth.addingTimeInterval(3_600), startTimeIsBirth: false)
+        await lineage.recordProcess(pid: 601, ppid: 600, path: "/bin/sh", name: "sh",
+                                    startTime: birth.addingTimeInterval(3_700))
+        await lineage.recordExit(pid: 600)
+        await lineage.recordProcess(pid: 602, ppid: 1, path: "/usr/bin/true", name: "true", startTime: birth)
+        await lineage.recordProcess(pid: 603, ppid: 1, path: "/usr/bin/true", name: "true", startTime: birth)
+        #expect(await !lineage.contains(pid: 600))
+        // Its own late Endpoint Security event carries the earlier kernel
+        // birth: the same process, so the child keeps its parent.
+        await lineage.recordExit(pid: 602)
+        await lineage.recordProcess(pid: 600, ppid: 1, path: "/usr/bin/python3", name: "python3", startTime: birth)
+        #expect(await lineage.isDescendant(601, of: 600))
+    }
+
     @Test("a node first seen by another source keeps its children when it execs")
     func execAfterSightingKeepsChildren() async {
         let lineage = ProcessLineage(maxProcessCount: 10)

@@ -306,6 +306,8 @@ public actor ProcessLineage {
         signerType: String? = nil,
         startTimeIsBirth: Bool = true
     ) {
+        // A sighting records the removed parent's start, not its own; see below.
+        var recordedStart = startTime
         // If this pid was previously tracked (pid reuse), clean up old entry.
         if let old = nodes[pid] {
             childrenIndex[old.ppid]?.remove(pid)
@@ -322,12 +324,18 @@ public actor ProcessLineage {
                old.exitTime != nil || startTime.timeIntervalSince(old.startTime) > 1 {
                 adoptOrphans(of: pid)
             }
-        } else if let removedStart = removedParents.removeValue(forKey: pid),
-                  startTimeIsBirth, startTime.timeIntervalSince(removedStart) > 1 {
-            // A sighting from another source carries no birth time, so it
-            // cannot tell the evicted process's late event from a new one; the
-            // next Endpoint Security event of a new process decides.
-            adoptOrphans(of: pid)
+        } else if let removedStart = removedParents.removeValue(forKey: pid) {
+            if startTimeIsBirth {
+                if startTime.timeIntervalSince(removedStart) > 1 { adoptOrphans(of: pid) }
+            } else {
+                // A sighting from another source carries no birth time, so it
+                // cannot tell the evicted process's late event from a new one;
+                // the next Endpoint Security event of a new process decides.
+                // Keep the removed parent's start as the node's reference, so a
+                // birth later than it still adopts even when the new process's
+                // own sighting came first.
+                recordedStart = min(startTime, removedStart)
+            }
         }
 
         let node = LineageNode(
@@ -337,14 +345,14 @@ public actor ProcessLineage {
             name: name,
             commandLine: commandLine,
             signerType: signerType,
-            startTime: startTime,
+            startTime: recordedStart,
             exitTime: nil
         )
 
         nodes[pid] = node
         childrenIndex[ppid, default: []].insert(pid)
         if path.hasPrefix("/System/") {
-            unobservedExits.append((pid, startTime))
+            unobservedExits.append((pid, recordedStart))
             compactUnobservedExitsIfNeeded()
         }
 
