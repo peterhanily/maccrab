@@ -99,6 +99,10 @@ public actor MCPAttributor {
     private var accessSeq: [pid_t: UInt64] = [:]
     private var accessCounter: UInt64 = 0
     private let cacheCap: Int
+    /// Bumped by each exec of a pid, dropped at its exit. An attribution
+    /// that read the pid's command line before an exec caches nothing: the
+    /// lanes run concurrently, and its verdict describes the old image.
+    private var generations: [pid_t: UInt64] = [:]
 
     private let logger = Logger(subsystem: "com.maccrab.aiguard", category: "mcp-attributor")
 
@@ -144,10 +148,11 @@ public actor MCPAttributor {
             return cached.attribution
         }
 
+        let generation = generation(of: pid)
         let toolKey = Self.mcpToolKey(for: aiTool)
         let configured = await mcpMonitor.serversForTool(toolKey)
         guard !configured.isEmpty else {
-            recordMiss(pid: pid, executable: executable)
+            recordVerdict(pid: pid, executable: executable, attribution: nil, computedAt: generation)
             return nil
         }
 
@@ -195,12 +200,8 @@ public actor MCPAttributor {
             if bestMatch?.0.confidence == .high { break }
         }
 
-        if let best = bestMatch {
-            recordHit(pid: pid, executable: executable, attribution: best.0)
-            return best.0
-        }
-        recordMiss(pid: pid, executable: executable)
-        return nil
+        recordVerdict(pid: pid, executable: executable, attribution: bestMatch?.0, computedAt: generation)
+        return bestMatch?.0
     }
 
     /// Evict cached entry for an exited PID. Optional — the cache
@@ -209,13 +210,21 @@ public actor MCPAttributor {
     public func processExited(pid: Int32) {
         cache.removeValue(forKey: pid)
         accessSeq.removeValue(forKey: pid)
+        generations.removeValue(forKey: pid)
     }
 
     /// An exec changes the command line the verdict was computed from, even
-    /// when the binary is the same (`claude` forking then exec'ing
-    /// `claude mcp serve`), so the cached verdict is dropped.
+    /// when the binary is the same (a node child exec'ing an MCP server's
+    /// script), so the cached verdict is dropped, and an attribution still
+    /// in flight from before the exec caches nothing.
     public func processExecuted(pid: Int32) {
-        processExited(pid: pid)
+        cache.removeValue(forKey: pid)
+        accessSeq.removeValue(forKey: pid)
+        generations[pid, default: 0] &+= 1
+    }
+
+    func generation(of pid: pid_t) -> UInt64 {
+        generations[pid, default: 0]
     }
 
     // MARK: - Internals
@@ -226,16 +235,12 @@ public actor MCPAttributor {
         let cmd: String?
     }
 
-    private func recordHit(pid: pid_t, executable: String?, attribution: Attribution) {
+    /// Cache a verdict (nil = no attribution) unless the pid exec'd since
+    /// the attribution started.
+    func recordVerdict(pid: pid_t, executable: String?, attribution: Attribution?, computedAt generation: UInt64) {
+        guard generations[pid, default: 0] == generation else { return }
         evictIfFull()
         cache[pid] = CachedAttribution(attribution: attribution, executable: executable)
-        accessCounter &+= 1
-        accessSeq[pid] = accessCounter
-    }
-
-    private func recordMiss(pid: pid_t, executable: String?) {
-        evictIfFull()
-        cache[pid] = CachedAttribution(attribution: nil, executable: executable)
         accessCounter &+= 1
         accessSeq[pid] = accessCounter
     }

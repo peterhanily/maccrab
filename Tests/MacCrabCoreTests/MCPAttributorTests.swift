@@ -302,3 +302,72 @@ struct MCPBaselineSnapshotTests {
         #expect(snapshot?.baselines.isEmpty == true)
     }
 }
+
+/// A pid's verdict describes the image it was computed for. An exec into an
+/// MCP server with the same binary must re-attribute, and an attribution that
+/// read the old command line must not cache it after the exec.
+@Suite("MCPAttributor: exec invalidation")
+struct MCPAttributorExecInvalidationTests {
+    private func stack() async -> (MCPAttributor, ProcessLineage) {
+        let monitor = MCPMonitor()
+        await monitor._testInjectServer(MCPMonitor.ConfiguredServer(
+            name: "filesystem", command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"], tool: "claude"))
+        let lineage = ProcessLineage()
+        let start = Date()
+        await lineage.recordProcess(pid: 5201, ppid: 0, path: "/usr/local/bin/claude",
+                                    name: "claude", startTime: start, commandLine: "claude")
+        await lineage.recordProcess(pid: 5202, ppid: 5201, path: "/usr/local/bin/node",
+                                    name: "node", startTime: start, commandLine: "node cli.js")
+        return (MCPAttributor(mcpMonitor: monitor, lineage: lineage), lineage)
+    }
+
+    private func execServer(_ lineage: ProcessLineage) async {
+        await lineage.recordProcess(
+            pid: 5202, ppid: 5201, path: "/usr/local/bin/node", name: "node", startTime: Date(),
+            commandLine: "node /usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js /tmp")
+    }
+
+    @Test("a same-binary exec into a package-token server is attributed to the child")
+    func sameBinaryExecIntoPackageServer() async {
+        let (attributor, lineage) = await stack()
+        let ancestors = await lineage.ancestors(of: 5202)
+        let forked = await attributor.attribute(pid: 5202, executable: "/usr/local/bin/node",
+                                                ancestors: ancestors, aiTool: .claudeCode)
+        #expect(forked == nil)
+        await execServer(lineage)
+        await attributor.processExecuted(pid: 5202)
+        let served = await attributor.attribute(pid: 5202, executable: "/usr/local/bin/node",
+                                                ancestors: ancestors, aiTool: .claudeCode)
+        #expect(served?.confidence == .high)
+        #expect(served?.boundaryPid == 5202)
+    }
+
+    @Test("an attribution computed before an exec caches nothing")
+    func staleAttributionCachesNothing() async {
+        let (attributor, lineage) = await stack()
+        let ancestors = await lineage.ancestors(of: 5202)
+        // An attribution on the other lane read the pre-exec command line…
+        let started = await attributor.generation(of: 5202)
+        await execServer(lineage)
+        await attributor.processExecuted(pid: 5202)
+        // …and finishes after the exec with its stale verdict.
+        await attributor.recordVerdict(pid: 5202, executable: "/usr/local/bin/node",
+                                       attribution: nil, computedAt: started)
+        let served = await attributor.attribute(pid: 5202, executable: "/usr/local/bin/node",
+                                                ancestors: ancestors, aiTool: .claudeCode)
+        #expect(served?.confidence == .high)
+    }
+
+    @Test("the lane drops a pid's verdict after enrichment records the exec")
+    func execHookFollowsEnrichment() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let eventLoop = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"),
+                                   encoding: .utf8)
+        let enrich = try #require(eventLoop.range(of: "var enrichedEvent = await state.enricher.enrich(event)"))
+        let hook = try #require(eventLoop.range(of: "await state.mcpAttributor.processExecuted(pid: event.process.pid)"))
+        #expect(enrich.upperBound < hook.lowerBound)
+        #expect(eventLoop.components(separatedBy: "mcpAttributor.processExecuted(").count == 2)
+    }
+}

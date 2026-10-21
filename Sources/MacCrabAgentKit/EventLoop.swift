@@ -777,9 +777,6 @@ enum EventLoop {
             // pid→server cache evicts proactively rather than waiting for
             // its 5K-entry LRU cap to overflow (audit P-W3.8). Cheap —
             // no-op for events that aren't NOTIFY_EXIT.
-            if event.eventAction == "exec" {
-                await state.mcpAttributor.processExecuted(pid: event.process.pid)
-            }
             if event.eventAction == "exit" {
                 await state.mcpAttributor.processExited(pid: event.process.pid)
                 await state.behaviorScoring.processExited(pid: event.process.pid)
@@ -832,6 +829,12 @@ enum EventLoop {
             stageStartedNanos = DispatchTime.now().uptimeNanoseconds
             var enrichedEvent = await state.enricher.enrich(event)
             stageAwaits.record(.enricher, startedAt: stageStartedNanos)
+            // An exec changes the command line an MCP verdict was computed
+            // from. Drop it only now that lineage holds the new image, so an
+            // attribution on the other lane cannot cache the old one again.
+            if event.eventAction == "exec" {
+                await state.mcpAttributor.processExecuted(pid: event.process.pid)
+            }
 
             // Skip a no-op actor hop for non-creation file events. The shared
             // predicate does not replace YARA's actor-owned availability gates.
