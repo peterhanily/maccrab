@@ -245,11 +245,14 @@ public actor SuppressionManager {
         let data: Data
         do {
             guard let saved = try RuntimeConfigurationFiles.readControlData(at: filePath, maximumBytes: 4 * 1024 * 1024) else {
+                lastLoadError = nil
                 if entries.isEmpty { publishSnapshot() }
                 return
             }
             data = saved
+            lastLoadError = nil
         } catch {
+            lastLoadError = error.localizedDescription
             logger.error("Suppression store read failed: \(error.localizedDescription)")
             return
         }
@@ -274,6 +277,7 @@ public actor SuppressionManager {
             return
         }
 
+        lastLoadError = "suppressions.json is not a v1 or v2 allowlist"
         logger.warning("Failed to decode suppressions.json as v1 or v2")
     }
 
@@ -342,7 +346,7 @@ public actor SuppressionManager {
             return entry
         }
         // ruleHash
-        if let sha = processSHA256,
+        if let sha = processSHA256?.lowercased(),
            let hashes = byRuleHash[ruleId], hashes.contains(sha),
            let entry = firstUnexpired(for: .ruleHash(ruleId: ruleId, sha256: sha), now: now) {
             return entry
@@ -523,7 +527,7 @@ public actor SuppressionManager {
         case let .rulePath(r, p):
             byRulePath[r, default: []].insert(p)
         case let .ruleHash(r, h):
-            byRuleHash[r, default: []].insert(h)
+            byRuleHash[r, default: []].insert(h.lowercased())
         case let .rule(r):
             byRuleOnly.insert(r)
         case let .path(p):
@@ -539,7 +543,7 @@ public actor SuppressionManager {
             byRulePath[r]?.remove(p)
             if byRulePath[r]?.isEmpty == true { byRulePath.removeValue(forKey: r) }
         case let .ruleHash(r, h):
-            byRuleHash[r]?.remove(h)
+            byRuleHash[r]?.remove(h.lowercased())
             if byRuleHash[r]?.isEmpty == true { byRuleHash.removeValue(forKey: r) }
         case let .rule(r):
             // Only remove the index mark if no other .rule entry targets this id.
@@ -561,7 +565,15 @@ public actor SuppressionManager {
     }
 
     private func firstUnexpired(for scope: SuppressionScope, now: Date) -> Suppression? {
-        entries.values.first(where: { $0.scope == scope && !$0.isExpired(at: now) })
+        let wanted = Self.matchKey(scope)
+        return entries.values.first(where: { Self.matchKey($0.scope) == wanted && !$0.isExpired(at: now) })
+    }
+
+    /// A rule+hash entry's digest compares case-insensitively: FileHasher
+    /// produces lowercase hex, and an entry typed in uppercase never matched.
+    private static func matchKey(_ scope: SuppressionScope) -> SuppressionScope {
+        guard case let .ruleHash(ruleId, sha256) = scope else { return scope }
+        return .ruleHash(ruleId: ruleId, sha256: sha256.lowercased())
     }
 
     /// Persist the store. Returns the failure reason, or nil on success.
@@ -596,6 +608,11 @@ public actor SuppressionManager {
     /// Where this store persists. Surfaced so a caller can tell the operator
     /// exactly which path a failed write was attempted against.
     public nonisolated var storePath: String { filePath }
+
+    /// Why the most recent `load()` could not read the store, or nil when it
+    /// read it or there was none. A caller listing entries must not present a
+    /// refused read (a root-only store) as an empty allowlist.
+    public private(set) var lastLoadError: String?
 
     /// Reason the most recent mutation failed to persist, or nil if it landed.
     /// Callers that report success to a human MUST check this — `add` returns a

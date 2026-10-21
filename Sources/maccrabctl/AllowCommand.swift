@@ -62,6 +62,18 @@ extension MacCrabCtl {
             }
         }
 
+        if let digest = hash {
+            guard let normalized = normalizedSHA256(digest) else {
+                print("✗ --hash must be a 64-character SHA-256 hex digest")
+                exit(1)
+            }
+            guard rule != nil else {
+                print("✗ --hash needs --rule: a hash entry suppresses one rule for one binary")
+                exit(1)
+            }
+            hash = normalized
+        }
+
         // Determine scope from which flags were provided.
         let scope: SuppressionScope
         if let r = rule, let p = path {
@@ -138,22 +150,29 @@ extension MacCrabCtl {
             }
         }
 
-        let mgr = SuppressionManager(dataDir: maccrabDataDir())
-        await mgr.load()
-        var entries = await mgr.list(includeExpired: includeExpired)
+        let now = Date()
+        var entries: [Suppression]
+        var fromSnapshot = false
+        switch await readAllowlist(dataDir: maccrabDataDir()) {
+        case let .entries(all, snapshot):
+            entries = includeExpired ? all : all.filter { !$0.isExpired(at: now) }
+            fromSnapshot = snapshot
+        case let .unreadable(path, reason):
+            failUnreadableAllowlist(path: path, reason: reason)
+        }
         if let kind = scopeFilter {
             entries = entries.filter { $0.scope.kind == kind }
         }
 
         if entries.isEmpty {
-            print("No suppressions\(includeExpired ? "" : " (active)") found.")
+            print("No suppressions\(includeExpired ? "" : " (active)") found\(fromSnapshot ? " in the engine's published snapshot" : "").")
             return
         }
 
         print("MacCrab Allowlist (\(entries.count) \(includeExpired ? "total" : "active"))")
+        if fromSnapshot { print("From the engine's published snapshot; the store itself needs sudo.") }
         print("────────────────────────────────────────────────")
 
-        let now = Date()
         let sorted = entries.sorted { $0.createdAt < $1.createdAt }
         for e in sorted {
             let expStr: String
@@ -177,23 +196,39 @@ extension MacCrabCtl {
             cliFailure("Usage: maccrabctl allow remove <id>")
         }
         let id = args[3]
-
-        let mgr = SuppressionManager(dataDir: maccrabDataDir(), publishReadableSnapshot: true)
-        await mgr.load()
+        let dataDir = maccrabDataDir()
 
         // Allow partial-id match (first 8 chars) for operator convenience.
-        let all = await mgr.list(includeExpired: true)
+        let all: [Suppression]
+        switch await readAllowlist(dataDir: dataDir) {
+        case let .entries(entries, _): all = entries
+        case let .unreadable(path, reason): failUnreadableAllowlist(path: path, reason: reason)
+        }
         let candidates = all.filter { $0.id.hasPrefix(id) }
         switch candidates.count {
         case 0:
             cliFailure("allow remove: no suppression matching '\(id)'")
         case 1:
             let match = candidates[0]
+            // The engine holds the allowlist in memory and rewrites the file
+            // from it, so a removal saved to the file alone came back at its
+            // next save. Ask the engine, as the dashboard does: it updates both.
+            let request: UUID
             do {
-                let removed = try await mgr.removePersisted(ids: [match.id])
-                guard !removed.isEmpty else { throw RuntimeConfigContractError("Suppression is no longer present") }
-                print("Saved removal of \(match.id) — \(match.scope.summary). Runtime reload may still be pending.")
+                request = try submitAllowRemoval(id: match.id, dataDir: dataDir,
+                                                 inboxDirectory: requestInboxDirectory(dataDir: dataDir))
             } catch { cliFailure("allow remove: \(error.localizedDescription)") }
+            let receipt = await awaitTerminalReceipt(directory: dataDir, requestID: request, timeout: 15)
+            switch receipt?.state {
+            case .applied?:
+                print("Removed \(match.id) — \(match.scope.summary).")
+            case .rejected?, .superseded?:
+                cliFailure("allow remove: the engine did not remove \(match.id): \(receipt?.reason ?? "")")
+            default:
+                print("Removal of \(match.id) is queued as request \(request.uuidString), but the engine "
+                      + "has not confirmed it yet (is it running?). It applies when the engine reads its inbox. "
+                      + "Check: maccrabctl config status \(request.uuidString)")
+            }
         default:
             cliFailure("allow remove: '\(id)' is ambiguous (\(candidates.count) matches). Use a longer prefix.")
         }
@@ -213,6 +248,62 @@ extension MacCrabCtl {
     }
 
     // MARK: - Helpers
+
+    /// What `allow list` and `allow remove` read.
+    enum AllowlistRead {
+        case entries([Suppression], fromSnapshot: Bool)
+        case unreadable(path: String, reason: String)
+    }
+
+    /// The engine's store when this user can read it, else the snapshot the
+    /// engine publishes for admins after every change. The store is root-only
+    /// on a release install, and a refused read used to print "No
+    /// suppressions" while entries were in force.
+    static func readAllowlist(dataDir: String) async -> AllowlistRead {
+        let manager = SuppressionManager(dataDir: dataDir)
+        await manager.load()
+        guard let failure = await manager.lastLoadError else {
+            return .entries(await manager.list(includeExpired: true), fromSnapshot: false)
+        }
+        if let snapshot = try? SuppressionFile.read(at: dataDir + "/suppressions_snapshot.json") {
+            return .entries(snapshot.entries, fromSnapshot: true)
+        }
+        return .unreadable(path: manager.storePath, reason: failure)
+    }
+
+    private static func failUnreadableAllowlist(path: String, reason: String) -> Never {
+        cliFailure("✘ The allowlist could not be read, so it is not shown as empty.\n"
+                   + "    path:   \(path)\n"
+                   + "    reason: \(reason)\n"
+                   + "    The store is root-only on a release install. Re-run with sudo, or use the\n"
+                   + "    dashboard's Suppressions list.")
+    }
+
+    /// Queue the engine's removal request for one exact suppression id.
+    static func submitAllowRemoval(id: String, dataDir: String, inboxDirectory: String) throws -> UUID {
+        try RuntimeConfigurationFiles.submit(operation: "remove-suppression", payload: ["id": id],
+                                             directory: dataDir, inboxDirectory: inboxDirectory)
+    }
+
+    /// The request's receipt once it is applied, rejected or superseded, or
+    /// its last state when `timeout` passes first (nil if none was written).
+    private static func awaitTerminalReceipt(directory: String, requestID: UUID,
+                                             timeout: TimeInterval) async -> RuntimeRequestReceipt? {
+        let deadline = Date().addingTimeInterval(timeout)
+        var latest: RuntimeRequestReceipt?
+        while true {
+            latest = (try? RuntimeConfigurationFiles.readReceipt(directory: directory, requestID: requestID)) ?? latest
+            if let state = latest?.state, state != .accepted { return latest }
+            guard Date() < deadline else { return latest }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+    }
+
+    /// A SHA-256 digest in FileHasher's lowercase hex, or nil.
+    static func normalizedSHA256(_ value: String) -> String? {
+        guard value.count == 64, value.allSatisfy(\.isHexDigit) else { return nil }
+        return value.lowercased()
+    }
 
     /// Parse a TTL string like `7d`, `24h`, `30m`, `90s`, `2w`.
     private static func parseTTL(_ s: String) -> TimeInterval? {
