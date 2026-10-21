@@ -241,12 +241,50 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         }
     }
 
-    /// Every directory the engine loads compiled rules from: single-event,
-    /// sequence, graph and auto-generated rules, and the user rules beside
-    /// the compiled corpus.
+    /// Every directory the engine loads compiled rules from, in the order an
+    /// id resolves: user rules first, because the engine loads them after
+    /// the bundled corpus and a user rule replaces the bundled one with its
+    /// id; then single-event, sequence, graph and auto-generated rules.
     private static func ruleDirectories(_ compiledDir: String) -> [String] {
-        [compiledDir, compiledDir + "/sequences", compiledDir + "/graph", compiledDir + "/auto_generated",
-         (compiledDir as NSString).deletingLastPathComponent + "/user_rules"]
+        [userRulesDirectory(compiledDir), compiledDir, compiledDir + "/sequences",
+         compiledDir + "/graph", compiledDir + "/auto_generated"]
+    }
+
+    static func userRulesDirectory(_ compiledDir: String) -> String {
+        (compiledDir as NSString).deletingLastPathComponent + "/user_rules"
+    }
+
+    /// The uid the engine runs as for this support directory: root for the
+    /// installed engine, this user for a development daemon.
+    static func engineUID(forCompiledDir compiledDir: String) -> uid_t {
+        (compiledDir as NSString).deletingLastPathComponent == "/Library/Application Support/MacCrab" ? 0 : getuid()
+    }
+
+    /// The engine loads user rules only from a directory that is not a
+    /// symlink, is owned by root or the engine's uid and is writable by its
+    /// owner alone (DaemonSetup's `isSecureDirectory`), and only files the
+    /// engine's uid owns (`RuleEngine.loadRules(requireOwnerUID:)`). The index
+    /// applies the same checks, so it shows the definition the engine applies
+    /// and never hands an agent rule text the engine refused.
+    static func trustsUserRulesDirectory(owner: uid_t, mode: mode_t, isSymlink: Bool, engineUID: uid_t) -> Bool {
+        !isSymlink && (owner == 0 || owner == engineUID) && mode & 0o022 == 0
+    }
+
+    static func trustsUserRuleFile(owner: uid_t, engineUID: uid_t) -> Bool { owner == engineUID }
+
+    private static func userRulesTrusted(_ directory: String, engineUID: uid_t) -> Bool {
+        var st = stat()
+        guard lstat(directory, &st) == 0 else { return false }
+        let type = st.st_mode & S_IFMT
+        guard type == S_IFDIR || type == S_IFLNK else { return false }
+        return trustsUserRulesDirectory(owner: st.st_uid, mode: st.st_mode, isSymlink: type == S_IFLNK,
+                                        engineUID: engineUID)
+    }
+
+    private static func userRuleTrusted(_ path: String, engineUID: uid_t) -> Bool {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return false }
+        return trustsUserRuleFile(owner: st.st_uid, engineUID: engineUID)
     }
 
     private let lock = NSLock()
@@ -255,8 +293,19 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     private var paths: [String: String] = [:]
 
     func rule(id: String, in compiledDir: String) -> [String: Any]? {
+        rule(id: id, in: compiledDir, engineUID: Self.engineUID(forCompiledDir: compiledDir))
+    }
+
+    func rule(id: String, in compiledDir: String, engineUID: uid_t) -> [String: Any]? {
+        let userDir = Self.userRulesDirectory(compiledDir)
+        // A user rule is used only while the engine would still load it.
+        func trusted(_ path: String) -> Bool {
+            !path.hasPrefix(userDir + "/")
+                || (Self.userRulesTrusted(userDir, engineUID: engineUID)
+                    && Self.userRuleTrusted(path, engineUID: engineUID))
+        }
         let cached = cachedPath(id: id, in: compiledDir)
-        if let cached, let json = Self.load(cached), (json["id"] as? String) == id {
+        if let cached, trusted(cached), let json = Self.load(cached), (json["id"] as? String) == id {
             return json
         }
         // A stale entry means the rules changed: rebuild. An id with no entry
@@ -264,8 +313,8 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         // is no longer in the corpus does not reopen every file on each call.
         let current = Self.stamp(compiledDir)
         guard cached != nil || !isCurrent(compiledDir, stamp: current) else { return nil }
-        rebuild(compiledDir, stamp: current)
-        guard let path = cachedPath(id: id, in: compiledDir), let json = Self.load(path),
+        rebuild(compiledDir, stamp: current, engineUID: engineUID)
+        guard let path = cachedPath(id: id, in: compiledDir), trusted(path), let json = Self.load(path),
               (json["id"] as? String) == id else { return nil }
         return json
     }
@@ -281,13 +330,18 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return directory == compiledDir && stamp == current
     }
 
-    private func rebuild(_ compiledDir: String, stamp current: Stamp) {
+    private func rebuild(_ compiledDir: String, stamp current: Stamp, engineUID: uid_t) {
         var next: [String: String] = [:]
         let fm = FileManager.default
+        let userDir = Self.userRulesDirectory(compiledDir)
         for dir in Self.ruleDirectories(compiledDir) {
+            let user = dir == userDir
+            if user, !Self.userRulesTrusted(dir, engineUID: engineUID) { continue }
             guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
-            for file in files.sorted() where file.hasSuffix(".json") && file != "manifest.json" {
+            // The engine skips hidden files and the build manifest.
+            for file in files.sorted() where file.hasSuffix(".json") && !file.hasPrefix(".") && file != "manifest.json" {
                 let path = dir + "/" + file
+                if user, !Self.userRuleTrusted(path, engineUID: engineUID) { continue }
                 if let id = Self.load(path)?["id"] as? String, next[id] == nil {
                     next[id] = path
                 }
@@ -308,8 +362,10 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return Stamp(directories: ruleDirectories(compiledDir).map(modified))
     }
 
+    /// A regular file only, read through the bounded reader: a FIFO or a
+    /// symlink planted among the rules is skipped, not followed or waited on.
     private static func load(_ path: String) -> [String: Any]? {
-        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 }
