@@ -53,6 +53,60 @@ struct ProcessLineageRemovedParentTests {
         #expect(await lineage.ancestors(of: 101).map(\.executable) == ["/bin/sh", "/sbin/launchd"])
     }
 
+    @Test("an observation-time sighting of an evicted parent keeps the edge; a later birth releases it")
+    func sightingKeepsRemovedParentEdge() async {
+        let lineage = await evictedDropper()
+        await lineage.recordExit(pid: 102)
+        // A network poll saw the dropper before it exited; its event, enriched
+        // late, starts the process at the poll time, not at its birth.
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/bin/sh", name: "sh",
+                                    startTime: Date(timeIntervalSince1970: 1_500), startTimeIsBirth: false)
+        #expect(await lineage.isDescendant(101, of: 100))
+        // An Endpoint Security birth later than that is a new process.
+        await lineage.recordProcess(pid: 100, ppid: 1, path: "/usr/local/bin/claude", name: "claude",
+                                    startTime: Date(timeIntervalSince1970: 1_600))
+        #expect(await !lineage.isDescendant(101, of: 100))
+    }
+
+    @Test("a node first seen by another source keeps its children when it execs")
+    func execAfterSightingKeepsChildren() async {
+        let lineage = ProcessLineage(maxProcessCount: 10)
+        let birth = Date(timeIntervalSince1970: 1_000)
+        await lineage.recordProcess(pid: 1, ppid: 0, path: "/sbin/launchd", name: "launchd", startTime: birth)
+        // First recorded from a network poll, an hour after its birth.
+        await lineage.recordProcessIfAbsent(pid: 400, ppid: 1, path: "/usr/bin/python3", name: "python3",
+                                            startTime: birth.addingTimeInterval(3_600), startTimeIsBirth: false)
+        await lineage.recordProcess(pid: 401, ppid: 400, path: "/bin/sh", name: "sh",
+                                    startTime: birth.addingTimeInterval(3_700))
+        // Its exec reports the kernel birth time, earlier than the sighting.
+        await lineage.recordProcess(pid: 400, ppid: 1, path: "/usr/local/bin/node", name: "node", startTime: birth)
+        #expect(await lineage.isDescendant(401, of: 400))
+    }
+
+    @Test("recording an absent process never overwrites one recorded in between")
+    func recordIfAbsentKeepsExistingNode() async throws {
+        let lineage = ProcessLineage(maxProcessCount: 10)
+        let start = Date(timeIntervalSince1970: 1_000)
+        await lineage.recordProcess(pid: 500, ppid: 1, path: "/usr/local/bin/node", name: "node", startTime: start,
+                                    commandLine: "node /srv/server-filesystem/dist/index.js /tmp")
+        await lineage.recordProcessIfAbsent(pid: 500, ppid: 1, path: "/usr/local/bin/node", name: "node",
+                                            startTime: start, commandLine: "")
+        #expect(await lineage.commandLine(of: 500) == "node /srv/server-filesystem/dist/index.js /tmp")
+        await lineage.recordProcessIfAbsent(pid: 501, ppid: 500, path: "/bin/sh", name: "sh", startTime: start)
+        #expect(await lineage.contains(pid: 501))
+        // The enricher's untracked-process branch uses the one-turn form and
+        // tells a kernel birth time from a sighting.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let enricher = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/EventEnricher.swift"),
+                                  encoding: .utf8)
+        let branch = try #require(enricher.range(of: "private func updateLineage(for event: Event)"))
+        let body = enricher[branch.lowerBound...].prefix(2_400)
+        #expect(body.contains("await lineage.recordProcessIfAbsent("))
+        #expect(body.contains("startTimeIsBirth: proc.auditIdentity != nil"))
+        #expect(!body.contains("lineage.contains(pid:"))
+    }
+
     @Test("a process reusing a running node's pid does not adopt its children")
     func reusedRunningPidReleasesChildren() async {
         let lineage = ProcessLineage(maxProcessCount: 10)

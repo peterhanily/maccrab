@@ -293,6 +293,9 @@ public actor ProcessLineage {
     ///   - path: Full executable path.
     ///   - name: Process name (basename).
     ///   - startTime: Time the process was observed starting.
+    ///   - startTimeIsBirth: Whether `startTime` is the kernel's birth time
+    ///     (Endpoint Security) rather than when another source first saw the
+    ///     process (network, unified log, TCC).
     public func recordProcess(
         pid: pid_t,
         ppid: pid_t,
@@ -300,7 +303,8 @@ public actor ProcessLineage {
         name: String,
         startTime: Date,
         commandLine: String = "",
-        signerType: String? = nil
+        signerType: String? = nil,
+        startTimeIsBirth: Bool = true
     ) {
         // If this pid was previously tracked (pid reuse), clean up old entry.
         if let old = nodes[pid] {
@@ -311,12 +315,18 @@ public actor ProcessLineage {
             // and made a long-lived orphan an "AI child"). The kernel
             // reparented them to launchd; mirror that.
             // A running node whose exit never arrived (a muted /System/ exit)
-            // is reused too when the new process started later.
-            if old.exitTime != nil || abs(old.startTime.timeIntervalSince(startTime)) > 1 {
+            // is reused too when the new process started later. Only later:
+            // a node first seen by another source holds that sighting, not its
+            // birth, and its own exec reports an earlier start.
+            if startTimeIsBirth,
+               old.exitTime != nil || startTime.timeIntervalSince(old.startTime) > 1 {
                 adoptOrphans(of: pid)
             }
         } else if let removedStart = removedParents.removeValue(forKey: pid),
-                  abs(removedStart.timeIntervalSince(startTime)) > 1 {
+                  startTimeIsBirth, startTime.timeIntervalSince(removedStart) > 1 {
+            // A sighting from another source carries no birth time, so it
+            // cannot tell the evicted process's late event from a new one; the
+            // next Endpoint Security event of a new process decides.
             adoptOrphans(of: pid)
         }
 
@@ -345,6 +355,25 @@ public actor ProcessLineage {
         if nodes.count > maxProcessCount {
             evictLRUProcess()
         }
+    }
+
+    /// Record a process only if it is not tracked yet, in one actor turn. A
+    /// caller that checked first and recorded after could overwrite an exec
+    /// recorded in between with a file event's empty command line.
+    public func recordProcessIfAbsent(
+        pid: pid_t,
+        ppid: pid_t,
+        path: String,
+        name: String,
+        startTime: Date,
+        commandLine: String = "",
+        signerType: String? = nil,
+        startTimeIsBirth: Bool = true
+    ) {
+        guard nodes[pid] == nil else { return }
+        recordProcess(pid: pid, ppid: ppid, path: path, name: name, startTime: startTime,
+                      commandLine: commandLine, signerType: signerType,
+                      startTimeIsBirth: startTimeIsBirth)
     }
 
     /// The children of a pid whose process is gone were reparented to launchd

@@ -637,19 +637,19 @@ public actor EventEnricher {
 
         default:
             // Non-process events (file, network, tcc) still contribute to the
-            // lineage if the acting process is not yet tracked.
-            let alreadyTracked = await lineage.contains(pid: proc.pid)
-            if !alreadyTracked {
-                await lineage.recordProcess(
-                    pid: proc.pid,
-                    ppid: proc.ppid,
-                    path: proc.executable,
-                    name: proc.name,
-                    startTime: proc.startTime,
-                    commandLine: proc.commandLine,
-                    signerType: Self.lineageSignerType(proc)
-                )
-            }
+            // lineage if the acting process is not yet tracked. Only Endpoint
+            // Security carries the audit token and the kernel's birth time;
+            // other sources start the process when they first saw it.
+            await lineage.recordProcessIfAbsent(
+                pid: proc.pid,
+                ppid: proc.ppid,
+                path: proc.executable,
+                name: proc.name,
+                startTime: proc.startTime,
+                commandLine: proc.commandLine,
+                signerType: Self.lineageSignerType(proc),
+                startTimeIsBirth: proc.auditIdentity != nil
+            )
         }
     }
 
