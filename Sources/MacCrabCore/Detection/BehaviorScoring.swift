@@ -53,8 +53,10 @@ public actor BehaviorScoring {
 
     /// Exited processes keep their scores this long for events still in
     /// flight on the other lane, then leave so a later process reusing the
-    /// pid and path does not inherit their static weight or alert latch.
-    private static let exitGrace: TimeInterval = 120
+    /// pid and path does not inherit their static weight or alert latch. The
+    /// file lane can lag the exit by minutes near saturation; exited scores
+    /// are the first evicted, so the wait costs no live process its slot.
+    private static let exitGrace: TimeInterval = 600
     private var exitQueue: [(pid: Int32, at: Date)] = []
     private var exitQueueHead = 0
 
@@ -446,14 +448,12 @@ public actor BehaviorScoring {
 
         processScores[key] = entry
 
-        // Evict AFTER the new entry's score is applied. Evicting in the
-        // new-key block above (before the indicator weight lands) would make
-        // a brand-new process the lowest-scored entry (rawScore 0) and
-        // self-evict it the instant the table hit the cap — freezing the
-        // table at its first `maxTrackedProcesses` entries and silently
-        // dropping every later process, including a high-score attacker.
-        // With the score applied first, the genuinely-lowest entry is evicted.
-        if addedNewKey { evictIfNeeded(at: timestamp) }
+        // Evict AFTER the new entry's score is applied, so a newcomer whose
+        // first indicator is an action competes with that weight. A newcomer
+        // carrying only static weight has no action score yet and is never
+        // its own victim: otherwise any table holding action residue would
+        // drop every such process on insert, before its next indicator lands.
+        if addedNewKey { evictIfNeeded(at: timestamp, inserted: key) }
         let score = entry
 
         // Check threshold
@@ -629,6 +629,9 @@ public actor BehaviorScoring {
 
     private func dropExitedScores(at timestamp: Date) {
         let cutoff = timestamp.addingTimeInterval(-Self.exitGrace)
+        // One insertion-order pass for the whole drain: a burst of exits that
+        // expire together must not rescan the table once per pid.
+        var expiredKeys = Set<ProcessKey>()
         while exitQueueHead < exitQueue.count, exitQueue[exitQueueHead].at <= cutoff {
             let pid = exitQueue[exitQueueHead].pid
             exitQueueHead += 1
@@ -644,7 +647,10 @@ public actor BehaviorScoring {
             }
             let remaining = keys.subtracting(expired)
             if remaining.isEmpty { keysByPid.removeValue(forKey: pid) } else { keysByPid[pid] = remaining }
-            insertionOrder.removeAll { expired.contains($0) }
+            expiredKeys.formUnion(expired)
+        }
+        if !expiredKeys.isEmpty {
+            insertionOrder.removeAll { expiredKeys.contains($0) }
         }
         if exitQueueHead > 1_024, exitQueueHead * 2 > exitQueue.count {
             exitQueue.removeFirst(exitQueueHead)
@@ -737,29 +743,34 @@ public actor BehaviorScoring {
         return score.rawScore * pow(0.5, elapsed / decayHalfLife)
     }
 
-    private func evictIfNeeded(at timestamp: Date) {
-        // Evict the entry with the LOWEST decayed action score, not the
-        // oldest-inserted one. A long-lived, high-score process (e.g. a
-        // slow-burn attacker) must survive churn from transient benign
-        // processes — FIFO eviction would silently drop the strongest detection
-        // signal we have. Static weight is left out: it never decays, so one
-        // burst of /tmp executions would otherwise hold the table for the
-        // daemon's lifetime and evict every newcomer weighing less, and the
-        // process's next event reports it again anyway. Among equal scores we
-        // fall back to insertion order (oldest first) for a stable,
-        // deterministic choice. Eviction only runs above the cap (cold path),
-        // so the O(n) scan is not on the per-event hot path.
+    private func evictIfNeeded(at timestamp: Date, inserted: ProcessKey? = nil) {
+        // Evict exited processes first, then the entry with the LOWEST decayed
+        // action score, not the oldest-inserted one. A long-lived, high-score
+        // process (e.g. a slow-burn attacker) must survive churn from transient
+        // benign processes — FIFO eviction would silently drop the strongest
+        // detection signal we have. Static weight is left out: it never
+        // decays, so one burst of /tmp executions would otherwise hold the
+        // table for the daemon's lifetime and evict every newcomer weighing
+        // less, and the process's next event reports it again anyway. Among
+        // equal scores we fall back to insertion order (oldest first) for a
+        // stable, deterministic choice. Eviction only runs above the cap (cold
+        // path), so the O(n) scan is not on the per-event hot path.
         while processScores.count > maxTrackedProcesses {
             var victim: ProcessKey?
+            var victimExited = false
             var lowest = Double.greatestFiniteMagnitude
             for key in insertionOrder {
                 guard let score = processScores[key] else { continue }
+                if key == inserted, score.rawScore == 0, processScores.count > 1 { continue }
+                let exited = score.exitedAt != nil
                 let decayed = decayedActionScore(score, at: timestamp)
                 // The first retained key is a deterministic fallback, including
                 // equal maximum finite scores that are not < the initial bound.
-                if victim == nil || decayed < lowest {
+                if victim == nil || (exited && !victimExited)
+                    || (exited == victimExited && decayed < lowest) {
                     lowest = decayed
                     victim = key
+                    victimExited = exited
                 }
             }
             guard let evict = victim else { break }

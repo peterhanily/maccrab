@@ -101,8 +101,12 @@ struct BehaviorScoringStaticFloodTests {
         clock.advance(10)
         _ = await scorer.addIndicator(.init(name: "writes_launch_agent", weight: 1), forProcess: 71, path: path)
         #expect(await scorer.score(forPid: 71, path: path) >= 10)
+        // Still kept just inside the grace, for a lagging file lane.
+        clock.advance(589)
+        await scorer.processExited(pid: 72)
+        #expect(await scorer.score(forPid: 71, path: path) >= 10)
         // After the grace another exit (or the periodic prune) drops it.
-        clock.advance(121)
+        clock.advance(2)
         await scorer.processExited(pid: 72)
         #expect(await scorer.score(forPid: 71, path: path) == 0)
         // A new process reusing pid and path starts unscored and unlatched.
@@ -118,9 +122,61 @@ struct BehaviorScoringStaticFloodTests {
         let scorer = scorer(clock)
         _ = await scorer.addIndicator(.init(name: "writes_launch_agent", weight: 5), forProcess: 73, path: "/x")
         await scorer.processExited(pid: 73)
-        clock.advance(121)
+        clock.advance(601)
         await scorer.prune()
         #expect(await scorer.score(forPid: 73, path: "/x") == 0)
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
+    @Test("a newcomer with only static weight is not evicted on insert by a table of action residue")
+    func staticNewcomerSurvivesActionResidue() async {
+        let clock = Clock()
+        let scorer = scorer(clock)
+        for offset in 0..<50 {
+            _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 1),
+                                          forProcess: Int32(1 + offset), path: "/usr/bin/true")
+        }
+        clock.advance(1)
+        let path = "/opt/homebrew/bin/bash"
+        _ = await scorer.addIndicator(.init(name: "ai_tool_runs_sudo", weight: 6), forProcess: 900, path: path)
+        let crossing = await scorer.addIndicator(.init(name: "ai_tool_installs_unknown_pkg", weight: 4),
+                                                 forProcess: 900, path: path)
+        #expect(crossing != nil, "the static-only total must form and cross")
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
+    @Test("exited processes are evicted before live ones")
+    func exitedScoresEvictFirst() async {
+        let clock = Clock()
+        let scorer = scorer(clock, capacity: 3)
+        _ = await scorer.addIndicator(.init(name: "writes_launch_agent", weight: 8), forProcess: 1, path: "/a")
+        _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2), forProcess: 2, path: "/b")
+        _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2), forProcess: 3, path: "/c")
+        await scorer.processExited(pid: 1)
+        _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 3), forProcess: 4, path: "/d")
+        #expect(await scorer.score(forPid: 1, path: "/a") == 0, "the exited entry goes first")
+        #expect(await scorer.score(forPid: 2, path: "/b") > 0)
+        #expect(await scorer.score(forPid: 3, path: "/c") > 0)
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
+    @Test("a burst of exits expiring together drains in one pass")
+    func exitBurstDrainsInOnePass() async {
+        let clock = Clock()
+        let count = 8_000
+        let scorer = scorer(clock, capacity: count)
+        for pid in 1...count {
+            _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 1),
+                                          forProcess: Int32(pid), path: "/private/tmp/burst/payload")
+        }
+        for pid in 1...count { await scorer.processExited(pid: Int32(pid)) }
+        clock.advance(601)
+        let started = DispatchTime.now().uptimeNanoseconds
+        await scorer.processExited(pid: Int32(count + 1))
+        let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+        #expect(await scorer.score(forPid: 1, path: "/private/tmp/burst/payload") == 0)
+        // One pass over the table, not one per expired pid.
+        #expect(seconds < 0.75, "drain took \(seconds) s")
         #expect(await scorer.lifecycleInvariantFailures().isEmpty)
     }
 
