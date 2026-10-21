@@ -85,7 +85,7 @@ enum BehaviorScoreAlertEmitter {
     /// The scored process's start time, when the event is that process's: it
     /// tells a later process reusing an exited pid and path from the exited
     /// process's own late events.
-    private static func processStart(of event: Event?, pid: Int32) -> Date? {
+    static func processStart(of event: Event?, pid: Int32) -> Date? {
         guard let event, event.process.pid == pid else { return nil }
         return event.process.startTime
     }

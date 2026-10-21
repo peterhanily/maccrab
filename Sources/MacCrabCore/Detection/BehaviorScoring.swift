@@ -51,6 +51,11 @@ public actor BehaviorScoring {
     /// Score keys by pid, so a process exit finds its entries without a scan.
     private var keysByPid: [Int32: Set<ProcessKey>] = [:]
 
+    /// The latest processed exit of each pid in `keysByPid`. A new process
+    /// generation whose own exit was processed before its first score must
+    /// start out exited, or nothing would ever drop it.
+    private var lastExitAt: [Int32: Date] = [:]
+
     /// Exited processes keep their scores this long for events still in
     /// flight on the other lane, then leave so a later process reusing the
     /// pid and path does not inherit their static weight or alert latch. The
@@ -103,6 +108,10 @@ public actor BehaviorScoring {
         var indicatorLastAdd: [String: Date] = [:]
         /// Set by the process's exit; the score leaves after `exitGrace`.
         var exitedAt: Date?
+        /// When a later process reusing the pid and path replaced an exited
+        /// entry. A delivery pending from before then is the earlier
+        /// process's crossing.
+        var generationStartedAt: Date?
 
         var totalScore: Double { staticScore + rawScore }
     }
@@ -394,7 +403,10 @@ public actor BehaviorScoring {
         // generation: it must not inherit that score, latch or exit mark. The
         // exited process's own late events started before it exited.
         if let processStart, let exitedAt = processScores[key]?.exitedAt, processStart > exitedAt {
-            processScores[key] = ProcessScore(lastUpdate: timestamp)
+            var fresh = ProcessScore(lastUpdate: timestamp)
+            fresh.generationStartedAt = timestamp
+            if let exited = lastExitAt[pid], exited > processStart { fresh.exitedAt = exited }
+            processScores[key] = fresh
             alerted.remove(key)
             if let index = insertionOrder.firstIndex(of: key) { insertionOrder.remove(at: index) }
             insertionOrder.append(key)
@@ -423,8 +435,13 @@ public actor BehaviorScoring {
         if entry.rawScore < max(1.0, alertThreshold - entry.staticScore) {
             alerted.remove(key)
             // A crossing whose total decayed below the threshold is stale. A
-            // static-only total never decays, so its delivery stays pending.
-            if entry.totalScore < alertThreshold {
+            // static-only total never decays, so its delivery stays pending,
+            // and so does an earlier generation's crossing, which a new
+            // process's low score says nothing about.
+            let earlierGeneration = entry.generationStartedAt.map { start in
+                pendingThresholds[key].map { $0.createdAt < start } ?? false
+            } ?? false
+            if entry.totalScore < alertThreshold, !earlierGeneration {
                 abandonPendingThreshold(for: key)
             }
         }
@@ -674,6 +691,7 @@ public actor BehaviorScoring {
             for key in keys where processScores[key]?.exitedAt == nil {
                 processScores[key]?.exitedAt = timestamp
             }
+            lastExitAt[pid] = timestamp
             exitQueue.append((pid, timestamp))
             if exitQueue.count - exitQueueHead > 4 * max(1, maxTrackedProcesses) {
                 compactExitQueue()
@@ -722,7 +740,12 @@ public actor BehaviorScoring {
                 alerted.remove(key)
             }
             let remaining = keys.subtracting(expired)
-            if remaining.isEmpty { keysByPid.removeValue(forKey: pid) } else { keysByPid[pid] = remaining }
+            if remaining.isEmpty {
+                keysByPid.removeValue(forKey: pid)
+                lastExitAt.removeValue(forKey: pid)
+            } else {
+                keysByPid[pid] = remaining
+            }
             expiredKeys.formUnion(expired)
         }
         if !expiredKeys.isEmpty {
@@ -745,6 +768,7 @@ public actor BehaviorScoring {
         }
         insertionOrder = insertionOrder.filter { processScores[$0] != nil }
         keysByPid = Dictionary(grouping: insertionOrder, by: \.pid).mapValues(Set.init)
+        lastExitAt = lastExitAt.filter { keysByPid[$0.key] != nil }
         alerted = alerted.filter { processScores[$0] != nil }
         dropExitedScores(at: timestamp)
         for (key, pending) in pendingThresholds
@@ -768,6 +792,9 @@ public actor BehaviorScoring {
             failures.append("score pid index differs from retained keys")
         }
         if !alerted.isSubset(of: tracked) { failures.append("alert latch outlived its score") }
+        if lastExitAt.keys.contains(where: { keysByPid[$0] == nil }) {
+            failures.append("exit record outlived its scores")
+        }
         if pendingThresholds.count > maxPendingThresholds {
             failures.append("pending delivery capacity exceeded")
         }
@@ -852,7 +879,10 @@ public actor BehaviorScoring {
             guard let evict = victim else { break }
             processScores.removeValue(forKey: evict)
             keysByPid[evict.pid]?.remove(evict)
-            if keysByPid[evict.pid]?.isEmpty == true { keysByPid.removeValue(forKey: evict.pid) }
+            if keysByPid[evict.pid]?.isEmpty == true {
+                keysByPid.removeValue(forKey: evict.pid)
+                lastExitAt.removeValue(forKey: evict.pid)
+            }
             alerted.remove(evict)
             abandonPendingThreshold(for: evict)
             if let idx = insertionOrder.firstIndex(of: evict) {

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import MacCrabAgentKit
 @testable import MacCrabCore
 
 /// Static weight never decays, so it must not decide which scores the table
@@ -270,6 +271,82 @@ struct BehaviorScoringStaticFloodTests {
         await scorer.processExited(pid: 71)
         #expect(await scorer.score(forPid: 70, path: path) >= 10)
         #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
+    @Test("a new generation leaves the exited process's undelivered crossing pending")
+    func pendingCrossingSurvivesNewGeneration() async throws {
+        let clock = Clock()
+        let scorer = scorer(clock)
+        let path = "/bin/sh"
+        let crossing = await scorer.addIndicators(
+            [.init(name: "ai_tool_runs_sudo", weight: 6), .init(name: "ai_tool_installs_unknown_pkg", weight: 4)],
+            forProcess: 80, path: path, processStart: clock.now)
+        let token = try #require(crossing?.deliveryToken)
+        await scorer.recordThresholdDeliveryFailure(deliveryToken: token)
+        clock.advance(1)
+        await scorer.processExited(pid: 80)
+        clock.advance(1)
+        // A process reusing the pid and path starts afresh, but the exited
+        // process's crossing is still retried until it settles.
+        let retried = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2),
+                                                forProcess: 80, path: path, processStart: clock.now)
+        #expect(retried?.deliveryToken == token)
+        var telemetry = await scorer.thresholdTelemetry()
+        #expect(telemetry.abandoned == 0 && telemetry.pending == 1)
+        #expect(await scorer.score(forPid: 80, path: path) < 2.5)
+        #expect(await scorer.resolveThreshold(deliveryToken: token, as: .committed))
+        telemetry = await scorer.thresholdTelemetry()
+        #expect(telemetry.committed == 1 && telemetry.conservesCrossings)
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
+    @Test("a new generation whose own exit came first starts out exited")
+    func exitedGenerationStaysExited() async {
+        let clock = Clock()
+        let scorer = scorer(clock)
+        let path = "/bin/sh"
+        _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2),
+                                      forProcess: 90, path: path, processStart: clock.now)
+        clock.advance(1)
+        await scorer.processExited(pid: 90)
+        clock.advance(1)
+        let laterStart = clock.now
+        clock.advance(1)
+        // The later process exits before any of its events is scored.
+        await scorer.processExited(pid: 90)
+        clock.advance(1)
+        _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2),
+                                      forProcess: 90, path: path, processStart: laterStart)
+        #expect(await scorer.score(forPid: 90, path: path) < 2.5, "a fresh generation")
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+        // Still marked exited, so the queued exit drops it after the grace.
+        clock.advance(601)
+        await scorer.processExited(pid: 91)
+        #expect(await scorer.score(forPid: 90, path: path) == 0)
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
+    @Test("the emitter passes the scored process's start time on every path")
+    func emitterPassesStartTime() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let emitter = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/BehaviorScoreAlertEmitter.swift"),
+            encoding: .utf8)
+        #expect(emitter.components(separatedBy: "processStart: processStart(of: event, pid: pid)").count - 1 == 2)
+        let ruleMatch = try #require(emitter.range(of: "static func recordRuleMatch("))
+        #expect(emitter[ruleMatch.upperBound...].prefix(600).contains("processStart: event.process.startTime"))
+
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        let process = MacCrabCore.ProcessInfo(
+            pid: 5, ppid: 1, rpid: 1, name: "sh", executable: "/bin/sh", commandLine: "sh",
+            args: ["sh"], workingDirectory: "/", userId: 501, userName: "u", groupId: 20,
+            startTime: started)
+        let event = Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: process)
+        #expect(BehaviorScoreAlertEmitter.processStart(of: event, pid: 5) == started)
+        #expect(BehaviorScoreAlertEmitter.processStart(of: event, pid: 6) == nil,
+                "another pid's event does not date the scored process")
+        #expect(BehaviorScoreAlertEmitter.processStart(of: nil, pid: 5) == nil)
     }
 
     @Test("the daemon prunes scores on a timer and reports exits")
