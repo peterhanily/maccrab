@@ -236,24 +236,9 @@ extension MacCrabCtl {
         }
 
         // ── Suppressions ──────────────────────────────────────────────────
-        let suppressFile = (supportDir as NSString).appendingPathComponent("suppressions.json")
-        let suppressData = try? Data(contentsOf: URL(fileURLWithPath: suppressFile))
-        if let data = suppressData,
-           let suppressions = try? JSONDecoder().decode([String: [String]].self, from: data),
-           !suppressions.isEmpty {
-            let totalPaths = suppressions.values.reduce(0) { $0 + $1.count }
-            print("Suppressions:    \(suppressions.count) rule(s), \(totalPaths) path(s)")
-        } else if let data = suppressData,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let entries = json["entries"] as? [[String: Any]] {
-            // v2 store (SuppressionManager's `{"version": 2, "entries": [...]}`).
-            // The daemon rewrites the file into this shape on first load, so the
-            // v1 decode above fails on every running install and status reported
-            // "None configured" while the allowlist was in force.
-            print("Suppressions:    \(entries.count) allowlist entry(ies) — see 'maccrabctl allow list'")
-        } else {
-            print("Suppressions:    None configured")
-        }
+        // Read as `allow list` reads it: a store this user may not read (root-
+        // only on a release install) is reported, never shown as none.
+        print(await allowlistStatusLine(dataDir: supportDir))
 
         // ── Security Posture ──────────────────────────────────────────────
         let scoreResult = await SecurityScorer().calculate()

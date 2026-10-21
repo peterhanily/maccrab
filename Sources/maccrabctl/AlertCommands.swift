@@ -187,11 +187,22 @@ extension MacCrabCtl {
         return removed
     }
 
+    /// The store exists and this user may not read it.
+    static func suppressionStoreAccessDenied(_ path: String) -> Bool {
+        FileManager.default.fileExists(atPath: path) && !FileManager.default.isReadableFile(atPath: path)
+    }
+
     static func listSuppressions() {
         let configDir = maccrabDataDir()
         let suppressFile = (configDir as NSString).appendingPathComponent("suppressions.json")
 
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)) else {
+            // A store this user may not read (root-only on a release install)
+            // is not an empty one.
+            if suppressionStoreAccessDenied(suppressFile) {
+                failUnreadableAllowlist(path: suppressFile, failure: .inaccessible(
+                    "Control file could not be read: suppressions.json (inaccessible)"))
+            }
             print("No suppressions configured.")
             print("Use 'maccrabctl suppress <rule-id> <process-path>' to add one.")
             return

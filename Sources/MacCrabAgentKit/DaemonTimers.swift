@@ -6857,7 +6857,9 @@ enum DaemonTimers {
                 receipt.state = .accepted
                 receipt.reason = "Validated; awaiting saved allowlist removal"
                 try await state.runtimeConfigurationReporter.record(receipt)
-                let removed = try await state.suppressionManager.removePersisted(ids: [id])
+                // Reload first: `maccrabctl allow add` writes the saved store,
+                // which the running copy has not seen since the last reload.
+                let removed = try await state.suppressionManager.reloadAndRemovePersisted(ids: [id])
                 guard !removed.isEmpty else { throw RuntimeConfigContractError("Suppression ID is no longer present; review current saved state") }
                 persisted = true
                 receipt.state = .applied

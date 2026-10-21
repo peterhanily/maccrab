@@ -84,7 +84,8 @@ struct RootRequestInboxCLITests {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         for file in ["MacCrabCtl.swift", "RollupCommand.swift", "RuleMutateCommands.swift",
-                     "ResponseCommands.swift", "ConfigCommands.swift", "RuleChannelCommands.swift"] {
+                     "ResponseCommands.swift", "ConfigCommands.swift", "RuleChannelCommands.swift",
+                     "AllowCommand.swift"] {
             let source = try String(
                 contentsOf: root.appendingPathComponent("Sources/maccrabctl/" + file), encoding: .utf8)
             #expect(source.contains("requestInboxDirectory("), "\(file)")

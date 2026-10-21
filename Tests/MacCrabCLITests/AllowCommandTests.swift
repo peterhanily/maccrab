@@ -87,6 +87,8 @@ struct AllowCommandTests {
         let body = source[remove.lowerBound...].prefix(3_000)
         #expect(body.contains("submitAllowRemoval("))
         #expect(!body.contains("removePersisted("))
+        // Under sudo the request must reach the root-only inbox.
+        #expect(body.contains("inboxDirectory: requestInboxDirectory(dataDir: dataDir)"))
     }
 
     @Test("--hash takes a 64-character hex digest in either case and stores lowercase")
@@ -96,6 +98,78 @@ struct AllowCommandTests {
         #expect(MacCrabCtl.normalizedSHA256(String(upper.prefix(63))) == nil)
         #expect(MacCrabCtl.normalizedSHA256(String(repeating: "g", count: 64)) == nil)
         #expect(MacCrabCtl.normalizedSHA256(String(upper.prefix(12))) == nil)
+        // Fullwidth hex digits pass Character.isHexDigit but never match.
+        #expect(MacCrabCtl.normalizedSHA256(String(repeating: "\u{FF21}\u{FF22}", count: 32)) == nil)
+    }
+
+    @Test("status and stats read the allowlist as list does",
+          .enabled(if: geteuid() != 0, "root reads a mode-000 file"))
+    func statusAndStatsReadLikeList() async throws {
+        let root = try directory()
+        let store = root.appendingPathComponent("suppressions.json")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: store.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        #expect(await MacCrabCtl.allowlistStatusLine(dataDir: root.path) == "Suppressions:    None configured")
+        let entries = [
+            Suppression(scope: .rulePath(ruleId: "r1", path: "/a"), source: .cli, reason: "Fixture"),
+            Suppression(scope: .rulePath(ruleId: "r1", path: "/b"), source: .cli, reason: "Fixture"),
+            Suppression(scope: .path("/c"), source: .cli, reason: "Fixture"),
+            Suppression(scope: .host("build-mac"), source: .cli, reason: "Fixture"),
+        ]
+        try save(entries, to: store)
+        // The counters match the manager's own.
+        let manager = SuppressionManager(dataDir: root.path)
+        await manager.load()
+        let counted = MacCrabCtl.allowlistStats(entries)
+        let managed = await manager.stats()
+        #expect(counted.ruleCount == managed.ruleCount && counted.pathCount == managed.pathCount
+            && counted.totalEntries == managed.totalEntries && counted.expired == managed.expired)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: store.path)
+        let refused = await MacCrabCtl.allowlistStatusLine(dataDir: root.path)
+        #expect(refused.contains("needs sudo"), "\(refused)")
+        #expect(MacCrabCtl.suppressionStoreAccessDenied(store.path))
+        #expect(!MacCrabCtl.suppressionStoreAccessDenied(root.appendingPathComponent("missing.json").path))
+        try save(entries, to: root.appendingPathComponent("suppressions_snapshot.json"))
+        let snapshot = await MacCrabCtl.allowlistStatusLine(dataDir: root.path)
+        #expect(snapshot.contains("4 allowlist entry(ies) (engine snapshot)"), "\(snapshot)")
+    }
+
+    @Test("allow add never saves over a store it could not read",
+          .enabled(if: geteuid() != 0, "root reads a mode-000 file"))
+    func addNeverOverwritesAnUnreadableStore() async throws {
+        let root = try directory()
+        let store = root.appendingPathComponent("suppressions.json")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: store.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try save([Suppression(scope: .rule("kept.one"), source: .cli, reason: "Fixture"),
+                  Suppression(scope: .rule("kept.two"), source: .cli, reason: "Fixture")], to: store)
+        let before = try Data(contentsOf: store)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: store.path)
+        let outcome = await MacCrabCtl.addAllowlistEntry(
+            Suppression(scope: .rule("new.one"), source: .cli, reason: "Fixture"), dataDir: root.path)
+        guard case .unreadable(_, .inaccessible) = outcome else {
+            Issue.record("an unreadable store was saved over: \(outcome)")
+            return
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: store.path)
+        #expect(try Data(contentsOf: store) == before)
+    }
+
+    @Test("a corrupt store reports its reason and never falls back to the snapshot")
+    func corruptStoreIsNotReplacedBySnapshot() async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("not an allowlist".utf8).write(to: root.appendingPathComponent("suppressions.json"))
+        try save([Suppression(scope: .rule("stale.one"), source: .cli, reason: "Fixture")],
+                 to: root.appendingPathComponent("suppressions_snapshot.json"))
+        guard case .unreadable(_, .undecodable) = await MacCrabCtl.readAllowlist(dataDir: root.path) else {
+            Issue.record("a corrupt store was not reported as such")
+            return
+        }
     }
 
     @Test("a rule+hash entry matches the event digest whatever case either side was written in")

@@ -105,20 +105,20 @@ extension MacCrabCtl {
             reason: reason
         )
 
-        let mgr = SuppressionManager(dataDir: maccrabDataDir())
-        await mgr.load()
-        _ = await mgr.add(suppression)
-
-        // The store lives under root-owned /Library on a release install, so a
-        // uid-501 write fails. It used to fail SILENTLY — this printed success
-        // while nothing persisted, so an operator believed their false positives
-        // were allowlisted and the engine never saw an entry.
-        if let err = await mgr.lastPersistError {
-            let path = await mgr.storePath
+        switch await addAllowlistEntry(suppression, dataDir: maccrabDataDir()) {
+        case .saved:
+            break
+        case let .unreadable(path, failure):
+            failUnreadableAllowlist(path: path, failure: failure)
+        case let .notSaved(path, reason):
+            // The store lives under root-owned /Library on a release install, so
+            // a uid-501 write fails. It used to fail SILENTLY — this printed
+            // success while nothing persisted, so an operator believed their
+            // false positives were allowlisted and the engine never saw an entry.
             FileHandle.standardError.write(Data("""
             ✘ Suppression NOT saved — the allowlist could not be written.
                 path:   \(path)
-                reason: \(err)
+                reason: \(reason)
                 The suppression store is root-owned on a release install. Re-run with
                 sudo, or add the allowlist entry from the dashboard, which routes the
                 change through the privileged daemon.
@@ -157,8 +157,8 @@ extension MacCrabCtl {
         case let .entries(all, snapshot):
             entries = includeExpired ? all : all.filter { !$0.isExpired(at: now) }
             fromSnapshot = snapshot
-        case let .unreadable(path, reason):
-            failUnreadableAllowlist(path: path, reason: reason)
+        case let .unreadable(path, failure):
+            failUnreadableAllowlist(path: path, failure: failure)
         }
         if let kind = scopeFilter {
             entries = entries.filter { $0.scope.kind == kind }
@@ -202,7 +202,7 @@ extension MacCrabCtl {
         let all: [Suppression]
         switch await readAllowlist(dataDir: dataDir) {
         case let .entries(entries, _): all = entries
-        case let .unreadable(path, reason): failUnreadableAllowlist(path: path, reason: reason)
+        case let .unreadable(path, failure): failUnreadableAllowlist(path: path, failure: failure)
         }
         let candidates = all.filter { $0.id.hasPrefix(id) }
         switch candidates.count {
@@ -235,10 +235,18 @@ extension MacCrabCtl {
     }
 
     private static func allowStats() async {
-        let mgr = SuppressionManager(dataDir: maccrabDataDir())
-        await mgr.load()
-        let s = await mgr.stats()
+        let entries: [Suppression]
+        var fromSnapshot = false
+        switch await readAllowlist(dataDir: maccrabDataDir()) {
+        case let .entries(all, snapshot):
+            entries = all
+            fromSnapshot = snapshot
+        case let .unreadable(path, failure):
+            failUnreadableAllowlist(path: path, failure: failure)
+        }
+        let s = allowlistStats(entries)
         print("MacCrab Allowlist Stats")
+        if fromSnapshot { print("From the engine's published snapshot; the store itself needs sudo.") }
         print("────────────────────────")
         print("Total entries:   \(s.totalEntries)")
         print("Active:          \(s.totalEntries - s.expired)")
@@ -249,34 +257,98 @@ extension MacCrabCtl {
 
     // MARK: - Helpers
 
-    /// What `allow list` and `allow remove` read.
+    /// What `allow list`, `allow remove`, `allow stats` and `status` read.
     enum AllowlistRead {
         case entries([Suppression], fromSnapshot: Bool)
-        case unreadable(path: String, reason: String)
+        case unreadable(path: String, failure: SuppressionManager.LoadFailure)
     }
 
-    /// The engine's store when this user can read it, else the snapshot the
-    /// engine publishes for admins after every change. The store is root-only
-    /// on a release install, and a refused read used to print "No
-    /// suppressions" while entries were in force.
+    /// The engine's store when this user can read it, else, when the store is
+    /// refused for permissions, the snapshot the engine publishes for admins
+    /// after every change. The store is root-only on a release install, and a
+    /// refused read used to print "No suppressions" while entries were in
+    /// force. A store that is unreadable for another reason (corrupt, not a
+    /// regular file) reports that reason: the snapshot may list entries the
+    /// engine is not applying.
     static func readAllowlist(dataDir: String) async -> AllowlistRead {
         let manager = SuppressionManager(dataDir: dataDir)
         await manager.load()
-        guard let failure = await manager.lastLoadError else {
+        guard let failure = await manager.lastLoadFailure else {
             return .entries(await manager.list(includeExpired: true), fromSnapshot: false)
         }
-        if let snapshot = try? SuppressionFile.read(at: dataDir + "/suppressions_snapshot.json") {
+        if case .inaccessible = failure,
+           let snapshot = try? SuppressionFile.read(at: dataDir + "/suppressions_snapshot.json") {
             return .entries(snapshot.entries, fromSnapshot: true)
         }
-        return .unreadable(path: manager.storePath, reason: failure)
+        return .unreadable(path: manager.storePath, failure: failure)
     }
 
-    private static func failUnreadableAllowlist(path: String, reason: String) -> Never {
+    static func failUnreadableAllowlist(path: String, failure: SuppressionManager.LoadFailure) -> Never {
+        let hint: String
+        if case .inaccessible = failure {
+            hint = "    The store is root-only on a release install. Re-run with sudo, or use the\n"
+                + "    dashboard's Suppressions list."
+        } else {
+            hint = "    The store is not a readable allowlist; nothing was changed."
+        }
         cliFailure("✘ The allowlist could not be read, so it is not shown as empty.\n"
                    + "    path:   \(path)\n"
-                   + "    reason: \(reason)\n"
-                   + "    The store is root-only on a release install. Re-run with sudo, or use the\n"
-                   + "    dashboard's Suppressions list.")
+                   + "    reason: \(failure.reason)\n"
+                   + hint)
+    }
+
+    /// One line for `maccrabctl status`.
+    static func allowlistStatusLine(dataDir: String) async -> String {
+        switch await readAllowlist(dataDir: dataDir) {
+        case let .entries(entries, fromSnapshot):
+            guard !entries.isEmpty else { return "Suppressions:    None configured" }
+            return "Suppressions:    \(entries.count) allowlist entry(ies)"
+                + (fromSnapshot ? " (engine snapshot)" : "") + " — see 'maccrabctl allow list'"
+        case let .unreadable(_, failure):
+            if case .inaccessible = failure {
+                return "Suppressions:    unknown — the store needs sudo ('sudo maccrabctl allow list')"
+            }
+            return "Suppressions:    unreadable — \(failure.reason)"
+        }
+    }
+
+    enum AllowAddOutcome: Equatable {
+        case saved
+        case unreadable(path: String, failure: SuppressionManager.LoadFailure)
+        case notSaved(path: String, reason: String)
+    }
+
+    /// Save one entry. A store that could not be read is never saved over:
+    /// the save writes the whole list, which would replace it with this entry.
+    static func addAllowlistEntry(_ suppression: Suppression, dataDir: String) async -> AllowAddOutcome {
+        let mgr = SuppressionManager(dataDir: dataDir)
+        await mgr.load()
+        if let failure = await mgr.lastLoadFailure {
+            return .unreadable(path: mgr.storePath, failure: failure)
+        }
+        _ = await mgr.add(suppression)
+        if let err = await mgr.lastPersistError {
+            return .notSaved(path: mgr.storePath, reason: err)
+        }
+        return .saved
+    }
+
+    /// `allow stats` counters from a list of entries, as SuppressionManager
+    /// counts them: rules with rule+path entries, and paths across those and
+    /// path-only entries.
+    static func allowlistStats(_ entries: [Suppression], now: Date = Date())
+        -> (ruleCount: Int, pathCount: Int, totalEntries: Int, expired: Int) {
+        var rulePaths: [String: Set<String>] = [:]
+        var paths: Set<String> = []
+        for entry in entries {
+            switch entry.scope {
+            case let .rulePath(ruleId, path): rulePaths[ruleId, default: []].insert(path)
+            case let .path(path): paths.insert(path)
+            default: break
+            }
+        }
+        let pathCount = rulePaths.values.reduce(0) { $0 + $1.count } + paths.count
+        return (rulePaths.count, pathCount, entries.count, entries.filter { $0.isExpired(at: now) }.count)
     }
 
     /// Queue the engine's removal request for one exact suppression id.
@@ -299,9 +371,10 @@ extension MacCrabCtl {
         }
     }
 
-    /// A SHA-256 digest in FileHasher's lowercase hex, or nil.
+    /// A SHA-256 digest in FileHasher's lowercase hex, or nil. ASCII only:
+    /// `isHexDigit` also accepts fullwidth digits, which never match.
     static func normalizedSHA256(_ value: String) -> String? {
-        guard value.count == 64, value.allSatisfy(\.isHexDigit) else { return nil }
+        guard value.utf8.count == 64, value.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
         return value.lowercased()
     }
 

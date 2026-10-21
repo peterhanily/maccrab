@@ -245,14 +245,17 @@ public actor SuppressionManager {
         let data: Data
         do {
             guard let saved = try RuntimeConfigurationFiles.readControlData(at: filePath, maximumBytes: 4 * 1024 * 1024) else {
-                lastLoadError = nil
+                lastLoadFailure = nil
                 if entries.isEmpty { publishSnapshot() }
                 return
             }
             data = saved
-            lastLoadError = nil
+            lastLoadFailure = nil
         } catch {
-            lastLoadError = error.localizedDescription
+            // A refused permission (the root-only store, read by a user) is
+            // told apart: that caller may show the engine's published snapshot.
+            let denied = access(filePath, R_OK) != 0 && (errno == EACCES || errno == EPERM)
+            lastLoadFailure = denied ? .inaccessible(error.localizedDescription) : .unreadable(error.localizedDescription)
             logger.error("Suppression store read failed: \(error.localizedDescription)")
             return
         }
@@ -277,8 +280,22 @@ public actor SuppressionManager {
             return
         }
 
-        lastLoadError = "suppressions.json is not a v1 or v2 allowlist"
+        lastLoadFailure = .undecodable("suppressions.json is not a v1 or v2 allowlist")
         logger.warning("Failed to decode suppressions.json as v1 or v2")
+    }
+
+    /// Remove entries against the saved store, not only this process's copy.
+    /// The engine holds the allowlist in memory while `maccrabctl allow add`
+    /// writes the file, so a removal written from memory alone dropped every
+    /// entry saved since the last reload, and could not remove one of them.
+    /// A store that cannot be read removes nothing.
+    @discardableResult
+    public func reloadAndRemovePersisted(ids: Set<String>) throws -> [Suppression] {
+        load()
+        if let failure = lastLoadFailure {
+            throw RuntimeConfigContractError("The saved allowlist could not be read: \(failure.reason)")
+        }
+        return try removePersisted(ids: ids)
     }
 
     /// Persist entries to disk in v2 format.
@@ -540,9 +557,13 @@ public actor SuppressionManager {
     private func indexRemove(_ s: Suppression) {
         switch s.scope {
         case let .rulePath(r, p):
+            // Only unindex when no remaining entry has the same key: an
+            // uppercase and a lowercase digest share one, and so do duplicates.
+            guard !entries.values.contains(where: { Self.matchKey($0.scope) == Self.matchKey(s.scope) }) else { return }
             byRulePath[r]?.remove(p)
             if byRulePath[r]?.isEmpty == true { byRulePath.removeValue(forKey: r) }
         case let .ruleHash(r, h):
+            guard !entries.values.contains(where: { Self.matchKey($0.scope) == Self.matchKey(s.scope) }) else { return }
             byRuleHash[r]?.remove(h.lowercased())
             if byRuleHash[r]?.isEmpty == true { byRuleHash.removeValue(forKey: r) }
         case let .rule(r):
@@ -612,7 +633,24 @@ public actor SuppressionManager {
     /// Why the most recent `load()` could not read the store, or nil when it
     /// read it or there was none. A caller listing entries must not present a
     /// refused read (a root-only store) as an empty allowlist.
-    public private(set) var lastLoadError: String?
+    public private(set) var lastLoadFailure: LoadFailure?
+
+    public var lastLoadError: String? { lastLoadFailure?.reason }
+
+    public enum LoadFailure: Sendable, Equatable {
+        /// The store exists and this user may not read it (root-only).
+        case inaccessible(String)
+        /// Not a regular file, too large, or changed while being read.
+        case unreadable(String)
+        /// Read, but neither a v1 nor a v2 allowlist.
+        case undecodable(String)
+
+        public var reason: String {
+            switch self {
+            case let .inaccessible(reason), let .unreadable(reason), let .undecodable(reason): return reason
+            }
+        }
+    }
 
     /// Reason the most recent mutation failed to persist, or nil if it landed.
     /// Callers that report success to a human MUST check this — `add` returns a
