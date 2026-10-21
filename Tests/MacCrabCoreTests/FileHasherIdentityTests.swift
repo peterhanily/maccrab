@@ -1,0 +1,173 @@
+import CryptoKit
+import Foundation
+import Testing
+@testable import MacCrabCore
+
+/// Every miss for a file waits on the one hash in flight, so that hash must
+/// always end, and must hash only the file its key names: a path swapped to a
+/// FIFO or a device since the lstat must not block or read without end.
+@Suite("File hasher reads only the file its key names")
+struct FileHasherIdentityTests {
+    private func directory() throws -> String {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-hash-identity-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        return path
+    }
+
+    /// Runs `body` on its own thread and reports whether it finished in time.
+    private func finishes<T>(within seconds: TimeInterval, _ body: @escaping @Sendable () -> T) -> (done: Bool, value: T?) {
+        let lock = NSLock()
+        var value: T?
+        let finished = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            let result = body()
+            lock.lock(); value = result; lock.unlock()
+            finished.signal()
+        }
+        let done = finished.wait(timeout: .now() + seconds) == .success
+        lock.lock(); defer { lock.unlock() }
+        return (done, value)
+    }
+
+    @Test("ordinary files hash to the SHA-256 of their bytes")
+    func digestsMatchContent() async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let hasher = FileHasher()
+        for size in [0, 1, 64 * 1024, 64 * 1024 + 1, 1_000_003] {
+            let bytes = (0..<size).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) }
+            let path = base + "/file-\(size)"
+            #expect(FileManager.default.createFile(atPath: path, contents: Data(bytes)))
+            let expected = SHA256.hash(data: Data(bytes)).map { String(format: "%02x", $0) }.joined()
+            #expect(await hasher.hash(path: path) == expected, "\(size) bytes")
+            #expect(FileHasher.computeSHA256(path: path) == expected, "the public path-based hash is unchanged")
+        }
+    }
+
+    @Test("a path swapped to a FIFO since its key was taken returns at once")
+    func swappedToFIFO() throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
+        let key = try #require(FileHasher.cacheKey(path: path))
+        let fifo = base + "/pipe"
+        #expect(mkfifo(fifo, 0o600) == 0)
+        #expect(rename(fifo, path) == 0)
+        let outcome = finishes(within: 5) { FileHasher.computeSHA256(path: path, matching: key) }
+        if !outcome.done {
+            // Release the reader blocked in open() so the process can exit.
+            let writer = open(path, O_WRONLY)
+            if writer >= 0 { close(writer) }
+        }
+        #expect(outcome.done, "the hash must not wait for a FIFO writer")
+        #expect(outcome.value ?? nil == nil)
+    }
+
+    @Test("a path swapped into a device directory is refused, not read without end")
+    func swappedParentToDevice() throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let parent = base + "/dir"
+        try FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: false)
+        let path = parent + "/zero"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data(repeating: 1, count: 4_096)))
+        let key = try #require(FileHasher.cacheKey(path: path))
+        #expect(rename(parent, base + "/moved") == 0)
+        try FileManager.default.createSymbolicLink(atPath: parent, withDestinationPath: "/dev")
+        let outcome = finishes(within: 5) { FileHasher.computeSHA256(path: path, matching: key) }
+        #expect(outcome.done, "/dev/zero must not be read without end")
+        #expect(outcome.value ?? nil == nil)
+    }
+
+    @Test("a symlink, or a file changed since its key was taken, is not hashed")
+    func symlinkAndChangedFile() throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let target = base + "/target"
+        #expect(FileManager.default.createFile(atPath: target, contents: Data("one".utf8)))
+        let key = try #require(FileHasher.cacheKey(path: target))
+        // A link to the very same file still names another path's lookup.
+        let link = base + "/link"
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
+        #expect(FileHasher.computeSHA256(path: link, matching: key) == nil)
+
+        #expect(FileHasher.computeSHA256(path: target, matching: key) != nil)
+        let handle = try #require(FileHandle(forWritingAtPath: target))
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("two".utf8))
+        try handle.close()
+        #expect(FileHasher.computeSHA256(path: target, matching: key) == nil)
+    }
+
+    @Test("a swapped path is refused before any byte is read, and a rewrite during the read is caught after it")
+    func checkedBeforeAndAfterTheRead() throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data("same-size-1".utf8)))
+        let key = try #require(FileHasher.cacheKey(path: path))
+
+        // Another file of the same size renamed over the path: refused at the
+        // open, so nothing of it is read.
+        let other = base + "/other"
+        #expect(FileManager.default.createFile(atPath: other, contents: Data("same-size-2".utf8)))
+        #expect(rename(other, path) == 0)
+        var reachedRead = false
+        #expect(FileHasher.computeSHA256(path: path, matching: key) { _ in reachedRead = true } == nil)
+        #expect(!reachedRead)
+
+        // The named file, grown while it is read: the read stops at the key's
+        // size, and the identity no longer matches afterwards.
+        let fresh = try #require(FileHasher.cacheKey(path: path))
+        let grown = FileHasher.computeSHA256(path: path, matching: fresh) { _ in
+            let handle = FileHandle(forWritingAtPath: path)
+            try? handle?.seekToEnd()
+            try? handle?.write(contentsOf: Data("more".utf8))
+            try? handle?.close()
+        }
+        #expect(grown == nil)
+    }
+
+    @Test("misses sharing a hash that fails are all released with nil")
+    func sharedFailureReleasesWaiters() async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
+        let gate = DispatchSemaphore(value: 0)
+        let calls = Counter()
+        let hasher = FileHasher(capacity: 16, maxFileBytes: 1_024) { _, _ in
+            calls.increment()
+            gate.wait()
+            return nil
+        }
+        async let first = hasher.hash(path: path)
+        async let second = hasher.hash(path: path)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        gate.signal()
+        let results = await [first, second]
+        #expect(results == [nil, nil])
+        #expect(calls.value == 1, "the second miss waits on the first hash")
+        #expect(await hasher.cacheCount() == 0)
+    }
+
+    @Test("the enrichment hasher uses the identity-bound hash")
+    func productionWiring() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/FileHasher.swift"),
+            encoding: .utf8)
+        #expect(source.contains("computeDigest: { FileHasher.computeSHA256(path: $0, matching: $1) }"))
+        #expect(source.contains("await HeavyEnrichmentBlockingWork.run({ compute(path, key) })"))
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func increment() { lock.lock(); count += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+}

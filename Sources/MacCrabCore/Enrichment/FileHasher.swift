@@ -43,7 +43,7 @@ public actor FileHasher {
     /// Device, inode and change time join size and mtime: a same-size
     /// rewrite with a restored mtime must not keep serving the old digest,
     /// which would hide the new bytes from hash IOCs.
-    private struct CacheKey: Hashable {
+    struct CacheKey: Hashable {
         let path: String
         let device: UInt64
         let inode: UInt64
@@ -66,6 +66,9 @@ public actor FileHasher {
     /// read it N times; later misses for the same bytes wait for this one.
     private var inFlight: [CacheKey: Task<String?, Never>] = [:]
     private var statsStore = Stats()
+    /// The digest computation; a seam so tests can hold or fail the hash
+    /// that concurrent misses share.
+    private let computeDigest: @Sendable (String, CacheKey) -> String?
 
     // MARK: - Init
 
@@ -75,10 +78,20 @@ public actor FileHasher {
     ///   - capacity: Max cache entries before LRU eviction (default 4096).
     ///   - maxFileBytes: Files larger than this are skipped (default 256 MB).
     public init(capacity: Int = 4096, maxFileBytes: Int64 = 256 * 1024 * 1024) {
+        self.init(capacity: capacity, maxFileBytes: maxFileBytes,
+                  computeDigest: { FileHasher.computeSHA256(path: $0, matching: $1) })
+    }
+
+    init(
+        capacity: Int,
+        maxFileBytes: Int64,
+        computeDigest: @escaping @Sendable (String, CacheKey) -> String?
+    ) {
         precondition(capacity > 0, "capacity must be > 0")
         precondition(maxFileBytes > 0, "maxFileBytes must be > 0")
         self.capacity = capacity
         self.maxFileBytes = maxFileBytes
+        self.computeDigest = computeDigest
     }
 
     // MARK: - Public API
@@ -118,9 +131,14 @@ public actor FileHasher {
         }
 
         // Cache miss: compute off the actor and the cooperative pool. Up to
-        // 256 MiB is read; concurrent misses for other files proceed.
+        // 256 MiB is read; concurrent misses for other files proceed. Every
+        // later miss for this key waits on this one, so it must always end:
+        // the hash reads only the file the key names, never what a swapped
+        // path now resolves to (a FIFO that never opens, a device that never
+        // ends).
+        let compute = computeDigest
         let task = Task<String?, Never> {
-            await HeavyEnrichmentBlockingWork.run({ Self.computeSHA256(path: path) })
+            await HeavyEnrichmentBlockingWork.run({ compute(path, key) })
         }
         inFlight[key] = task
         let computed = await task.value
@@ -138,7 +156,7 @@ public actor FileHasher {
         return digest
     }
 
-    private static func cacheKey(path: String) -> CacheKey? {
+    static func cacheKey(path: String) -> CacheKey? {
         var st = stat()
         guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
             return nil
@@ -212,6 +230,60 @@ public actor FileHasher {
     }
 
     // MARK: - Hashing
+
+    /// SHA-256 of exactly the file `key` names. The descriptor is opened
+    /// without blocking or following a final symlink, and must be a regular
+    /// file with the key's device, inode, size, mtime and ctime, before and
+    /// after the read; the read stops at the key's size. Anything else, a
+    /// path swapped since the lstat that made the key, a file rewritten while
+    /// it was read, is unavailable (nil) rather than hashed.
+    nonisolated static func computeSHA256(
+        path: String,
+        matching key: CacheKey,
+        afterIdentityCheckForTesting: ((Int32) -> Void)? = nil
+    ) -> String? {
+        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0, identity(of: opened, matches: key) else { return nil }
+        // Test seam: a fixture can change the file between the check and the
+        // read. Production callers never supply it.
+        afterIdentityCheckForTesting?(descriptor)
+
+        var hasher = SHA256()
+        let chunkSize = 64 * 1024
+        var buffer = [UInt8](repeating: 0, count: chunkSize)
+        var remaining = Int(key.size)
+        while remaining > 0 {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                read(descriptor, bytes.baseAddress, min(chunkSize, remaining))
+            }
+            if count < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
+            if count == 0 { return nil }   // shorter than the key says
+            buffer.withUnsafeBytes { bytes in
+                hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes[..<count]))
+            }
+            remaining -= count
+        }
+        var after = stat()
+        guard fstat(descriptor, &after) == 0, identity(of: after, matches: key) else { return nil }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func identity(of info: stat, matches key: CacheKey) -> Bool {
+        (info.st_mode & S_IFMT) == S_IFREG
+            && UInt64(info.st_dev) == key.device
+            && UInt64(info.st_ino) == key.inode
+            && Int64(info.st_size) == key.size
+            && info.st_mtimespec.tv_sec == key.mtimeSeconds
+            && info.st_mtimespec.tv_nsec == key.mtimeNanoseconds
+            && info.st_ctimespec.tv_sec == key.ctimeSeconds
+            && info.st_ctimespec.tv_nsec == key.ctimeNanoseconds
+    }
 
     /// Compute SHA-256 of file contents via streaming 64 KB chunks.
     ///
