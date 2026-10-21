@@ -31,8 +31,11 @@ public enum LLMSanitizer {
 
     // Precompiled once at load. Patterns are static literals — safe to force-try.
     private static let userPathRegex = try! NSRegularExpression(pattern: #"/Users/([^/\s]+)/"#)
+    /// A match starts only where a `[\w-]` run starts: with `\b`, every
+    /// letter after a `-` in a long `a-a-a…` run was a start that re-scanned
+    /// the rest of the run.
     private static let hostnameRegex = try! NSRegularExpression(
-        pattern: #"\b[a-zA-Z][\w\-]*\.(local|internal|corp|lan)\b"#
+        pattern: #"(?<![\w\-])-*+[a-zA-Z][\w\-]*+\.(local|internal|corp|lan)\b"#
     )
     /// Includes RFC 1918 (10/8, 172.16/12, 192.168/16), loopback
     /// (127/8), link-local (169.254/16), AND RFC 6598 carrier-grade
@@ -76,8 +79,9 @@ public enum LLMSanitizer {
         pattern: #"(?<![0-9a-f:])(?=[0-9a-f:]*::|(?:[0-9a-f]{1,4}:){6}[0-9a-f]{1,4})[0-9a-f:]*[0-9a-f](?![0-9a-f:])"#,
         options: [.caseInsensitive]
     )
+    /// Anchored at the start of the local-part run for the same reason.
     private static let emailRegex = try! NSRegularExpression(
-        pattern: #"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#
+        pattern: #"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]++@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#
     )
 
     // API-key shapes. Each vendor's format is distinctive enough that
@@ -112,9 +116,11 @@ public enum LLMSanitizer {
     /// `Peters-MacBook-Pro` / `Adrians-Mac-mini`. Heuristic: two-or-
     /// more hyphenated tokens, each capitalized, where at least one
     /// token matches a Mac family keyword. Conservative enough that
-    /// it won't strip ordinary prose.
+    /// it won't strip ordinary prose. Each name part matches one way and
+    /// the parts are bounded: `[a-z]+[a-z0-9]*` inside an unbounded repeat
+    /// backtracked exponentially over `Aaaa-Aaaa-…` with no model name.
     private static let computerNameRegex = try! NSRegularExpression(
-        pattern: #"\b([A-Z][a-z]+[a-z0-9]*-)+(MacBook-Pro|MacBook-Air|Mac-Pro|Mac-mini|Mac-Studio|iMac)\b"#
+        pattern: #"\b(?:[A-Z][a-z][a-z0-9]*+-){1,8}(MacBook-Pro|MacBook-Air|Mac-Pro|Mac-mini|Mac-Studio|iMac)\b"#
     )
 
     /// The same names in the human-readable `scutil --get ComputerName` form —

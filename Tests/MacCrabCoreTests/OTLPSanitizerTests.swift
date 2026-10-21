@@ -286,3 +286,37 @@ struct OTLPAttributeSanitizerEntropyTests {
         #expect(cleaned.contains("[HIGH_ENTROPY_TOKEN]"))
     }
 }
+
+/// Credential and host-name patterns run on event argv tokens (EventPrivacySanitizer),
+/// OTLP span fields and LLM prompts, so their cost must stay linear in the input.
+@Suite("Credential and host-name patterns: linear time")
+struct CredentialPatternCostTests {
+    private func fastest(_ body: () -> Void) -> Duration {
+        let clock = ContinuousClock()
+        var best = Duration.seconds(3_600)
+        for _ in 0..<3 { best = min(best, clock.measure(body)) }
+        return best
+    }
+
+    @Test("a long -eyJ run and unmatched computer-name parts stay fast")
+    func adversarialInputs() {
+        // Every `eyJ` inside the run was a JWT start that re-scanned the rest.
+        let eyj = String(repeating: "-eyJ", count: 16_384)
+        #expect(fastest { _ = EventPrivacySanitizer.sanitizeString(eyj) } < .milliseconds(250))
+        // `[a-z]+[a-z0-9]*` in an unbounded repeat backtracked exponentially.
+        let parts = String(repeating: "Aaaa-", count: 4_000) + "!"
+        #expect(fastest { _ = OTLPAttributeSanitizer.redactString(parts) } < .milliseconds(250))
+        #expect(fastest { _ = LLMSanitizer.sanitize(parts) } < .milliseconds(250))
+    }
+
+    @Test("JWTs and Mac host names are still redacted")
+    func shapesStillRedacted() {
+        let jwt = "ey" + "JhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "ey" + "JzdWIiOiJGQUtFIn0." + String(repeating: "F", count: 16)
+        #expect(OTLPAttributeSanitizer.redactCredentialShapes("token=\(jwt) next") == "token=[JWT] next")
+        #expect(OTLPAttributeSanitizer.redactCredentialShapes("jwt: \(jwt)") == "jwt: [JWT]")
+        for host in ["Peters-MacBook-Pro", "Johns-Mac-mini", "Mary-Janes-MacBook-Air", "Johns-Mac-Pro"] {
+            #expect(OTLPAttributeSanitizer.redactString("on \(host) today").contains("[COMPUTER_NAME]"), "\(host)")
+            #expect(LLMSanitizer.sanitize("on \(host) today").contains("[COMPUTER_NAME]"), "\(host)")
+        }
+    }
+}

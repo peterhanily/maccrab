@@ -78,11 +78,11 @@ enum CommandSanitizer {
     )
 
     /// URLs with embedded credentials: `://user:pass@host`. The spans are
-    /// possessive and the password stops at `/`, which ends the authority,
-    /// so each `://` scans only up to the next one instead of backtracking
-    /// across the whole token.
+    /// possessive and the password is bounded, so each `://` scans a fixed
+    /// distance instead of backtracking across the whole token. A raw `/` in
+    /// the password (`u:p/q@host`) is still redacted, as it was before.
     private static let urlCredentials = try! NSRegularExpression(
-        pattern: #"(://[^:@/\s]++:)([^@\s/]++)(@)"#,
+        pattern: #"(://[^:@/\s]++:)([^@\s]{1,256}+)(@)"#,
         options: []
     )
 
@@ -277,7 +277,11 @@ enum CommandSanitizer {
         // prompts), so a dash token is the next option, not the value.
         var pendingValueIsOptional = false
         var userPairNext = false
-        let program = arguments.first.map(programName) ?? ""
+        // A string segment's first word may be glued to shell punctuation
+        // (`(docker login …)`); argv[0] is the program as executed.
+        let program = arguments.first.map {
+            failClosed ? programName($0) : invokedProgram($0) ?? programName($0)
+        } ?? ""
         var exemptionsApply = true
         let window = optionWindows[program]
         var windowValuePending = false
@@ -295,8 +299,8 @@ enum CommandSanitizer {
         var operandsMayBePrograms = program != "find"
 
         for (index, argument) in arguments.enumerated() {
-            if operandsMayBePrograms, !argument.hasPrefix("-"), !redactNext, !userPairNext {
-                let name = programName(argument)
+            if operandsMayBePrograms, !redactNext, !userPairNext,
+               let name = invokedProgram(argument) {
                 if passwordLowerPPrograms.contains(name) {
                     lowerPIsPassword = true
                     // The most recent password program decides: in `docker exec
@@ -361,11 +365,12 @@ enum CommandSanitizer {
                 // A flag handled here is the next option, not the pending
                 // value (`curl -p -u alice:secret`), as is any option after an
                 // optional-value `-p`. Anything else is the value, even a
-                // dash-leading one (`zip -P -x7Kq9!`).
+                // dash-leading one shaped like a bundle (`zip -P -x7Kq9!`,
+                // `sshpass -p -Secretp`).
                 let nextOption = isSensitiveFlag
                     || userPairFlags.contains(lowered)
                     || argument == "-p" || argument == "-P"
-                    || letterEnd == argument.endIndex
+                    || (newPassphraseFlag && argument == "-N")
                     || (pendingValueIsOptional && argument.hasPrefix("-"))
                 if !nextOption {
                     actions.append(.replace("[REDACTED]"))
@@ -452,7 +457,7 @@ enum CommandSanitizer {
         guard containsSpaceDash(text.utf8) else { return text }
         let bytes = Array(text.utf8)
         var replacements: [(range: Range<Int>, with: String)] = []
-        collectFlagValueRedactions(bytes, in: 0..<bytes.count, depth: 0, into: &replacements)
+        collectFlagValueRedactions(ScanLevel(bytes: bytes, rawStarts: nil, rawEnds: nil), in: 0..<bytes.count, depth: 0, into: &replacements)
         guard !replacements.isEmpty else { return text }
         // A quoted script redacted inside a word that is itself replaced
         // gives way to the outer replacement.
@@ -477,21 +482,71 @@ enum CommandSanitizer {
     /// another layer of escapes, so a small bound covers real input.
     private static let maximumQuoteDepth = 3
 
+    /// The bytes one scan reads. A double-quoted script is scanned with its
+    /// escapes resolved (`\"hunter two\"` is one quoted word), and each byte
+    /// keeps where its encoding starts and ends in the input (an escaped byte
+    /// starts at its backslash), so a redaction replaces the original span.
+    private struct ScanLevel {
+        let bytes: [UInt8]
+        let rawStarts: [Int]?
+        let rawEnds: [Int]?
+
+        func rawRange(_ range: Range<Int>) -> Range<Int> {
+            guard let rawStarts, let rawEnds, !range.isEmpty else { return range }
+            return rawStarts[range.lowerBound]..<rawEnds[range.upperBound - 1]
+        }
+
+        /// A double-quoted span's content with `\x` resolved to `x`.
+        func unescaped(_ range: Range<Int>) -> ScanLevel {
+            var bytes: [UInt8] = []
+            var starts: [Int] = []
+            var ends: [Int] = []
+            bytes.reserveCapacity(range.count)
+            starts.reserveCapacity(range.count)
+            ends.reserveCapacity(range.count)
+            var index = range.lowerBound
+            while index < range.upperBound {
+                let start = index
+                if self.bytes[index] == UInt8(ascii: "\\"), index + 1 < range.upperBound {
+                    index += 1
+                }
+                bytes.append(self.bytes[index])
+                starts.append(rawStarts?[start] ?? start)
+                ends.append(rawEnds?[index] ?? index + 1)
+                index += 1
+            }
+            return ScanLevel(bytes: bytes, rawStarts: starts, rawEnds: ends)
+        }
+    }
+
     private static func collectFlagValueRedactions(
-        _ bytes: [UInt8],
+        _ level: ScanLevel,
         in bounds: Range<Int>,
         depth: Int,
         into replacements: inout [(range: Range<Int>, with: String)]
     ) {
-        var words: [(range: Range<Int>, text: String)] = []
-        var quotedScripts: [Range<Int>] = []
+        let bytes = level.bytes
+        var words: [(range: Range<Int>, text: String, cutBySeparator: Bool)] = []
+        var quotedScripts: [(range: Range<Int>, double: Bool)] = []
         func endSegment() {
             if words.count > 1 {
                 for (word, action) in zip(words, argumentActions(words.map(\.text), failClosed: false)) {
                     // Earlier patterns' output is already redacted.
                     guard case .replace(let replacement) = action,
                           !word.text.contains("[REDACTED]") else { continue }
-                    replacements.append((word.range, replacement))
+                    var range = word.range
+                    // Argv joined by spaces is not shell syntax: a value cut
+                    // at `&`, `;` or `|` (`-p Tr0ub4dor&3`) is redacted to the
+                    // end of its run, as argv redacts the whole token.
+                    if word.cutBySeparator {
+                        var end = range.upperBound
+                        while end < bounds.upperBound, !isWordSpace(bytes[end]),
+                              bytes[end] != UInt8(ascii: "\n") {
+                            end += 1
+                        }
+                        range = range.lowerBound..<end
+                    }
+                    replacements.append((level.rawRange(range), replacement))
                 }
             }
             words.removeAll(keepingCapacity: true)
@@ -527,7 +582,9 @@ enum CommandSanitizer {
                         word.append(bytes[index])
                         index += 1
                     }
-                    if holdsSpace { quotedScripts.append(content..<min(index, bounds.upperBound)) }
+                    if holdsSpace {
+                        quotedScripts.append((content..<min(index, bounds.upperBound), byte == UInt8(ascii: "\"")))
+                    }
                     index += 1
                 } else if byte == UInt8(ascii: "\\"), index + 1 < bounds.upperBound {
                     word.append(bytes[index + 1])
@@ -537,21 +594,32 @@ enum CommandSanitizer {
                     index += 1
                 }
             }
-            words.append((start..<min(index, bounds.upperBound), String(decoding: word, as: UTF8.self)))
+            let end = min(index, bounds.upperBound)
+            words.append((start..<end, String(decoding: word, as: UTF8.self),
+                          end < bounds.upperBound && isSegmentSeparator(bytes[end])))
         }
         endSegment()
         guard depth < maximumQuoteDepth else { return }
-        for script in quotedScripts where containsSpaceDash(bytes[script]) {
-            collectFlagValueRedactions(bytes, in: script, depth: depth + 1, into: &replacements)
+        for script in quotedScripts where containsSpaceDash(bytes[script.range]) {
+            if script.double {
+                let inner = level.unescaped(script.range)
+                collectFlagValueRedactions(inner, in: 0..<inner.bytes.count, depth: depth + 1, into: &replacements)
+            } else {
+                collectFlagValueRedactions(level, in: script.range, depth: depth + 1, into: &replacements)
+            }
         }
     }
 
-    /// Every flag after a segment's first word follows a space or a tab.
+    /// Every flag after a segment's first word follows a space or a tab,
+    /// possibly through an opening quote (`zip '-P' VALUE`).
     private static func containsSpaceDash<Bytes: Sequence>(_ bytes: Bytes) -> Bool where Bytes.Element == UInt8 {
         var afterSpace = false
+        var atStart = true
         for byte in bytes {
             if afterSpace, byte == UInt8(ascii: "-") { return true }
-            afterSpace = isWordSpace(byte)
+            let isQuote = byte == UInt8(ascii: "'") || byte == UInt8(ascii: "\"")
+            afterSpace = isWordSpace(byte) || (isQuote && (afterSpace || atStart))
+            atStart = false
         }
         return false
     }
@@ -560,9 +628,13 @@ enum CommandSanitizer {
         byte == UInt8(ascii: " ") || byte == UInt8(ascii: "\t") || byte == UInt8(ascii: "\r")
     }
 
+    /// Shell separators end a command: a list or pipeline (`;`, `&`, `|`, a
+    /// newline), a subshell or command substitution (`(`, `)`, a backtick).
     private static func isSegmentSeparator(_ byte: UInt8) -> Bool {
         byte == UInt8(ascii: ";") || byte == UInt8(ascii: "&")
             || byte == UInt8(ascii: "|") || byte == UInt8(ascii: "\n")
+            || byte == UInt8(ascii: "(") || byte == UInt8(ascii: ")")
+            || byte == UInt8(ascii: "`")
     }
 
     /// The stored command line must be at least as redacted as argv. The ES
@@ -715,6 +787,23 @@ enum CommandSanitizer {
     private static func programName(_ token: String) -> String {
         let base = token.lastIndex(of: "/").map { token[token.index(after: $0)...] } ?? token[...]
         return base.lowercased()
+    }
+
+    /// The program a word may invoke, or nil for a plain option. An
+    /// assignment names its value (`--rsh=sshpass`, `ProxyCommand=sshpass`,
+    /// `GIT_SSH_COMMAND=sshpass`), and leading shell punctuation is not part
+    /// of the name (`(sshpass`, `$(sshpass`, a backtick, `!`, `{`).
+    private static func invokedProgram(_ word: String) -> String? {
+        var name = Substring(word)
+        if let equals = name.lastIndex(of: "=") {
+            name = name[name.index(after: equals)...]
+        } else if name.hasPrefix("-") {
+            return nil
+        }
+        while let first = name.first, "({!`$".contains(first) {
+            name = name.dropFirst()
+        }
+        return programName(String(name))
     }
 
     /// `alice:secret` -> `alice:[REDACTED]`; nil when the token is not a

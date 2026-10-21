@@ -193,9 +193,12 @@ public enum OTLPAttributeSanitizer {
     )
     /// JWT — three base64url segments separated by dots, with the first
     /// segment starting `eyJ` (the magic that says "{" in base64url).
-    /// Bound the lengths so we don't false-positive on URL fragments.
+    /// Bound the lengths so we don't false-positive on URL fragments. A match
+    /// starts only where a base64url run starts, and the runs are possessive:
+    /// with `\b` every `eyJ` inside a long `-eyJ-eyJ…` run was a start that
+    /// re-scanned the rest, quadratic on an argv token of the write path.
     private static let jwtToken = try! NSRegularExpression(
-        pattern: #"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b"#
+        pattern: #"(?<![A-Za-z0-9_\-])eyJ[A-Za-z0-9_\-]{8,}+\.eyJ[A-Za-z0-9_\-]{8,}+\.[A-Za-z0-9_\-]{8,}+"#
     )
     private static let postmanKey = try! NSRegularExpression(
         // PMAK-<24 hex>-<32+ hex>. Postman API key shape; the second
@@ -247,8 +250,11 @@ public enum OTLPAttributeSanitizer {
         pattern: #"\b(?:fe80|f[cd][0-9a-f]{2})(?::[0-9a-f]{0,4}){1,7}\b"#,
         options: [.caseInsensitive]
     )
+    /// `Peters-MacBook-Pro`. Each name part matches one way (possessive
+    /// tail) and the parts are bounded: `[a-z]+[a-z0-9]*` inside an unbounded
+    /// repeat backtracked exponentially over `Aaaa-Aaaa-…` with no model name.
     private static let computerName = try! NSRegularExpression(
-        pattern: #"\b([A-Z][a-z]+[a-z0-9]*-)+(MacBook-Pro|MacBook-Air|Mac-Pro|Mac-mini|Mac-Studio|iMac)\b"#
+        pattern: #"\b(?:[A-Z][a-z][a-z0-9]*+-){1,8}(MacBook-Pro|MacBook-Air|Mac-Pro|Mac-mini|Mac-Studio|iMac)\b"#
     )
 
     // v1.9 PR-5 audit (Performance-H4): promoted the replacements list

@@ -244,6 +244,89 @@ struct CommandLineRedactionParityTests {
         #expect(!CommandSanitizer.sanitize("docker exec mysql sshpass -p -Secret1 ssh h").contains("Secret1"))
     }
 
+    @Test("a password program glued to an assignment or shell punctuation is found")
+    func gluedProgramNames() throws {
+        for argv in [
+            ["/usr/bin/rsync", "-av", "--rsh=sshpass -p Hunter22 ssh -l u", "src/", "h:dst/"],
+            ["/usr/bin/ssh", "-o", "ProxyCommand=sshpass -p Hunter22 ssh -W %h:%p jump", "target"],
+            ["/usr/bin/ssh", "-oProxyCommand=sshpass -p Hunter22 ssh -W %h:%p jump", "target"],
+            ["/usr/bin/git", "-c", "core.sshCommand=sshpass -p Hunter22 ssh", "pull"],
+            ["/usr/bin/env", "GIT_SSH_COMMAND=sshpass -p Hunter22 ssh", "git", "pull"],
+            ["/bin/sh", "-c", "(sshpass -p Hunter22 ssh h uptime) &"],
+            ["/bin/sh", "-c", "out=$(sshpass -p Hunter22 ssh h cat f)"],
+            ["/bin/sh", "-c", "out=`sshpass -p Hunter22 ssh h cat f`"],
+        ] {
+            let process = try stored(argv)
+            #expect(!process.commandLine.contains("Hunter22"), "\(process.commandLine)")
+            #expect(!process.args.contains { $0.contains("Hunter22") }, "\(process.args)")
+            let line = argv.joined(separator: " ")
+            #expect(!CommandSanitizer.sanitize(line).contains("Hunter22"), "\(line)")
+        }
+        // A command substitution starts its own command: its program is not the
+        // value of the outer `-p`, and its dash-leading password is redacted.
+        let substituted = "mysql -p $(sshpass -p -Secret1 ssh h cat pw) db"
+        #expect(!CommandSanitizer.sanitize(substituted).contains("Secret1"))
+        #expect(!CommandSanitizer.sanitize(arguments: ["/bin/sh", "-c", substituted])
+            .joined(separator: " ").contains("Secret1"))
+    }
+
+    @Test("a value cut by &, ; or | in a bare string is redacted to the end of its run")
+    func separatorsInsideValues() throws {
+        for (line, redacted) in [
+            ("/usr/local/bin/sshpass -p Tr0ub4dor&3 ssh host", "/usr/local/bin/sshpass -p [REDACTED] ssh host"),
+            ("sshpass -p pa|ss;w0rd ssh h", "sshpass -p [REDACTED] ssh h"),
+            ("docker login -u ci -p Tr0ub4dor&3 registry", "docker login -u ci -p [REDACTED] registry"),
+            ("zip -PHunt&er22 out.zip f", "zip -P[REDACTED] out.zip f"),
+        ] {
+            #expect(CommandSanitizer.sanitize(line) == redacted, "\(line)")
+        }
+        // A parent's command line reaches storage only as a string.
+        let child = MacCrabCore.ProcessInfo(
+            pid: 8, ppid: 7, rpid: 1, name: "ssh", executable: "/usr/bin/ssh",
+            commandLine: "/usr/bin/ssh host", args: ["/usr/bin/ssh", "host"],
+            workingDirectory: "/", userId: 501, userName: "u", groupId: 20, startTime: Date())
+        let event = Event(timestamp: Date(), eventCategory: .process, eventType: .start,
+                          eventAction: "exec", process: child,
+                          enrichments: ["parent.commandline": "/usr/local/bin/sshpass -p Tr0ub4dor&3 ssh host"])
+        let parent = try EventPrivacySanitizer.sanitize(event).event.enrichments["parent.commandline"]
+        #expect(parent == "/usr/local/bin/sshpass -p [REDACTED] ssh host")
+    }
+
+    @Test("a dash-leading password shaped like a bundle is the pending value")
+    func bundleShapedPasswords() throws {
+        #expect(try stored(["/usr/local/bin/sshpass", "-p", "-Secretp", "ssh", "host"]).args
+            == ["/usr/local/bin/sshpass", "-p", "[REDACTED]", "ssh", "host"])
+        #expect(try stored(["/usr/bin/zip", "-P", "-Secret7P", "out.zip", "f"]).args
+            == ["/usr/bin/zip", "-P", "[REDACTED]", "out.zip", "f"])
+        #expect(try stored(["/usr/bin/ssh-keygen", "-p", "-f", "k", "-P", "-OldPassN", "-N", "NewPass1"]).args
+            == ["/usr/bin/ssh-keygen", "-p", "-f", "k", "-P", "[REDACTED]", "-N", "[REDACTED]"])
+        for (line, secret) in [
+            ("sshpass -p -Secretp ssh host", "Secretp"),
+            ("zip -P -Secret7P out.zip f", "Secret7P"),
+            ("ssh-keygen -p -f k -P -OldPassN -N NewPass1", "OldPassN"),
+        ] {
+            #expect(!CommandSanitizer.sanitize(line).contains(secret), "\(line)")
+        }
+    }
+
+    @Test("nested double-quoted scripts and quoted flags are read with their escapes resolved")
+    func nestedQuoting() throws {
+        let nested = CommandSanitizer.sanitize(#"sh -c 'bash -lc "security unlock-keychain -p \"hunter two\" k"'"#)
+        #expect(nested == #"sh -c 'bash -lc "security unlock-keychain -p [REDACTED] k"'"#)
+        let json = CommandSanitizer.sanitize(#"{"cmd":"sh -c \"sshpass -p Secret77 ssh h\""}"#)
+        #expect(!json.contains("Secret77"), "\(json)")
+        let quotedFlag = try stored(["/bin/sh", "-c", "zip '-P' Secret77 out.zip f"])
+        #expect(!quotedFlag.args.contains { $0.contains("Secret77") }, "\(quotedFlag.args)")
+    }
+
+    @Test("a URL password containing a slash is redacted")
+    func urlPasswordsWithSlash() {
+        #expect(CommandSanitizer.sanitize("git clone https://u:p/q@host/r.git")
+            == "git clone https://u:[REDACTED]@host/r.git")
+        let database = CommandSanitizer.sanitize("python app.py --db postgresql://admin:Ab/cd+ef@db/app")
+        #expect(!database.contains("Ab/cd+ef"), "\(database)")
+    }
+
     @Test("bare-string redaction takes linear time on adversarial input")
     func linearTime() {
         // Each took seconds or more before: nested lazy spans after a program
@@ -253,7 +336,7 @@ struct CommandLineRedactionParityTests {
         let inputs = [
             String(repeating: "docker login ", count: 640),
             String(repeating: "sshpass ", count: 4_096),
-            String(repeating: "://a:b", count: 5_461),
+            String(repeating: "://a:b", count: 10_923),
             "--password" + String(repeating: " ", count: 16_384) + "!",
         ]
         let clock = ContinuousClock()
