@@ -568,19 +568,23 @@ enum CommandSanitizer {
                     replacements.append((level.rawRange(range), replacement))
                 }
                 // A value that starts with a separator byte (`-p (Tr0ub4dor`,
-                // `-p &Secret1`) ended the segment before it was read. Argv
-                // joined by spaces put it there as its own token, after a
-                // space; right after the flag only `(` is not shell syntax
-                // (`zip -P(Secret1`). Shell syntax stays: a separator followed
-                // by a space (`` `sshpass -p` to``), a newline, or one glued to
-                // the flag (`-p|openssl`, `$(id -u)/label`). A pending `-u`
-                // takes only a `user:password` run.
+                // `-p &Secret1`, `-p;Secret`) ended the segment before it was
+                // read. Argv joined by spaces puts such a value there, after a
+                // space or glued to its password flag, so a pending password
+                // takes the run either way; `-p|openssl` loses its pipeline,
+                // which is the safe direction. Shell syntax stays: a separator
+                // followed by a space (`` `sshpass -p` to``) or a newline. A
+                // pending `-u` is a pair flag for every program, and the next
+                // command's text after it (`$(id -u)/label`, `sort -u|head`) is
+                // hunting data: it takes only a `user:password` run, after a
+                // space or a `(` glued to the flag.
                 if let separator, decided.passwordPending || decided.userPairPending,
                    bytes[separator] != UInt8(ascii: "\n"),
                    separator + 1 < bounds.upperBound,
                    !isWordSpace(bytes[separator + 1]),
                    bytes[separator + 1] != UInt8(ascii: "\n"),
-                   bytes[separator] == UInt8(ascii: "(")
+                   decided.passwordPending
+                    || bytes[separator] == UInt8(ascii: "(")
                     || (separator > bounds.lowerBound && isWordSpace(bytes[separator - 1])) {
                     var end = separator + 1
                     while end < bounds.upperBound, !isWordSpace(bytes[end]),
@@ -864,11 +868,14 @@ enum CommandSanitizer {
         return programName(String(name))
     }
 
-    /// Options and variables whose value is a command line: rsync's `--rsh`
-    /// and `--rsync-path`, ssh's `ProxyCommand`, git's `core.sshCommand`,
-    /// `GIT_SSH` and `GIT_SSH_COMMAND`, and other `*_COMMAND` variables.
+    /// Options and variables whose value is a command line, by suffix of
+    /// the lowercased key: `command` (ssh's `ProxyCommand`, `RemoteCommand`,
+    /// `LocalCommand`, git's `core.sshCommand`, `GIT_SSH_COMMAND` and other
+    /// `*_COMMAND` variables), `ssh` (`GIT_SSH`, `SVN_SSH`, hg's `ui.ssh`),
+    /// rsync's `--rsh` and `--rsync-path`, and docker's `--entrypoint`. None
+    /// ends a container name or a database variable (`--name`, `*_DATABASE`).
     private static let commandCarryingKeySuffixes = [
-        "rsh", "rsync-path", "proxycommand", "sshcommand", "git_ssh", "_command",
+        "command", "ssh", "rsh", "rsync-path", "entrypoint",
     ]
 
     /// `alice:secret` -> `alice:[REDACTED]`; nil when the token is not a

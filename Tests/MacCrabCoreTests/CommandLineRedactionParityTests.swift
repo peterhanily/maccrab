@@ -255,6 +255,11 @@ struct CommandLineRedactionParityTests {
             ["/bin/sh", "-c", "(sshpass -p Hunter22 ssh h uptime) &"],
             ["/bin/sh", "-c", "out=$(sshpass -p Hunter22 ssh h cat f)"],
             ["/bin/sh", "-c", "out=`sshpass -p Hunter22 ssh h cat f`"],
+            ["/usr/bin/ssh", "-o", "RemoteCommand=sshpass -p Hunter22 ssh inner", "jump"],
+            ["/usr/bin/ssh", "-oLocalCommand=sshpass -p Hunter22 ssh inner", "jump"],
+            ["/usr/bin/env", "SVN_SSH=sshpass -p Hunter22 ssh", "svn", "up"],
+            ["/opt/homebrew/bin/hg", "--config", "ui.ssh=sshpass -p Hunter22 ssh", "pull"],
+            ["/usr/local/bin/docker", "run", "--entrypoint=sshpass", "img", "-p", "Hunter22", "ssh", "h"],
         ] {
             let process = try stored(argv)
             #expect(!process.commandLine.contains("Hunter22"), "\(process.commandLine)")
@@ -331,7 +336,6 @@ struct CommandLineRedactionParityTests {
             "sort -u|head -5",
             "set -u;curl x",
             "set -u\ncurl x",
-            "security find-certificate -c X -p|openssl x509",
             // After a space, a pending -u still needs a user:password run,
             // and a newline always ends the command.
             "sort -u |head -5",
@@ -346,6 +350,33 @@ struct CommandLineRedactionParityTests {
         let curl = CommandSanitizer.sanitize("curl -U (alice:secret https://x")
         #expect(!curl.contains("secret"), "\(curl)")
         #expect(curl.contains("(alice:"), "\(curl)")
+    }
+
+    @Test("a value glued to its password flag by a separator is redacted, in a parent's command line too")
+    func gluedSeparatorValues() throws {
+        // Argv joined by spaces: `sshpass '-p;Secret'` reaches a child's
+        // parent.commandline as `-p;Secret`, which only the string walk sees.
+        for (line, redacted) in [
+            ("/usr/local/bin/sshpass -p;Secret ssh host", "/usr/local/bin/sshpass -p[REDACTED] ssh host"),
+            ("zip -P&Secret1 out.zip f", "zip -P[REDACTED] out.zip f"),
+            ("security import id.p12 -P|Pass1", "security import id.p12 -P[REDACTED]"),
+            ("ssh-keygen -N;New1 -f k", "ssh-keygen -N[REDACTED] -f k"),
+            // The accepted cost: a boolean -p loses its pipeline.
+            ("security find-certificate -c X -p|openssl x509", "security find-certificate -c X -p[REDACTED] x509"),
+        ] {
+            #expect(CommandSanitizer.sanitize(line) == redacted, "\(line)")
+            let child = MacCrabCore.ProcessInfo(
+                pid: 8, ppid: 7, rpid: 1, name: "ssh", executable: "/usr/bin/ssh",
+                commandLine: "/usr/bin/ssh host", args: ["/usr/bin/ssh", "host"],
+                workingDirectory: "/", userId: 501, userName: "u", groupId: 20, startTime: Date())
+            let event = Event(timestamp: Date(), eventCategory: .process, eventType: .start,
+                              eventAction: "exec", process: child, enrichments: ["parent.commandline": line])
+            let parent = try EventPrivacySanitizer.sanitize(event).event.enrichments["parent.commandline"]
+            #expect(parent == redacted, "\(line)")
+        }
+        let argv = try stored(["/usr/local/bin/sshpass", "-p;Secret", "ssh", "host"])
+        #expect(!argv.args.contains { $0.contains("Secret") }, "\(argv.args)")
+        #expect(!argv.commandLine.contains("Secret"), "\(argv.commandLine)")
     }
 
     @Test("a flag behind escaped quotes reaches the walk at the top level too")
