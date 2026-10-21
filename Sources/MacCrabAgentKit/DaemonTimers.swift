@@ -3423,8 +3423,10 @@ enum DaemonTimers {
                 await state.behaviorScoring.prune()
                 // Allowlist v2: prune expired suppressions. The sweep
                 // appends an audit entry per expired row, so operators
-                // can reconstruct when each allow lapsed.
-                let expired = await state.suppressionManager.sweepExpired()
+                // can reconstruct when each allow lapsed. It reloads the
+                // saved store first, so entries the CLI added since the
+                // last reload are not dropped by the save.
+                let expired = await state.suppressionManager.reloadAndSweepExpired()
                 if !expired.isEmpty {
                     logger.info("Allowlist sweep expired \(expired.count) suppression(s)")
                 }

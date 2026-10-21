@@ -150,13 +150,47 @@ extension MacCrabCtl {
     /// Legacy command spelling with version-aware removal. Only the matching
     /// rule scopes change; TTL, reasons and unrelated v2 entries survive.
     static func unsuppressRule(ruleId: String, processPath: String?) async {
+        let dataDir = maccrabDataDir()
+        let removal: RuleSuppressionRemoval
         do {
-            let removed = try await removeRuleSuppressions(directory: maccrabDataDir(), ruleId: ruleId, processPath: processPath)
-            print("Saved removal of \(removed) suppression(s). Runtime reload may still be pending.")
+            removal = try await removeRuleSuppressions(directory: dataDir, ruleId: ruleId, processPath: processPath,
+                                                       inboxDirectory: requestInboxDirectory(dataDir: dataDir))
         } catch { cliFailure("unsuppress: \(error.localizedDescription)") }
+        switch removal {
+        case let .savedLegacy(removed):
+            print("Saved removal of \(removed) suppression(s). Runtime reload may still be pending.")
+        case let .requested(requests):
+            var pending: [UUID] = []
+            for (id, request) in requests {
+                let receipt = await awaitTerminalReceipt(directory: dataDir, requestID: request, timeout: 15)
+                switch receipt?.state {
+                case .applied?: print("Removed \(id).")
+                case .rejected?, .superseded?:
+                    cliFailure("unsuppress: the engine did not remove \(id): \(receipt?.reason ?? "")")
+                default: pending.append(request)
+                }
+            }
+            if !pending.isEmpty {
+                print("\(pending.count) removal(s) are queued, but the engine has not confirmed them yet "
+                      + "(is it running?). They apply when the engine reads its inbox. Check: "
+                      + pending.map { "maccrabctl config status \($0.uuidString)" }.joined(separator: "; "))
+            }
+        }
     }
 
-    static func removeRuleSuppressions(directory: String, ruleId: String, processPath: String?) async throws -> Int {
+    /// What `rules unsuppress` did to the saved allowlist.
+    enum RuleSuppressionRemoval {
+        /// A v1 store, which only an engine that has never loaded it leaves
+        /// on disk, edited in place; the engine migrates it when it loads.
+        case savedLegacy(Int)
+        /// One engine removal request per matching v2 entry. The engine holds
+        /// the allowlist in memory, so a removal saved to the file alone stayed
+        /// in force until the next reload.
+        case requested([(id: String, request: UUID)])
+    }
+
+    static func removeRuleSuppressions(directory: String, ruleId: String, processPath: String?,
+                                       inboxDirectory: String) async throws -> RuleSuppressionRemoval {
         let path = directory + "/suppressions.json"
         guard let data = try RuntimeConfigurationFiles.readControlData(at: path, maximumBytes: 4 * 1024 * 1024) else {
             throw RuntimeConfigContractError("No suppression store is available")
@@ -172,9 +206,9 @@ extension MacCrabCtl {
                 }
             }
             guard !matching.isEmpty else { throw RuntimeConfigContractError("No matching rule suppression is present") }
-            let manager = SuppressionManager(dataDir: directory, publishReadableSnapshot: true)
-            await manager.load()
-            return try await manager.removePersisted(ids: Set(matching.map(\.id))).count
+            return .requested(try matching.map { entry in
+                (entry.id, try submitAllowRemoval(id: entry.id, dataDir: directory, inboxDirectory: inboxDirectory))
+            })
         }
         var legacy = try JSONDecoder().decode([String: [String]].self, from: data)
         guard let paths = legacy[ruleId] else { throw RuntimeConfigContractError("No suppression is present for this rule") }
@@ -184,7 +218,7 @@ extension MacCrabCtl {
         if retained.isEmpty { legacy.removeValue(forKey: ruleId) }
         else { legacy[ruleId] = retained }
         try SecureFileIO.atomicReplace(at: path, data: JSONEncoder().encode(legacy), mode: 0o600)
-        return removed
+        return .savedLegacy(removed)
     }
 
     /// The store exists and this user may not read it.

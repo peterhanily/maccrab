@@ -35,6 +35,45 @@ struct SuppressionStoreReloadTests {
         #expect(try await engine.reloadAndRemovePersisted(ids: [added.id]).map(\.id) == [added.id])
     }
 
+    @Test("the engine's TTL sweep keeps entries the CLI saved since the last reload")
+    func sweepKeepsCLIAdditions() async throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let engine = SuppressionManager(dataDir: dir)
+        let expiring = Suppression(createdAt: Date(timeIntervalSince1970: 1000),
+                                   expiresAt: Date(timeIntervalSince1970: 2000),
+                                   scope: .rule("expiring.rule"), source: .cli, reason: "Fixture")
+        await engine.add(expiring)
+        let cli = SuppressionManager(dataDir: dir)
+        await cli.load()
+        let added = Suppression(scope: .rule("added.rule"), source: .cli, reason: "Fixture")
+        await cli.add(added)
+
+        let swept = await engine.reloadAndSweepExpired(now: Date(timeIntervalSince1970: 3000))
+        #expect(swept.map(\.id) == [expiring.id])
+        let reread = SuppressionManager(dataDir: dir)
+        await reread.load()
+        #expect(await reread.list(includeExpired: true).map(\.id) == [added.id])
+        // The CLI's entry is in force in the engine from then on.
+        #expect(await engine.matchingSuppression(ruleId: "added.rule", processPath: nil,
+                                                 processSHA256: nil, hostname: nil) != nil)
+        // Nothing expired: no reload, nothing written.
+        #expect(await engine.reloadAndSweepExpired(now: Date(timeIntervalSince1970: 3000)).isEmpty)
+    }
+
+    @Test("a sweep over a store that cannot be read leaves it alone")
+    func sweepSkipsAnUnreadableStore() async throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let engine = SuppressionManager(dataDir: dir)
+        await engine.add(Suppression(createdAt: Date(timeIntervalSince1970: 1000),
+                                     expiresAt: Date(timeIntervalSince1970: 2000),
+                                     scope: .rule("expiring.rule"), source: .cli, reason: "Fixture"))
+        try Data("corrupt".utf8).write(to: URL(fileURLWithPath: dir + "/suppressions.json"))
+        #expect(await engine.reloadAndSweepExpired(now: Date(timeIntervalSince1970: 3000)).isEmpty)
+        #expect(try String(contentsOfFile: dir + "/suppressions.json", encoding: .utf8) == "corrupt")
+    }
+
     @Test("a store that cannot be decoded removes nothing")
     func undecodableStoreRemovesNothing() async throws {
         let dir = try directory()
@@ -81,5 +120,8 @@ struct SuppressionStoreReloadTests {
         let body = source[handler.lowerBound...].prefix(4_000)
         #expect(body.contains("suppressionManager.reloadAndRemovePersisted(ids: [id])"))
         #expect(!body.contains("suppressionManager.removePersisted("))
+        // The maintenance sweep saves against the saved store too.
+        #expect(source.contains("await state.suppressionManager.reloadAndSweepExpired()"))
+        #expect(!source.contains("state.suppressionManager.sweepExpired("))
     }
 }

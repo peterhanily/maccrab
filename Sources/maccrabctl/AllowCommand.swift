@@ -359,7 +359,7 @@ extension MacCrabCtl {
 
     /// The request's receipt once it is applied, rejected or superseded, or
     /// its last state when `timeout` passes first (nil if none was written).
-    private static func awaitTerminalReceipt(directory: String, requestID: UUID,
+    static func awaitTerminalReceipt(directory: String, requestID: UUID,
                                              timeout: TimeInterval) async -> RuntimeRequestReceipt? {
         let deadline = Date().addingTimeInterval(timeout)
         var latest: RuntimeRequestReceipt?

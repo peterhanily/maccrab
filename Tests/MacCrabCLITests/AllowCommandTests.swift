@@ -91,6 +91,26 @@ struct AllowCommandTests {
         #expect(body.contains("inboxDirectory: requestInboxDirectory(dataDir: dataDir)"))
     }
 
+    @Test("status, allow stats and suppression list read the allowlist as allow list does")
+    func readoutsUseTheSharedRead() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/maccrabctl")
+        func body(_ file: String, after signature: String, length: Int = 1_500) throws -> Substring {
+            let source = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
+            let start = try #require(source.range(of: signature), "\(signature) in \(file)")
+            return source[start.lowerBound...].prefix(length)
+        }
+        let status = try body("StatusCommand.swift", after: "static func showStatus() async {", length: 40_000)
+        #expect(status.contains("allowlistStatusLine(dataDir:"))
+        let stats = try body("AllowCommand.swift", after: "private static func allowStats() async {")
+        #expect(stats.contains("switch await readAllowlist("))
+        let list = try body("AlertCommands.swift", after: "static func listSuppressions() {")
+        let denied = try #require(list.range(of: "suppressionStoreAccessDenied("))
+        let empty = try #require(list.range(of: "No suppressions configured."))
+        #expect(denied.lowerBound < empty.lowerBound, "the refused read is checked before the empty message")
+    }
+
     @Test("--hash takes a 64-character hex digest in either case and stores lowercase")
     func hashValidation() {
         let upper = String(repeating: "AB", count: 32)

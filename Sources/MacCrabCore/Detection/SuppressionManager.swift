@@ -516,6 +516,22 @@ public actor SuppressionManager {
         return expired
     }
 
+    /// The engine's TTL sweep, against the saved store like a removal: a
+    /// sweep saved from memory alone dropped every entry `maccrabctl allow
+    /// add` saved since the last reload, and brought back entries removed in
+    /// the file. Reloads only when something in memory has expired; a store
+    /// that cannot be read is left as it is.
+    @discardableResult
+    public func reloadAndSweepExpired(now: Date = Date()) -> [Suppression] {
+        guard entries.values.contains(where: { $0.isExpired(at: now) }) else { return [] }
+        load()
+        if let failure = lastLoadFailure {
+            logger.error("Allowlist sweep skipped; the saved allowlist could not be read: \(failure.reason)")
+            return []
+        }
+        return sweepExpired(now: now)
+    }
+
     /// Wipe all entries. Intended for "reset allowlist" flows; every removal
     /// gets audited.
     public func removeAll() -> Int {
