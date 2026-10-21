@@ -22,7 +22,13 @@ struct StorageMaintenanceWaitTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         #expect(await store.beginJournalExpiryPrune())
         let sweep = Task { await acquireSizeCapSweep(eventStore: store, waitSeconds: 10) }
-        try await Task.sleep(for: .milliseconds(400))
+        // Release only once the sweep has registered its wait.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while await !store.sizeCapSweepIsWaiting, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await store.sizeCapSweepIsWaiting)
         await store.endSizeCapPrune()
         // Expiry's next quantum yields to the waiting sweep.
         #expect(await store.beginJournalExpiryPrune() == false)

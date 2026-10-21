@@ -54,24 +54,37 @@ struct AsyncPermitsTests {
 
     @Test("runAsync holds a permit for each running command")
     func runAsyncIsBounded() async throws {
+        // Five one-second commands on two permits take at least three rounds;
+        // unbounded they all finish in about one. Load only lengthens it.
+        // Completion is polled against a deadline rather than awaited, so a
+        // permit that is never released fails the test instead of hanging it.
+        actor Finished { var count = 0; func add() { count += 1 } }
+        let finished = Finished()
         let permits = AsyncPermits(2)
+        let started = ContinuousClock.now
         let commands = (0..<5).map { _ in
-            Task {
-                await BoundedPrivilegedProcessRunner.runAsync(
-                    executable: "/bin/sleep", arguments: ["0.5"], timeout: 10,
+            Task { () -> BoundedPrivilegedProcessRunner.Result? in
+                let result = await BoundedPrivilegedProcessRunner.runAsync(
+                    executable: "/bin/sleep", arguments: ["1"], timeout: 10,
                     maximumOutputBytes: 1_024, permits: permits)
+                await finished.add()
+                return result
             }
         }
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(5))
-        while await permits.waiting < 3, clock.now < deadline {
-            try await Task.sleep(for: .milliseconds(5))
+        let deadline = started.advanced(by: .seconds(30))
+        while await finished.count < 5, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
         }
-        #expect(await permits.waiting == 3, "two run, three wait")
+        let elapsed = ContinuousClock.now - started
+        let count = await finished.count
+        guard count == 5 else {
+            Issue.record("\(count) of 5 commands finished: a permit was never released")
+            return
+        }
         for command in commands {
-            let result = await command.value
-            #expect(result?.succeeded == true)
+            #expect(await command.value?.succeeded == true)
         }
+        #expect(elapsed >= .milliseconds(2_500), "at most two commands ran at once")
         #expect(await permits.waiting == 0)
     }
 }

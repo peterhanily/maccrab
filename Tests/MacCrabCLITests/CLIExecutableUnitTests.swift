@@ -459,6 +459,21 @@ struct MacCrabCtlUnitTests {
                 "conserves_accepted_handlers": true,
                 "conserves_offered_handlers": true,
             ],
+            "notarization_follow_up_lifecycle": [
+                "accepting": true,
+                "offered_handlers_total": 4,
+                "accepted_handlers_total": 3,
+                "completed_handlers_total": 3,
+                "rejected_handlers_total": 0,
+                "closed_rejected_handlers_total": 0,
+                "overload_shed_handlers_total": 1,
+                "coalesced_handlers_total": 0,
+                "inline_fallback_handlers_total": 0,
+                "in_flight_handlers": 0,
+                "maximum_in_flight_handlers": 32,
+                "conserves_accepted_handlers": true,
+                "conserves_offered_handlers": true,
+            ],
             "otlp_receiver_lifecycle": [
                 "accepting_listeners": false,
                 "listeners_accepted_total": 2,
@@ -531,6 +546,8 @@ struct MacCrabCtlUnitTests {
         #expect(work.contains("AI Advisory:    Degraded"))
         #expect(work.contains("deterministic detection"))
         #expect(work.contains("Alert Outputs:  Conserving"))
+        // A shed follow-up is lost protection, and its label fits the column.
+        #expect(work.contains("Notarization:   Degraded ⚠ (offered=4"), "\(work)")
         let otlp = MacCrabCtl.otlpReceiverLifecycleStatusLines(supportDir: dir.path)
             .joined(separator: "\n")
         #expect(otlp.contains("Agent OTLP:     Feature degraded"))

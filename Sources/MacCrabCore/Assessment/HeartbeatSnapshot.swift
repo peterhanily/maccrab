@@ -95,6 +95,11 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// lane handed off instead of running inline. A shed here is an unchecked
     /// first launch, so it is a protection gap like the detection plane's.
     public let notarizationFollowUpLifecycle: TimerLifecycle?
+    /// NotarizationChecker's own counters. A check refused at its assessment
+    /// cap leaves a first launch unchecked even when no plane shed it.
+    /// Reported only: a build storm reaches the cap routinely, so it is not
+    /// part of the protection verdict until hosts show what is normal.
+    public let notarizationChecker: NotarizationCheckerCounters?
     /// Compatibility only for pre-split engines. New lanes are never filled
     /// from this aggregate because doing so would hide which class lost work.
     public let legacyDerivedWorkLifecycle: TimerLifecycle?
@@ -268,6 +273,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case advisoryWorkLifecycle = "advisory_work_lifecycle"
         case outputWorkLifecycle = "output_work_lifecycle"
         case notarizationFollowUpLifecycle = "notarization_follow_up_lifecycle"
+        case notarizationChecker = "notarization_checker"
         case legacyDerivedWorkLifecycle = "derived_work_lifecycle"
         case otlpReceiverLifecycle = "otlp_receiver_lifecycle"
         case prevention
@@ -1068,6 +1074,20 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// detection's inline overload fallback are owned outcomes, not loss.
     /// Rejection, explicit overload shedding, accounting drift, or work left
     /// after close are fail-visible and interpreted according to the lane.
+    public struct NotarizationCheckerCounters: Codable, Sendable, Equatable {
+        /// Checks answered `unknown` because the assessment cap was full.
+        public let saturatedChecks: UInt64?
+        /// Lane-inline checks that found no cached result.
+        public let overloadCacheMisses: UInt64?
+        public let assessmentsInFlightOrQueued: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case saturatedChecks = "saturated_checks"
+            case overloadCacheMisses = "overload_cache_misses"
+            case assessmentsInFlightOrQueued = "assessments_in_flight_or_queued"
+        }
+    }
+
     public struct TimerLifecycle: Codable, Sendable, Equatable {
         public let accepting: Bool?
         public let offeredHandlersTotal: UInt64?

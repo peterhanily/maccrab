@@ -501,7 +501,8 @@ extension MacCrabCtl {
             detail: "PROTECTION DEGRADED: a security decision was rejected, shed, left unjoined, or could not be accounted for completely. Lossless inline overload fallback and intentional coalescing are not loss."
         )
         append(
-            "Notarization Checks:", heartbeat.notarizationFollowUpLifecycle,
+            // Labels are padded to 16 columns; a longer one is cut off.
+            "Notarization:", heartbeat.notarizationFollowUpLifecycle,
             degraded: { $0.detectionProtectionDegraded },
             detail: "PROTECTION DEGRADED: a notarization or revoked-certificate check handed off by a saturated detection lane was shed, left unjoined, or could not be accounted for; that first launch went unchecked."
         )

@@ -38,6 +38,27 @@ struct NotarizationFollowUpWiringTests {
         #expect(timers[key.upperBound...].prefix(80).contains("workLifecycleDictionary(notarizationFollowUpPlane)"))
     }
 
+    @Test("the heartbeat reports checks the notarization checker refused at its cap, outside the verdict")
+    func checkerCountersArePublished() throws {
+        let h = try JSONDecoder().decode(HeartbeatSnapshot.self, from: Data("""
+        {"schema_version": 5,
+         "notarization_checker": {"saturated_checks": 7, "overload_cache_misses": 3,
+                                  "assessments_in_flight_or_queued": 128}}
+        """.utf8))
+        #expect(h.notarizationChecker?.saturatedChecks == 7)
+        #expect(h.notarizationChecker?.overloadCacheMisses == 3)
+        #expect(h.notarizationChecker?.assessmentsInFlightOrQueued == 128)
+        let timers = try source("Sources/MacCrabAgentKit/DaemonTimers.swift")
+        #expect(timers.contains("let notarizationCheckerCounters = await state.notarizationChecker.diagnostics()"))
+        let key = try #require(timers.range(of: "\"notarization_checker\": ["))
+        let block = timers[key.upperBound...].prefix(400)
+        for field in ["\"saturated_checks\": notarizationCheckerCounters.saturatedChecks",
+                      "\"overload_cache_misses\": notarizationCheckerCounters.overloadCacheMisses",
+                      "\"assessments_in_flight_or_queued\""] {
+            #expect(block.contains(field), "\(field)")
+        }
+    }
+
     @Test("a lane-inline cache miss is assessed on the follow-up plane, off the lane")
     func missGoesToFollowUp() throws {
         let loop = try source("Sources/MacCrabAgentKit/EventLoop.swift")

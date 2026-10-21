@@ -21218,6 +21218,10 @@ public actor EventStore {
         sizeCapSweepWaiting = false
     }
 
+    /// Whether a sweep is registered as waiting for journal expiry, so a
+    /// test can wait for that rather than for a fixed time.
+    var sizeCapSweepIsWaiting: Bool { sizeCapSweepWaiting }
+
     /// Count one coalesced scheduler tick, not every 250-ms acquisition poll.
     public func recordJournalExpiryPendingTick() {
         journalExpiryPendingTicks &+= 1

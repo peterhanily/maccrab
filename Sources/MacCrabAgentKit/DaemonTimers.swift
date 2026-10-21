@@ -4780,6 +4780,7 @@ enum DaemonTimers {
             let advisoryWorkPlane = state.advisoryWorkLifecycle.snapshot()
             let outputWorkPlane = state.outputWorkLifecycle.snapshot()
             let notarizationFollowUpPlane = state.notarizationFollowUpLifecycle.snapshot()
+            let notarizationCheckerCounters = await state.notarizationChecker.diagnostics()
             let heavyEnrichmentPlane = await state.enricher
                 .heavyEnrichmentSnapshot()
             let deferredEnrichmentBuffer = await state.deferredEnrichmentBuffer
@@ -5176,6 +5177,14 @@ enum DaemonTimers {
                 // notarization check; it was otherwise counted nowhere.
                 "notarization_follow_up_lifecycle":
                     workLifecycleDictionary(notarizationFollowUpPlane),
+                // A check refused at the checker's assessment cap is a first
+                // launch left unchecked with no plane shed. Reported, not in
+                // the protection verdict: build storms reach the cap routinely.
+                "notarization_checker": [
+                    "saturated_checks": notarizationCheckerCounters.saturatedChecks,
+                    "overload_cache_misses": notarizationCheckerCounters.overloadCacheMisses,
+                    "assessments_in_flight_or_queued": notarizationCheckerCounters.assessmentsInFlightOrQueued,
+                ] as [String: Any],
                 "heavy_enrichment_plane": heavyEnrichmentPlaneDict,
                 "deferred_enrichment_buffer":
                     deferredEnrichmentBufferDict,
