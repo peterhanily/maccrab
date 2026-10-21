@@ -1595,6 +1595,23 @@ public final class ESCollector: @unchecked Sendable {
         types.contains { lineageCriticalRawValues.contains($0.rawValue) }
     }
 
+    /// The hand-off tiers one client gives its messages, decided once from
+    /// what the client subscribes to, so the degraded single client (which
+    /// carries EXEC/FORK/EXIT) keeps the top slice for lineage.
+    struct WorkerTierPolicy {
+        let carriesLineage: Bool
+
+        init(subscribedTypes: [es_event_type_t]) {
+            carriesLineage = ESCollector.carriesLineage(subscribedTypes)
+        }
+
+        func tier(eventType: UInt32, protectedOpen: Bool) -> (lineageCritical: Bool, writeFamily: Bool) {
+            (ESCollector.usesWorkerTopReserve(
+                eventType: eventType, protectedOpen: protectedOpen, carriesLineage: carriesLineage),
+             ESCollector.usesWriteFamilyReserve(eventType: eventType, protectedOpen: protectedOpen))
+        }
+    }
+
     /// The full pre-split subscription list — `subscribedEvents` plus the
     /// optional OPEN, introspection and memory-protection families. Used verbatim
     /// for the degraded single client AND as the domain that
@@ -1759,7 +1776,7 @@ public final class ESCollector: @unchecked Sendable {
         context.tracker.reset()
         let tracker = context.tracker
         let worker = context.worker
-        let carriesLineage = Self.carriesLineage(context.subscribedTypes)
+        let tierPolicy = WorkerTierPolicy(subscribedTypes: context.subscribedTypes)
         // v1.21.4 Phase-2 (D3) FIX: the coverage-canary recognizer runs HERE, at
         // the true ES callback boundary, so "seen at callback" means the kernel
         // DELIVERED the probe exec — not that it survived the async hand-off +
@@ -1844,12 +1861,11 @@ public final class ESCollector: @unchecked Sendable {
             // never reach events.db — and the two-point verdict would blame the
             // store/eviction stage for a loss that happened here, at the ingest
             // hand-off. Record the third point against the message we just lost.
+            let tier = tierPolicy.tier(eventType: evType, protectedOpen: protectedOpen)
             let accepted = worker.submit(
                 UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()),
-                lineageCritical: ESCollector.usesWorkerTopReserve(
-                    eventType: evType, protectedOpen: protectedOpen, carriesLineage: carriesLineage
-                ),
-                writeFamily: ESCollector.usesWriteFamilyReserve(eventType: evType, protectedOpen: protectedOpen),
+                lineageCritical: tier.lineageCritical,
+                writeFamily: tier.writeFamily,
                 eventType: evType
             )
             if !accepted, let canary = canary { canary.noteDroppedAtHandoff(canaryNonces) }
@@ -2544,12 +2560,10 @@ public final class ESCollector: @unchecked Sendable {
             // or a credential / agent-content OPEN rides the priority lane
             // while the budget lasts, out of reach of a file-lane flood, and the
             // file lane past it (`EventPipelineLane.finalLane(for:)`).
-            if EventPipelineLane.stampProtectedLane(
+            EventPipelineLane.stampProtectedLane(
                 &event, budget: protectedLaneBudget, openBudget: protectedOpenLaneBudget,
-                nowNanos: box.startNanos
-            ) == false {
-                tracker.recordProtectedLaneRefused()
-            }
+                nowNanos: box.startNanos, refusals: tracker
+            )
 
             let result = continuation.yield(event)
             deliveryTelemetry.recordYield(offered: event, result: result)

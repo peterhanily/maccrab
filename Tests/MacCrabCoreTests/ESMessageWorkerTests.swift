@@ -582,6 +582,40 @@ extension ESMessageWorkerTopReserveTests {
     }
 }
 
+extension ESMessageWorkerTopReserveTests {
+    @Test("a client's subscription decides whether a protected OPEN may take the top slice")
+    func tierPolicyFollowsTheSubscription() throws {
+        let open = ES_EVENT_TYPE_NOTIFY_OPEN.rawValue
+        let degraded = ESCollector.WorkerTierPolicy(subscribedTypes:
+            ESCollector.fullSubscription(subscribeFileOpen: true, subscribeIntrospection: true))
+        let split = ESCollector.WorkerTierPolicy(subscribedTypes:
+            ESCollector.fileClientTypes(subscribeFileOpen: true, subscribeIntrospection: true))
+        // The degraded single client: lineage keeps the top slice, and a
+        // protected OPEN shares the write family's tier below it.
+        #expect(!degraded.tier(eventType: open, protectedOpen: true).lineageCritical)
+        #expect(degraded.tier(eventType: open, protectedOpen: true).writeFamily)
+        for lineage in [ES_EVENT_TYPE_NOTIFY_EXEC, ES_EVENT_TYPE_NOTIFY_FORK, ES_EVENT_TYPE_NOTIFY_EXIT] {
+            #expect(degraded.tier(eventType: lineage.rawValue, protectedOpen: false).lineageCritical)
+        }
+        // The split file client carries no lineage, so a protected OPEN keeps
+        // the top slice against a write flood; an ordinary one does not.
+        #expect(split.tier(eventType: open, protectedOpen: true).lineageCritical)
+        #expect(!split.tier(eventType: open, protectedOpen: false).lineageCritical)
+        #expect(!split.tier(eventType: open, protectedOpen: false).writeFamily)
+        // The collector hands each message over with its client's policy.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let collector = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabCore/Collectors/ESCollector.swift"), encoding: .utf8)
+        let start = try #require(collector.range(of: "private func openClient(for context: ESClientContext)"))
+        let end = try #require(collector.range(of: "context.client = newClient", range: start.upperBound..<collector.endIndex))
+        let body = collector[start.upperBound..<end.lowerBound]
+        #expect(body.contains("WorkerTierPolicy(subscribedTypes: context.subscribedTypes)"))
+        #expect(body.contains("lineageCritical: tier.lineageCritical"))
+        #expect(body.contains("writeFamily: tier.writeFamily"))
+    }
+}
+
 private final class ManagedAtomicCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0

@@ -500,8 +500,10 @@ struct ProtectedFileLaneTests {
     func stampAdmitsThenRefuses() {
         let budget = ProtectedFileLaneBudget(capacity: 2, refillPerSecond: 0)
         let openBudget = ProtectedFileLaneBudget(capacity: 1, refillPerSecond: 0)
+        let tracker = ESSeqTracker()
         func stamp(_ event: inout Event, at nanos: UInt64) -> Bool? {
-            EventPipelineLane.stampProtectedLane(&event, budget: budget, openBudget: openBudget, nowNanos: nanos)
+            EventPipelineLane.stampProtectedLane(
+                &event, budget: budget, openBudget: openBudget, nowNanos: nanos, refusals: tracker)
         }
         let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
         var first = fileEvent("write", plist), second = fileEvent("write", plist), third = fileEvent("write", plist)
@@ -510,6 +512,7 @@ struct ProtectedFileLaneTests {
         #expect(stamp(&third, at: 3) == false)
         #expect(EventPipelineLane.finalLane(for: first) == .priority)
         #expect(EventPipelineLane.finalLane(for: third) == .file)
+        #expect(tracker.protectedLaneRefusedTotal() == 1, "only the refusal counts")
         // A protected OPEN keeps the priority lane unless its budget refuses it.
         var credential = fileEvent("open", "/Users/x/.ssh/id_ed25519")
         var flood = fileEvent("open", "/Users/x/.ssh/id_ed25519")
@@ -524,6 +527,7 @@ struct ProtectedFileLaneTests {
         #expect(stamp(&bulk, at: 6) == nil)
         #expect(EventPipelineLane.finalLane(for: dynamic) == .file)
         #expect(EventPipelineLane.finalLane(for: bulk) == .file)
+        #expect(tracker.protectedLaneRefusedTotal() == 2, "admissions and non-candidates do not count")
         // An OPEN from a producer that never stamps keeps the priority lane.
         #expect(EventPipelineLane.finalLane(for: fileEvent("open", "/Users/x/.ssh/id_ed25519")) == .priority)
     }
@@ -535,38 +539,45 @@ struct ProtectedFileLaneTests {
         do {
             let budget = ProtectedFileLaneBudget(capacity: 64, refillPerSecond: 16)
             let openBudget = ProtectedFileLaneBudget.forProtectedOpens()
+            let tracker = ESSeqTracker()
             var refused = 0
             for i in 0..<10_000 {
                 var open = fileEvent("open", "/tmp/x/.env")
                 if EventPipelineLane.stampProtectedLane(
-                    &open, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i)
+                    &open, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i), refusals: tracker
                 ) == false { refused += 1 }
             }
             #expect(refused == 10_000 - 256, "an OPEN burst gets the OPEN burst capacity")
+            #expect(tracker.protectedLaneRefusedTotal() == UInt64(refused))
             var write = fileEvent("write", plist)
             #expect(EventPipelineLane.stampProtectedLane(
-                &write, budget: budget, openBudget: openBudget, nowNanos: 11_001) == true)
+                &write, budget: budget, openBudget: openBudget, nowNanos: 11_001, refusals: tracker) == true)
         }
         // ...and a write flood spends only the write budget.
         do {
             let budget = ProtectedFileLaneBudget(capacity: 64, refillPerSecond: 16)
             let openBudget = ProtectedFileLaneBudget.forProtectedOpens()
+            let tracker = ESSeqTracker()
             for i in 0..<1_000 {
                 var write = fileEvent("write", plist)
-                _ = EventPipelineLane.stampProtectedLane(
-                    &write, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i))
+                EventPipelineLane.stampProtectedLane(
+                    &write, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i), refusals: tracker)
             }
             var credential = fileEvent("open", "/Users/x/.ssh/id_ed25519")
             #expect(EventPipelineLane.stampProtectedLane(
-                &credential, budget: budget, openBudget: openBudget, nowNanos: 2_001) == true)
+                &credential, budget: budget, openBudget: openBudget, nowNanos: 2_001, refusals: tracker) == true)
         }
     }
 
     @Test("the worker stamps through the budget and counts its refusals")
     func workerStampsAndCountsRefusals() throws {
         let tracker = ESSeqTracker()
-        tracker.recordProtectedLaneRefused()
-        tracker.recordProtectedLaneRefused()
+        let budget = ProtectedFileLaneBudget(capacity: 0, refillPerSecond: 0)
+        for _ in 0..<2 {
+            var write = fileEvent("write", "/Users/x/Library/LaunchAgents/com.evil.plist")
+            #expect(EventPipelineLane.stampProtectedLane(
+                &write, budget: budget, openBudget: budget, nowNanos: 1, refusals: tracker) == false)
+        }
         #expect(tracker.protectedLaneRefusedTotal() == 2)
         tracker.reset()
         #expect(tracker.protectedLaneRefusedTotal() == 0)
@@ -578,7 +589,7 @@ struct ProtectedFileLaneTests {
         let end = try #require(collector.range(of: "continuation.yield(event)", range: start.upperBound..<collector.endIndex))
         let body = collector[start.upperBound..<end.lowerBound]
         #expect(body.contains("EventPipelineLane.stampProtectedLane("))
-        #expect(body.contains("tracker.recordProtectedLaneRefused()"))
+        #expect(body.contains("refusals: tracker"))
         #expect(!body.contains("protectedLaneBudget.admit("), "the budget is spent only through the stamp")
         let timers = try String(contentsOf: root.appendingPathComponent(
             "Sources/MacCrabAgentKit/DaemonTimers.swift"), encoding: .utf8)

@@ -112,15 +112,18 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
 
     /// Spends one budget token on a protected event and stamps its lane: nil
     /// for an event that is not a candidate, true when it was admitted to the
-    /// priority lane, false when the budget refused it. A refused OPEN is
-    /// stamped for the file lane; any other refused event already rides it.
-    /// OPENs spend their own budget: an `open()` loop on the caller's own
-    /// `.env` must not use up the tokens a real LaunchAgent write needs.
+    /// priority lane, false when the budget refused it, which `refusals`
+    /// counts. A refused OPEN is stamped for the file lane; any other refused
+    /// event already rides it. OPENs spend their own budget: an `open()` loop
+    /// on the caller's own `.env` must not use up the tokens a real
+    /// LaunchAgent write needs.
+    @discardableResult
     static func stampProtectedLane(
         _ event: inout Event,
         budget: ProtectedFileLaneBudget,
         openBudget: ProtectedFileLaneBudget,
-        nowNanos: UInt64
+        nowNanos: UInt64,
+        refusals: ESSeqTracker
     ) -> Bool? {
         guard isProtectedFileCandidate(event) else { return nil }
         let isOpen = event.eventAction == "open"
@@ -131,6 +134,7 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
         if isOpen {
             event.enrichments[protectedFileLaneEnrichmentKey] = protectedFileLaneFile
         }
+        refusals.recordProtectedLaneRefused()
         return false
     }
 
