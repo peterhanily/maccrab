@@ -300,6 +300,64 @@ struct BehaviorScoringStaticFloodTests {
         #expect(await scorer.lifecycleInvariantFailures().isEmpty)
     }
 
+    @Test("an earlier process's retried crossing is marked as such and does not latch the new one")
+    func earlierProcessCrossingIsMarked() async throws {
+        let clock = Clock()
+        let scorer = scorer(clock)
+        let path = "/bin/sh"
+        let processStart = clock.now
+        let crossing = try #require(await scorer.addIndicators(
+            [.init(name: "ai_tool_runs_sudo", weight: 6), .init(name: "ai_tool_installs_unknown_pkg", weight: 4)],
+            forProcess: 81, path: path, processStart: processStart))
+        #expect(!crossing.fromEarlierProcess)
+        await scorer.recordThresholdDeliveryFailure(deliveryToken: crossing.deliveryToken)
+        // The same process's own later event retries its own crossing.
+        clock.advance(1)
+        let own = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2),
+                                            forProcess: 81, path: path, processStart: processStart)
+        #expect(own?.deliveryToken == crossing.deliveryToken)
+        #expect(own?.fromEarlierProcess == false)
+
+        clock.advance(1)
+        await scorer.processExited(pid: 81)
+        clock.advance(1)
+        // A later process with the same pid and path is already over the
+        // threshold, with action weight, while the old crossing is retried.
+        let laterStart = clock.now
+        let retried = try #require(await scorer.addIndicators(
+            [.init(name: "ai_tool_runs_sudo", weight: 6), .init(name: "ai_tool_installs_unknown_pkg", weight: 4)],
+            forProcess: 81, path: path, processStart: laterStart))
+        #expect(retried.deliveryToken == crossing.deliveryToken)
+        #expect(retried.fromEarlierProcess, "another process's crossing, retried on this one's event")
+        _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2),
+                                      forProcess: 81, path: path, processStart: laterStart)
+        #expect(await scorer.resolveThreshold(deliveryToken: retried.deliveryToken, as: .committed))
+
+        // The settled crossing was the old process's: it does not latch this
+        // one, whose own next action crosses.
+        clock.advance(1)
+        let next = await scorer.addIndicator(.init(name: "obfuscated_commandline", weight: 3),
+                                             forProcess: 81, path: path, processStart: laterStart)
+        #expect(next != nil, "the new process crosses on its own")
+        #expect(next?.deliveryToken != crossing.deliveryToken)
+        #expect(next?.fromEarlierProcess == false)
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
+    @Test("the emitter delivers an earlier process's crossing without the triggering event")
+    func emitterDropsTheTriggeringEvent() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let emitter = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/BehaviorScoreAlertEmitter.swift"),
+            encoding: .utf8)
+        let emit = try #require(emitter.range(of: "event triggeringEvent: Event?,"))
+        let body = emitter[emit.upperBound...].prefix(600)
+        #expect(body.contains("let event = crossing.fromEarlierProcess ? nil : triggeringEvent"))
+        #expect(emitter.components(separatedBy: "triggeringEvent").count - 1 == 2,
+                "the body reads the event only through that line")
+    }
+
     @Test("a new generation whose own exit came first starts out exited")
     func exitedGenerationStaysExited() async {
         let clock = Clock()

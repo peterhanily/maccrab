@@ -168,6 +168,11 @@ public actor BehaviorScoring {
         public let severity: Severity
         /// Delivery expiry uses the same clock/window as retained scores.
         let createdAt: Date
+        /// The crossing belongs to an earlier process that held this pid and
+        /// path, and is being retried. It must be delivered without the
+        /// current process's event: that event's evidence, noise judgement
+        /// and response target are another process's.
+        public internal(set) var fromEarlierProcess = false
     }
 
     public enum ThresholdResolution: Sendable {
@@ -509,7 +514,13 @@ public actor BehaviorScoring {
         let score = entry
 
         // Check threshold
-        if let pending = pendingThresholds[key] {
+        if var pending = pendingThresholds[key] {
+            // Only a generation reset, which an observed exit gates, says the
+            // crossing is another process's: a network or log event's start
+            // time is when it was seen, not when its process started.
+            if let generationStart = entry.generationStartedAt, pending.createdAt < generationStart {
+                pending.fromEarlierProcess = true
+            }
             return pending
         }
 
@@ -557,14 +568,20 @@ public actor BehaviorScoring {
         as resolution: ThresholdResolution
     ) -> Bool {
         guard let key = thresholdTokenToProcess[deliveryToken],
-              pendingThresholds[key]?.deliveryToken == deliveryToken else {
+              let settled = pendingThresholds[key],
+              settled.deliveryToken == deliveryToken else {
             return false
         }
         thresholdTokenToProcess.removeValue(forKey: deliveryToken)
         pendingThresholds.removeValue(forKey: key)
         // Detached deliveries still count their real outcome, but there is no
-        // score generation left on which to retain a one-shot alert latch.
-        if processScores[key] != nil { alerted.insert(key) }
+        // score generation left on which to retain a one-shot alert latch,
+        // and an earlier process's crossing must not latch the process now
+        // holding this pid and path.
+        if let entry = processScores[key],
+           settled.createdAt >= (entry.generationStartedAt ?? .distantPast) {
+            alerted.insert(key)
+        }
         switch resolution {
         case .committed:
             thresholdCommittedTotal &+= 1

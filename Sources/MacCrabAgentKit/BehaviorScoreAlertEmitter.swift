@@ -112,9 +112,13 @@ enum BehaviorScoreAlertEmitter {
         alertSink: AlertSink,
         notifier: NotificationOutput,
         responseEngine: ResponseEngine?,
-        event: Event?,
+        event triggeringEvent: Event?,
         isWarmingUp: Bool
     ) async {
+        // A crossing retried for an earlier process that held this pid and
+        // path carries no evidence, noise judgement or response target from
+        // the process whose event triggered the retry.
+        let event = crossing.fromEarlierProcess ? nil : triggeringEvent
         let indicatorSummary = crossing.indicators.prefix(5)
             .map { "\($0.name)(\($0.weight))" }
             .joined(separator: ", ")
