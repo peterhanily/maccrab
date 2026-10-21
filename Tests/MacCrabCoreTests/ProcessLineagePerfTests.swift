@@ -157,11 +157,11 @@ struct ProcessLineageMemoTests {
         await lineage.prune()
         #expect(await !lineage.contains(pid: 50))
 
-        // The child was reparented to launchd when its exited parent was
-        // removed, as the kernel does → ["launchd"], NOT the stale
-        // ["parent","launchd"] memo.
+        // The child's walk now stops at the missing parent → empty chain,
+        // NOT the stale ["parent","launchd"] memo. The child keeps the
+        // removed pid as its parent until another process takes it.
         let afterPrune = await lineage.ancestors(of: 100)
-        #expect(names(afterPrune) == ["launchd"])
+        #expect(afterPrune.isEmpty)
     }
 
     @Test("Eviction of an ancestor under cap pressure invalidates descendant memo")

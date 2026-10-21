@@ -123,6 +123,23 @@ public actor ProcessLineage {
     private var exitOrder: [(pid: pid_t, exitTime: Date)] = []
     private var exitOrderHead = 0
 
+    /// Nodes whose exit ES never delivers (it mutes events acted by /System/
+    /// images), in insertion order. A spawn loop of short-lived /System/
+    /// binaries leaves such nodes "running"; once no recorded exit is left to
+    /// evict, eviction checks these for liveness before taking the oldest
+    /// running process, which would be launchd, a login shell or an agent's
+    /// root. Stale entries are skipped like `exitOrder`'s.
+    private var unobservedExits: [(pid: pid_t, startTime: Date)] = []
+    private var unobservedExitsHead = 0
+    private static let maximumLivenessChecksPerEviction = 64
+
+    /// Removed nodes whose children are still tracked. The children keep
+    /// naming the removed pid, so a descendant check bound to it still holds
+    /// (an `npm postinstall` shell exits, its detached RAT calls home). They
+    /// are reparented to launchd only when another process takes the pid; a
+    /// running node evicted under the cap that later execs keeps them.
+    private var removedParents: [pid_t: (startTime: Date, exited: Bool)] = [:]
+
     // MARK: Storage
 
     /// Primary index: pid -> node.
@@ -289,12 +306,10 @@ public actor ProcessLineage {
             // the new, unrelated process (e.g. a `claude` that took the pid
             // and made a long-lived orphan an "AI child"). The kernel
             // reparented them to launchd; mirror that.
-            if old.exitTime != nil, let orphans = childrenIndex.removeValue(forKey: pid) {
-                for child in orphans where nodes[child]?.ppid == pid {
-                    nodes[child]?.ppid = 1
-                    childrenIndex[1, default: []].insert(child)
-                }
-            }
+            if old.exitTime != nil { adoptOrphans(of: pid) }
+        } else if let removed = removedParents.removeValue(forKey: pid),
+                  removed.exited || abs(removed.startTime.timeIntervalSince(startTime)) > 1 {
+            adoptOrphans(of: pid)
         }
 
         let node = LineageNode(
@@ -310,6 +325,9 @@ public actor ProcessLineage {
 
         nodes[pid] = node
         childrenIndex[ppid, default: []].insert(pid)
+        if path.hasPrefix("/System/") {
+            unobservedExits.append((pid, startTime))
+        }
 
         // Structural change: a new/overwritten node can alter the ancestor
         // chain of any descendant. Drop the whole memo. (See ancestorsMemo.)
@@ -317,6 +335,16 @@ public actor ProcessLineage {
 
         if nodes.count > maxProcessCount {
             evictLRUProcess()
+        }
+    }
+
+    /// The children of a pid whose process is gone were reparented to launchd
+    /// by the kernel; mirror that before another process takes the pid.
+    private func adoptOrphans(of pid: pid_t) {
+        guard let orphans = childrenIndex.removeValue(forKey: pid) else { return }
+        for child in orphans where nodes[child]?.ppid == pid {
+            nodes[child]?.ppid = 1
+            childrenIndex[1, default: []].insert(child)
         }
     }
 
@@ -341,8 +369,44 @@ public actor ProcessLineage {
             }
         }
         compactExitOrderIfNeeded()
+        if evictVanishedUnobservedProcess() { return }
         if let victim = nodes.values.min(by: { $0.startTime < $1.startTime }) {
             removeNode(pid: victim.pid)
+        }
+    }
+
+    /// Evict the first exit-unobservable node found dead, checking at most
+    /// `maximumLivenessChecksPerEviction` live candidates; live ones go to the
+    /// back of the queue.
+    private func evictVanishedUnobservedProcess() -> Bool {
+        var checks = 0
+        let pending = unobservedExits.count - unobservedExitsHead
+        defer { compactUnobservedExitsIfNeeded() }
+        for _ in 0..<pending where checks < Self.maximumLivenessChecksPerEviction {
+            let entry = unobservedExits[unobservedExitsHead]
+            unobservedExitsHead += 1
+            guard let node = nodes[entry.pid], node.exitTime == nil,
+                  node.startTime == entry.startTime else { continue }
+            checks += 1
+            if !processIsRunning(entry.pid, entry.startTime) {
+                removeNode(pid: entry.pid)
+                return true
+            }
+            unobservedExits.append(entry)
+        }
+        return false
+    }
+
+    private func compactUnobservedExitsIfNeeded() {
+        if unobservedExitsHead > 0, unobservedExitsHead * 2 >= unobservedExits.count {
+            unobservedExits.removeFirst(unobservedExitsHead)
+            unobservedExitsHead = 0
+        }
+        if unobservedExits.count > 2 * maxProcessCount + 1_024 {
+            unobservedExits = nodes.values.compactMap { node in
+                node.exitTime == nil && node.path.hasPrefix("/System/") ? (node.pid, node.startTime) : nil
+            }.sorted { $0.startTime < $1.startTime }
+            unobservedExitsHead = 0
         }
     }
 
@@ -389,17 +453,12 @@ public actor ProcessLineage {
         childrenIndex[node.ppid]?.remove(pid)
         if childrenIndex[node.ppid]?.isEmpty == true {
             childrenIndex.removeValue(forKey: node.ppid)
+            if nodes[node.ppid] == nil { removedParents.removeValue(forKey: node.ppid) }
         }
-        let children = childrenIndex.removeValue(forKey: pid) ?? []
-        // An exited parent's children were reparented to launchd by the
-        // kernel. Leaving them pointing at the dead pid let a process that
-        // later reuses it, after prune or eviction, adopt them. A running
-        // parent evicted under cap pressure is still their parent.
-        if node.exitTime != nil {
-            for child in children where nodes[child]?.ppid == pid {
-                nodes[child]?.ppid = 1
-                childrenIndex[1, default: []].insert(child)
-            }
+        // The children keep the removed pid as their parent; see
+        // `removedParents`.
+        if childrenIndex[pid]?.isEmpty == false {
+            removedParents[pid] = (node.startTime, node.exitTime != nil)
         }
 
         // Removing a node shortens the chain of any descendant that walked
