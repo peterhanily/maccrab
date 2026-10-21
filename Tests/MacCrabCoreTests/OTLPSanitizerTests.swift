@@ -304,7 +304,7 @@ struct CredentialPatternCostTests {
         let eyj = String(repeating: "-eyJ", count: 16_384)
         #expect(fastest { _ = EventPrivacySanitizer.sanitizeString(eyj) } < .milliseconds(250))
         // `[a-z]+[a-z0-9]*` in an unbounded repeat backtracked exponentially.
-        let parts = String(repeating: "Aaaa-", count: 4_000) + "!"
+        let parts = String(repeating: "Aaaa-", count: 13_000) + "!"
         #expect(fastest { _ = OTLPAttributeSanitizer.redactString(parts) } < .milliseconds(250))
         #expect(fastest { _ = LLMSanitizer.sanitize(parts) } < .milliseconds(250))
     }
@@ -317,6 +317,11 @@ struct CredentialPatternCostTests {
         for host in ["Peters-MacBook-Pro", "Johns-Mac-mini", "Mary-Janes-MacBook-Air", "Johns-Mac-Pro"] {
             #expect(OTLPAttributeSanitizer.redactString("on \(host) today").contains("[COMPUTER_NAME]"), "\(host)")
             #expect(LLMSanitizer.sanitize("on \(host) today").contains("[COMPUTER_NAME]"), "\(host)")
+        }
+        // A host-name run may start with a digit or an underscore.
+        for name in ["1st-floor-printer.local", "_dev-box.local", "0x1-host.internal"] {
+            let cleaned = LLMSanitizer.sanitize("ping \(name) now")
+            #expect(cleaned == "ping [HOSTNAME] now", "\(name): \(cleaned)")
         }
     }
 }

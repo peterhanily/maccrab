@@ -33,9 +33,10 @@ public enum LLMSanitizer {
     private static let userPathRegex = try! NSRegularExpression(pattern: #"/Users/([^/\s]+)/"#)
     /// A match starts only where a `[\w-]` run starts: with `\b`, every
     /// letter after a `-` in a long `a-a-a…` run was a start that re-scanned
-    /// the rest of the run.
+    /// the rest of the run. The whole run is the name, whatever it starts
+    /// with (`1st-floor-printer.local`, `_dev-box.local`).
     private static let hostnameRegex = try! NSRegularExpression(
-        pattern: #"(?<![\w\-])-*+[a-zA-Z][\w\-]*+\.(local|internal|corp|lan)\b"#
+        pattern: #"(?<![\w\-])[\w\-]++\.(local|internal|corp|lan)\b"#
     )
     /// Includes RFC 1918 (10/8, 172.16/12, 192.168/16), loopback
     /// (127/8), link-local (169.254/16), AND RFC 6598 carrier-grade

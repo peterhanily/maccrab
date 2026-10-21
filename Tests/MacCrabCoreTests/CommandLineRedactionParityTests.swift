@@ -292,6 +292,52 @@ struct CommandLineRedactionParityTests {
         #expect(parent == "/usr/local/bin/sshpass -p [REDACTED] ssh host")
     }
 
+    @Test("a value whose first byte is a shell separator is redacted; shell syntax is not")
+    func valuesStartingWithSeparators() throws {
+        // Argv joined by spaces puts any byte first (`sshpass -p '(Secret1'`).
+        for (line, redacted) in [
+            ("sshpass -p (Secret1 ssh host", "sshpass -p [REDACTED] ssh host"),
+            ("sshpass -p `Secret1 ssh host", "sshpass -p [REDACTED] ssh host"),
+            ("zip -P(Secret1 out.zip f", "zip -P[REDACTED] out.zip f"),
+            ("sshpass -p &Secret1 ssh host", "sshpass -p [REDACTED] ssh host"),
+            ("sshpass -p ;Secret1 ssh host", "sshpass -p [REDACTED] ssh host"),
+        ] {
+            #expect(CommandSanitizer.sanitize(line) == redacted, "\(line)")
+            let child = MacCrabCore.ProcessInfo(
+                pid: 8, ppid: 7, rpid: 1, name: "ssh", executable: "/usr/bin/ssh",
+                commandLine: "/usr/bin/ssh host", args: ["/usr/bin/ssh", "host"],
+                workingDirectory: "/", userId: 501, userName: "u", groupId: 20, startTime: Date())
+            let event = Event(timestamp: Date(), eventCategory: .process, eventType: .start,
+                              eventAction: "exec", process: child,
+                              enrichments: ["parent.commandline": line])
+            let parent = try EventPrivacySanitizer.sanitize(event).event.enrichments["parent.commandline"]
+            #expect(parent == redacted, "\(line)")
+        }
+        // A separator followed by a space is shell syntax: prose quoting a
+        // command, and a prompting `-p` ended by `;`.
+        for line in ["Run `sshpass -p` to see the prompt", "mysql -p; echo done", "sshpass -p ; echo"] {
+            #expect(CommandSanitizer.sanitize(line) == line, "\(line)")
+        }
+    }
+
+    @Test("an escaped space or quote in a nested double-quoted script stays inside its word")
+    func escapesInNestedScripts() {
+        #expect(CommandSanitizer.sanitize(#"sh -c "sshpass -p pass\ word ssh h""#)
+            == #"sh -c "sshpass -p [REDACTED] ssh h""#)
+        #expect(CommandSanitizer.sanitize(#"bash -lc "ssh-keygen -qN new\ pass -f k""#)
+            == #"bash -lc "ssh-keygen -qN [REDACTED] -f k""#)
+        let quotedFlag = CommandSanitizer.sanitize(#"sh -c "zip \"-P\" Secret77 out.zip f""#)
+        #expect(!quotedFlag.contains("Secret77"), "\(quotedFlag)")
+    }
+
+    @Test("an assignment in argv is not a program; ports stay visible")
+    func argvAssignmentsAreNotPrograms() throws {
+        #expect(try stored(["/usr/local/bin/docker", "run", "--name=mysql", "-p", "3306:3306", "mysql:8"]).args
+            == ["/usr/local/bin/docker", "run", "--name=mysql", "-p", "3306:3306", "mysql:8"])
+        #expect(try stored(["/usr/local/bin/docker", "run", "-e", "MYSQL_DATABASE=mysql", "-p", "3306:3306", "mysql:8"]).args
+            == ["/usr/local/bin/docker", "run", "-e", "MYSQL_DATABASE=mysql", "-p", "3306:3306", "mysql:8"])
+    }
+
     @Test("a dash-leading password shaped like a bundle is the pending value")
     func bundleShapedPasswords() throws {
         #expect(try stored(["/usr/local/bin/sshpass", "-p", "-Secretp", "ssh", "host"]).args
