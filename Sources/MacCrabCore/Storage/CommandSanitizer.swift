@@ -268,11 +268,12 @@ enum CommandSanitizer {
     /// target get no exemption, because another program's arguments follow
     /// there. Strings redact only a password program's values: the same
     /// redactor runs on free text, which stays byte exact unless it carries a
-    /// credential. `valuePending` reports a password value still owed after
-    /// the last token, which a string segment cut at a separator needs.
+    /// credential. `passwordPending` and `userPairPending` report a value
+    /// still owed after the last token, which a string segment cut at a
+    /// separator needs.
     private static func argumentActions(
         _ arguments: [String], failClosed: Bool
-    ) -> (actions: [ArgumentAction], valuePending: Bool) {
+    ) -> (actions: [ArgumentAction], passwordPending: Bool, userPairPending: Bool) {
         var actions: [ArgumentAction] = []
         actions.reserveCapacity(arguments.count)
         var redactNext = false
@@ -451,7 +452,7 @@ enum CommandSanitizer {
             actions.append(.keep)
             redactNext = false
         }
-        return (actions, (redactNext && !pendingValueIsOptional) || userPairNext)
+        return (actions, redactNext && !pendingValueIsOptional, userPairNext)
     }
 
     /// A password program's `-p`, `-P` and `-N` values in a bare string (a
@@ -568,19 +569,29 @@ enum CommandSanitizer {
                 }
                 // A value that starts with a separator byte (`-p (Tr0ub4dor`,
                 // `-p &Secret1`) ended the segment before it was read. Argv
-                // joined by spaces put it there, so redact the run it starts.
-                // A separator followed by a space (`` `sshpass -p` to``) is
-                // shell syntax and stays.
-                if decided.valuePending, let separator,
+                // joined by spaces put it there as its own token, after a
+                // space; right after the flag only `(` is not shell syntax
+                // (`zip -P(Secret1`). Shell syntax stays: a separator followed
+                // by a space (`` `sshpass -p` to``), a newline, or one glued to
+                // the flag (`-p|openssl`, `$(id -u)/label`). A pending `-u`
+                // takes only a `user:password` run.
+                if let separator, decided.passwordPending || decided.userPairPending,
+                   bytes[separator] != UInt8(ascii: "\n"),
                    separator + 1 < bounds.upperBound,
                    !isWordSpace(bytes[separator + 1]),
-                   bytes[separator + 1] != UInt8(ascii: "\n") {
+                   bytes[separator + 1] != UInt8(ascii: "\n"),
+                   bytes[separator] == UInt8(ascii: "(")
+                    || (separator > bounds.lowerBound && isWordSpace(bytes[separator - 1])) {
                     var end = separator + 1
                     while end < bounds.upperBound, !isWordSpace(bytes[end]),
                           bytes[end] != UInt8(ascii: "\n") {
                         end += 1
                     }
-                    replacements.append((level.rawRange(separator..<end), "[REDACTED]"))
+                    if decided.passwordPending {
+                        replacements.append((level.rawRange(separator..<end), "[REDACTED]"))
+                    } else if let pair = redactingUserPassword(String(decoding: bytes[separator..<end], as: UTF8.self)) {
+                        replacements.append((level.rawRange(separator..<end), pair))
+                    }
                 }
             }
             words.removeAll(keepingCapacity: true)
@@ -648,14 +659,16 @@ enum CommandSanitizer {
     }
 
     /// Every flag after a segment's first word follows a space or a tab,
-    /// possibly through an opening quote (`zip '-P' VALUE`).
+    /// possibly through an opening quote (`zip '-P' VALUE`), escaped or not
+    /// (`"zip \"-P\" VALUE"` inside another script).
     private static func containsSpaceDash<Bytes: Sequence>(_ bytes: Bytes) -> Bool where Bytes.Element == UInt8 {
         var afterSpace = false
         var atStart = true
         for byte in bytes {
             if afterSpace, byte == UInt8(ascii: "-") { return true }
-            let isQuote = byte == UInt8(ascii: "'") || byte == UInt8(ascii: "\"")
-            afterSpace = isWordSpace(byte) || (isQuote && (afterSpace || atStart))
+            let opensWord = byte == UInt8(ascii: "'") || byte == UInt8(ascii: "\"")
+                || byte == UInt8(ascii: "\\")
+            afterSpace = isWordSpace(byte) || (opensWord && (afterSpace || atStart))
             atStart = false
         }
         return false
@@ -827,9 +840,11 @@ enum CommandSanitizer {
     }
 
     /// The program a word may invoke, or nil for a plain option. An
-    /// assignment names its value (`--rsh=sshpass`, `ProxyCommand=sshpass`,
-    /// `GIT_SSH_COMMAND=sshpass`), and leading shell punctuation is not part
-    /// of the name (`(sshpass`, `$(sshpass`, a backtick, `!`, `{`).
+    /// assignment that carries a command names its value (`--rsh=sshpass`,
+    /// `ProxyCommand=sshpass`, `GIT_SSH_COMMAND=sshpass`); any other names
+    /// none (`--name=mysql` is a container, `MYSQL_DATABASE=mysql` a
+    /// database). Leading shell punctuation is not part of the name
+    /// (`(sshpass`, `$(sshpass`, a backtick, `!`, `{`).
     private static func invokedProgram(_ word: String) -> String? {
         // Most words are plain names: no assignment, no leading punctuation.
         if let first = word.utf8.first, !"-({!`$".utf8.contains(first), !word.utf8.contains(UInt8(ascii: "=")) {
@@ -837,6 +852,8 @@ enum CommandSanitizer {
         }
         var name = Substring(word)
         if let equals = name.lastIndex(of: "=") {
+            let key = name[..<equals].lowercased()
+            guard commandCarryingKeySuffixes.contains(where: { key.hasSuffix($0) }) else { return nil }
             name = name[name.index(after: equals)...]
         } else if name.hasPrefix("-") {
             return nil
@@ -846,6 +863,13 @@ enum CommandSanitizer {
         }
         return programName(String(name))
     }
+
+    /// Options and variables whose value is a command line: rsync's `--rsh`
+    /// and `--rsync-path`, ssh's `ProxyCommand`, git's `core.sshCommand`,
+    /// `GIT_SSH` and `GIT_SSH_COMMAND`, and other `*_COMMAND` variables.
+    private static let commandCarryingKeySuffixes = [
+        "rsh", "rsync-path", "proxycommand", "sshcommand", "git_ssh", "_command",
+    ]
 
     /// `alice:secret` -> `alice:[REDACTED]`; nil when the token is not a
     /// `user:password` pair: no colon, or a numeric uid:gid (`501:20`). A

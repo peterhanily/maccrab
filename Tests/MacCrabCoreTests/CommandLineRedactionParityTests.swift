@@ -320,6 +320,44 @@ struct CommandLineRedactionParityTests {
         }
     }
 
+    @Test("a separator glued to a pending -u or -p is shell syntax; a pending -u takes only a user:password run")
+    func separatorsAfterPendingFlags() throws {
+        // `-u` is a pair flag for every program, and the next command's text
+        // (a launchd label, a pipeline) is hunting data, not a password.
+        for line in [
+            "launchctl kickstart -k gui/$(id -u)/com.x",
+            "uid=$(id -u);launchctl asuser $uid /bin/ls",
+            "launchctl print gui/`id -u`/com.x",
+            "sort -u|head -5",
+            "set -u;curl x",
+            "set -u\ncurl x",
+            "security find-certificate -c X -p|openssl x509",
+            // After a space, a pending -u still needs a user:password run,
+            // and a newline always ends the command.
+            "sort -u |head -5",
+            "id -u ;ls",
+            "sshpass -p \necho next",
+        ] {
+            #expect(CommandSanitizer.sanitize(line) == line, "\(line)")
+            let argv = ["/bin/sh", "-c", line]
+            #expect(try stored(argv).args == argv, "\(line)")
+        }
+        // A pair that starts with a separator byte is still a pair.
+        let curl = CommandSanitizer.sanitize("curl -U (alice:secret https://x")
+        #expect(!curl.contains("secret"), "\(curl)")
+        #expect(curl.contains("(alice:"), "\(curl)")
+    }
+
+    @Test("a flag behind escaped quotes reaches the walk at the top level too")
+    func escapedQuotedFlagAtTopLevel() throws {
+        let line = #"ssh host "zip \"-P\" Secret77 out.zip f""#
+        let bare = CommandSanitizer.sanitize(line)
+        #expect(!bare.contains("Secret77"), "\(bare)")
+        let process = try stored(["/bin/bash", "-c", line])
+        #expect(!process.args[2].contains("Secret77"), "\(process.args[2])")
+        #expect(!process.commandLine.contains("Secret77"), "\(process.commandLine)")
+    }
+
     @Test("an escaped space or quote in a nested double-quoted script stays inside its word")
     func escapesInNestedScripts() {
         #expect(CommandSanitizer.sanitize(#"sh -c "sshpass -p pass\ word ssh h""#)
@@ -332,10 +370,18 @@ struct CommandLineRedactionParityTests {
 
     @Test("an assignment in argv is not a program; ports stay visible")
     func argvAssignmentsAreNotPrograms() throws {
-        #expect(try stored(["/usr/local/bin/docker", "run", "--name=mysql", "-p", "3306:3306", "mysql:8"]).args
-            == ["/usr/local/bin/docker", "run", "--name=mysql", "-p", "3306:3306", "mysql:8"])
-        #expect(try stored(["/usr/local/bin/docker", "run", "-e", "MYSQL_DATABASE=mysql", "-p", "3306:3306", "mysql:8"]).args
-            == ["/usr/local/bin/docker", "run", "-e", "MYSQL_DATABASE=mysql", "-p", "3306:3306", "mysql:8"])
+        for argv in [
+            ["/usr/local/bin/docker", "run", "--name=mysql", "-p", "3306:3306", "mysql:8"],
+            ["/usr/local/bin/docker", "run", "-e", "MYSQL_DATABASE=mysql", "-p", "3306:3306", "mysql:8"],
+        ] {
+            let process = try stored(argv)
+            #expect(process.args == argv)
+            // The stored command line is rebuilt from argv and walked as a
+            // string, where only an assignment carrying a command names one.
+            #expect(process.commandLine == argv.joined(separator: " "), "\(process.commandLine)")
+            #expect(CommandSanitizer.sanitize(commandLine: argv.joined(separator: " "), arguments: argv)
+                == argv.joined(separator: " "))
+        }
     }
 
     @Test("a dash-leading password shaped like a bundle is the pending value")
