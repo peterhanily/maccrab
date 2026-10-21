@@ -85,20 +85,27 @@ extension MacCrabCtl {
         let directory = maccrabDataDir()
         let encryption: DatabaseEncryption?
         if directory.hasPrefix("/Library/Application Support/MacCrab") {
+            var keyFailure = TraceDashboardKeyExchange.KeyRequestFailure.noAnswer
             guard let resolved = await TraceDashboardKeyExchange.resolveEncryption(
                 supportDir: directory,
-                requester: "maccrabctl"
+                requester: "maccrabctl",
+                failure: { keyFailure = $0 }
             ) else {
                 // Fail loudly and specifically. Opening keyless "worked" and
                 // then failed on every query with an opaque decode error, which
                 // read as store corruption rather than a missing key.
                 // Under sudo the request goes to the root-only inbox; say which,
-                // and whether it could be queued at all.
+                // and why no key came back.
                 let requestDirectory = InboxDirectories.requestDirectory(dataDir: directory)
                 print("Cannot read tracegraph.db: no trace read key for uid \(getuid()).")
-                if (try? InboxDirectories.preparedRequestDirectory(dataDir: directory)) == nil {
+                switch keyFailure {
+                case .noRecipient:
+                    print("Could not create this session's key to receive one.")
+                case .inboxUnavailable:
                     print("Could not queue a key request in \(requestDirectory): it is missing, not writable, or not a private directory.")
-                } else {
+                case .writeFailed:
+                    print("Could not write a key request into \(requestDirectory).")
+                case .noAnswer:
                     print("Asked the engine for one via \(requestDirectory) and it did not answer within 10s.")
                 }
                 print("(The engine seals the key to this process. Check it is running: pgrep -x com.maccrab.agent)")

@@ -165,17 +165,32 @@ public enum TraceDashboardKeyExchange {
         }
     }
 
+    /// Why `resolveEncryption` returned no key.
+    public enum KeyRequestFailure: String, Sendable, Equatable {
+        /// This session's recipient key could not be created.
+        case noRecipient
+        /// The request inbox is missing, not writable, or (under root) not a
+        /// private directory.
+        case inboxUnavailable
+        /// The request could not be written into the inbox.
+        case writeFailed
+        /// The request was queued and the engine did not answer in time.
+        case noAnswer
+    }
+
     /// Resolve a read-side encryption for the root-owned trace stores: use an
     /// envelope already addressed to this process if one exists, otherwise ask
     /// the daemon for one and wait a bounded time for the reply.
     ///
-    /// Returns nil only when the daemon did not answer — the caller should say
-    /// so plainly rather than opening keyless and failing later as an opaque
-    /// decode error, which read as store corruption.
+    /// Returns nil when no key could be had, and reports why through
+    /// `failure` — the caller should say so plainly rather than opening
+    /// keyless and failing later as an opaque decode error, which read as
+    /// store corruption.
     public static func resolveEncryption(
         supportDir: String,
         requester: String,
-        timeout: TimeInterval = 10
+        timeout: TimeInterval = 10,
+        failure: (KeyRequestFailure) -> Void = { _ in }
     ) async -> DatabaseEncryption? {
         let responsePath = supportDir + "/dashboard_trace_key_\(getuid()).json"
 
@@ -194,20 +209,29 @@ public enum TraceDashboardKeyExchange {
 
         if let ready = tryExisting() { return ready }
 
-        guard let recipient = try? dashboardPrivateKeyForCurrentSession(),
-              let inboxDir = try? InboxDirectories.preparedRequestDirectory(dataDir: supportDir),
-              writeKeyRequest(
-                inboxDir: inboxDir,
-                publicKey: recipient.publicKey.rawRepresentation,
-                requester: requester
-              )
-        else { return nil }
+        guard let recipient = try? dashboardPrivateKeyForCurrentSession() else {
+            failure(.noRecipient)
+            return nil
+        }
+        guard let inboxDir = try? InboxDirectories.preparedRequestDirectory(dataDir: supportDir) else {
+            failure(.inboxUnavailable)
+            return nil
+        }
+        guard writeKeyRequest(
+            inboxDir: inboxDir,
+            publicKey: recipient.publicKey.rawRepresentation,
+            requester: requester
+        ) else {
+            failure(.writeFailed)
+            return nil
+        }
 
         let deadline = Date().addingTimeInterval(max(0, timeout))
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 200_000_000)
             if let issued = tryExisting() { return issued }
         }
+        failure(.noAnswer)
         return nil
     }
 

@@ -197,7 +197,7 @@ struct InboxGateTests {
 
     /// Hardcoded independently from production so a newly introduced handler
     /// must be deliberately added to both the cap policy and this adversarial
-    /// corpus. The five id handlers share `readIdRequest`; every other shape
+    /// corpus. The six id handlers share `readIdRequest`; every other shape
     /// parses an arbitrary JSON dictionary directly.
     private static let jsonRequestShapes: [(handler: String, prefix: String, idBased: Bool)] = [
         ("handleSuppressAlertRequests", "suppress-alert-", true),
@@ -205,6 +205,7 @@ struct InboxGateTests {
         ("handleRemoveSuppressionRequests", "remove-suppression-", true),
         ("handleDeleteAlertRequests", "delete-alert-", true),
         ("handleSuppressCampaignRequests", "suppress-campaign-", true),
+        ("handleUnsuppressCampaignRequests", "unsuppress-campaign-", true),
         ("handleLLMConfigRequests", "llm-config-", false),
         ("handleRecordClipboardRequests", "record-clipboard-", false),
         ("handleBuiltinRuleSettingRequests", "builtin-rule-setting-", false),

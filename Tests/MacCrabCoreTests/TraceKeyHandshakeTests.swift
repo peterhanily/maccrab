@@ -124,6 +124,46 @@ struct TraceKeyHandshakeTests {
         #expect(elapsed < 120, "the wait must terminate, not hang (took \(elapsed)s)")
     }
 
+    @Test("resolve says why no key came back")
+    func resolveReportsWhy() async throws {
+        guard geteuid() != 0 else { return }  // Root asks through the root-only inbox.
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("maccrab-resolve-why-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        typealias Failure = TraceDashboardKeyExchange.KeyRequestFailure
+
+        func failure(supportDir: URL) async -> Failure? {
+            var reported: Failure?
+            let resolved = await TraceDashboardKeyExchange.resolveEncryption(
+                supportDir: supportDir.path, requester: "unit-test", timeout: 0,
+                failure: { reported = $0 }
+            )
+            #expect(resolved == nil)
+            return reported
+        }
+
+        // Queued, and no engine answered.
+        let quiet = base.appendingPathComponent("quiet")
+        try FileManager.default.createDirectory(
+            at: quiet.appendingPathComponent("inbox"), withIntermediateDirectories: true)
+        #expect(await failure(supportDir: quiet) == .noAnswer)
+
+        // The inbox path is a file, so no request can be queued.
+        let blocked = base.appendingPathComponent("blocked")
+        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+        #expect(FileManager.default.createFile(atPath: blocked.appendingPathComponent("inbox").path, contents: Data()))
+        #expect(await failure(supportDir: blocked) == .inboxUnavailable)
+
+        // The inbox exists but this user cannot write into it.
+        let readOnly = base.appendingPathComponent("read-only")
+        let inbox = readOnly.appendingPathComponent("inbox")
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        #expect(chmod(inbox.path, 0o500) == 0)
+        defer { chmod(inbox.path, 0o700) }
+        #expect(await failure(supportDir: readOnly) == .writeFailed)
+    }
+
     @Test("an envelope addressed to another process is refused, not misread")
     func foreignEnvelopeRefused() throws {
         // The property that forced the CLI to run its own handshake.

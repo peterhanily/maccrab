@@ -1959,36 +1959,50 @@ enum DaemonTimers {
     /// discards every entry, reported through `discarded`, before any is
     /// dispatched.
     static func ensureRootInboxDirectory(
-        at path: String, discarded: ((String) -> Void)? = nil
+        at path: String,
+        writesTaintMarker: Bool = true,
+        discarded: ((String) -> Void)? = nil
     ) -> Bool {
         let taintMarker = path + ".tainted"
+        func taint() {
+            // Held in memory too, so a marker that cannot be written (a full
+            // volume, no descriptors left) still blocks dispatch until a purge.
+            // Tests turn the write off to stand for that failure.
+            taintedRootInboxes.withLock { _ = $0.insert(path) }
+            if writesTaintMarker { writeRootInboxTaintMarker(taintMarker) }
+        }
         if mkdir(path, 0o700) != 0, errno != EEXIST { return false }
         var st = stat()
         guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR,
               st.st_uid == geteuid() else {
-            markRootInboxTainted(taintMarker)
+            taint()
             return false
         }
         if (st.st_mode & 0o7777) != 0o700 {
-            markRootInboxTainted(taintMarker)
+            taint()
             guard chmod(path, 0o700) == 0 else { return false }
         }
         guard InboxDirectories.isPrivateDirectory(at: path) else {
-            markRootInboxTainted(taintMarker)
+            taint()
             return false
         }
         var marker = stat()
-        if lstat(taintMarker, &marker) == 0 {
+        let tainted = taintedRootInboxes.withLock { $0.contains(path) }
+        if tainted || lstat(taintMarker, &marker) == 0 {
             for name in (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? [] {
                 removeInboxEntry(at: path + "/" + name)
                 discarded?(name)
             }
             guard unlink(taintMarker) == 0 || errno == ENOENT else { return false }
+            taintedRootInboxes.withLock { _ = $0.remove(path) }
         }
         return true
     }
 
-    private static func markRootInboxTainted(_ marker: String) {
+    /// Root-only inboxes seen unsafe since their last purge.
+    private static let taintedRootInboxes = OSAllocatedUnfairLock<Set<String>>(initialState: [])
+
+    private static func writeRootInboxTaintMarker(_ marker: String) {
         let descriptor = open(marker, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY, 0o600)
         if descriptor >= 0 { close(descriptor) }
     }
@@ -1999,7 +2013,7 @@ enum DaemonTimers {
     /// hardened reader.
     static let knownInboxRequestPrefixes = [
         "suppress-alert-", "unsuppress-alert-", "delete-alert-", "remove-suppression-",
-        "suppress-campaign-", "refresh-intel-", "reload-rules-",
+        "suppress-campaign-", "unsuppress-campaign-", "refresh-intel-", "reload-rules-",
         "llm-config-", "flush-request-", "record-clipboard-",
         "builtin-rule-setting-", "set-daemon-config-", "install-rule-",
         "remove-rule-", "set-agent-capabilities-", "prune-alerts-",
@@ -2030,7 +2044,8 @@ enum DaemonTimers {
         inboxDir: String,
         maxEntries: Int = 512,
         temporaryFileGrace: TimeInterval = 60,
-        now: Date = Date()
+        now: Date = Date(),
+        seen: SeenInboxInodes = seenPublicInboxInodes
     ) -> InboxScanBatch {
         let names = scanner.nextBatch(limit: maxEntries)
         var requests: [String] = []
@@ -2043,17 +2058,21 @@ enum DaemonTimers {
             }
 
             let path = inboxDir + "/" + name
+            // lstat never follows a planted symlink and never opens a FIFO.
+            var st = stat()
+            let statted = lstat(path, &st) == 0
+            let isRegular = statted && (st.st_mode & S_IFMT) == S_IFREG
             guard name.hasPrefix(".") else {
+                // A link kept to a request no handler claims must not come
+                // back later under a claimed name.
+                if isRegular { rememberDiscardedRequest(st, now: now, seen: seen) }
                 removeInboxEntry(at: path)
                 continue
             }
 
-            // lstat never follows a planted symlink and never opens a FIFO.
             // Only a recent REGULAR dotfile can be a legitimate atomic writer.
-            var st = stat()
-            guard lstat(path, &st) == 0 else { continue }
-            let type = st.st_mode & S_IFMT
-            guard type == S_IFREG else {
+            guard statted else { continue }
+            guard isRegular else {
                 removeInboxEntry(at: path)
                 continue
             }
@@ -2065,6 +2084,7 @@ enum DaemonTimers {
             // A far-future mtime is attacker-controlled, not an indefinite
             // lease. Allow one grace interval for ordinary clock adjustment.
             if age >= temporaryFileGrace || age < -temporaryFileGrace {
+                rememberDiscardedRequest(st, now: now, seen: seen)
                 removeInboxEntry(at: path)
             }
         }
@@ -5680,6 +5700,7 @@ enum DaemonTimers {
         let rootChannelUsable = OSAllocatedUnfairLock<Bool>(
             initialState: ensureRootInboxDirectory(at: rootInboxDir, discarded: discardPlantedRootRequest))
         if !rootChannelUsable.withLock({ $0 }) {
+            inboxLogger.warning("Root-only request directory unavailable at \(rootInboxDir, privacy: .public); root requests and capability grants are disabled")
             print("[inbox] root-only request directory unavailable at \(rootInboxDir); root requests and capability grants are disabled")
         }
 
@@ -5740,6 +5761,11 @@ enum DaemonTimers {
                     return usable != rootUsable
                 }
                 if rootStateChanged {
+                    if rootUsable {
+                        inboxLogger.notice("Root-only request directory is usable again at \(rootInboxDir, privacy: .public)")
+                    } else {
+                        inboxLogger.warning("Root-only request directory unavailable at \(rootInboxDir, privacy: .public); root requests and capability grants are disabled")
+                    }
                     print(rootUsable
                         ? "[inbox] root-only request directory is usable again at \(rootInboxDir)"
                         : "[inbox] root-only request directory unavailable at \(rootInboxDir); root requests and capability grants are disabled")
@@ -6283,6 +6309,9 @@ enum DaemonTimers {
         let removeSuppressionReqs = files.filter { $0.hasPrefix("remove-suppression-") && $0.hasSuffix(".json") }
         let deleteAlertReqs = files.filter { $0.hasPrefix("delete-alert-") && $0.hasSuffix(".json") }
         let suppressCampaignReqs = files.filter { $0.hasPrefix("suppress-campaign-") && $0.hasSuffix(".json") }
+        // The dashboard's campaign restore, queued when it cannot write the
+        // root-owned alert store itself.
+        let unsuppressCampaignReqs = files.filter { $0.hasPrefix("unsuppress-campaign-") && $0.hasSuffix(".json") }
         let refreshIntelReqs = files.filter { $0.hasPrefix("refresh-intel-") && $0.hasSuffix(".json") }
         let reloadRulesReqs = files.filter { $0.hasPrefix("reload-rules-") && $0.hasSuffix(".json") }
         let llmConfigReqs = files.filter { $0.hasPrefix("llm-config-") && $0.hasSuffix(".json") }
@@ -6323,6 +6352,7 @@ enum DaemonTimers {
         await handleRemoveSuppressionRequests(removeSuppressionReqs, inboxDir: inboxDir, state: state)
         await handleDeleteAlertRequests(deleteAlertReqs, inboxDir: inboxDir, state: state)
         await handleSuppressCampaignRequests(suppressCampaignReqs, inboxDir: inboxDir, state: state)
+        await handleUnsuppressCampaignRequests(unsuppressCampaignReqs, inboxDir: inboxDir, state: state)
         await handleRefreshIntelRequests(refreshIntelReqs, inboxDir: inboxDir, state: state)
         await handleReloadRulesRequests(reloadRulesReqs, inboxDir: inboxDir, state: state)
         await handleLLMConfigRequests(llmConfigReqs, inboxDir: inboxDir, state: state)
@@ -6354,13 +6384,14 @@ enum DaemonTimers {
         var anyAuthorized = false
         for name in names {
             let path = inboxDir + "/" + name
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             if isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) {
                 anyAuthorized = true
                 auditLogInbox(state: state, prefix: "flush", id: name, uid: uid, result: "ok")
             } else {
                 print("[inbox] flush \(name) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "flush", id: name, uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "flush", id: name, uid: owner.auditUID, result: owner.rejectionResult)
             }
             removeInboxEntry(at: path)
         }
@@ -6397,10 +6428,11 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)   // lstat — rejects symlink/hardlink forgery
+            let owner = requestOwner(at: path)   // lstat — rejects symlink/hardlink forgery
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] record-clipboard REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "record-clipboard", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "record-clipboard", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             // v1.21.4 review fix (M1): clipboard content is bounded DOWNSTREAM by
@@ -6442,10 +6474,11 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] builtin-rule-setting REJECTED uid=\(uid)")
-                auditLogInbox(state: state, prefix: "builtin-rule-setting", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "builtin-rule-setting", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
@@ -6484,15 +6517,16 @@ enum DaemonTimers {
             defer { removeInboxEntry(at: path) }
             let requestID = RuntimeConfigurationFiles.requestID(filename: name, operation: "set-daemon-config") ?? UUID()
             let identity = DaemonProcessIdentity.current.telemetryIdentity
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             var receipt = RuntimeRequestReceipt(
                 requestID: requestID, operation: "set-daemon-config", state: .rejected,
                 engineIdentity: identity, reason: "Request could not be validated"
             )
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
-                receipt.reason = "Request owner is not authorized"
+                receipt.reason = owner.rejectionReason
                 try? await state.runtimeConfigurationReporter.record(receipt)
-                auditLogInbox(state: state, prefix: "set-daemon-config", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "set-daemon-config", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
@@ -6661,9 +6695,10 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: rootChannel) else {
-                auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
@@ -6730,9 +6765,10 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
-                auditLogInbox(state: state, prefix: "install-rule", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "install-rule", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
@@ -6780,9 +6816,10 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
-                auditLogInbox(state: state, prefix: "remove-rule", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "remove-rule", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
@@ -6813,10 +6850,11 @@ enum DaemonTimers {
             // file). requestOwnerUID lstat()s without opening the file, so an
             // unauthorized request is rejected + removed (via defer) WITHOUT its
             // bytes ever being read.
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] suppress-alert \(name) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "suppress-alert", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "suppress-alert", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let id = readIdRequest(at: path) else {
@@ -6842,15 +6880,16 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             let requestID = RuntimeConfigurationFiles.requestID(filename: name, operation: "remove-suppression") ?? UUID()
             var receipt = RuntimeRequestReceipt(requestID: requestID, operation: "remove-suppression",
                 state: .rejected, engineIdentity: DaemonProcessIdentity.current.telemetryIdentity,
                 reason: "Request could not be validated")
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
-                receipt.reason = "Request owner is not authorized"
+                receipt.reason = owner.rejectionReason
                 try? await state.runtimeConfigurationReporter.record(receipt)
-                auditLogInbox(state: state, prefix: "remove-suppression", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "remove-suppression", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let id = readIdRequest(at: path), UUID(uuidString: id) != nil else {
@@ -6894,10 +6933,11 @@ enum DaemonTimers {
             // v1.21.4 (audit HIGH, local-DoS): authorize before reading — see
             // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
             // must never reach readIdRequest on an unauthorized request.
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] unsuppress-alert \(name) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "unsuppress-alert", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "unsuppress-alert", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let id = readIdRequest(at: path) else {
@@ -6924,10 +6964,11 @@ enum DaemonTimers {
             // v1.21.4 (audit HIGH, local-DoS): authorize before reading — see
             // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
             // must never reach readIdRequest on an unauthorized request.
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] delete-alert \(name) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "delete-alert", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "delete-alert", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let id = readIdRequest(at: path) else {
@@ -6971,9 +7012,10 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
-                auditLogInbox(state: state, prefix: "prune-alerts", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "prune-alerts", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             // v1.21.5 (audit S-05): floor the window at 1 day. `days >= 0` let a
@@ -7034,9 +7076,10 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
-                auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
@@ -7080,9 +7123,10 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
-                auditLogInbox(state: state, prefix: "trace-dashboard-key", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "trace-dashboard-key", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
@@ -7172,9 +7216,10 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
-                auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
@@ -7284,10 +7329,11 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] refresh-intel \(name) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "refresh-intel", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "refresh-intel", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             anyAuthorized = true
@@ -7315,17 +7361,18 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] reload-rules \(name) REJECTED uid=\(uid) (not console-user or root)")
                 let receipt = RuntimeRequestReceipt(
                     requestID: RuntimeConfigurationFiles.requestID(filename: name, operation: "reload-rules") ?? UUID(),
                     operation: "reload-rules", state: .rejected,
                     engineIdentity: DaemonProcessIdentity.current.telemetryIdentity,
-                    reason: "Request owner is not authorized"
+                    reason: owner.rejectionReason
                 )
                 try? await state.runtimeConfigurationReporter.record(receipt)
-                auditLogInbox(state: state, prefix: "reload-rules", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "reload-rules", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             do {
@@ -7366,9 +7413,10 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
-                auditLogInbox(state: state, prefix: "llm-config", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "llm-config", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let data = safeReadInboxRequestData(at: path),
@@ -7500,10 +7548,11 @@ enum DaemonTimers {
             // v1.21.4 (audit HIGH, local-DoS): authorize before reading — see
             // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
             // must never reach readIdRequest on an unauthorized request.
-            let uid = requestOwnerUID(at: path)
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
             guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
                 print("[inbox] suppress-campaign \(name) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "suppress-campaign", id: "-", uid: uid, result: "rejected_uid")
+                auditLogInbox(state: state, prefix: "suppress-campaign", id: "-", uid: owner.auditUID, result: owner.rejectionResult)
                 continue
             }
             guard let id = readIdRequest(at: path) else {
@@ -7546,6 +7595,45 @@ enum DaemonTimers {
             }
             print("[inbox] suppress-campaign id=\(id) uid=\(uid) fanOut=\(fanOut)")
             auditLogInbox(state: state, prefix: "suppress-campaign", id: id, uid: uid, result: "ok fanOut=\(fanOut)")
+        }
+    }
+
+    /// Reverse of `handleSuppressCampaignRequests`: the campaign's own row,
+    /// the alerts it contributed, and the persistent campaign row come back.
+    private static func handleUnsuppressCampaignRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { removeInboxEntry(at: path) }
+            let owner = requestOwner(at: path)
+            let uid = owner.uid
+            guard isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir)) else {
+                print("[inbox] unsuppress-campaign \(name) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "unsuppress-campaign", id: "-",
+                              uid: owner.auditUID, result: owner.rejectionResult)
+                continue
+            }
+            guard let id = readIdRequest(at: path) else {
+                print("[inbox] unsuppress-campaign \(name): malformed payload")
+                continue
+            }
+            // Best-effort, as in the suppression: pre-v1.8 campaigns have no
+            // alerts.db row of their own.
+            try? await state.alertStore.unsuppress(alertId: id)
+            do {
+                let restored = try await state.alertStore.unsuppress(campaignId: id)
+                if let cs = state.campaignStore {
+                    try? await cs.setSuppressed(id: id, false)
+                }
+                print("[inbox] unsuppress-campaign id=\(id) uid=\(uid) restored=\(restored)")
+                auditLogInbox(state: state, prefix: "unsuppress-campaign", id: id, uid: uid,
+                              result: "ok restored=\(restored)")
+            } catch {
+                print("[inbox] unsuppress-campaign id=\(id) uid=\(uid) failed: \(error)")
+                auditLogInbox(state: state, prefix: "unsuppress-campaign", id: id, uid: uid,
+                              result: "failed:\(error)")
+            }
         }
     }
 
@@ -7650,13 +7738,42 @@ enum DaemonTimers {
     // unit-tested against real on-disk files — this is the gate that stops a
     // local user from forging root ownership of an inbox request.
     static func requestOwnerUID(at path: String) -> Int {
+        requestOwner(at: path).uid
+    }
+
+    /// The owner check with its reason, so a refused request is audited and
+    /// answered as what it was rather than as an unauthorized owner.
+    struct InboxRequestOwner: Equatable {
+        /// The authorizing uid, or -1 for any refusal or unusable carrier.
+        let uid: Int
+        let refusal: PublicInboxRefusal?
+        /// The lstat owner, -1 when the entry could not be read.
+        let fileOwner: Int
+
+        /// The audit result for a request this check turned away.
+        var rejectionResult: String { refusal.map { "refused_\($0.rawValue)" } ?? "rejected_uid" }
+        /// The uid to audit: the file's real owner when it was refused.
+        var auditUID: Int { refusal == nil ? uid : fileOwner }
+        /// The receipt reason for a request this check turned away.
+        var rejectionReason: String {
+            switch refusal {
+            case .stale?: return "Request is more than 10 minutes old"
+            case .future?: return "Request is dated in the future"
+            case .replayed?: return "Request was already seen"
+            case nil: return "Request owner is not authorized"
+            }
+        }
+    }
+
+    static func requestOwner(at path: String) -> InboxRequestOwner {
         var st = stat()
-        guard lstat(path, &st) == 0 else { return -1 }
+        guard lstat(path, &st) == 0 else { return InboxRequestOwner(uid: -1, refusal: nil, fileOwner: -1) }
+        let fileOwner = Int(st.st_uid)
         // Refuse every non-regular object. In particular, a FIFO owned by an
         // otherwise authorized uid must not pass the owner gate and reach a
         // handler read; sockets/devices/directories are equally invalid request
         // carriers. The opened-fd reader repeats this check after open.
-        if (st.st_mode & S_IFMT) != S_IFREG { return -1 }
+        if (st.st_mode & S_IFMT) != S_IFREG { return InboxRequestOwner(uid: -1, refusal: nil, fileOwner: fileOwner) }
         // In the 1777 inbox a user can keep a link to the console user's
         // request and rename it back in once the engine has consumed it.
         // Checked before the link count, so a request rejected while someone
@@ -7667,20 +7784,23 @@ enum DaemonTimers {
                     + TimeInterval(st.st_birthtimespec.tv_nsec) / 1_000_000_000,
                 now: Date().timeIntervalSince1970,
                 inode: SeenInboxInodes.Inode(device: Int64(st.st_dev), number: UInt64(st.st_ino)),
-                ownedByConsoleUser: consoleUserUID() == st.st_uid,
                 seen: seenPublicInboxInodes
             )
             if let refusal {
-                print("[inbox] \((path as NSString).lastPathComponent) refused: \(refusal.rawValue) request")
-                return -1
+                let name = (path as NSString).lastPathComponent
+                inboxLogger.notice("Refused inbox request \(name, privacy: .public) from uid \(fileOwner): \(refusal.rawValue, privacy: .public)")
+                print("[inbox] \(name) refused: \(refusal.rawValue) request")
+                return InboxRequestOwner(uid: -1, refusal: refusal, fileOwner: fileOwner)
             }
         }
         // Refuse hardlinked files: st_nlink > 1 means the inode also
         // exists elsewhere in the filesystem; the attacker may have
         // hardlinked a root-owned file into the world-writable inbox.
-        if st.st_nlink > 1 { return -1 }
-        return Int(st.st_uid)
+        if st.st_nlink > 1 { return InboxRequestOwner(uid: -1, refusal: nil, fileOwner: fileOwner) }
+        return InboxRequestOwner(uid: fileOwner, refusal: nil, fileOwner: fileOwner)
     }
+
+    static let inboxLogger = Logger(subsystem: "com.maccrab", category: "inbox")
 
     /// Whether `path` names an entry of the public (1777) inbox.
     static func isPublicInboxEntry(_ path: String) -> Bool {
@@ -7699,13 +7819,15 @@ enum DaemonTimers {
     static let publicInboxRequestMaximumAge: TimeInterval = 600
     static let publicInboxRequestFutureTolerance: TimeInterval = 60
 
-    /// Inodes of console-user requests the public inbox has seen, accepted or
-    /// rejected, so a saved link to one cannot be renamed back in while it is
-    /// still fresh. Only console-user inodes are recorded, so another user's
-    /// files cannot push them out, and APFS does not reuse an inode number
-    /// while a link to it exists. A console-user inode taken from outside the
-    /// inbox within the freshness window is still accepted; closing that needs
-    /// a per-user private inbox.
+    /// Inodes of fresh public-inbox entries, accepted, rejected or discarded,
+    /// so a saved link to one cannot be renamed back in while it is still
+    /// fresh. Every owner's fresh inodes are recorded, and a record leaves
+    /// only once its file could no longer pass the freshness check, so old
+    /// files linked in by the thousand cannot push a live record out. The
+    /// poller examines at most 512 public entries a tick, which keeps the set
+    /// well below its safety cap. A console-user inode taken from outside the
+    /// inbox within the freshness window is still accepted; closing that
+    /// needs a per-user private inbox.
     final class SeenInboxInodes: @unchecked Sendable {
         struct Inode: Hashable {
             let device: Int64
@@ -7713,46 +7835,75 @@ enum DaemonTimers {
         }
 
         private let lock = NSLock()
+        private let retention: TimeInterval
         private let capacity: Int
+        private var births: [Inode: TimeInterval] = [:]
         private var order: [Inode] = []
-        private var oldest = 0
-        private var members: Set<Inode> = []
+        private var head = 0
 
-        init(capacity: Int) { self.capacity = max(1, capacity) }
+        init(
+            retention: TimeInterval = publicInboxRequestMaximumAge + publicInboxRequestFutureTolerance,
+            capacity: Int = 100_000
+        ) {
+            self.retention = retention
+            self.capacity = max(1, capacity)
+        }
 
-        /// True when `inode` was seen before; otherwise records it, forgetting
-        /// the oldest record once full.
-        func checkAndRecord(_ inode: Inode) -> Bool {
+        /// True when `inode` was seen before; otherwise records it.
+        func checkAndRecord(_ inode: Inode, birthTime: TimeInterval, now: TimeInterval) -> Bool {
             lock.lock(); defer { lock.unlock() }
-            if members.contains(inode) { return true }
-            members.insert(inode)
-            if order.count < capacity {
-                order.append(inode)
-            } else {
-                members.remove(order[oldest])
-                order[oldest] = inode
-                oldest = (oldest + 1) % capacity
+            // Records leave in arrival order once their file is past the
+            // freshness window, and so could no longer be accepted anyway.
+            while head < order.count {
+                if let birth = births[order[head]], now - birth <= retention { break }
+                births.removeValue(forKey: order[head])
+                head += 1
+            }
+            if births[inode] != nil { return true }
+            // The cap is a backstop for a runaway clock, not the bound.
+            while births.count >= capacity, head < order.count {
+                births.removeValue(forKey: order[head])
+                head += 1
+            }
+            births[inode] = birthTime
+            order.append(inode)
+            if head > 4_096, head * 2 > order.count {
+                order.removeFirst(head)
+                head = 0
             }
             return false
         }
 
-        var count: Int { lock.lock(); defer { lock.unlock() }; return members.count }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return births.count }
     }
 
-    static let seenPublicInboxInodes = SeenInboxInodes(capacity: 4_096)
+    static let seenPublicInboxInodes = SeenInboxInodes()
 
-    /// The freshness and replay decision for one public-inbox entry.
+    /// The freshness and replay decision for one public-inbox entry. A stale
+    /// or future-dated entry is refused without being recorded: it can never
+    /// be accepted, so recording it would only crowd the records that matter.
     static func publicInboxRefusal(
         birthTime: TimeInterval,
         now: TimeInterval,
         inode: SeenInboxInodes.Inode,
-        ownedByConsoleUser: Bool,
         seen: SeenInboxInodes
     ) -> PublicInboxRefusal? {
-        if ownedByConsoleUser, seen.checkAndRecord(inode) { return .replayed }
         if now - birthTime > publicInboxRequestMaximumAge { return .stale }
         if birthTime - now > publicInboxRequestFutureTolerance { return .future }
+        if seen.checkAndRecord(inode, birthTime: birthTime, now: now) { return .replayed }
         return nil
+    }
+
+    /// Records a regular file the poller is about to discard unclaimed, so a
+    /// link kept to it cannot return under a claimed name while fresh.
+    static func rememberDiscardedRequest(_ st: stat, now: Date, seen: SeenInboxInodes) {
+        _ = publicInboxRefusal(
+            birthTime: TimeInterval(st.st_birthtimespec.tv_sec)
+                + TimeInterval(st.st_birthtimespec.tv_nsec) / 1_000_000_000,
+            now: now.timeIntervalSince1970,
+            inode: SeenInboxInodes.Inode(device: Int64(st.st_dev), number: UInt64(st.st_ino)),
+            seen: seen
+        )
     }
 
     /// Returns the UID of the user logged in at the macOS GUI console.

@@ -96,6 +96,41 @@ struct RootInboxChannelTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: inbox) == ["reload-rules-c.json"])
     }
 
+    @Test("an inbox seen unsafe is purged even when its taint marker cannot be written")
+    func unwritableMarkerStillPurges() throws {
+        let base = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let inbox = base + "/" + InboxDirectories.rootName
+        var discarded: [String] = []
+        func ensure() -> Bool {
+            DaemonTimers.ensureRootInboxDirectory(at: inbox, writesTaintMarker: false) { discarded.append($0) }
+        }
+        #expect(ensure())
+
+        // An ACL taints the directory in memory; the planted request is still
+        // dropped once the ACL is gone, though no marker was written.
+        #expect(try chmodACL(["+a", "everyone allow add_file", inbox]) == 0)
+        #expect(!ensure())
+        #expect(!FileManager.default.fileExists(atPath: inbox + ".tainted"))
+        #expect(FileManager.default.createFile(atPath: inbox + "/reload-rules-a.json", contents: Data("{}".utf8)))
+        #expect(try chmodACL(["-N", inbox]) == 0)
+        #expect(ensure())
+        #expect(try FileManager.default.contentsOfDirectory(atPath: inbox).isEmpty)
+        #expect(discarded == ["reload-rules-a.json"])
+
+        // A widened mode is purged in the same call, marker or not.
+        chmod(inbox, 0o755)
+        #expect(FileManager.default.createFile(atPath: inbox + "/flush-request-b.json", contents: Data("{}".utf8)))
+        #expect(ensure())
+        #expect(try FileManager.default.contentsOfDirectory(atPath: inbox).isEmpty)
+        #expect(discarded == ["reload-rules-a.json", "flush-request-b.json"])
+
+        // Once purged, a safe directory keeps its requests.
+        #expect(FileManager.default.createFile(atPath: inbox + "/reload-rules-c.json", contents: Data("{}".utf8)))
+        #expect(ensure())
+        #expect(try FileManager.default.contentsOfDirectory(atPath: inbox) == ["reload-rules-c.json"])
+    }
+
     @Test("each channel reaches one dispatcher, and every handler authorizes by its channel")
     func pollerWiring() throws {
         let root = URL(fileURLWithPath: #filePath)
@@ -112,7 +147,7 @@ struct RootInboxChannelTests {
             separatedBy: "isAuthorizedInboxRequest(uid: uid, rootChannel: isRootInbox(inboxDir))").count - 1
         let explicit = timers.components(
             separatedBy: "isAuthorizedInboxRequest(uid: uid, rootChannel: rootChannel)").count - 1
-        #expect(byDirectory == 18)
+        #expect(byDirectory == 19, "18 verbs plus the campaign restore")
         #expect(explicit == 1, "the capability handler uses the dispatcher's channel")
         // The root dispatch call itself, and grants handled only through the
         // dispatcher, which sets the audit line's channel.
@@ -129,6 +164,11 @@ struct RootInboxChannelTests {
         #expect(timers.contains("await $inboxAuditChannel.withValue(rootChannel ? \"root\" : \"public\")"))
         #expect(timers.contains("source=inbox\\(channelField) prefix="))
         #expect(timers.contains("root-only request directory is usable again"))
+        // A System Extension's stdout is discarded: state changes and refusals
+        // reach the unified log.
+        #expect(timers.contains("inboxLogger.warning(\"Root-only request directory unavailable"))
+        #expect(timers.contains("inboxLogger.notice(\"Root-only request directory is usable again"))
+        #expect(timers.contains("inboxLogger.notice(\"Refused inbox request"))
         // `sudo maccrabctl trace …` asks through the inbox its user may write.
         let exchange = try String(
             contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Storage/TraceDashboardKeyExchange.swift"),
