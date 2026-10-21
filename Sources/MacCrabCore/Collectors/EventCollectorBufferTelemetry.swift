@@ -29,9 +29,10 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
     /// `open` (credential / honeyfile / agent-content reads, which the
     /// single-event credential rules, the wall-clock sequence windows and
     /// the injection-evidence weld all need in order and persisted) and
-    /// `btm_add` (the only sensor for a ghost login item). A dynamic-AI OPEN
-    /// is the one exception, decided per event in `finalLane(for:)`, as is
-    /// a protected file event the ES worker stamped for the priority lane.
+    /// `btm_add` (the only sensor for a ghost login item). A dynamic-AI OPEN,
+    /// or a protected OPEN past the ES worker's budget, rides the file lane
+    /// instead, and a protected file event the worker admitted rides the
+    /// priority lane; both are decided per event in `finalLane(for:)`.
     public static func routesToFile(_ category: EventCategory, action: String) -> Bool {
         guard category == .file else { return false }
         switch action {
@@ -40,34 +41,97 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
         }
     }
 
-    /// Enrichment key the ES worker stamps on a protected file event it
-    /// admitted to the priority lane (`isProtectedFileCandidate`).
+    /// Enrichment key the ES worker stamps on a protected event: admitted to
+    /// the priority lane, or (for an OPEN, which otherwise keeps it) refused.
     public static let protectedFileLaneEnrichmentKey = "protected_file_lane"
     /// The value for a protected file event admitted to the priority lane.
     public static let protectedFileLanePriority = "priority"
+    /// The value for a protected OPEN the worker's budget refused.
+    public static let protectedFileLaneFile = "file"
 
-    /// Persistence locations. The file lane evicts its oldest events under
+    /// Persistence locations, anchored where launchd, sudo, cron and the
+    /// shells read them. The file lane evicts its oldest events under
     /// overload, and an agent could read a few thousand files to push its own
-    /// LaunchAgent write out of the lane before it was evaluated.
-    static let persistencePathMarkers = [
-        "/LaunchAgents/", "/LaunchDaemons/", "/StartupItems/",
+    /// LaunchAgent write out of the lane before it was evaluated. Anchoring
+    /// matters for the budget: writes to a path that merely contains a marker
+    /// (`/tmp/LaunchAgents/x`, `/tmp/a/.zshrc`) cost nothing and would drain
+    /// it ahead of a real plist write.
+    private static let persistencePrefixes = [
+        "/Library/LaunchAgents/", "/Library/LaunchDaemons/", "/Library/StartupItems/",
         "/Library/Security/SecurityAgentPlugins/", "/Library/ScriptingAdditions/",
-        "/.ssh/authorized_keys", "/etc/sudoers", "/usr/lib/cron/tabs/", "/var/at/tabs/",
-        "/.zshrc", "/.zshenv", "/.zprofile", "/.bashrc", "/.bash_profile", "/.profile",
+        "/etc/sudoers", "/private/etc/sudoers", "/usr/lib/cron/tabs/", "/var/at/tabs/",
+        "/private/var/at/tabs/",
+    ]
+    private static let homePersistencePrefixes = [
+        "/Library/LaunchAgents/", "/Library/LaunchDaemons/", "/Library/ScriptingAdditions/",
+    ]
+    private static let homePersistenceFiles: Set<String> = [
+        "/.ssh/authorized_keys", "/.zshrc", "/.zshenv", "/.zprofile", "/.bashrc",
+        "/.bash_profile", "/.profile",
     ]
 
-    /// A file-lane event the ES worker may move to the priority lane: a
-    /// SETMODE (the callback keeps only mode changes that grant execution or
-    /// setuid/setgid, the `chmod +x` of a dropped payload) or any file event
-    /// under a persistence location. Both are rare next to bulk file traffic,
-    /// but unprivileged code can raise either at syscall rate on its own
-    /// files, so the worker admits them through `ProtectedFileLaneBudget`
-    /// and the rest keep the file lane.
+    static func isPersistenceLocation(_ path: String) -> Bool {
+        if persistencePrefixes.contains(where: { path.hasPrefix($0) }) { return true }
+        guard let inHome = homeRelativePath(path) else { return false }
+        return homePersistencePrefixes.contains { inHome.hasPrefix($0) }
+            || homePersistenceFiles.contains(String(inHome))
+    }
+
+    /// The part of `path` inside a user's home (`/Users/<name>`) or root's,
+    /// starting with its `/`; nil for any other path.
+    private static func homeRelativePath(_ path: String) -> Substring? {
+        for root in ["/private/var/root/", "/var/root/"] where path.hasPrefix(root) {
+            return path.dropFirst(root.count - 1)
+        }
+        guard path.hasPrefix("/Users/") else { return nil }
+        let afterUsers = path.dropFirst("/Users/".count)
+        guard let slash = afterUsers.firstIndex(of: "/"), slash != afterUsers.startIndex else { return nil }
+        return afterUsers[slash...]
+    }
+
+    /// An event the ES worker admits to the priority lane only through
+    /// `ProtectedFileLaneBudget`:
+    /// - a SETMODE (the callback keeps only mode changes that grant execution
+    ///   or setuid/setgid, the `chmod +x` of a dropped payload);
+    /// - any file event at a persistence location;
+    /// - a credential / honeyfile / agent-content OPEN (one the static
+    ///   allowlists admitted, so not stamped dynamic-AI).
+    /// All are rare next to bulk file traffic, but unprivileged code can raise
+    /// any of them at syscall rate on its own files, and the priority lane is
+    /// a drop-oldest buffer that also carries exec/fork/exit.
     public static func isProtectedFileCandidate(_ event: Event) -> Bool {
+        guard event.eventCategory == .file else { return false }
+        if event.eventAction == "open" {
+            return event.enrichments[openAdmissionEnrichmentKey] != dynamicAIOpenAdmission
+        }
         guard routesToFile(event.eventCategory, action: event.eventAction) else { return false }
         if event.eventAction == "setmode" { return true }
         guard let path = event.file?.path else { return false }
-        return ExactSubstringSearch.containsAny(path, persistencePathMarkers)
+        return isPersistenceLocation(path)
+    }
+
+    /// Spends one budget token on a protected event and stamps its lane: nil
+    /// for an event that is not a candidate, true when it was admitted to the
+    /// priority lane, false when the budget refused it. A refused OPEN is
+    /// stamped for the file lane; any other refused event already rides it.
+    /// OPENs spend their own budget: an `open()` loop on the caller's own
+    /// `.env` must not use up the tokens a real LaunchAgent write needs.
+    static func stampProtectedLane(
+        _ event: inout Event,
+        budget: ProtectedFileLaneBudget,
+        openBudget: ProtectedFileLaneBudget,
+        nowNanos: UInt64
+    ) -> Bool? {
+        guard isProtectedFileCandidate(event) else { return nil }
+        let isOpen = event.eventAction == "open"
+        if (isOpen ? openBudget : budget).admit(nowNanos: nowNanos) {
+            event.enrichments[protectedFileLaneEnrichmentKey] = protectedFileLanePriority
+            return true
+        }
+        if isOpen {
+            event.enrichments[protectedFileLaneEnrichmentKey] = protectedFileLaneFile
+        }
+        return false
     }
 
     /// The per-event lane. v1.22.7: an `open` stamped
@@ -84,7 +148,8 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
     /// exec by a lane backlog.
     public static func finalLane(for event: Event) -> EventPipelineLane {
         if event.eventCategory == .file, event.eventAction == "open",
-           event.enrichments[openAdmissionEnrichmentKey] == dynamicAIOpenAdmission {
+           event.enrichments[openAdmissionEnrichmentKey] == dynamicAIOpenAdmission
+            || event.enrichments[protectedFileLaneEnrichmentKey] == protectedFileLaneFile {
             return .file
         }
         guard routesToFile(event.eventCategory, action: event.eventAction) else {
@@ -97,14 +162,22 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
     }
 }
 
-/// How many protected file events (`EventPipelineLane.isProtectedFileCandidate`)
-/// one ES worker may move to the priority lane: a token bucket of `capacity`
+/// How many protected events (`EventPipelineLane.isProtectedFileCandidate`)
+/// one ES worker may put on the priority lane: a token bucket of `capacity`
 /// refilled at `refillPerSecond`. The priority lane is a drop-oldest buffer
-/// that also carries exec/fork/exit, and a `chmod 755` loop or a write loop
-/// on the caller's own `~/.zshrc` costs nothing to run, so an unbounded
-/// class would let it evict lineage. Past the budget an event keeps the file
-/// lane. Owned by one serial `ESMessageWorker` queue, so it needs no lock.
+/// that also carries exec/fork/exit, and a `chmod 755` loop, a write loop on
+/// the caller's own `~/.zshrc` or an `open()` loop on its own `.env` costs
+/// nothing to run, so an unbounded class would let it evict lineage. Past the
+/// budget an event rides the file lane. Owned by one serial `ESMessageWorker`
+/// queue, so it needs no lock.
 final class ProtectedFileLaneBudget {
+    /// The OPEN budget: credential and agent-content reads come in bursts
+    /// (every `git` reads `~/.gitconfig`), and even this rate is a small
+    /// fraction of what the priority lane drains.
+    static func forProtectedOpens() -> ProtectedFileLaneBudget {
+        ProtectedFileLaneBudget(capacity: 256, refillPerSecond: 64)
+    }
+
     private let capacity: Double
     private let refillPerNanosecond: Double
     private var tokens: Double

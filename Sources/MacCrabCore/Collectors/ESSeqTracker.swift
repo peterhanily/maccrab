@@ -76,6 +76,9 @@ public final class ESSeqTracker: @unchecked Sendable {
     /// the same path inside the coalescing window. The first callback for the
     /// key was yielded; these were folded into it and counted here.
     private var coalescedOnWorkerByTypeMap: [UInt32: UInt64] = [:]
+    /// Protected events the worker's priority-lane budget refused. They still
+    /// rode the file lane, so this is a demotion count, not a loss.
+    private var protectedLaneRefusedCount: UInt64 = 0
     /// Messages for which normalization produced an Event and the worker offered
     /// that Event to the collector-local AsyncStream. The separate stream-yield
     /// telemetry records whether the offer enqueued or evicted an older event.
@@ -197,6 +200,13 @@ public final class ESSeqTracker: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Record a protected event the priority-lane budget refused.
+    public func recordProtectedLaneRefused() {
+        lock.lock()
+        protectedLaneRefusedCount &+= 1
+        lock.unlock()
+    }
+
     /// Bucket one latency sample. Caller holds `lock`.
     private func recordLatencyLocked(micros: UInt64) {
         let bounds = Self.latencyBoundsMicros
@@ -230,6 +240,7 @@ public final class ESSeqTracker: @unchecked Sendable {
         intentionallyFilteredBeforeWorkerByTypeMap.removeAll(keepingCapacity: true)
         intentionallyFilteredOnWorkerByTypeMap.removeAll(keepingCapacity: true)
         coalescedOnWorkerByTypeMap.removeAll(keepingCapacity: true)
+        protectedLaneRefusedCount = 0
         normalizedYieldedByTypeMap.removeAll(keepingCapacity: true)
         for i in 0..<latencyBuckets.count { latencyBuckets[i] = 0 }
         latencyTotalCount = 0
@@ -284,6 +295,13 @@ public final class ESSeqTracker: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return coalescedOnWorkerByTypeMap
+    }
+
+    /// Protected events the priority-lane budget refused since the last reset.
+    public func protectedLaneRefusedTotal() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return protectedLaneRefusedCount
     }
 
     /// Per-event-type count of normalized Events offered to the collector-local

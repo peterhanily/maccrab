@@ -455,7 +455,7 @@ public final class ESCollector: @unchecked Sendable {
 
     /// Paths and prefixes that generate excessive noise and should be muted
     /// at the kernel level to reduce overhead.
-    private static let mutedPaths: [String] = [
+    static let mutedPaths: [String] = [
         // System binaries and frameworks
         "/System/",
         "/usr/libexec/xpcproxy",
@@ -1418,7 +1418,8 @@ public final class ESCollector: @unchecked Sendable {
     /// Rare, high-value types that may use the whole budget alongside lineage.
     /// A write loop could otherwise fill every reserved slot, and an exec
     /// storm used to refuse a BTM add or a kext load before any ordinary
-    /// message. A protected OPEN joins them per message. SETMODE stays out:
+    /// message. A protected OPEN joins them per message, but only on a worker
+    /// that carries no lineage (`usesWorkerTopReserve`). SETMODE stays out:
     /// the callback keeps every mode change that grants execution, which an
     /// installer's or `rsync -a`'s `chmod 755` does as readily as a payload's
     /// `chmod +x`, and unprivileged code can raise it at syscall rate on its
@@ -1572,9 +1573,26 @@ public final class ESCollector: @unchecked Sendable {
     /// Whether a retained message may also use the top slice of the reserve,
     /// which the write family cannot: a 1-byte write loop could fill every
     /// reserved slot and refuse a credential or honeyfile OPEN at hand-off.
-    static func usesWorkerTopReserve(eventType: UInt32, protectedOpen: Bool) -> Bool {
+    /// A protected OPEN gets that slice only on a worker without lineage (the
+    /// split file client). On one that also carries EXEC/FORK/EXIT (the
+    /// degraded single client) an `open()` loop on the caller's own
+    /// credential-named file would take the slots lineage depends on, so
+    /// there it shares the write family's tier.
+    static func usesWorkerTopReserve(eventType: UInt32, protectedOpen: Bool, carriesLineage: Bool) -> Bool {
         topReserveRawValues.contains(eventType)
+            || (eventType == ES_EVENT_TYPE_NOTIFY_OPEN.rawValue && protectedOpen && !carriesLineage)
+    }
+
+    /// Whether a retained message may use the reserve below its top slice:
+    /// the write family, and a protected OPEN wherever it lacks the top slice.
+    static func usesWriteFamilyReserve(eventType: UInt32, protectedOpen: Bool) -> Bool {
+        writeFamilyRawValues.contains(eventType)
             || (eventType == ES_EVENT_TYPE_NOTIFY_OPEN.rawValue && protectedOpen)
+    }
+
+    /// Whether a client's subscription includes the lineage types.
+    static func carriesLineage(_ types: [es_event_type_t]) -> Bool {
+        types.contains { lineageCriticalRawValues.contains($0.rawValue) }
     }
 
     /// The full pre-split subscription list — `subscribedEvents` plus the
@@ -1682,6 +1700,7 @@ public final class ESCollector: @unchecked Sendable {
         let coalescer = ESRepeatCoalescer()
         // Same ownership as the coalescer: this worker's serial queue only.
         let protectedLaneBudget = ProtectedFileLaneBudget()
+        let protectedOpenLaneBudget = ProtectedFileLaneBudget.forProtectedOpens()
         let worker = ESMessageWorker(
             maxInFlight: maxInFlight,
             label: "com.maccrab.es.message-worker.\(label)",
@@ -1698,6 +1717,7 @@ public final class ESCollector: @unchecked Sendable {
                     tracker: tracker,
                     coalescer: coalescer,
                     protectedLaneBudget: protectedLaneBudget,
+                    protectedOpenLaneBudget: protectedOpenLaneBudget,
                     logger: logger
                 )
             },
@@ -1739,6 +1759,7 @@ public final class ESCollector: @unchecked Sendable {
         context.tracker.reset()
         let tracker = context.tracker
         let worker = context.worker
+        let carriesLineage = Self.carriesLineage(context.subscribedTypes)
         // v1.21.4 Phase-2 (D3) FIX: the coverage-canary recognizer runs HERE, at
         // the true ES callback boundary, so "seen at callback" means the kernel
         // DELIVERED the probe exec — not that it survived the async hand-off +
@@ -1826,9 +1847,9 @@ public final class ESCollector: @unchecked Sendable {
             let accepted = worker.submit(
                 UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()),
                 lineageCritical: ESCollector.usesWorkerTopReserve(
-                    eventType: evType, protectedOpen: protectedOpen
+                    eventType: evType, protectedOpen: protectedOpen, carriesLineage: carriesLineage
                 ),
-                writeFamily: ESCollector.writeFamilyRawValues.contains(evType),
+                writeFamily: ESCollector.usesWriteFamilyReserve(eventType: evType, protectedOpen: protectedOpen),
                 eventType: evType
             )
             if !accepted, let canary = canary { canary.noteDroppedAtHandoff(canaryNonces) }
@@ -2262,6 +2283,13 @@ public final class ESCollector: @unchecked Sendable {
         Self.mergeCountMaps(contexts.map { $0.tracker.coalescedOnWorkerByType() })
     }
 
+    /// Protected events the priority-lane budget refused, summed across both
+    /// workers. Each still rode the file lane, so this is a demotion, not a
+    /// loss. Surfaced as `es_protected_lane_refused_total`.
+    public func esProtectedLaneRefused() -> UInt64 {
+        contexts.reduce(UInt64(0)) { $0 &+ $1.tracker.protectedLaneRefusedTotal() }
+    }
+
     /// Per-event-type normalized Events offered to the collector-local stream.
     /// Whether an offer evicted an older buffered event remains accounted by the
     /// collector delivery telemetry and is deliberately not folded into this map.
@@ -2403,6 +2431,7 @@ public final class ESCollector: @unchecked Sendable {
         tracker: ESSeqTracker,
         coalescer: ESRepeatCoalescer,
         protectedLaneBudget: ProtectedFileLaneBudget,
+        protectedOpenLaneBudget: ProtectedFileLaneBudget,
         logger: Logger
     ) {
         autoreleasepool {
@@ -2511,13 +2540,15 @@ public final class ESCollector: @unchecked Sendable {
                 }
             }
 
-            // An exec-granting SETMODE or a file event under a persistence
-            // location rides the priority lane while the budget lasts, out of
-            // reach of a file-lane flood (`EventPipelineLane.finalLane(for:)`).
-            if EventPipelineLane.isProtectedFileCandidate(event),
-               protectedLaneBudget.admit(nowNanos: box.startNanos) {
-                event.enrichments[EventPipelineLane.protectedFileLaneEnrichmentKey] =
-                    EventPipelineLane.protectedFileLanePriority
+            // An exec-granting SETMODE, a file event at a persistence location
+            // or a credential / agent-content OPEN rides the priority lane
+            // while the budget lasts, out of reach of a file-lane flood, and the
+            // file lane past it (`EventPipelineLane.finalLane(for:)`).
+            if EventPipelineLane.stampProtectedLane(
+                &event, budget: protectedLaneBudget, openBudget: protectedOpenLaneBudget,
+                nowNanos: box.startNanos
+            ) == false {
+                tracker.recordProtectedLaneRefused()
             }
 
             let result = continuation.yield(event)

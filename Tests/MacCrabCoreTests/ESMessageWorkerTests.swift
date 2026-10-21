@@ -506,7 +506,7 @@ struct ESMessageWorkerTopReserveTests {
     @Test("a chmod +x flood submitted as the collector submits it leaves lineage its whole reserve")
     func setmodeFloodLeavesLineageReserve() {
         let setmode = ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue
-        #expect(!ESCollector.usesWorkerTopReserve(eventType: setmode, protectedOpen: false))
+        #expect(!ESCollector.usesWorkerTopReserve(eventType: setmode, protectedOpen: false, carriesLineage: true))
         #expect(!ESCollector.writeFamilyRawValues.contains(setmode))
         let freed = ManagedAtomicCounter()
         let gate = DispatchSemaphore(value: 0)
@@ -520,7 +520,9 @@ struct ESMessageWorkerTopReserveTests {
         var chmods = 0, lineage = 0
         for _ in 0..<64 where worker.submit(
             handle(),
-            lineageCritical: ESCollector.usesWorkerTopReserve(eventType: setmode, protectedOpen: false),
+            lineageCritical: ESCollector.usesWorkerTopReserve(
+                eventType: setmode, protectedOpen: false, carriesLineage: true
+            ),
             writeFamily: ESCollector.writeFamilyRawValues.contains(setmode),
             eventType: setmode
         ) { chmods += 1 }
@@ -529,6 +531,52 @@ struct ESMessageWorkerTopReserveTests {
         ) { lineage += 1 }
         #expect(chmods == 48)
         #expect(lineage == 16, "EXEC/FORK/EXIT keep the full quarter-cap reserve")
+        for _ in 0..<70 { gate.signal() }
+        worker.shutdownAndDrain()
+    }
+}
+
+extension ESMessageWorkerTopReserveTests {
+    @Test("a protected-OPEN flood leaves lineage the top slice on a worker that also carries it")
+    func protectedOpenFloodLeavesLineageTopSlice() {
+        let open = ES_EVENT_TYPE_NOTIFY_OPEN.rawValue
+        // The split file client carries no lineage, so there a protected OPEN
+        // keeps the top slice against a write flood.
+        #expect(ESCollector.usesWorkerTopReserve(eventType: open, protectedOpen: true, carriesLineage: false))
+        #expect(!ESCollector.usesWorkerTopReserve(eventType: open, protectedOpen: true, carriesLineage: true))
+        #expect(!ESCollector.usesWorkerTopReserve(eventType: open, protectedOpen: false, carriesLineage: false))
+        #expect(ESCollector.usesWriteFamilyReserve(eventType: open, protectedOpen: true))
+        #expect(!ESCollector.usesWriteFamilyReserve(eventType: open, protectedOpen: false))
+        #expect(!ESCollector.carriesLineage(
+            ESCollector.fileClientTypes(subscribeFileOpen: true, subscribeIntrospection: true)))
+        #expect(ESCollector.carriesLineage(
+            ESCollector.execClientTypes(subscribeFileOpen: true, subscribeIntrospection: true)))
+        #expect(ESCollector.carriesLineage(
+            ESCollector.fullSubscription(subscribeFileOpen: true, subscribeIntrospection: true)),
+                "the degraded single client carries lineage")
+        let freed = ManagedAtomicCounter()
+        let gate = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: 64,
+            uptimeNanoseconds: { DispatchTime.now().uptimeNanoseconds },
+            process: { _ in gate.wait() },
+            free: { _ in freed.increment() }
+        )
+        func handle() -> ESMessageWorker.Handle { UnsafeRawPointer(bitPattern: 0x1000)! }
+        var opens = 0, lineage = 0
+        for _ in 0..<64 where worker.submit(
+            handle(),
+            lineageCritical: ESCollector.usesWorkerTopReserve(
+                eventType: open, protectedOpen: true, carriesLineage: true
+            ),
+            writeFamily: ESCollector.usesWriteFamilyReserve(eventType: open, protectedOpen: true),
+            eventType: open
+        ) { opens += 1 }
+        for _ in 0..<64 where worker.submit(
+            handle(), lineageCritical: true, eventType: ES_EVENT_TYPE_NOTIFY_EXEC.rawValue
+        ) { lineage += 1 }
+        #expect(opens == 60, "a protected OPEN still uses the reserve below the top slice")
+        #expect(lineage == 4, "EXEC/FORK/EXIT keep the top slice")
         for _ in 0..<70 { gate.signal() }
         worker.shutdownAndDrain()
     }

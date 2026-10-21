@@ -442,7 +442,9 @@ struct ESIngressAdmissionTests {
 
 @Suite("Protected file events ride the priority lane within a budget")
 struct ProtectedFileLaneTests {
-    private func fileEvent(_ action: String, _ path: String, stamped: Bool = false) -> Event {
+    private func fileEvent(
+        _ action: String, _ path: String, stamped: Bool = false, enrichments: [String: String] = [:]
+    ) -> Event {
         let process = MacCrabCore.ProcessInfo(
             pid: 77, ppid: 1, rpid: 1, name: "node", executable: "/usr/local/bin/node",
             commandLine: "node", args: [], workingDirectory: "/", userId: 501, userName: "u",
@@ -451,8 +453,10 @@ struct ProtectedFileLaneTests {
                      process: process, file: FileInfo(path: path, action: .write),
                      enrichments: stamped
                         ? [EventPipelineLane.protectedFileLaneEnrichmentKey: EventPipelineLane.protectedFileLanePriority]
-                        : [:])
+                        : enrichments)
     }
+
+    private let dynamicAI = [EventPipelineLane.openAdmissionEnrichmentKey: EventPipelineLane.dynamicAIOpenAdmission]
 
     @Test("exec-granting mode changes and persistence writes are candidates; bulk file traffic is not")
     func protectedCandidates() {
@@ -467,8 +471,119 @@ struct ProtectedFileLaneTests {
         }
         #expect(!EventPipelineLane.isProtectedFileCandidate(fileEvent("write", "/Users/x/project/main.swift")))
         #expect(!EventPipelineLane.isProtectedFileCandidate(fileEvent("close_modified", "/tmp/build/out.o")))
-        #expect(!EventPipelineLane.isProtectedFileCandidate(fileEvent("open", "/Users/x/.zshrc")),
-                "OPEN has its own lane rule")
+        // A credential OPEN is a candidate; the dynamic-AI class rides the file lane anyway.
+        #expect(EventPipelineLane.isProtectedFileCandidate(fileEvent("open", "/Users/x/.ssh/id_ed25519")))
+        #expect(!EventPipelineLane.isProtectedFileCandidate(
+            fileEvent("open", "/Users/x/project/README.md", enrichments: dynamicAI)))
+    }
+
+    @Test("persistence locations are anchored where launchd, sudo, cron and the shells read them")
+    func persistenceLocationsAreAnchored() {
+        for path in ["/Library/LaunchAgents/x.plist", "/Users/x/Library/LaunchAgents/y.plist",
+                     "/private/var/root/Library/LaunchDaemons/z.plist", "/var/root/.zshrc",
+                     "/Library/StartupItems/x", "/Users/x/Library/ScriptingAdditions/x.osax",
+                     "/private/var/at/tabs/root", "/usr/lib/cron/tabs/u", "/private/etc/sudoers",
+                     "/Users/x/.bash_profile"] {
+            #expect(EventPipelineLane.isPersistenceLocation(path), "\(path)")
+        }
+        // A marker anywhere else costs nothing to write, so it must not drain
+        // the budget a real plist write needs.
+        for path in ["/tmp/LaunchAgents/x", "/tmp/a/1/.zshrc", "/Users/x/project/LaunchAgents/x.plist",
+                     "/Users/x/proj/.zshrc", "/Users/x/Library/LaunchAgentsX/y", "/Users//.zshrc",
+                     "/Users/x/.ssh/authorized_keys.bak", "/Volumes/u/Library/LaunchAgents/x.plist"] {
+            #expect(!EventPipelineLane.isPersistenceLocation(path), "\(path)")
+            #expect(!EventPipelineLane.isProtectedFileCandidate(fileEvent("write", path)), "\(path)")
+        }
+    }
+
+    @Test("the worker's stamp admits a protected event within the budget and sends it to the file lane past it")
+    func stampAdmitsThenRefuses() {
+        let budget = ProtectedFileLaneBudget(capacity: 2, refillPerSecond: 0)
+        let openBudget = ProtectedFileLaneBudget(capacity: 1, refillPerSecond: 0)
+        func stamp(_ event: inout Event, at nanos: UInt64) -> Bool? {
+            EventPipelineLane.stampProtectedLane(&event, budget: budget, openBudget: openBudget, nowNanos: nanos)
+        }
+        let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
+        var first = fileEvent("write", plist), second = fileEvent("write", plist), third = fileEvent("write", plist)
+        #expect(stamp(&first, at: 1) == true)
+        #expect(stamp(&second, at: 2) == true)
+        #expect(stamp(&third, at: 3) == false)
+        #expect(EventPipelineLane.finalLane(for: first) == .priority)
+        #expect(EventPipelineLane.finalLane(for: third) == .file)
+        // A protected OPEN keeps the priority lane unless its budget refuses it.
+        var credential = fileEvent("open", "/Users/x/.ssh/id_ed25519")
+        var flood = fileEvent("open", "/Users/x/.ssh/id_ed25519")
+        #expect(stamp(&credential, at: 4) == true, "OPENs spend their own budget")
+        #expect(stamp(&flood, at: 5) == false)
+        #expect(EventPipelineLane.finalLane(for: credential) == .priority)
+        #expect(EventPipelineLane.finalLane(for: flood) == .file)
+        // Not candidates: no token, no stamp.
+        var dynamic = fileEvent("open", "/Users/x/project/README.md", enrichments: dynamicAI)
+        var bulk = fileEvent("write", "/Users/x/project/main.swift")
+        #expect(stamp(&dynamic, at: 6) == nil)
+        #expect(stamp(&bulk, at: 6) == nil)
+        #expect(EventPipelineLane.finalLane(for: dynamic) == .file)
+        #expect(EventPipelineLane.finalLane(for: bulk) == .file)
+        // An OPEN from a producer that never stamps keeps the priority lane.
+        #expect(EventPipelineLane.finalLane(for: fileEvent("open", "/Users/x/.ssh/id_ed25519")) == .priority)
+    }
+
+    @Test("an open() loop cannot spend the budget a persistence write needs, nor the reverse")
+    func openAndWriteBudgetsAreSeparate() {
+        let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
+        // An OPEN flood spends only the OPEN budget...
+        do {
+            let budget = ProtectedFileLaneBudget(capacity: 64, refillPerSecond: 16)
+            let openBudget = ProtectedFileLaneBudget.forProtectedOpens()
+            var refused = 0
+            for i in 0..<10_000 {
+                var open = fileEvent("open", "/tmp/x/.env")
+                if EventPipelineLane.stampProtectedLane(
+                    &open, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i)
+                ) == false { refused += 1 }
+            }
+            #expect(refused == 10_000 - 256, "an OPEN burst gets the OPEN burst capacity")
+            var write = fileEvent("write", plist)
+            #expect(EventPipelineLane.stampProtectedLane(
+                &write, budget: budget, openBudget: openBudget, nowNanos: 11_001) == true)
+        }
+        // ...and a write flood spends only the write budget.
+        do {
+            let budget = ProtectedFileLaneBudget(capacity: 64, refillPerSecond: 16)
+            let openBudget = ProtectedFileLaneBudget.forProtectedOpens()
+            for i in 0..<1_000 {
+                var write = fileEvent("write", plist)
+                _ = EventPipelineLane.stampProtectedLane(
+                    &write, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i))
+            }
+            var credential = fileEvent("open", "/Users/x/.ssh/id_ed25519")
+            #expect(EventPipelineLane.stampProtectedLane(
+                &credential, budget: budget, openBudget: openBudget, nowNanos: 2_001) == true)
+        }
+    }
+
+    @Test("the worker stamps through the budget and counts its refusals")
+    func workerStampsAndCountsRefusals() throws {
+        let tracker = ESSeqTracker()
+        tracker.recordProtectedLaneRefused()
+        tracker.recordProtectedLaneRefused()
+        #expect(tracker.protectedLaneRefusedTotal() == 2)
+        tracker.reset()
+        #expect(tracker.protectedLaneRefusedTotal() == 0)
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let collector = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabCore/Collectors/ESCollector.swift"), encoding: .utf8)
+        let start = try #require(collector.range(of: "private static func processRetained("))
+        let end = try #require(collector.range(of: "continuation.yield(event)", range: start.upperBound..<collector.endIndex))
+        let body = collector[start.upperBound..<end.lowerBound]
+        #expect(body.contains("EventPipelineLane.stampProtectedLane("))
+        #expect(body.contains("tracker.recordProtectedLaneRefused()"))
+        #expect(!body.contains("protectedLaneBudget.admit("), "the budget is spent only through the stamp")
+        let timers = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabAgentKit/DaemonTimers.swift"), encoding: .utf8)
+        #expect(timers.components(separatedBy: "\"es_protected_lane_refused_total\": esProtectedLaneRefused").count == 3,
+                "both heartbeat payloads report the refusals")
     }
 
     @Test("only the worker's stamp moves a protected file event to the priority lane")
@@ -512,5 +627,19 @@ struct ExecVisibleProcessMuteTests {
             #expect(muted.contains(type.rawValue), "\(type.rawValue) must stay muted for /System/")
         }
         #expect(ESCollector.execVisibleProcessMutes == ["/System/", "/usr/libexec/xpcproxy"])
+    }
+
+    @Test("bundle directory mutes end in a slash, or they are literal mutes that match no process")
+    func bundleDirectoryMutesArePrefixes() {
+        #expect(ESCollector.mutedPaths.contains("/System/"))
+        let bundleExtensions: Set<String> = ["framework", "bundle", "app"]
+        for path in ESCollector.mutedPaths
+        where (path as NSString).pathComponents.contains(where: {
+            bundleExtensions.contains(($0 as NSString).pathExtension)
+        }) {
+            #expect(path.hasSuffix("/"), "\(path)")
+        }
+        #expect(ESCollector.mutedPaths.contains { $0.hasSuffix("/Metadata.framework/") })
+        #expect(ESCollector.mutedPaths.contains { $0.hasSuffix("/backupd.bundle/") })
     }
 }

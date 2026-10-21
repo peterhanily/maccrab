@@ -4029,6 +4029,8 @@ enum DaemonTimers {
             let esHandlerP99Micros = state.collector?.esHandlerP99Micros() ?? 0
             let esStreamYieldDropped = state.collector?.esStreamYieldDropped() ?? 0
             let esCopyBackpressureDropped = state.collector?.esCopyBackpressureDropped() ?? 0
+            // Protected events the priority-lane budget sent to the file lane.
+            let esProtectedLaneRefused = state.collector?.esProtectedLaneRefused() ?? 0
             // v1.21.6 (audit DET-05): per-type attribution for the copy-stage
             // drops, name-keyed like `es_kernel_dropped_by_type`. On the field
             // host this stage discards ~22.6% of every delivered ES message, and
@@ -5217,6 +5219,7 @@ enum DaemonTimers {
                 "es_normalized_yielded_by_type": esNormalizedYieldedByType,
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
+                "es_protected_lane_refused_total": esProtectedLaneRefused,
                 // v1.21.6 (audit DET-05): rich-heartbeat only, like the other
                 // by-type maps. For one uninterrupted process epoch,
                 // drop/(drop+processed) is the callback→worker refusal fraction.
@@ -5508,6 +5511,7 @@ enum DaemonTimers {
 
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
+                "es_protected_lane_refused_total": esProtectedLaneRefused,
                 "es_client_split_degraded": esClientSplitDegraded,
                 "events_per_sec_lifetime": uptime > 0 ? Double(events) / Double(uptime) : 0,
                 "resident_memory_mb": residentMB,
