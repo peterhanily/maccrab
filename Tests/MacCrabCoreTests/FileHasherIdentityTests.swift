@@ -130,7 +130,7 @@ struct FileHasherIdentityTests {
         #expect(grown == nil)
     }
 
-    @Test("misses sharing a hash that fails are all released with nil")
+    @Test("misses sharing a hash that fails are all released with nil", .timeLimit(.minutes(1)))
     func sharedFailureReleasesWaiters() async throws {
         let base = try directory()
         defer { try? FileManager.default.removeItem(atPath: base) }
@@ -138,10 +138,15 @@ struct FileHasherIdentityTests {
         #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
         let gate = DispatchSemaphore(value: 0)
         let calls = Counter()
-        let hasher = FileHasher(capacity: 16, maxFileBytes: 1_024) { _, _ in
+        // The shared hash runs the real identity-bound compute after the path
+        // is swapped for a FIFO. A miss that arrives after it ends sees the
+        // FIFO at its own lstat, so it never computes either.
+        let hasher = FileHasher(capacity: 16, maxFileBytes: 1_024) { path, key in
             calls.increment()
-            gate.wait()
-            return nil
+            _ = gate.wait(timeout: .now() + 10)
+            let fifo = (path as NSString).deletingLastPathComponent + "/pipe"
+            guard mkfifo(fifo, 0o600) == 0, rename(fifo, path) == 0 else { return "not swapped" }
+            return FileHasher.computeSHA256(path: path, matching: key)
         }
         async let first = hasher.hash(path: path)
         async let second = hasher.hash(path: path)
@@ -149,8 +154,48 @@ struct FileHasherIdentityTests {
         gate.signal()
         let results = await [first, second]
         #expect(results == [nil, nil])
-        #expect(calls.value == 1, "the second miss waits on the first hash")
+        #expect(calls.value == 1, "one compute for both misses")
         #expect(await hasher.cacheCount() == 0)
+    }
+
+    @Test("a parent swapped for a symlink to the same directory is refused")
+    func symlinkedParentIsRefused() throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let parent = base + "/dir"
+        try FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: false)
+        let path = parent + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
+        let key = try #require(FileHasher.cacheKey(path: path))
+        #expect(FileHasher.computeSHA256(path: path, matching: key) != nil)
+        // The same inode stays reachable, but only through a symlink, which
+        // could as well have pointed at a tty or an automount trigger.
+        #expect(rename(parent, base + "/moved") == 0)
+        try FileManager.default.createSymbolicLink(atPath: parent, withDestinationPath: base + "/moved")
+        #expect(FileHasher.computeSHA256(path: path, matching: key) == nil)
+        #expect(FileHasher.computeSHA256(path: base + "/moved/bin", matching: key) != nil)
+    }
+
+    @Test("the read stops at the key's size while the file grows")
+    func readStopsAtTheKeySize() throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data(repeating: 7, count: 100 * 1_024)))
+        let key = try #require(FileHasher.cacheKey(path: path))
+        var duplicate: Int32 = -1
+        _ = FileHasher.computeSHA256(path: path, matching: key) { descriptor in
+            // A dup shares the hash's file offset; grow the file as it is read.
+            duplicate = dup(descriptor)
+            let handle = FileHandle(forWritingAtPath: path)
+            try? handle?.seekToEnd()
+            try? handle?.write(contentsOf: Data(repeating: 9, count: 1_024 * 1_024))
+            try? handle?.close()
+        }
+        #expect(duplicate >= 0)
+        let offset = lseek(duplicate, 0, SEEK_CUR)
+        close(duplicate)
+        #expect(offset == off_t(key.size), "a read to the moving end of file need not terminate")
     }
 
     @Test("the enrichment hasher uses the identity-bound hash")

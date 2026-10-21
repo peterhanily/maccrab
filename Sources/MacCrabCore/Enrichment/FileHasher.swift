@@ -232,17 +232,23 @@ public actor FileHasher {
     // MARK: - Hashing
 
     /// SHA-256 of exactly the file `key` names. The descriptor is opened
-    /// without blocking or following a final symlink, and must be a regular
-    /// file with the key's device, inode, size, mtime and ctime, before and
-    /// after the read; the read stops at the key's size. Anything else, a
-    /// path swapped since the lstat that made the key, a file rewritten while
-    /// it was read, is unavailable (nil) rather than hashed.
+    /// without blocking and without following a symlink in any component,
+    /// and must be a regular file with the key's device, inode, size, mtime
+    /// and ctime, before and after the read; the read stops at the key's
+    /// size. Anything else, a path swapped since the lstat that made the key,
+    /// a file rewritten while it was read, is unavailable (nil) rather than
+    /// hashed.
     nonisolated static func computeSHA256(
         path: String,
         matching key: CacheKey,
         afterIdentityCheckForTesting: ((Int32) -> Void)? = nil
     ) -> String? {
-        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY)
+        // A swapped parent symlink would otherwise aim this root open at a
+        // tty, an automount trigger that blocks, or /dev/fd before the
+        // identity check: refuse a symlink anywhere in the path. Exec paths
+        // are canonical; /var and /tmp are rewritten to /private first.
+        guard let resolved = BoundedRegularFileReader.normalizedAbsolutePath(path) else { return nil }
+        let descriptor = open(resolved, O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC | O_NOCTTY)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
         var opened = stat()
