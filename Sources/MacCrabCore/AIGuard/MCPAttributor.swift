@@ -99,10 +99,13 @@ public actor MCPAttributor {
     private var accessSeq: [pid_t: UInt64] = [:]
     private var accessCounter: UInt64 = 0
     private let cacheCap: Int
-    /// Bumped by each exec of a pid, dropped at its exit. An attribution
-    /// that read the pid's command line before an exec caches nothing: the
-    /// lanes run concurrently, and its verdict describes the old image.
-    private var generations: [pid_t: UInt64] = [:]
+    /// Attributions still running, per pid. An exec, fork or exit while one
+    /// runs bumps the generation, and its verdict is then not cached: the
+    /// lanes run concurrently, so it may describe the old image or a process
+    /// that is gone. Only pids with an attribution in flight are kept, so a
+    /// muted /System/ exit cannot leave an entry behind.
+    private var inFlight: [pid_t: (count: Int, generation: UInt64)] = [:]
+    private var afterSelfCommandLineReadForTesting: (@Sendable () async -> Void)?
 
     private let logger = Logger(subsystem: "com.maccrab.aiguard", category: "mcp-attributor")
 
@@ -148,7 +151,8 @@ public actor MCPAttributor {
             return cached.attribution
         }
 
-        let generation = generation(of: pid)
+        let generation = beginAttribution(pid)
+        defer { endAttribution(pid) }
         let toolKey = Self.mcpToolKey(for: aiTool)
         let configured = await mcpMonitor.serversForTool(toolKey)
         guard !configured.isEmpty else {
@@ -163,6 +167,7 @@ public actor MCPAttributor {
         // subprocess gets attributed to its nearest MCP boundary, not
         // to a far-up ancestor that happens to share a token.
         var firstAncestorCmd = await lineage.commandLine(of: pid) ?? ""
+        if let hook = afterSelfCommandLineReadForTesting { await hook() }
         var bestMatch: (Attribution, score: Int)? = nil
 
         for (index, candidate) in ([SearchTarget(pid: pid, executable: nil, cmd: firstAncestorCmd)] + ancestors.map { SearchTarget(pid: $0.pid, executable: $0.executable, cmd: nil) }).enumerated() {
@@ -208,23 +213,43 @@ public actor MCPAttributor {
     /// also caps itself at `cacheCap` with LRU eviction (v1.7.3) —
     /// but calling this on every ES exit event keeps the cache lean.
     public func processExited(pid: Int32) {
-        cache.removeValue(forKey: pid)
-        accessSeq.removeValue(forKey: pid)
-        generations.removeValue(forKey: pid)
+        invalidate(pid)
     }
 
     /// An exec changes the command line the verdict was computed from, even
     /// when the binary is the same (a node child exec'ing an MCP server's
-    /// script), so the cached verdict is dropped, and an attribution still
-    /// in flight from before the exec caches nothing.
+    /// script), and a fork starts a new process at the pid, which may be a
+    /// reused one. Either drops the cached verdict, and an attribution still
+    /// in flight caches nothing.
     public func processExecuted(pid: Int32) {
-        cache.removeValue(forKey: pid)
-        accessSeq.removeValue(forKey: pid)
-        generations[pid, default: 0] &+= 1
+        invalidate(pid)
     }
 
-    func generation(of pid: pid_t) -> UInt64 {
-        generations[pid, default: 0]
+    private func invalidate(_ pid: pid_t) {
+        cache.removeValue(forKey: pid)
+        accessSeq.removeValue(forKey: pid)
+        inFlight[pid]?.generation &+= 1
+    }
+
+    private func beginAttribution(_ pid: pid_t) -> UInt64 {
+        var entry = inFlight[pid] ?? (count: 0, generation: 0)
+        entry.count += 1
+        inFlight[pid] = entry
+        return entry.generation
+    }
+
+    private func endAttribution(_ pid: pid_t) {
+        guard var entry = inFlight[pid] else { return }
+        entry.count -= 1
+        inFlight[pid] = entry.count > 0 ? entry : nil
+    }
+
+    var inFlightPidCount: Int { inFlight.count }
+
+    /// Runs inside `attribute()` right after it reads the pid's own command
+    /// line, where another lane's exec can interleave.
+    func setAfterSelfCommandLineReadForTesting(_ hook: (@Sendable () async -> Void)?) {
+        afterSelfCommandLineReadForTesting = hook
     }
 
     // MARK: - Internals
@@ -235,10 +260,10 @@ public actor MCPAttributor {
         let cmd: String?
     }
 
-    /// Cache a verdict (nil = no attribution) unless the pid exec'd since
-    /// the attribution started.
-    func recordVerdict(pid: pid_t, executable: String?, attribution: Attribution?, computedAt generation: UInt64) {
-        guard generations[pid, default: 0] == generation else { return }
+    /// Cache a verdict (nil = no attribution) unless the pid exec'd, forked
+    /// or exited since the attribution started.
+    private func recordVerdict(pid: pid_t, executable: String?, attribution: Attribution?, computedAt generation: UInt64) {
+        guard inFlight[pid]?.generation == generation else { return }
         evictIfFull()
         cache[pid] = CachedAttribution(attribution: attribution, executable: executable)
         accessCounter &+= 1

@@ -811,9 +811,10 @@ enum EventLoop {
             var enrichedEvent = await state.enricher.enrich(event)
             stageAwaits.record(.enricher, startedAt: stageStartedNanos)
             // An exec changes the command line an MCP verdict was computed
-            // from. Drop it only now that lineage holds the new image, so an
+            // from, and a fork may start a new process at a reused pid. Drop
+            // it only now that lineage holds the new process, so an
             // attribution on the other lane cannot cache the old one again.
-            if event.eventAction == "exec" {
+            if event.eventAction == "exec" || event.eventAction == "fork" {
                 await state.mcpAttributor.processExecuted(pid: event.process.pid)
             }
 

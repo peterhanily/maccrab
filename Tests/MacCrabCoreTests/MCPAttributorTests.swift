@@ -343,20 +343,39 @@ struct MCPAttributorExecInvalidationTests {
         #expect(served?.boundaryPid == 5202)
     }
 
-    @Test("an attribution computed before an exec caches nothing")
+    @Test("an attribution that read the pre-exec command line caches nothing")
     func staleAttributionCachesNothing() async {
         let (attributor, lineage) = await stack()
         let ancestors = await lineage.ancestors(of: 5202)
-        // An attribution on the other lane read the pre-exec command line…
-        let started = await attributor.generation(of: 5202)
-        await execServer(lineage)
-        await attributor.processExecuted(pid: 5202)
-        // …and finishes after the exec with its stale verdict.
-        await attributor.recordVerdict(pid: 5202, executable: "/usr/local/bin/node",
-                                       attribution: nil, computedAt: started)
+        // The other lane's exec lands while this attribution is suspended
+        // after reading the pid's old command line.
+        await attributor.setAfterSelfCommandLineReadForTesting {
+            await self.execServer(lineage)
+            await attributor.processExecuted(pid: 5202)
+        }
+        let stale = await attributor.attribute(pid: 5202, executable: "/usr/local/bin/node",
+                                               ancestors: ancestors, aiTool: .claudeCode)
+        #expect(stale == nil)
+        await attributor.setAfterSelfCommandLineReadForTesting(nil)
         let served = await attributor.attribute(pid: 5202, executable: "/usr/local/bin/node",
                                                 ancestors: ancestors, aiTool: .claudeCode)
         #expect(served?.confidence == .high)
+    }
+
+    @Test("generation state exists only while an attribution runs")
+    func generationStateIsBounded() async {
+        let (attributor, lineage) = await stack()
+        // Execs and forks on the host (a muted /System/ exit never arrives)
+        // leave nothing behind.
+        for pid in Int32(10_000)..<Int32(20_000) { await attributor.processExecuted(pid: pid) }
+        #expect(await attributor.inFlightPidCount == 0)
+        let ancestors = await lineage.ancestors(of: 5202)
+        await attributor.setAfterSelfCommandLineReadForTesting {
+            #expect(await attributor.inFlightPidCount == 1)
+        }
+        _ = await attributor.attribute(pid: 5202, executable: "/usr/local/bin/node",
+                                       ancestors: ancestors, aiTool: .claudeCode)
+        #expect(await attributor.inFlightPidCount == 0)
     }
 
     @Test("the lane drops a pid's verdict after enrichment records the exec")
@@ -369,5 +388,9 @@ struct MCPAttributorExecInvalidationTests {
         let hook = try #require(eventLoop.range(of: "await state.mcpAttributor.processExecuted(pid: event.process.pid)"))
         #expect(enrich.upperBound < hook.lowerBound)
         #expect(eventLoop.components(separatedBy: "mcpAttributor.processExecuted(").count == 2)
+        // A fork may start a new process at a reused pid, so it drops the
+        // dead process's verdict as an exec does.
+        let condition = eventLoop[..<hook.lowerBound].suffix(160)
+        #expect(condition.contains(#"event.eventAction == "exec" || event.eventAction == "fork""#))
     }
 }
