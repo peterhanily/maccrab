@@ -183,4 +183,92 @@ struct CommandLineRedactionParityTests {
             arguments: ["/usr/local/bin/sshpass", "-p", "letmein", "ssh"]
         ) == "/usr/local/bin/sshpass -p [REDACTED] ssh")
     }
+
+    @Test("a password letter bundled after other flags, or attached, is redacted")
+    func bundledPasswordLetters() throws {
+        for (argv, secret) in [
+            (["/usr/bin/ssh-keygen", "-t", "ed25519", "-qN", "NewPass1", "-f", "k"], "NewPass1"),
+            (["/usr/bin/ssh-keygen", "-NNewPass1", "-f", "k"], "NewPass1"),
+            (["/usr/bin/zip", "-r9P", "Secret77", "out.zip", "dir"], "Secret77"),
+            // A pending value never swallows a flag the walk handles.
+            (["/usr/bin/zip", "-P", "-P", "Secret77", "out.zip"], "Secret77"),
+            (["/usr/local/bin/tool", "-p", "--password", "Secret77"], "Secret77"),
+            (["/usr/local/bin/tool", "-p", "-p", "Secret77"], "Secret77"),
+        ] {
+            let process = try stored(argv)
+            #expect(!process.commandLine.contains(secret), "\(process.commandLine)")
+            #expect(!process.args.contains { $0.contains(secret) }, "\(process.args)")
+        }
+        #expect(try stored(["/usr/bin/ssh-keygen", "-NNewPass1"]).args.last == "-N[REDACTED]")
+        // 7z and rar switches never bundle: `-ssp`, `-ep` and `-oOutput` are not passwords.
+        for argv in [
+            ["/opt/homebrew/bin/7z", "a", "-ssp", "-spf", "out.7z", "f"],
+            ["/opt/homebrew/bin/7z", "x", "in.7z", "-oOutput"],
+            ["/opt/homebrew/bin/rar", "a", "-ep", "out.rar", "f"],
+        ] {
+            #expect(try stored(argv).args == argv)
+        }
+        for line in [
+            "ssh-keygen -t ed25519 -qN NewPass1 -f k",
+            "ssh-keygen -NNewPass1 -f k",
+            "zip -r9P NewPass1 out.zip dir",
+            "sh -c 'security unlock-keychain -p NewPass1'",
+            "bash -lc \"ssh-keygen -qN NewPass1 -f k\"",
+        ] {
+            #expect(!CommandSanitizer.sanitize(line).contains("NewPass1"), "\(line)")
+        }
+    }
+
+    @Test("a password program's name inside another word does not redact")
+    func programNamesInsideOtherWords() throws {
+        for line in [
+            "docker run --security-opt seccomp=unconfined -p 8080:80 nginx",
+            "docker run --name login-svc -p 8080:80 img",
+            "ssh -i ~/.ssh/security-key -p 2222 host",
+            "find /x/security -print",
+            "rsync src.zip -P dst",
+        ] {
+            #expect(CommandSanitizer.sanitize(line) == line, "\(line)")
+            #expect(CommandSanitizer.sanitize(arguments: ["/bin/sh", "-c", line]) == ["/bin/sh", "-c", line])
+            #expect(try stored(line.split(separator: " ").map(String.init)).commandLine == line)
+        }
+    }
+
+    @Test("the latest password program decides whether -p may take a dash value")
+    func optionalValueFollowsLatestProgram() throws {
+        let prompt = try stored(["/usr/local/bin/mysql", "-p", "-h", "db", "app"])
+        #expect(prompt.args == ["/usr/local/bin/mysql", "-p", "-h", "db", "app"])
+        let nested = try stored(["/usr/local/bin/docker", "exec", "mysql", "sshpass", "-p", "-Secret1", "ssh", "h"])
+        #expect(!nested.args.contains { $0.contains("Secret1") }, "\(nested.args)")
+        #expect(!nested.commandLine.contains("Secret1"), "\(nested.commandLine)")
+        #expect(!CommandSanitizer.sanitize("docker exec mysql sshpass -p -Secret1 ssh h").contains("Secret1"))
+    }
+
+    @Test("bare-string redaction takes linear time on adversarial input")
+    func linearTime() {
+        // Each took seconds or more before: nested lazy spans after a program
+        // word, a lazy span per sshpass, a greedy password span per `://`, and
+        // a backtracking separator after --password. The memo skips inputs
+        // over 4 KiB, so each runs in full.
+        let inputs = [
+            String(repeating: "docker login ", count: 640),
+            String(repeating: "sshpass ", count: 4_096),
+            String(repeating: "://a:b", count: 5_461),
+            "--password" + String(repeating: " ", count: 16_384) + "!",
+        ]
+        let clock = ContinuousClock()
+        for input in inputs {
+            var fastest = Duration.seconds(3_600)
+            for _ in 0..<3 {
+                fastest = min(fastest, clock.measure { _ = CommandSanitizer.sanitize(input) })
+            }
+            #expect(fastest < .milliseconds(250), "\(input.prefix(16))…: \(fastest)")
+        }
+        let argv = ["/usr/bin/true", String(repeating: "docker login ", count: 640)]
+        var fastest = Duration.seconds(3_600)
+        for _ in 0..<3 {
+            fastest = min(fastest, clock.measure { _ = CommandSanitizer.sanitize(arguments: argv) })
+        }
+        #expect(fastest < .milliseconds(250), "argv: \(fastest)")
+    }
 }

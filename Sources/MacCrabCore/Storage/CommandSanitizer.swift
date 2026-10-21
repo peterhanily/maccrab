@@ -63,21 +63,6 @@ enum CommandSanitizer {
         options: .caseInsensitive
     )
 
-    /// A password given to a program that always takes one there, separated
-    /// or compact: `sshpass -p VALUE`, `security unlock-keychain -p VALUE`,
-    /// `zip -P VALUE`, `ssh-keygen -P OLD -N NEW`, `docker login -p VALUE`. In
-    /// a bare string another program's `-p` is ambiguous, and a shell
-    /// separator ends the program's arguments. A value already redacted is
-    /// skipped, so repeated passes reach every flag after the program.
-    private static let programPasswordFlags: [NSRegularExpression] = [
-        #"(\b(?:sshpass|security|altool|cqlsh|cypher-shell)\b[^\n;&|]*?\s-p)"#,
-        #"(\b(?:zip|unzip|zipcloak|security|sqlcmd|bcp|ipmitool|mosquitto_(?:pub|sub|rr))\b[^\n;&|]*?\s-P)"#,
-        #"(\bssh-keygen\b[^\n;&|]*?\s-[PN])"#,
-        #"(\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm|finch)\b[^\n;&|]*?\blogin\b[^\n;&|]*?\s-p)"#,
-    ].map {
-        try! NSRegularExpression(pattern: $0 + #"\s*(?!\[REDACTED\])('[^']*'|"[^"]*"|\S+)"#, options: [])
-    }
-
     /// `user:password` after curl/wget-style `-u`, `--user` or `--proxy-user`.
     /// Only an all-numeric pair is a uid:gid (`docker run -u 501:20`); a
     /// numeric password after a named user (`-u admin:123456`) is redacted.
@@ -92,9 +77,12 @@ enum CommandSanitizer {
         options: []
     )
 
-    /// URLs with embedded credentials: `://user:pass@host`
+    /// URLs with embedded credentials: `://user:pass@host`. The spans are
+    /// possessive and the password stops at `/`, which ends the authority,
+    /// so each `://` scans only up to the next one instead of backtracking
+    /// across the whole token.
     private static let urlCredentials = try! NSRegularExpression(
-        pattern: #"(://[^:@/\s]+:)([^@\s]+)(@)"#,
+        pattern: #"(://[^:@/\s]++:)([^@\s/]++)(@)"#,
         options: []
     )
 
@@ -127,9 +115,11 @@ enum CommandSanitizer {
     )
 
     /// Base64-encoded strings after common sensitive flags (heuristic: 20+ base64
-    /// chars that include mixed case, digits, and/or `+/=`).
+    /// chars that include mixed case, digits, and/or `+/=`). The separator is
+    /// matched possessively: `\s*[=\s]\s*` backtracked quadratically over a
+    /// long whitespace run.
     private static let base64AfterFlag = try! NSRegularExpression(
-        pattern: #"(--(password|secret|token|key|auth|credential)\s*[=\s]\s*)([A-Za-z0-9+/]{20,}={0,2})"#,
+        pattern: #"(--(password|secret|token|key|auth|credential)(?:\s*+=\s*+|\s++))([A-Za-z0-9+/]{20,}={0,2})"#,
         options: .caseInsensitive
     )
 
@@ -195,18 +185,9 @@ enum CommandSanitizer {
             withTemplate: "--$1 [REDACTED]"
         )
 
-        // 5b. Program- and pair-specific password arguments
-        for pattern in programPasswordFlags {
-            // One flag per program occurrence and pass; stop once nothing changes.
-            for _ in 0..<8 {
-                let next = pattern.stringByReplacingMatches(
-                    in: result, options: [], range: fullRange(),
-                    withTemplate: "$1 [REDACTED]"
-                )
-                if next == result { break }
-                result = next
-            }
-        }
+        // 5b. Password programs' `-p`, `-P` and `-N` values, then
+        //     pair-specific passwords
+        result = redactingFlagValues(in: result)
         result = userPasswordFlag.stringByReplacingMatches(
             in: result, options: [], range: fullRange(),
             withTemplate: "$1[REDACTED]"
@@ -259,16 +240,38 @@ enum CommandSanitizer {
 
     /// The argv walk with its per-token redactor as a parameter, so the memo
     /// parity test can run the same walk over the uncached suite.
-    ///
-    /// A `-p`/`-P` value is redacted unless argv[0] is a program whose flag is
-    /// known not to carry a secret there (a port, pid, path or boolean). That
-    /// list fails closed: an unknown program, a launcher or interpreter
-    /// (`sudo`, `xargs`, `sh`, `python3`), the argv after `--` or a find
-    /// `-exec`, and an ssh or docker command after its target get no
-    /// exemption, because another program's arguments follow there.
     static func sanitize(arguments: [String], leaf: (String) -> String) -> [String] {
-        var result: [String] = []
-        result.reserveCapacity(arguments.count)
+        zip(arguments, argumentActions(arguments, failClosed: true)).map { argument, action in
+            switch action {
+            case .keep: return leaf(argument)
+            case .replace(let replacement): return replacement
+            }
+        }
+    }
+
+    /// What the walk does with one token.
+    private enum ArgumentAction {
+        /// Kept; argv still passes it through the per-token redactors.
+        case keep
+        /// Replaced: a value, or a flag with its attached value.
+        case replace(String)
+    }
+
+    /// One decision per token, shared by argv and by the token walk over
+    /// bare strings.
+    ///
+    /// In argv (`failClosed`) a `-p`/`-P` value is redacted unless argv[0] is
+    /// a program whose flag is known not to carry a secret there (a port, pid,
+    /// path or boolean). That list fails closed: an unknown program, a
+    /// launcher or interpreter (`sudo`, `xargs`, `sh`, `python3`), the argv
+    /// after `--` or a find `-exec`, and an ssh or docker command after its
+    /// target get no exemption, because another program's arguments follow
+    /// there. Strings redact only a password program's values: the same
+    /// redactor runs on free text, which stays byte exact unless it carries a
+    /// credential.
+    private static func argumentActions(_ arguments: [String], failClosed: Bool) -> [ArgumentAction] {
+        var actions: [ArgumentAction] = []
+        actions.reserveCapacity(arguments.count)
         var redactNext = false
         // The pending value follows an optional-value `-p` (`mysql -p -u root`
         // prompts), so a dash token is the next option, not the value.
@@ -283,20 +286,33 @@ enum CommandSanitizer {
         // A wrapper (`sudo`, `docker exec db`) puts it after argv[0].
         var lowerPIsPassword = false
         var lowerPIsOptional = false
+        var lowerPBundles = false
         var upperPIsPassword = false
         var newPassphraseFlag = false
         let containerTool = containerLoginPrograms.contains(program)
+        // find's operands before `-exec` are paths, not programs: `find
+        // /x/security -print` names no password program.
+        var operandsMayBePrograms = program != "find"
 
         for (index, argument) in arguments.enumerated() {
-            if !argument.hasPrefix("-"), !redactNext, !userPairNext {
+            if operandsMayBePrograms, !argument.hasPrefix("-"), !redactNext, !userPairNext {
                 let name = programName(argument)
                 if passwordLowerPPrograms.contains(name) {
                     lowerPIsPassword = true
-                    if optionalValuePasswordPrograms.contains(name) { lowerPIsOptional = true }
+                    // The most recent password program decides: in `docker exec
+                    // mysql sshpass -p -Secret1` the dash token is sshpass's
+                    // password, not the next option of a prompting mysql.
+                    lowerPIsOptional = optionalValuePasswordPrograms.contains(name)
+                    // 7z and rar switches never bundle; `-ssp` and `-ep` end in p.
+                    lowerPBundles = !attachedOnlyPasswordPrograms.contains(name)
                 }
                 if passwordUpperPPrograms.contains(name) { upperPIsPassword = true }
                 if name == "ssh-keygen" { newPassphraseFlag = true }
-                if containerTool, argument == "login" { lowerPIsPassword = true }
+                if containerTool, argument == "login" {
+                    lowerPIsPassword = true
+                    lowerPIsOptional = false
+                    lowerPBundles = true
+                }
             }
             // An ssh destination or docker image ends the program's own
             // options; the remote or container command follows it.
@@ -314,7 +330,7 @@ enum CommandSanitizer {
                 }
             }
             if argument == "--" {
-                result.append(argument)
+                actions.append(.keep)
                 redactNext = false
                 exemptionsApply = false
                 continue
@@ -323,7 +339,7 @@ enum CommandSanitizer {
             if userPairNext {
                 userPairNext = false
                 if let redacted = redactingUserPassword(argument) {
-                    result.append(redacted)
+                    actions.append(.replace(redacted))
                     continue
                 }
             }
@@ -334,6 +350,11 @@ enum CommandSanitizer {
                 omittingEmptySubsequences: false
             ).first.map(String.init) ?? lowered
             let isSensitiveFlag = sensitiveArgumentFlags.contains(flag)
+            var letters: Set<Character> = []
+            if lowerPIsPassword, lowerPBundles { letters.insert("p") }
+            if upperPIsPassword { letters.insert("P") }
+            if newPassphraseFlag { letters.insert("N") }
+            let letterEnd = passwordLetterEnd(argument, letters: letters)
 
             if redactNext {
                 redactNext = false
@@ -344,10 +365,10 @@ enum CommandSanitizer {
                 let nextOption = isSensitiveFlag
                     || userPairFlags.contains(lowered)
                     || argument == "-p" || argument == "-P"
-                    || (newPassphraseFlag && argument == "-N")
+                    || letterEnd == argument.endIndex
                     || (pendingValueIsOptional && argument.hasPrefix("-"))
                 if !nextOption {
-                    result.append("[REDACTED]")
+                    actions.append(.replace("[REDACTED]"))
                     continue
                 }
             }
@@ -355,32 +376,39 @@ enum CommandSanitizer {
             if !argument.hasPrefix("--"),
                argument.hasPrefix("-p") || argument.hasPrefix("-P") {
                 let upper = argument.hasPrefix("-P")
-                let exempt = exemptionsApply
-                    && !(upper ? upperPIsPassword : lowerPIsPassword)
-                    && (upper ? nonSecretUpperPPrograms : nonSecretLowerPPrograms).contains(program)
+                let passwordFlag = upper ? upperPIsPassword : lowerPIsPassword
+                let exempt = failClosed
+                    ? exemptionsApply && !passwordFlag
+                        && (upper ? nonSecretUpperPPrograms : nonSecretLowerPPrograms).contains(program)
+                    : !passwordFlag
                 if exempt {
-                    result.append(leaf(argument))
+                    actions.append(.keep)
                     continue
                 }
                 if argument.count > 2 {
-                    result.append("\(argument.prefix(2))[REDACTED]")
+                    actions.append(.replace("\(argument.prefix(2))[REDACTED]"))
                 } else {
-                    result.append(argument)
+                    actions.append(.keep)
                     redactNext = true
                     pendingValueIsOptional = !upper && lowerPIsOptional
                 }
                 continue
             }
-            // `zip -erP VALUE`: a password program's flag bundled last.
-            if passwordFlagEndsBundle(argument, lower: lowerPIsPassword, upper: upperPIsPassword)
-                || (newPassphraseFlag && argument == "-N") {
-                result.append(argument)
-                redactNext = true
-                pendingValueIsOptional = false
+            // A password program's letter ending a bundle, or ssh-keygen's new
+            // passphrase: `zip -r9P VALUE`, `ssh-keygen -qN VALUE` take the next
+            // token, `-NVALUE` carries it.
+            if let letterEnd {
+                if letterEnd == argument.endIndex {
+                    actions.append(.keep)
+                    redactNext = true
+                    pendingValueIsOptional = false
+                } else {
+                    actions.append(.replace("\(argument[..<letterEnd])[REDACTED]"))
+                }
                 continue
             }
             if userPairFlags.contains(lowered) {
-                result.append(argument)
+                actions.append(.keep)
                 userPairNext = true
                 redactNext = false
                 continue
@@ -391,13 +419,13 @@ enum CommandSanitizer {
                     let originalFlag = argument.prefix {
                         $0 != "="
                     }
-                    result.append("\(originalFlag)=[REDACTED]")
+                    actions.append(.replace("\(originalFlag)=[REDACTED]"))
                     redactNext = false
                 } else {
                     // A repeated sensitive flag is still a flag, not the prior
                     // flag's value. The final flag consumes the next ordinary
                     // token, preserving deterministic option structure.
-                    result.append(argument)
+                    actions.append(.keep)
                     redactNext = true
                     pendingValueIsOptional = false
                 }
@@ -405,11 +433,136 @@ enum CommandSanitizer {
             }
             if program == "find", findCommandFlags.contains(argument) {
                 exemptionsApply = false
+                operandsMayBePrograms = true
             }
-            result.append(leaf(argument))
+            actions.append(.keep)
             redactNext = false
         }
-        return result
+        return actions
+    }
+
+    /// A password program's `-p`, `-P` and `-N` values in a bare string (a
+    /// shell `-c` script, a command line not captured as argv, free text),
+    /// decided by the argv walk with each segment's first word as its
+    /// program. One pass splits unquoted shell separators and quote-aware
+    /// words, and only redacted words are rewritten, so the cost is linear in
+    /// the input. A regex keyed on a program word and a later flag backtracked
+    /// over every occurrence of the word, and matched it inside other words.
+    static func redactingFlagValues(in text: String) -> String {
+        guard containsSpaceDash(text.utf8) else { return text }
+        let bytes = Array(text.utf8)
+        var replacements: [(range: Range<Int>, with: String)] = []
+        collectFlagValueRedactions(bytes, in: 0..<bytes.count, depth: 0, into: &replacements)
+        guard !replacements.isEmpty else { return text }
+        // A quoted script redacted inside a word that is itself replaced
+        // gives way to the outer replacement.
+        replacements.sort {
+            $0.range.lowerBound != $1.range.lowerBound
+                ? $0.range.lowerBound < $1.range.lowerBound
+                : $0.range.upperBound > $1.range.upperBound
+        }
+        var output: [UInt8] = []
+        output.reserveCapacity(bytes.count + 12 * replacements.count)
+        var cursor = 0
+        for replacement in replacements where replacement.range.lowerBound >= cursor {
+            output.append(contentsOf: bytes[cursor..<replacement.range.lowerBound])
+            output.append(contentsOf: replacement.with.utf8)
+            cursor = replacement.range.upperBound
+        }
+        output.append(contentsOf: bytes[cursor...])
+        return String(decoding: output, as: UTF8.self)
+    }
+
+    /// Quoted scripts nest (`sh -c 'security … -p VALUE'`); each level needs
+    /// another layer of escapes, so a small bound covers real input.
+    private static let maximumQuoteDepth = 3
+
+    private static func collectFlagValueRedactions(
+        _ bytes: [UInt8],
+        in bounds: Range<Int>,
+        depth: Int,
+        into replacements: inout [(range: Range<Int>, with: String)]
+    ) {
+        var words: [(range: Range<Int>, text: String)] = []
+        var quotedScripts: [Range<Int>] = []
+        func endSegment() {
+            if words.count > 1 {
+                for (word, action) in zip(words, argumentActions(words.map(\.text), failClosed: false)) {
+                    // Earlier patterns' output is already redacted.
+                    guard case .replace(let replacement) = action,
+                          !word.text.contains("[REDACTED]") else { continue }
+                    replacements.append((word.range, replacement))
+                }
+            }
+            words.removeAll(keepingCapacity: true)
+        }
+        var index = bounds.lowerBound
+        while index < bounds.upperBound {
+            if isSegmentSeparator(bytes[index]) {
+                endSegment()
+                index += 1
+                continue
+            }
+            if isWordSpace(bytes[index]) {
+                index += 1
+                continue
+            }
+            let start = index
+            var word: [UInt8] = []
+            while index < bounds.upperBound,
+                  !isSegmentSeparator(bytes[index]), !isWordSpace(bytes[index]) {
+                let byte = bytes[index]
+                if byte == UInt8(ascii: "'") || byte == UInt8(ascii: "\"") {
+                    // A quoted span may hold spaces and separators; an
+                    // unterminated one runs to the end.
+                    index += 1
+                    let content = index
+                    var holdsSpace = false
+                    while index < bounds.upperBound, bytes[index] != byte {
+                        if byte == UInt8(ascii: "\""), bytes[index] == UInt8(ascii: "\\"),
+                           index + 1 < bounds.upperBound {
+                            index += 1
+                        }
+                        holdsSpace = holdsSpace || isWordSpace(bytes[index])
+                        word.append(bytes[index])
+                        index += 1
+                    }
+                    if holdsSpace { quotedScripts.append(content..<min(index, bounds.upperBound)) }
+                    index += 1
+                } else if byte == UInt8(ascii: "\\"), index + 1 < bounds.upperBound {
+                    word.append(bytes[index + 1])
+                    index += 2
+                } else {
+                    word.append(byte)
+                    index += 1
+                }
+            }
+            words.append((start..<min(index, bounds.upperBound), String(decoding: word, as: UTF8.self)))
+        }
+        endSegment()
+        guard depth < maximumQuoteDepth else { return }
+        for script in quotedScripts where containsSpaceDash(bytes[script]) {
+            collectFlagValueRedactions(bytes, in: script, depth: depth + 1, into: &replacements)
+        }
+    }
+
+    /// Every flag after a segment's first word follows a space or a tab.
+    private static func containsSpaceDash<Bytes: Sequence>(_ bytes: Bytes) -> Bool where Bytes.Element == UInt8 {
+        var afterSpace = false
+        for byte in bytes {
+            if afterSpace, byte == UInt8(ascii: "-") { return true }
+            afterSpace = isWordSpace(byte)
+        }
+        return false
+    }
+
+    private static func isWordSpace(_ byte: UInt8) -> Bool {
+        byte == UInt8(ascii: " ") || byte == UInt8(ascii: "\t") || byte == UInt8(ascii: "\r")
+    }
+
+    private static func isSegmentSeparator(_ byte: UInt8) -> Bool {
+        byte == UInt8(ascii: ";") || byte == UInt8(ascii: "&")
+            || byte == UInt8(ascii: "|") || byte == UInt8(ascii: "\n")
     }
 
     /// The stored command line must be at least as redacted as argv. The ES
@@ -442,6 +595,11 @@ enum CommandSanitizer {
         "mongoimport", "mongofiles", "mongostat", "mongotop",
         "7z", "7za", "7zr", "7zz", "rar", "unrar",
     ])
+
+    /// Programs whose switches never bundle: only a leading `-p` is theirs.
+    private static let attachedOnlyPasswordPrograms: Set<String> = [
+        "7z", "7za", "7zr", "7zz", "rar", "unrar",
+    ]
 
     /// Programs whose `-p` takes a password, separated (`sshpass -p VALUE`,
     /// `security unlock-keychain -p VALUE`) or compact (`mysql -pVALUE`). Any
@@ -539,11 +697,18 @@ enum CommandSanitizer {
         return flags.index(after: first) == flags.endIndex
     }
 
-    /// `-erP` for a program whose `-P` takes a password: the value follows.
-    private static func passwordFlagEndsBundle(_ token: String, lower: Bool, upper: Bool) -> Bool {
-        guard token.count > 2, token.hasPrefix("-"), !token.hasPrefix("--"),
-              let last = token.last, token.dropFirst().allSatisfy(\.isLetter) else { return false }
-        return (last == "p" && lower) || (last == "P" && upper)
+    /// The end of a password letter that ends a one-dash bundle of letters
+    /// and digits (`-erP`, `-r9P`, `-qN`), whose value is the next token, or
+    /// of a compact `-NVALUE`. `-p`/`-P` compact forms are handled earlier.
+    private static func passwordLetterEnd(_ token: String, letters: Set<Character>) -> String.Index? {
+        guard !letters.isEmpty, token.hasPrefix("-"), !token.hasPrefix("--") else { return nil }
+        let flags = token.dropFirst()
+        if flags.count > 1, flags.first == "N", letters.contains("N") {
+            return flags.index(after: flags.startIndex)
+        }
+        guard let last = flags.last, letters.contains(last),
+              flags.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else { return nil }
+        return flags.endIndex
     }
 
     /// Lowercased basename of an argv token.
