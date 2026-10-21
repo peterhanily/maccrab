@@ -31,7 +31,7 @@ public actor BehaviorScoring {
     /// Time window for score decay (scores halve every this many seconds).
     private let decayHalfLife: TimeInterval
 
-    /// Maximum tracked processes, retaining the highest decayed scores.
+    /// Maximum tracked processes, retaining the highest decayed action scores.
     private let maxTrackedProcesses: Int
     private let now: @Sendable () -> Date
 
@@ -47,6 +47,16 @@ public actor BehaviorScoring {
 
     /// Order of insertion breaks equal-score eviction ties.
     private var insertionOrder: [ProcessKey] = []
+
+    /// Score keys by pid, so a process exit finds its entries without a scan.
+    private var keysByPid: [Int32: Set<ProcessKey>] = [:]
+
+    /// Exited processes keep their scores this long for events still in
+    /// flight on the other lane, then leave so a later process reusing the
+    /// pid and path does not inherit their static weight or alert latch.
+    private static let exitGrace: TimeInterval = 120
+    private var exitQueue: [(pid: Int32, at: Date)] = []
+    private var exitQueueHead = 0
 
     /// Set of process keys that have already triggered alerts (avoid re-alerting).
     private var alerted: Set<ProcessKey> = []
@@ -87,6 +97,8 @@ public actor BehaviorScoring {
         /// indicator (e.g. `ai_tool_unapproved_network`) on every HTTPS
         /// request can walk itself past the alert threshold trivially.
         var indicatorLastAdd: [String: Date] = [:]
+        /// Set by the process's exit; the score leaves after `exitGrace`.
+        var exitedAt: Date?
 
         var totalScore: Double { staticScore + rawScore }
     }
@@ -362,6 +374,7 @@ public actor BehaviorScoring {
         if processScores[key] == nil {
             processScores[key] = ProcessScore(lastUpdate: timestamp)
             insertionOrder.append(key)
+            keysByPid[pid, default: []].insert(key)
             addedNewKey = true
         }
 
@@ -370,13 +383,19 @@ public actor BehaviorScoring {
 
         guard var entry = processScores[key] else { return nil }
 
-        // If score has decayed below the alert threshold, allow re-alerting.
-        // This uses the full alertThreshold (not a fraction) so that the re-alert
-        // condition is consistent with the firing condition — no dead zone where
-        // new indicators are silently ignored.
-        if entry.totalScore < alertThreshold {
+        // Re-arm once the decayed action score is below what a new crossing
+        // needs. With static weight under the threshold this is exactly
+        // "total below the threshold", so there is no dead zone where new
+        // indicators are ignored. Static weight never decays, so when it alone
+        // reaches the threshold the bar is a quiet period (action score below
+        // 1); otherwise such a process could never alert again.
+        if entry.rawScore < max(1.0, alertThreshold - entry.staticScore) {
             alerted.remove(key)
-            abandonPendingThreshold(for: key)
+            // A crossing whose total decayed below the threshold is stale. A
+            // static-only total never decays, so its delivery stays pending.
+            if entry.totalScore < alertThreshold {
+                abandonPendingThreshold(for: key)
+            }
         }
 
         // Indicators describing the process itself, not an action, are true
@@ -593,6 +612,46 @@ public actor BehaviorScoring {
         .map { ($0.0, $0.1, $0.2, $0.3) }
     }
 
+    /// Record a process exit. Keys are (pid, path), so after `exitGrace` its
+    /// scores are dropped: a later process reusing the pid and path must not
+    /// inherit its static weight or alert latch. A detached delivery keeps
+    /// its own expiry.
+    public func processExited(pid: Int32) {
+        let timestamp = now()
+        if let keys = keysByPid[pid] {
+            for key in keys where processScores[key]?.exitedAt == nil {
+                processScores[key]?.exitedAt = timestamp
+            }
+            exitQueue.append((pid, timestamp))
+        }
+        dropExitedScores(at: timestamp)
+    }
+
+    private func dropExitedScores(at timestamp: Date) {
+        let cutoff = timestamp.addingTimeInterval(-Self.exitGrace)
+        while exitQueueHead < exitQueue.count, exitQueue[exitQueueHead].at <= cutoff {
+            let pid = exitQueue[exitQueueHead].pid
+            exitQueueHead += 1
+            guard let keys = keysByPid[pid] else { continue }
+            let expired = keys.filter { key in
+                guard let exited = processScores[key]?.exitedAt else { return false }
+                return exited <= cutoff
+            }
+            guard !expired.isEmpty else { continue }
+            for key in expired {
+                processScores.removeValue(forKey: key)
+                alerted.remove(key)
+            }
+            let remaining = keys.subtracting(expired)
+            if remaining.isEmpty { keysByPid.removeValue(forKey: pid) } else { keysByPid[pid] = remaining }
+            insertionOrder.removeAll { expired.contains($0) }
+        }
+        if exitQueueHead > 1_024, exitQueueHead * 2 > exitQueue.count {
+            exitQueue.removeFirst(exitQueueHead)
+            exitQueueHead = 0
+        }
+    }
+
     /// Prune expired scores and detached deliveries. A fresh delivery is not
     /// expired merely because its score lost capacity eviction. Bounds do not
     /// depend on this optional sweep: insertion enforces both capacities.
@@ -603,7 +662,9 @@ public actor BehaviorScoring {
             timestamp.timeIntervalSince(score.lastUpdate) < expiry
         }
         insertionOrder = insertionOrder.filter { processScores[$0] != nil }
+        keysByPid = Dictionary(grouping: insertionOrder, by: \.pid).mapValues(Set.init)
         alerted = alerted.filter { processScores[$0] != nil }
+        dropExitedScores(at: timestamp)
         for (key, pending) in pendingThresholds
         where processScores[key] == nil
             && timestamp.timeIntervalSince(pending.createdAt) >= expiry {
@@ -619,6 +680,10 @@ public actor BehaviorScoring {
         if tracked.count > maxTrackedProcesses { failures.append("score capacity exceeded") }
         if insertionOrder.count != tracked.count || Set(insertionOrder) != tracked {
             failures.append("score insertion order differs from retained keys")
+        }
+        if keysByPid.values.reduce(into: Set<ProcessKey>(), { $0.formUnion($1) }) != tracked
+            || keysByPid.contains(where: { pid, keys in keys.isEmpty || keys.contains { $0.pid != pid } }) {
+            failures.append("score pid index differs from retained keys")
         }
         if !alerted.isSubset(of: tracked) { failures.append("alert latch outlived its score") }
         if pendingThresholds.count > maxPendingThresholds {
@@ -663,17 +728,25 @@ public actor BehaviorScoring {
     }
 
     private func decayedScore(_ score: ProcessScore, at timestamp: Date) -> Double {
+        score.staticScore + decayedActionScore(score, at: timestamp)
+    }
+
+    private func decayedActionScore(_ score: ProcessScore, at timestamp: Date) -> Double {
         // Match applyDecay: a backward wall-clock correction cannot add score.
         let elapsed = max(0, timestamp.timeIntervalSince(score.lastUpdate))
-        return score.staticScore + score.rawScore * pow(0.5, elapsed / decayHalfLife)
+        return score.rawScore * pow(0.5, elapsed / decayHalfLife)
     }
 
     private func evictIfNeeded(at timestamp: Date) {
-        // Evict the entry with the LOWEST decayed score, not the oldest-inserted
-        // one. A long-lived, high-score process (e.g. a slow-burn attacker) must
-        // survive churn from transient benign processes — FIFO eviction would
-        // silently drop the strongest detection signal we have. Among equal
-        // scores we fall back to insertion order (oldest first) for a stable,
+        // Evict the entry with the LOWEST decayed action score, not the
+        // oldest-inserted one. A long-lived, high-score process (e.g. a
+        // slow-burn attacker) must survive churn from transient benign
+        // processes — FIFO eviction would silently drop the strongest detection
+        // signal we have. Static weight is left out: it never decays, so one
+        // burst of /tmp executions would otherwise hold the table for the
+        // daemon's lifetime and evict every newcomer weighing less, and the
+        // process's next event reports it again anyway. Among equal scores we
+        // fall back to insertion order (oldest first) for a stable,
         // deterministic choice. Eviction only runs above the cap (cold path),
         // so the O(n) scan is not on the per-event hot path.
         while processScores.count > maxTrackedProcesses {
@@ -681,7 +754,7 @@ public actor BehaviorScoring {
             var lowest = Double.greatestFiniteMagnitude
             for key in insertionOrder {
                 guard let score = processScores[key] else { continue }
-                let decayed = decayedScore(score, at: timestamp)
+                let decayed = decayedActionScore(score, at: timestamp)
                 // The first retained key is a deterministic fallback, including
                 // equal maximum finite scores that are not < the initial bound.
                 if victim == nil || decayed < lowest {
@@ -691,6 +764,8 @@ public actor BehaviorScoring {
             }
             guard let evict = victim else { break }
             processScores.removeValue(forKey: evict)
+            keysByPid[evict.pid]?.remove(evict)
+            if keysByPid[evict.pid]?.isEmpty == true { keysByPid.removeValue(forKey: evict.pid) }
             alerted.remove(evict)
             abandonPendingThreshold(for: evict)
             if let idx = insertionOrder.firstIndex(of: evict) {

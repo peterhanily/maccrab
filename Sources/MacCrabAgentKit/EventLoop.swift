@@ -764,6 +764,7 @@ enum EventLoop {
             }
             if event.eventAction == "exit" {
                 await state.mcpAttributor.processExited(pid: event.process.pid)
+                await state.behaviorScoring.processExited(pid: event.process.pid)
                 _ = await state.aiSessionLifecycleCoordinator.processExited(
                     tracker: state.aiTracker,
                     projectBoundary: state.projectBoundary,

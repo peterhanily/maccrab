@@ -3367,6 +3367,8 @@ enum DaemonTimers {
                 await state.topologyAnomalyDetector.purgeStale()
                 await state.campaignDetector.sweep()
                 await state.tlsFingerprinter.sweep()
+                // Scores of processes with no event for ten half-lives.
+                await state.behaviorScoring.prune()
                 // Allowlist v2: prune expired suppressions. The sweep
                 // appends an audit entry per expired row, so operators
                 // can reconstruct when each allow lapsed.
