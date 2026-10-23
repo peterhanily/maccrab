@@ -64,6 +64,11 @@ final class EventQuerySession: ObservableObject {
     private let reader: any EventQueryReading
     @Published private(set) var sourceEpoch: UInt64
     @Published private(set) var retryTick: UInt64 = 0
+    /// Bumped when a live page came back full, and on each poll while that
+    /// gap is unhandled: rows may be missing between the newest shown and
+    /// that page. The window reloads its own query when `claimLiveGapReload`
+    /// allows, so unlike `retryTick` this starts no new query.
+    @Published private(set) var liveGapTick: UInt64 = 0
     /// Query/source replacements invalidate a paused view's retained table too.
     @Published private(set) var presentationResetTick: UInt64 = 0
     @Published private(set) var events: [EventViewModel] = []
@@ -87,6 +92,11 @@ final class EventQuerySession: ObservableObject {
     private var aggregateGeneration: UInt64 = 0
     private var queryLoaded = false
     private var retryNeeded = false
+    private var liveGapPending = false
+    private var lastLiveGapReloadAt: Date?
+    /// At ~40 events/s every live page is full; reloading on each would drop
+    /// the window's older pages every poll.
+    static let liveGapReloadInterval: TimeInterval = 15
     private var presentationKey: PresentationKey?
     private var lastSuccessAt: Date?
     private let now: () -> Date
@@ -183,6 +193,7 @@ final class EventQuerySession: ObservableObject {
         isLoading = false
         isLoadingOlderEvents = false
         retryNeeded = false
+        liveGapPending = false
         queryLoaded = false
         readiness.invalidate()
         aggregateReadiness.invalidate()
@@ -244,6 +255,7 @@ final class EventQuerySession: ObservableObject {
         readiness.invalidate()
         queryLoaded = false
         retryNeeded = false
+        liveGapPending = false
         events = []
         cursor = nil
         hasMoreEvents = false
@@ -301,6 +313,7 @@ final class EventQuerySession: ObservableObject {
         pageGeneration &+= 1
         isLoadingOlderEvents = false
         retryNeeded = false
+        liveGapPending = false
         query = next
         presentationKey = nextKey
         if !retainRows { presentationResetTick &+= 1 }
@@ -432,6 +445,24 @@ final class EventQuerySession: ObservableObject {
             retryNeeded = false
             retryTick &+= 1
         }
+        // Offered again: at the last offer the window may have been paused or
+        // inside its reload interval.
+        if liveGapPending { liveGapTick &+= 1 }
+    }
+
+    /// Whether the window should reload its query now for an unhandled live
+    /// gap, which claiming clears. A paused window keeps it until it resumes,
+    /// and reloads happen at most once per `liveGapReloadInterval`.
+    func claimLiveGapReload(paused: Bool) -> Bool {
+        guard liveGapPending, !paused, !isLoading else { return false }
+        let current = now()
+        if let last = lastLiveGapReloadAt {
+            let elapsed = current.timeIntervalSince(last)
+            if elapsed >= 0, elapsed < Self.liveGapReloadInterval { return false }
+        }
+        liveGapPending = false
+        lastLiveGapReloadAt = current
+        return true
     }
 
     var canReceiveIncremental: Bool {
@@ -452,12 +483,15 @@ final class EventQuerySession: ObservableObject {
             return
         }
         // A full live page may have skipped events since the newest row shown,
-        // and across categories. Reload this window's own query, filtered in
-        // SQL, rather than prepend over a hole that "Load older" cannot reach.
+        // and across categories. The window reloads its own query, filtered in
+        // SQL, when `claimLiveGapReload` allows, rather than prepend over a
+        // hole that "Load older" cannot reach.
         if saturated {
-            retryNeeded = true
-            return
+            liveGapPending = true
+            liveGapTick &+= 1
         }
+        // Nothing is prepended above the hole until that reload fills it.
+        if liveGapPending { return }
         let existing = Set(events.map(\.id))
         let newest = events.map(\.timestamp).max() ?? query.since
         let appended = rows.filter {

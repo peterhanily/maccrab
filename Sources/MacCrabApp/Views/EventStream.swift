@@ -172,6 +172,8 @@ struct EventStream: View {
 
     @State private var isPaused: Bool = false
     @State private var selectedEventID: EventViewModel.ID? = nil
+    /// Bumped to reload this window's query over a live gap.
+    @State private var liveGapReloadTick: UInt64 = 0
     /// Aggregate-table selection so warm-tier summary rows get a right-click
     /// drill-in (they were previously inert despite the banner telling the
     /// user to "narrow the range for per-event detail"). (#5)
@@ -705,6 +707,14 @@ struct EventStream: View {
         }
     }
 
+    /// A full live page left a possible hole above the shown rows. Reload when
+    /// the session allows: never while paused (once on resume), and at most
+    /// every 15 s.
+    private func reloadForLiveGapIfDue() {
+        guard !isAggregateMode, querySession.claimLiveGapReload(paused: isPaused) else { return }
+        liveGapReloadTick &+= 1
+    }
+
     @MainActor
     private func reloadEvents() async {
         await querySession.loadEvents(currentQuery(), isPresented: !isAggregateMode,
@@ -1170,6 +1180,18 @@ struct EventStream: View {
             displayedReadiness = querySession.readiness.forDisplayedContent(isEmpty: filteredCache.isEmpty)
             displayedQueryKey = eventQueryKey
         }
+        .onChange(of: querySession.liveGapTick) { _ in reloadForLiveGapIfDue() }
+        // The same query read again over a live gap: unlike a new query it
+        // keeps the selection, and leaves a table paused meanwhile alone.
+        .task(id: liveGapReloadTick) {
+            guard liveGapReloadTick > 0, !Task.isCancelled, !isAggregateMode else { return }
+            let selection = selectedEventID
+            let key = eventQueryKey
+            await querySession.loadEvents(currentQuery(), presentationKey: presentationKey)
+            guard !Task.isCancelled, key == eventQueryKey, !isPaused else { return }
+            recomputeFilter()
+            selectedEventID = selection.flatMap { id in filteredCache.contains { $0.id == id } ? id : nil }
+        }
         // v1.8.0: refresh aggregate rows whenever the time range crosses the
         // 24h boundary or the category filter changes. Runs only in aggregate
         // mode — inside 24h the filteredCache + live polling is canonical.
@@ -1248,7 +1270,9 @@ struct EventStream: View {
         // Resume: rebuild once from the current events so the frozen table
         // catches up to everything that arrived while paused.
         .onChange(of: isPaused) { paused in
-            if !paused { recomputeFilter() }
+            guard !paused else { return }
+            recomputeFilter()
+            reloadForLiveGapIfDue()
         }
         .onChange(of: filterCategory) { _ in recomputeFilter() }
         .onChange(of: timeRange) { _ in recomputeFilter() }

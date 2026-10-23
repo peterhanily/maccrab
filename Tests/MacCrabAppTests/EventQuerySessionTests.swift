@@ -490,7 +490,7 @@ struct EventQuerySessionTests {
         #expect(retainedTable.isEmpty && session.events.isEmpty)
     }
 
-    @Test("a full live page reloads the window instead of prepending over a gap")
+    @Test("a full live page asks the window to reload over the gap, as no new query")
     func saturatedIncrementalReloads() async {
         let reader = Reader()
         let base = Date().addingTimeInterval(-60)
@@ -498,13 +498,53 @@ struct EventQuerySessionTests {
         let session = EventQuerySession(reader: reader)
         await session.loadEvents(query(live: true))
         #expect(session.events.map(\.processName) == ["older"])
-        let tick = session.retryTick
+        let retry = session.retryTick
+        let gap = session.liveGapTick
         session.receiveIncremental([row("newer", at: base.addingTimeInterval(30))], epoch: session.sourceEpoch,
                                    saturated: true)
         #expect(session.events.map(\.processName) == ["older"], "no prepend across a possible gap")
-        session.pollTick()
-        #expect(session.retryTick == tick + 1, "the next poll reloads the query")
+        #expect(session.liveGapTick == gap + 1)
         session.receiveIncremental([row("newest", at: base.addingTimeInterval(40))], epoch: session.sourceEpoch)
-        #expect(session.events.map(\.processName) == ["newest", "older"], "a partial page still prepends")
+        #expect(session.events.map(\.processName) == ["older"], "nor above it before the reload")
+        session.pollTick()
+        // retryTick is part of the window's query key: bumping it reset the
+        // selection, older pages and a paused table on every full page.
+        #expect(session.retryTick == retry, "a gap is not a new query")
+        #expect(session.liveGapTick == gap + 2, "offered again on each poll until handled")
+        #expect(session.claimLiveGapReload(paused: false))
+        reader.result = .init(events: [row("newest", at: base.addingTimeInterval(40)), row("older", at: base)],
+                              nextCursor: nil)
+        await session.loadEvents(query(live: true))
+        session.receiveIncremental([row("latest", at: base.addingTimeInterval(50))], epoch: session.sourceEpoch)
+        #expect(session.events.map(\.processName) == ["latest", "newest", "older"], "a partial page prepends again")
+    }
+
+    @Test("a paused window keeps the gap for its resume, and gap reloads come at most every 15 s")
+    func liveGapReloadPolicy() async {
+        let reader = Reader()
+        var current = Date()
+        let session = EventQuerySession(reader: reader, now: { current })
+        reader.result = .init(events: [row("first")], nextCursor: nil)
+        await session.loadEvents(query(live: true))
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        #expect(!session.claimLiveGapReload(paused: true), "paused: kept, not reloaded")
+        session.pollTick()
+        #expect(!session.claimLiveGapReload(paused: true))
+        #expect(session.claimLiveGapReload(paused: false), "resumed: reloaded once")
+        #expect(!session.claimLiveGapReload(paused: false), "claimed: nothing left")
+
+        await session.loadEvents(query(live: true))
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        current = current.addingTimeInterval(14)
+        #expect(!session.claimLiveGapReload(paused: false), "inside the interval")
+        current = current.addingTimeInterval(1)
+        #expect(session.claimLiveGapReload(paused: false), "after it")
+
+        // Any read of the window's query covers the gap.
+        await session.loadEvents(query(live: true))
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        current = current.addingTimeInterval(60)
+        await session.loadEvents(query(live: true))
+        #expect(!session.claimLiveGapReload(paused: false))
     }
 }
