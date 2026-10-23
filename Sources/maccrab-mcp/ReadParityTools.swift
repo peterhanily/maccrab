@@ -228,26 +228,36 @@ func handleGetBrowserExtensions(_ args: [String: Any]) -> Any {
 final class CompiledRuleFileIndex: @unchecked Sendable {
     static let shared = CompiledRuleFileIndex()
 
-    /// Modification times of the rule directories at the last build. A
-    /// compile adds, removes or renames files, which changes them.
+    /// The rule directories as they were at the last build. A compile adds,
+    /// removes or renames files, which moves a directory's mtime. A chmod or
+    /// chown of user_rules, which decides whether the engine trusts the
+    /// overlay, leaves its mtime alone, so its ctime, mode and owner count too.
     private struct Stamp: Equatable {
-        let directories: [timespec?]
+        let bundled: [Time?]
+        let user: UserRulesState?
+    }
 
-        static func == (a: Stamp, b: Stamp) -> Bool {
-            a.directories.count == b.directories.count
-                && zip(a.directories, b.directories).allSatisfy { x, y in
-                    x?.tv_sec == y?.tv_sec && x?.tv_nsec == y?.tv_nsec
-                }
+    private struct Time: Equatable {
+        let seconds: Int
+        let nanoseconds: Int
+
+        init(_ value: timespec) {
+            seconds = value.tv_sec
+            nanoseconds = value.tv_nsec
         }
     }
 
-    /// Every directory the engine loads compiled rules from, in the order an
-    /// id resolves: user rules first, because the engine loads them after
-    /// the bundled corpus and a user rule replaces the bundled one with its
-    /// id; then single-event, sequence, graph and auto-generated rules.
-    private static func ruleDirectories(_ compiledDir: String) -> [String] {
-        [userRulesDirectory(compiledDir), compiledDir, compiledDir + "/sequences",
-         compiledDir + "/graph", compiledDir + "/auto_generated"]
+    private struct UserRulesState: Equatable {
+        let modified: Time
+        let changed: Time
+        let mode: mode_t
+        let owner: uid_t
+    }
+
+    /// The bundled corpus in the order an id resolves: single-event,
+    /// sequence, graph and auto-generated rules.
+    private static func bundledDirectories(_ compiledDir: String) -> [String] {
+        [compiledDir, compiledDir + "/sequences", compiledDir + "/graph", compiledDir + "/auto_generated"]
     }
 
     static func userRulesDirectory(_ compiledDir: String) -> String {
@@ -299,24 +309,32 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     func rule(id: String, in compiledDir: String, engineUID: uid_t) -> [String: Any]? {
         let userDir = Self.userRulesDirectory(compiledDir)
         // A user rule is used only while the engine would still load it.
-        func trusted(_ path: String) -> Bool {
-            !path.hasPrefix(userDir + "/")
-                || (Self.userRulesTrusted(userDir, engineUID: engineUID)
-                    && Self.userRuleTrusted(path, engineUID: engineUID))
+        func resolve(_ path: String) -> [String: Any]? {
+            let json: [String: Any]?
+            if path.hasPrefix(userDir + "/") {
+                guard Self.userRulesTrusted(userDir, engineUID: engineUID),
+                      Self.userRuleTrusted(path, engineUID: engineUID) else { return nil }
+                json = Self.loadUserRule(path)
+            } else {
+                json = Self.load(path)
+            }
+            return (json?["id"] as? String) == id ? json : nil
         }
+        // The server lives for a whole agent session, while the engine installs
+        // overrides and an operator may fix user_rules' mode: an entry is used
+        // only while the directories are as they were when it was indexed.
+        let current = Self.stamp(compiledDir)
+        let unchanged = isCurrent(compiledDir, stamp: current)
         let cached = cachedPath(id: id, in: compiledDir)
-        if let cached, trusted(cached), let json = Self.load(cached), (json["id"] as? String) == id {
+        if unchanged, let cached, let json = resolve(cached) {
             return json
         }
         // A stale entry means the rules changed: rebuild. An id with no entry
         // rebuilds only when the directories changed, so an alert whose rule
         // is no longer in the corpus does not reopen every file on each call.
-        let current = Self.stamp(compiledDir)
-        guard cached != nil || !isCurrent(compiledDir, stamp: current) else { return nil }
+        guard cached != nil || !unchanged else { return nil }
         rebuild(compiledDir, stamp: current, engineUID: engineUID)
-        guard let path = cachedPath(id: id, in: compiledDir), trusted(path), let json = Self.load(path),
-              (json["id"] as? String) == id else { return nil }
-        return json
+        return cachedPath(id: id, in: compiledDir).flatMap(resolve)
     }
 
     private func cachedPath(id: String, in compiledDir: String) -> String? {
@@ -332,19 +350,26 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
 
     private func rebuild(_ compiledDir: String, stamp current: Stamp, engineUID: uid_t) {
         var next: [String: String] = [:]
-        let fm = FileManager.default
-        let userDir = Self.userRulesDirectory(compiledDir)
-        for dir in Self.ruleDirectories(compiledDir) {
-            let user = dir == userDir
-            if user, !Self.userRulesTrusted(dir, engineUID: engineUID) { continue }
-            guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
-            // The engine skips hidden files and the build manifest.
-            for file in files.sorted() where file.hasSuffix(".json") && !file.hasPrefix(".") && file != "manifest.json" {
-                let path = dir + "/" + file
-                if user, !Self.userRuleTrusted(path, engineUID: engineUID) { continue }
+        for dir in Self.bundledDirectories(compiledDir) {
+            for path in Self.ruleFiles(in: dir) {
                 if let id = Self.load(path)?["id"] as? String, next[id] == nil {
                     next[id] = path
                 }
+            }
+        }
+        // The engine overlays user rules on its single-event rules, and only
+        // the files it decodes: one replaces a single-event id or adds a new
+        // one, never a sequence or graph id, which other engines run from
+        // their own files.
+        let userDir = Self.userRulesDirectory(compiledDir)
+        if Self.userRulesTrusted(userDir, engineUID: engineUID) {
+            let otherEngines = [compiledDir + "/sequences/", compiledDir + "/graph/"]
+            var overridden: Set<String> = []
+            for path in Self.ruleFiles(in: userDir) where Self.userRuleTrusted(path, engineUID: engineUID) {
+                guard let id = Self.loadUserRule(path)?["id"] as? String, !overridden.contains(id) else { continue }
+                if let bundled = next[id], otherEngines.contains(where: { bundled.hasPrefix($0) }) { continue }
+                next[id] = path
+                overridden.insert(id)
             }
         }
         lock.lock()
@@ -354,18 +379,41 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// A directory's rule files, sorted. The engine skips hidden files and
+    /// the build manifest.
+    private static func ruleFiles(in dir: String) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).sorted()
+            .filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") && $0 != "manifest.json" }
+            .map { dir + "/" + $0 }
+    }
+
     private static func stamp(_ compiledDir: String) -> Stamp {
-        func modified(_ path: String) -> timespec? {
+        let bundled = bundledDirectories(compiledDir).map { path -> Time? in
             var st = stat()
-            return stat(path, &st) == 0 ? st.st_mtimespec : nil
+            return stat(path, &st) == 0 ? Time(st.st_mtimespec) : nil
         }
-        return Stamp(directories: ruleDirectories(compiledDir).map(modified))
+        // lstat, as the trust check does: a symlink swapped in changes it.
+        var st = stat()
+        let user = lstat(userRulesDirectory(compiledDir), &st) == 0
+            ? UserRulesState(modified: Time(st.st_mtimespec), changed: Time(st.st_ctimespec),
+                             mode: st.st_mode, owner: st.st_uid)
+            : nil
+        return Stamp(bundled: bundled, user: user)
     }
 
     /// A regular file only, read through the bounded reader: a FIFO or a
     /// symlink planted among the rules is skipped, not followed or waited on.
     private static func load(_ path: String) -> [String: Any]? {
         guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    /// A user rule only if it decodes as a compiled rule, as the engine
+    /// requires before applying it. The engine's condition-tree validation
+    /// is internal to MacCrabCore and is not repeated here.
+    private static func loadUserRule(_ path: String) -> [String: Any]? {
+        guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024),
+              (try? JSONDecoder().decode(CompiledRule.self, from: data)) != nil else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 }

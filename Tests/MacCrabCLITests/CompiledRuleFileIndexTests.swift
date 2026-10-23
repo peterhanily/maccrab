@@ -6,9 +6,21 @@ import Testing
 /// for every lookup, including lookups for ids the corpus no longer has.
 @Suite("Compiled rule index")
 struct CompiledRuleFileIndexTests {
+    /// A rule file the engine decodes, as every user rule it loads must.
     private func write(_ id: String, to path: String, title: String? = nil) throws {
-        let json = try JSONSerialization.data(withJSONObject: ["id": id, "title": title ?? id])
+        let json = try JSONSerialization.data(withJSONObject: [
+            "id": id, "title": title ?? id, "description": "rule index fixture", "level": "low",
+            "tags": ["attack.discovery"], "logsource": ["category": "file_event", "product": "macos"],
+            "predicates": [["field": "file.path", "modifier": "contains",
+                            "values": ["/maccrab-rule-index-fixture/"], "negate": false]],
+            "condition": "all_of", "falsepositives": ["test fixture"], "enabled": true, "status": "stable",
+        ])
         try json.write(to: URL(fileURLWithPath: path))
+    }
+
+    /// Moves a directory's mtime on, as any change to its entries would.
+    private func touch(_ path: String) throws {
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: path)
     }
 
     /// compiled_rules and user_rules under a fresh support directory.
@@ -23,12 +35,12 @@ struct CompiledRuleFileIndexTests {
 
     @Test("every rule directory resolves; an unknown id does not rebuild until the rules change")
     func lookups() throws {
-        let root = NSTemporaryDirectory() + "maccrab-rule-index-\(UUID().uuidString)"
-        let dir = root + "/compiled_rules"
+        // supportDirectory() makes user_rules 0755: under a umask of 002 a
+        // default mkdir leaves it group-writable, which the engine refuses.
+        let (root, dir, _) = try supportDirectory()
         for sub in ["/sequences", "/graph", "/auto_generated"] {
             try FileManager.default.createDirectory(atPath: dir + sub, withIntermediateDirectories: true)
         }
-        try FileManager.default.createDirectory(atPath: root + "/user_rules", withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: root) }
         try write("rule.a", to: dir + "/a.json")
         try write("seq.b", to: dir + "/sequences/b.json")
@@ -110,6 +122,88 @@ struct CompiledRuleFileIndexTests {
         #expect(box.plain?["id"] as? String == "rule.a")
     }
 
+    @Test("an override installed after a bundled lookup is shown on the same index")
+    func overrideAddedDuringASession() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        let index = CompiledRuleFileIndex()
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "bundled")
+        // The engine's install-rule handler writes the override; the server,
+        // alive for the whole agent session, must not keep the bundled entry.
+        try write("rule.x", to: user + "/x.json", title: "user override")
+        try touch(user)
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "user override")
+    }
+
+    @Test("making user_rules trusted again is seen though its mtime is unchanged")
+    func chmodToTrustedIsSeen() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        try write("rule.x", to: user + "/x.json", title: "user override")
+        try FileManager.default.setAttributes([.posixPermissions: 0o775], ofItemAtPath: user)
+        let index = CompiledRuleFileIndex()
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "bundled")
+        var before = stat()
+        #expect(stat(user, &before) == 0)
+        // chmod changes only the ctime and mode; the mtime stays as it was.
+        #expect(chmod(user, 0o755) == 0)
+        var after = stat()
+        #expect(stat(user, &after) == 0)
+        #expect(after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec
+            && after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec)
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "user override")
+    }
+
+    @Test("a user file the engine cannot decode leaves the bundled rule in place")
+    func undecodableUserRuleIsIgnored() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        // An id and a title only: the engine logs a load error and keeps the
+        // bundled definition, so the index must not show this one.
+        try JSONSerialization.data(withJSONObject: ["id": "rule.x", "title": "refused override"])
+            .write(to: URL(fileURLWithPath: user + "/x.json"))
+        try JSONSerialization.data(withJSONObject: ["id": "user.refused", "title": "refused rule"])
+            .write(to: URL(fileURLWithPath: user + "/y.json"))
+        let index = CompiledRuleFileIndex()
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "bundled")
+        #expect(index.rule(id: "user.refused", in: compiled) == nil)
+    }
+
+    @Test("an id resolves single-event, then sequence, then graph; user rules override single-event ids only")
+    func precedenceAcrossEngines() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        for sub in ["/sequences", "/graph"] {
+            try FileManager.default.createDirectory(atPath: compiled + sub, withIntermediateDirectories: true)
+        }
+        try write("dup.id", to: compiled + "/a.json", title: "single")
+        try write("dup.id", to: compiled + "/sequences/a.json", title: "sequence")
+        try write("dup.id", to: compiled + "/graph/a.json", title: "graph")
+        let index = CompiledRuleFileIndex()
+        #expect(index.rule(id: "dup.id", in: compiled)?["title"] as? String == "single")
+        try FileManager.default.removeItem(atPath: compiled + "/a.json")
+        try touch(compiled)
+        #expect(index.rule(id: "dup.id", in: compiled)?["title"] as? String == "sequence")
+        try FileManager.default.removeItem(atPath: compiled + "/sequences/a.json")
+        try touch(compiled + "/sequences")
+        #expect(index.rule(id: "dup.id", in: compiled)?["title"] as? String == "graph")
+
+        // The engine overlays user rules on single-event rules only; sequence
+        // and graph rules run from their own files.
+        try write("seq.id", to: compiled + "/sequences/s.json", title: "sequence")
+        try write("graph.id", to: compiled + "/graph/g.json", title: "graph")
+        try write("seq.id", to: user + "/s.json", title: "user")
+        try write("graph.id", to: user + "/g.json", title: "user")
+        try write("new.id", to: user + "/n.json", title: "user rule")
+        let fresh = CompiledRuleFileIndex()
+        #expect(fresh.rule(id: "seq.id", in: compiled)?["title"] as? String == "sequence")
+        #expect(fresh.rule(id: "graph.id", in: compiled)?["title"] as? String == "graph")
+        #expect(fresh.rule(id: "new.id", in: compiled)?["title"] as? String == "user rule")
+    }
+
     @Test("trust follows the engine's directory and file checks")
     func trustMatchesTheEngine() {
         typealias Index = CompiledRuleFileIndex
@@ -129,7 +223,7 @@ struct CompiledRuleFileIndexTests {
         let source = (try? String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/maccrab-mcp/ReadParityTools.swift"), encoding: .utf8)) ?? ""
-        #expect(source.contains("if user, !Self.userRuleTrusted(path, engineUID: engineUID) { continue }"))
-        #expect(source.contains("&& Self.userRuleTrusted(path, engineUID: engineUID))"))
+        #expect(source.contains("for path in Self.ruleFiles(in: userDir) where Self.userRuleTrusted(path, engineUID: engineUID) {"))
+        #expect(source.contains("Self.userRuleTrusted(path, engineUID: engineUID) else { return nil }"))
     }
 }
