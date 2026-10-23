@@ -143,6 +143,31 @@ struct PublicInboxReplayTests {
         #expect(DaemonTimers.requestOwner(at: replay).refusal == .replayed)
     }
 
+    @Test("every handler audits a refused request as its real owner, and answers it with the reason")
+    func handlersAuditAndAnswerTheRefusal() throws {
+        // Building a DaemonState for one handler is out of reach in a unit
+        // test, so each owner check's rejection branch is pinned in the source.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let timers = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/DaemonTimers.swift"), encoding: .utf8)
+        let checks = timers.components(separatedBy: "let owner = requestOwner(at: path)").dropFirst()
+        #expect(checks.count == 20, "owner checks: \(checks.count)")
+        var answered = 0
+        for (index, handler) in checks.enumerated() {
+            let audit = try #require(handler.range(of: "uid: owner.auditUID, result: owner.rejectionResult)"),
+                                     "owner check \(index + 1) never audits its refusal")
+            let branch = handler[..<audit.lowerBound]
+            #expect(branch.count < 1_000, "owner check \(index + 1): that audit belongs to a later handler")
+            #expect(!branch.contains("result: \"rejected"), "owner check \(index + 1) audits a refusal without its reason")
+            if branch.contains("state: .rejected") {
+                #expect(branch.contains("owner.rejectionReason"), "owner check \(index + 1) answers without the reason")
+                answered += 1
+            }
+        }
+        #expect(answered == 3, "set-daemon-config, remove-suppression and reload-rules answer a refusal")
+    }
+
     @Test("every verb the dashboard queues is one the engine claims, campaign restore included")
     func dashboardVerbsAreClaimed() throws {
         let root = URL(fileURLWithPath: #filePath)
