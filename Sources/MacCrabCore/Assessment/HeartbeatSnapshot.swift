@@ -1070,10 +1070,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         }
     }
 
-    /// Conservation for one joinable work plane. In-flight work, coalescing and
-    /// detection's inline overload fallback are owned outcomes, not loss.
-    /// Rejection, explicit overload shedding, accounting drift, or work left
-    /// after close are fail-visible and interpreted according to the lane.
+    /// The notarization checker's own counters, published beside the planes
+    /// and kept out of the verdict.
     public struct NotarizationCheckerCounters: Codable, Sendable, Equatable {
         /// Checks answered `unknown` because the assessment cap was full.
         public let saturatedChecks: UInt64?
@@ -1088,6 +1086,10 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         }
     }
 
+    /// Conservation for one joinable work plane. In-flight work, coalescing and
+    /// detection's inline overload fallback are owned outcomes, not loss.
+    /// Rejection, explicit overload shedding, accounting drift, or work left
+    /// after close are fail-visible and interpreted according to the lane.
     public struct TimerLifecycle: Codable, Sendable, Equatable {
         public let accepting: Bool?
         public let offeredHandlersTotal: UInt64?
