@@ -380,7 +380,15 @@ public actor EventEnricher {
             cacheResult: false
         ) {
             let before = HeavyEnrichmentFileIdentity.capture(path: path)
-            let verified = await cache.evaluate(path: path)
+            // Nothing to bind a verdict to, or nothing Security.framework may
+            // open: the path is missing, or no longer a regular file.
+            guard before != nil,
+                  let verified = await cache.evaluateExecutable(path: path) else {
+                return .codeSignature(HeavyCodeSignatureEvidence(
+                    value: nil,
+                    fileIdentity: nil
+                ))
+            }
             let after = HeavyEnrichmentFileIdentity.capture(path: path)
             guard let stable = after, before == stable else {
                 // Never publish a trusted verdict when the path was absent or

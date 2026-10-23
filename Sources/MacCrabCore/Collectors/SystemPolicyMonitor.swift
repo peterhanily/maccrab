@@ -513,7 +513,13 @@ public actor SystemPolicyMonitor {
             // of the quarantine xattr, and legitimate apps often ship
             // without quarantine once installed. Only flag when the target
             // is unsigned/ad-hoc or outright fails signature validation.
-            if isSignedWithAppleAnchor(path: fullPath) {
+            // A name swapped since the listing onto another kind (a FIFO, a
+            // device, a symlink) is skipped this scan, never evaluated.
+            guard let anchored = isSignedWithAppleAnchor(
+                path: fullPath,
+                expected: entry.kind == .directory ? .directory : .regularFile
+            ) else { continue }
+            if anchored {
                 quarantineAlerted.insert(fullPath)
                 continue
             }
@@ -532,8 +538,13 @@ public actor SystemPolicyMonitor {
 
     /// True when the file at `path` has a valid signature rooted in Apple
     /// (first-party, Mac App Store, or Developer ID). These files do not
-    /// represent a meaningful "stripped quarantine" risk.
-    private func isSignedWithAppleAnchor(path: String) -> Bool {
+    /// represent a meaningful "stripped quarantine" risk. Nil, unevaluated,
+    /// when `path` no longer opens as the kind the listing saw: the listing
+    /// pinned every directory no-follow, so a symlink anywhere is a swap.
+    func isSignedWithAppleAnchor(path: String, expected: SecurityEvaluationPrecheck.Expected) -> Bool? {
+        guard SecurityEvaluationPrecheck.metadata(of: path, expected: expected, canonical: true) != nil else {
+            return nil
+        }
         let url = URL(fileURLWithPath: path) as CFURL
         var staticCodeRef: SecStaticCode?
         guard SecStaticCodeCreateWithPath(url, [], &staticCodeRef) == errSecSuccess,

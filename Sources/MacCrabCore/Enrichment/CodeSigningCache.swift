@@ -51,6 +51,16 @@ public actor CodeSigningCache {
         let mtimeNsec: Int
         let ctimeSec: time_t
         let ctimeNsec: Int
+
+        init(_ metadata: stat) {
+            dev = metadata.st_dev
+            ino = metadata.st_ino
+            size = metadata.st_size
+            mtimeSec = metadata.st_mtimespec.tv_sec
+            mtimeNsec = metadata.st_mtimespec.tv_nsec
+            ctimeSec = metadata.st_ctimespec.tv_sec
+            ctimeNsec = metadata.st_ctimespec.tv_nsec
+        }
     }
 
     // MARK: Storage
@@ -145,15 +155,7 @@ public actor CodeSigningCache {
     private nonisolated static func currentIdentity(path: String) -> FileIdentity? {
         var st = stat()
         guard path.withCString({ stat($0, &st) }) == 0 else { return nil }
-        return FileIdentity(
-            dev: st.st_dev,
-            ino: st.st_ino,
-            size: st.st_size,
-            mtimeSec: st.st_mtimespec.tv_sec,
-            mtimeNsec: st.st_mtimespec.tv_nsec,
-            ctimeSec: st.st_ctimespec.tv_sec,
-            ctimeNsec: st.st_ctimespec.tv_nsec
-        )
+        return FileIdentity(st)
     }
 
     // MARK: Evaluate
@@ -165,8 +167,26 @@ public actor CodeSigningCache {
     /// details. The result is cached before being returned.
     ///
     /// - Parameter path: Absolute path to the binary on disk.
-    /// - Returns: Signing information for the binary.
+    /// - Returns: Signing information for the binary. A path that does not
+    ///   open safely as a regular file or bundle reads as unsigned, as one
+    ///   Security.framework cannot open does, and nothing is cached for it.
     public func evaluate(path: String) async -> CodeSignatureInfo {
+        await evaluate(path: path, expected: .regularFileOrDirectory, canonical: false)
+            ?? CodeSignatureInfo(signerType: .unsigned)
+    }
+
+    /// `evaluate(path:)` for an executable path the kernel reported, which is
+    /// canonical and names a regular file. Nil, never a verdict, when the path
+    /// no longer opens as that file without following a symlink.
+    public func evaluateExecutable(path: String) async -> CodeSignatureInfo? {
+        await evaluate(path: path, expected: .regularFile, canonical: true)
+    }
+
+    private func evaluate(
+        path: String,
+        expected: SecurityEvaluationPrecheck.Expected,
+        canonical: Bool
+    ) async -> CodeSignatureInfo? {
         // 1. Cache hit — fast path.
         if let cached = lookup(path: path) {
             cacheHits += 1
@@ -177,7 +197,7 @@ public actor CodeSigningCache {
         cacheMisses += 1
         let before = Self.currentIdentity(path: path)
         let afterEvaluation = afterEvaluationForTesting
-        let info = await BlockingWorkOffload.perform(
+        let info: CodeSignatureInfo? = await BlockingWorkOffload.perform(
             on: Self.evaluationQueue,
             qos: BlockingWorkOffload.dispatchQoS(
                 waitedOnAt: Task.currentPriority,
@@ -185,10 +205,17 @@ public actor CodeSigningCache {
             ),
             flags: .enforceQoS
         ) {
+            // Security.framework opens the path itself, blocking on a FIFO and
+            // without O_NOCTTY: hand it only what a safe open just found, and
+            // only the file stat saw, when stat saw one.
+            guard let opened = SecurityEvaluationPrecheck.metadata(
+                of: path, expected: expected, canonical: canonical
+            ), before.map({ $0 == FileIdentity(opened) }) ?? true else { return nil }
             let info = Self.performEvaluation(path: path)
             afterEvaluation?(path)
             return info
         }
+        guard let info else { return nil }
         // Bind the verdict only to bytes that stayed in place for the whole
         // evaluation. Capturing the identity afterwards let a binary renamed
         // into place mid-evaluation inherit the previous file's verdict.

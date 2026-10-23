@@ -237,8 +237,15 @@ public actor LibraryInventory {
     /// Returns `true` when the library at `path` is validly signed by Apple,
     /// the Mac App Store, or a Developer ID certificate. Results are cached
     /// per-path to avoid repeated Security framework calls for the same dylib.
-    private func isTrustedSigned(path: String) -> Bool {
+    func isTrustedSigned(path: String) -> Bool {
         if let cached = signatureCache[path] { return cached }
+        // Security.framework opens the path itself, blocking on a FIFO. A
+        // mapped library's path that no longer opens as a regular file,
+        // without a symlink, cannot vouch for what was loaded: untrusted,
+        // and not cached, so the next scan looks again.
+        guard SecurityEvaluationPrecheck.metadata(of: path, expected: .regularFile, canonical: true) != nil else {
+            return false
+        }
 
         let url = URL(fileURLWithPath: path) as CFURL
         var staticCodeRef: SecStaticCode?
