@@ -37,9 +37,9 @@ final class AlertNotifier: NSObject {
     private let dataDir: String?
     /// Lazily-opened read-only handle to alerts.db.
     private var store: AlertStore?
-    /// Timestamp of the newest alert we've already considered. Persisted
-    /// so a relaunch doesn't re-notify the backlog.
-    private var cursor: Date?
+    /// The last alert considered, in commit order. Persisted so a relaunch
+    /// doesn't re-notify the backlog.
+    private var cursor: NotificationCursor?
     /// Upgrade-handoff gate. While set to a future date, `tick()` returns
     /// WITHOUT posting or advancing the cursor, so a freshly-launched
     /// post-upgrade app stays silent during the `OSSystemExtensionRequest`
@@ -67,12 +67,19 @@ final class AlertNotifier: NSObject {
     /// "Show dashboard" action. See `userNotificationCenter(_:didReceive:)`.
     var onOpenAlert: ((String) -> Void)?
 
+    /// The watermark, under the key of the timestamp cursor it replaces: an
+    /// older cursor resumes after it, and an older app still reads it.
     private static let cursorDefaultsKey = "maccrab.alertNotifier.cursor"
+    private static let rowCursorDefaultsKey = "maccrab.alertNotifier.rowCursor"
 
     init(dataDir: String? = AlertNotifier.resolveDataDir()) {
         self.dataDir = dataDir
-        if let t = UserDefaults.standard.object(forKey: Self.cursorDefaultsKey) as? Double {
-            self.cursor = Date(timeIntervalSince1970: t)
+        let defaults = UserDefaults.standard
+        if let data = defaults.data(forKey: Self.rowCursorDefaultsKey),
+           let saved = try? JSONDecoder().decode(NotificationCursor.self, from: data) {
+            self.cursor = saved
+        } else if let t = defaults.object(forKey: Self.cursorDefaultsKey) as? Double {
+            self.cursor = NotificationCursor(rowID: 0, alertID: nil, watermark: Date(timeIntervalSince1970: t))
         }
         super.init()
         center.delegate = self
@@ -109,6 +116,7 @@ final class AlertNotifier: NSObject {
         case storeUnavailable    = "store_unavailable"
         case fetchFailed         = "fetch_failed"
         case cursorSeeded        = "cursor_seeded"
+        case disabled            = "disabled"
         case nothingFresh        = "nothing_fresh"
         case authorizationPending = "authorization_pending"
         case delivered           = "delivered"
@@ -140,11 +148,11 @@ final class AlertNotifier: NSObject {
         status.lastTickAt = Date()
         status.authorizationDenied = authorizationDenied
         switch outcome {
-        case .delivered, .cursorSeeded, .nothingFresh:
+        case .delivered, .cursorSeeded, .disabled, .nothingFresh:
             break
         case .handoffGated, .storeUnavailable, .fetchFailed, .authorizationPending:
             logger.notice(
-                "alert notifier silent: \(outcome.rawValue, privacy: .public), backlog=\(backlog, privacy: .public), cursor=\(self.cursor?.description ?? "nil", privacy: .public)"
+                "alert notifier silent: \(outcome.rawValue, privacy: .public), backlog=\(backlog, privacy: .public), cursor=\(self.cursor.map { "\($0.rowID)@\($0.watermark)" } ?? "nil", privacy: .public)"
             )
         }
     }
@@ -170,53 +178,50 @@ final class AlertNotifier: NSObject {
             return
         }
 
-        // First run (no persisted cursor): seed to the newest alert and
-        // do NOT notify the backlog.
-        guard let since = cursor else {
-            guard let newest = try? await store.alerts(since: Date.distantPast, limit: 1) else {
-                finish(.fetchFailed)
-                return
-            }
-            cursor = newest.first?.timestamp ?? Date()
-            persistCursor()
-            finish(.cursorSeeded)
-            return
-        }
-        // Read forward from the cursor, oldest first: this tick's slice plus
-        // one row to learn whether more wait. Reading the newest rows and
-        // widening the window up to 5,000 re-read about 9,200 full rows every
-        // tick during a backlog and skipped, for good, the oldest alerts of a
-        // storm larger than the widest window.
-        guard let fresh = try? await store.alertsForNotification(
-            after: since, limit: Self.maximumDeliveriesPerTick + 1
-        ) else {
+        let center = self.center
+        var status = UNAuthorizationStatus.notDetermined
+        let read: ForwardRead
+        do {
+            read = try await Self.readForward(
+                store: store, cursor: cursor,
+                floor: gate.minimumSeverity, enabled: gate.enabled,
+                isAuthorizationDetermined: {
+                    status = await center.notificationSettings().authorizationStatus
+                    return status != .notDetermined
+                })
+        } catch {
             finish(.fetchFailed)
             return
         }
-        guard !fresh.isEmpty else {
+        cursor = read.cursor
+        persistCursor()
+        switch read.outcome {
+        case .seeded:
+            finish(.cursorSeeded)
+            return
+        case .disabled:
+            finish(.disabled)
+            return
+        case .nothingFresh:
             finish(.nothingFresh)
             return
+        case .authorizationPending:
+            // Auth still pending (prompt not yet answered): these alerts were
+            // not consumed, so they re-process on a later tick once the user
+            // grants — otherwise alerts that fire in the few seconds before
+            // the prompt is answered are silently lost. (Denied is treated as
+            // determined: we process + fall back to the in-app popover so a
+            // user who said "no" isn't stuck retrying forever.)
+            authorizationDenied = false
+            finish(.authorizationPending, backlog: read.backlog)
+            return
+        case .delivered:
+            break
         }
-        func backlog(after: Date) async -> Int {
-            (try? await store.notificationBacklogCount(after: after)) ?? 0
-        }
-
-        let status = await center.notificationSettings().authorizationStatus
         authorizationDenied = (status == .denied)
 
-        // Auth still pending (prompt not yet answered): DON'T consume these
-        // alerts. Returning without advancing the cursor means they re-process
-        // on a later tick once the user grants — otherwise alerts that fire in
-        // the few seconds before the prompt is answered are silently lost.
-        // (Denied is treated as determined: we process + fall back to the
-        // in-app popover so a user who said "no" isn't stuck retrying forever.)
-        if status == .notDetermined {
-            finish(.authorizationPending, backlog: await backlog(after: since))
-            return
-        }
-
-        // Drain a BOUNDED slice, oldest first, and always persist what we got
-        // through.
+        // A BOUNDED slice, oldest commit first, whose progress is already
+        // persisted.
         //
         // This is hardening, not the outage fix — be precise about which. The
         // six-day silence was caused by the channel never being CONSTRUCTED
@@ -226,8 +231,7 @@ final class AlertNotifier: NSObject {
         // 2,091-alert backlog would have fired 2,091 banners at once. A cap of
         // 50 per 5s tick drains 600/min, bounds the burst a storm can produce,
         // and bounds the MainActor time one tick can hold.
-        let slice = fresh.prefix(Self.maximumDeliveriesPerTick)
-        for alert in slice {
+        for alert in read.alerts {
             switch gate.evaluate(alert: alert) {
             case .deliver(let title, let body, let sound),
                  .stormSummary(let title, let body, let sound):
@@ -237,16 +241,109 @@ final class AlertNotifier: NSObject {
             case .drop:
                 self.status.droppedByGateTotal &+= 1
             }
-            cursor = max(cursor ?? alert.timestamp, alert.timestamp)
         }
-        persistCursor()
-        let remaining = fresh.count > slice.count ? await backlog(after: cursor ?? since) : 0
-        if remaining > 0 {
+        if read.backlog > 0 {
             logger.notice(
-                "alert notifier draining backlog: delivered slice of \(slice.count, privacy: .public), \(remaining, privacy: .public) still pending"
+                "alert notifier draining backlog: delivered slice of \(read.alerts.count, privacy: .public), \(read.backlog, privacy: .public) still pending"
             )
         }
-        finish(.delivered, backlog: remaining)
+        finish(.delivered, backlog: read.backlog)
+    }
+
+    /// Where the notifier is in alerts.db.
+    struct NotificationCursor: Codable, Equatable, Sendable {
+        /// The last alert considered: its rowid, the order alerts were
+        /// committed in, and its id. A deleted newest alert's rowid is
+        /// reused, and another alerts.db reuses every rowid, so the rowid
+        /// counts only while it still names this alert.
+        var rowID: Int64
+        var alertID: String?
+        /// The newest alert timestamp considered (or when the cursor was
+        /// placed): where reading resumes when the rowid no longer counts.
+        var watermark: Date
+
+        init(rowID: Int64, alertID: String?, watermark: Date) {
+            self.rowID = rowID
+            self.alertID = alertID
+            self.watermark = watermark
+        }
+
+        init(_ row: AlertStore.AlertRowReference?, watermark: Date) {
+            self.init(rowID: row?.rowID ?? 0, alertID: row?.id, watermark: watermark)
+        }
+    }
+
+    /// One tick's read: the slice to gate and post, and the cursor after it.
+    struct ForwardRead {
+        enum Outcome: Equatable {
+            case seeded, disabled, nothingFresh, authorizationPending, delivered
+        }
+        var outcome: Outcome
+        var alerts: [Alert] = []
+        var cursor: NotificationCursor
+        /// Alerts at or above the floor still waiting after this read.
+        var backlog: Int = 0
+    }
+
+    /// Read forward from `cursor` in commit order, at or above `floor`, and
+    /// say where the cursor goes. Authorization is asked only when there is
+    /// something to deliver; until it is determined nothing is consumed.
+    static func readForward(
+        store: AlertStore,
+        cursor saved: NotificationCursor?,
+        floor: MacCrabCore.Severity,
+        enabled: Bool,
+        now: Date = Date(),
+        isAuthorizationDetermined: () async -> Bool
+    ) async throws -> ForwardRead {
+        // First run: start at the newest alert and notify none of the backlog.
+        // An empty table has none, so every alert after it is new.
+        guard var cursor = saved else {
+            let newest = try await store.newestAlertRow()
+            return ForwardRead(outcome: .seeded,
+                               cursor: NotificationCursor(newest, watermark: newest == nil ? .distantPast : now))
+        }
+        let named = cursor.alertID == nil ? nil : try await store.alertID(atRowID: cursor.rowID)
+        if named == nil || named != cursor.alertID {
+            cursor.rowID = try await store.notificationResumeRowID(after: cursor.watermark)
+            cursor.alertID = nil
+        }
+        guard let newest = try await store.newestAlertRow(), newest.rowID > cursor.rowID else {
+            return ForwardRead(outcome: .nothingFresh, cursor: cursor)
+        }
+        guard enabled else {
+            // Muted: everything so far counts as considered, so unmuting does
+            // not replay the muted period.
+            return ForwardRead(outcome: .disabled,
+                               cursor: NotificationCursor(newest, watermark: max(cursor.watermark, now)))
+        }
+        // This tick's slice plus one row to learn whether more wait, at or
+        // above the floor only: a flood below it must not hold a critical
+        // banner back, a slice at a time, behind its own backlog.
+        let severities = MacCrabCore.Severity.allCases.filter { $0 >= floor }
+        let fresh = try await store.alertsForNotification(
+            afterRowID: cursor.rowID, throughRowID: newest.rowID,
+            severities: severities, limit: Self.maximumDeliveriesPerTick + 1
+        )
+        guard !fresh.isEmpty else {
+            return ForwardRead(outcome: .nothingFresh, cursor: NotificationCursor(newest, watermark: cursor.watermark))
+        }
+        guard await isAuthorizationDetermined() else {
+            let backlog = try await store.notificationBacklogCount(afterRowID: cursor.rowID, severities: severities)
+            return ForwardRead(outcome: .authorizationPending, cursor: cursor, backlog: backlog)
+        }
+        let slice = Array(fresh.prefix(Self.maximumDeliveriesPerTick))
+        let watermark = max(cursor.watermark, slice.map(\.alert.timestamp).max() ?? cursor.watermark)
+        guard fresh.count > slice.count, let last = slice.last else {
+            // Everything at or above the floor up to the newest row is here.
+            return ForwardRead(outcome: .delivered, alerts: slice.map(\.alert),
+                               cursor: NotificationCursor(newest, watermark: watermark))
+        }
+        return ForwardRead(
+            outcome: .delivered, alerts: slice.map(\.alert),
+            cursor: NotificationCursor(rowID: last.rowID, alertID: last.alert.id, watermark: watermark),
+            backlog: try await store.notificationBacklogCount(afterRowID: last.rowID, severities: severities)
+        )
     }
 
     /// Per-tick delivery cap. Bounds both the banner burst a storm can produce
@@ -338,8 +435,10 @@ final class AlertNotifier: NSObject {
     }
 
     private func persistCursor() {
-        if let cursor {
-            UserDefaults.standard.set(cursor.timeIntervalSince1970, forKey: Self.cursorDefaultsKey)
+        guard let cursor else { return }
+        UserDefaults.standard.set(cursor.watermark.timeIntervalSince1970, forKey: Self.cursorDefaultsKey)
+        if let data = try? JSONEncoder().encode(cursor) {
+            UserDefaults.standard.set(data, forKey: Self.rowCursorDefaultsKey)
         }
     }
 

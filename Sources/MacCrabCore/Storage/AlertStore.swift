@@ -1726,34 +1726,109 @@ public actor AlertStore {
         return sqlite3_column_int(stmt, 0) == 1
     }
 
-    /// Unsuppressed alerts strictly newer than `after`, oldest first, for a
-    /// forward reader such as the notification channel. Reading the newest
-    /// rows and widening the window re-read thousands of full rows every tick
-    /// during a backlog and skipped the oldest past the widest window. The
-    /// investigation, analyst and triggering-evidence columns, up to 64 KiB a
-    /// row, are not read; columns keep their positions for the row decoder.
-    public func alertsForNotification(after: Date, limit: Int) throws -> [Alert] {
+    /// An alert with its rowid, the order alerts were committed in.
+    public struct CommittedAlert: Sendable {
+        public let rowID: Int64
+        public let alert: Alert
+    }
+
+    /// A committed row's rowid and alert id.
+    public struct AlertRowReference: Sendable, Equatable {
+        public let rowID: Int64
+        public let id: String
+
+        public init(rowID: Int64, id: String) {
+            self.rowID = rowID
+            self.id = id
+        }
+    }
+
+    /// The newest committed alert row, nil for an empty table.
+    public func newestAlertRow() throws -> AlertRowReference? {
+        let stmt = try prepare("SELECT rowid, id FROM alerts ORDER BY rowid DESC LIMIT 1")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW, let id = columnTextOrNil(stmt, index: 1) else { return nil }
+        return AlertRowReference(rowID: sqlite3_column_int64(stmt, 0), id: id)
+    }
+
+    /// The id of the alert at `rowID`, nil when no row has it.
+    public func alertID(atRowID rowID: Int64) throws -> String? {
+        let stmt = try prepare("SELECT id FROM alerts WHERE rowid = ?1")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, rowID)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return columnTextOrNil(stmt, index: 0)
+    }
+
+    /// Where a forward reader that has considered every alert stamped up to
+    /// `watermark` resumes in rowid terms: just below the oldest alert stamped
+    /// after it, so none of those is skipped, else after the newest row. 0
+    /// for an empty table.
+    public func notificationResumeRowID(after watermark: Date) throws -> Int64 {
+        let oldestAfter = try prepare("SELECT MIN(rowid) FROM alerts WHERE timestamp > ?1")
+        defer { sqlite3_finalize(oldestAfter) }
+        sqlite3_bind_double(oldestAfter, 1, watermark.timeIntervalSince1970)
+        if sqlite3_step(oldestAfter) == SQLITE_ROW, sqlite3_column_type(oldestAfter, 0) != SQLITE_NULL {
+            return sqlite3_column_int64(oldestAfter, 0) - 1
+        }
+        return try newestAlertRow()?.rowID ?? 0
+    }
+
+    /// Unsuppressed alerts at one of `severities`, committed after
+    /// `afterRowID` and up to `throughRowID`, oldest commit first, for a
+    /// forward reader such as the notification channel. A timestamp cursor
+    /// skipped an alert committed after a later-stamped one it had already
+    /// read, and ties across a slice boundary; reading below the floor let a
+    /// flood of low alerts hold a critical one back. Rowids keep commit order
+    /// here: the table has them (it is not WITHOUT ROWID), an existing id is
+    /// updated in place, never replaced, and VACUUM keeps the rowids of a
+    /// table with indexes. Only a deleted newest row's rowid is reused, which
+    /// the reader detects by the alert id it saw there. The investigation,
+    /// analyst and triggering-evidence columns, up to 64 KiB a row, are not
+    /// read; columns keep their positions for the row decoder.
+    public func alertsForNotification(
+        afterRowID: Int64,
+        throughRowID: Int64,
+        severities: [Severity],
+        limit: Int
+    ) throws -> [CommittedAlert] {
+        guard !severities.isEmpty else { return [] }
+        let placeholders = severities.indices.map { "?\($0 + 4)" }.joined(separator: ", ")
         let sql = """
             SELECT id, timestamp, rule_id, rule_title, severity, event_id, process_path,
                    process_name, description, mitre_tactics, mitre_techniques, suppressed,
                    NULL, d3fend_techniques, remediation_hint, NULL, campaign_id, user_id,
                    user_name, working_directory, ai_tool, parent_executable, process_sha256,
-                   host_name, NULL, ai_tool_session_id
-            FROM alerts WHERE timestamp > ?1 AND suppressed = 0
-            ORDER BY timestamp ASC, rowid ASC LIMIT ?2
+                   host_name, NULL, ai_tool_session_id, rowid
+            FROM alerts WHERE rowid > ?1 AND rowid <= ?2 AND suppressed = 0
+                AND severity IN (\(placeholders))
+            ORDER BY rowid ASC LIMIT ?3
             """
-        return try queryAlerts(sql: sql, bindings: [
-            (1, .double(after.timeIntervalSince1970)),
-            (2, .int(Int32(max(1, min(limit, 1_000))))),
-        ])
+        var bindings: [(Int32, BindingValue)] = [
+            (1, .int64(afterRowID)),
+            (2, .int64(throughRowID)),
+            (3, .int(Int32(max(1, min(limit, 1_000))))),
+        ]
+        for (index, severity) in severities.enumerated() {
+            bindings.append((Int32(index + 4), .text(severity.rawValue)))
+        }
+        return try queryAlertRows(sql: sql, bindings: bindings, rowIDColumn: 26)
+            .map { CommittedAlert(rowID: $0.rowID, alert: $0.alert) }
     }
 
-    /// How many unsuppressed alerts are strictly newer than `after`.
-    public func notificationBacklogCount(after: Date) throws -> Int {
-        let sql = "SELECT COUNT(*) FROM alerts WHERE timestamp > ?1 AND suppressed = 0"
-        let stmt = try prepare(sql)
+    /// How many unsuppressed alerts at one of `severities` were committed
+    /// after `afterRowID`: the forward reader's backlog, by its own predicate.
+    public func notificationBacklogCount(afterRowID: Int64, severities: [Severity]) throws -> Int {
+        guard !severities.isEmpty else { return 0 }
+        let placeholders = severities.indices.map { "?\($0 + 2)" }.joined(separator: ", ")
+        let stmt = try prepare(
+            "SELECT COUNT(*) FROM alerts WHERE rowid > ?1 AND suppressed = 0 AND severity IN (\(placeholders))"
+        )
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_double(stmt, 1, after.timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 1, afterRowID)
+        for (index, severity) in severities.enumerated() {
+            bindText(stmt, index: Int32(index + 2), value: severity.rawValue)
+        }
         guard sqlite3_step(stmt) == SQLITE_ROW else {
             throw AlertStoreError.stepFailed("Failed to count the notification backlog")
         }
@@ -3375,6 +3450,7 @@ public actor AlertStore {
         case text(String)
         case double(Double)
         case int(Int32)
+        case int64(Int64)
         case null
     }
 
@@ -4430,6 +4506,15 @@ public actor AlertStore {
         sql: String,
         bindings: [(Int32, BindingValue)]
     ) throws -> [Alert] {
+        try queryAlertRows(sql: sql, bindings: bindings, rowIDColumn: nil).map(\.alert)
+    }
+
+    /// `queryAlerts`, with each row's rowid read from `rowIDColumn` (0 without one).
+    private func queryAlertRows(
+        sql: String,
+        bindings: [(Int32, BindingValue)],
+        rowIDColumn: Int32?
+    ) throws -> [(rowID: Int64, alert: Alert)] {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
 
@@ -4441,12 +4526,14 @@ public actor AlertStore {
                 sqlite3_bind_double(stmt, index, d)
             case .int(let i):
                 sqlite3_bind_int(stmt, index, i)
+            case .int64(let i):
+                sqlite3_bind_int64(stmt, index, i)
             case .null:
                 sqlite3_bind_null(stmt, index)
             }
         }
 
-        var results: [Alert] = []
+        var results: [(rowID: Int64, alert: Alert)] = []
         while try AlertQueryReadStep.advance(statement: stmt, database: db) {
             // Columns by index match the CREATE TABLE order:
             // 0: id, 1: timestamp, 2: rule_id, 3: rule_title, 4: severity,
@@ -4558,7 +4645,7 @@ public actor AlertStore {
                 triggeringEventsJson: triggeringEventsJson,
                 aiToolSessionId: aiToolSessionId
             )
-            results.append(alert)
+            results.append((rowIDColumn.map { sqlite3_column_int64(stmt, $0) } ?? 0, alert))
         }
         return results
     }
