@@ -344,6 +344,63 @@ struct BehaviorScoringStaticFloodTests {
         #expect(await scorer.lifecycleInvariantFailures().isEmpty)
     }
 
+    @Test("every retry of an earlier process's crossing is marked, a repeated indicator's too")
+    func repeatedIndicatorRetryIsMarked() async throws {
+        let clock = Clock()
+        let scorer = scorer(clock)
+        let path = "/bin/sh"
+        let crossing = try #require(await scorer.addIndicators(
+            [.init(name: "ai_tool_runs_sudo", weight: 6), .init(name: "ai_tool_installs_unknown_pkg", weight: 4)],
+            forProcess: 82, path: path, processStart: clock.now))
+        await scorer.recordThresholdDeliveryFailure(deliveryToken: crossing.deliveryToken)
+        clock.advance(1)
+        await scorer.processExited(pid: 82)
+        clock.advance(1)
+        let laterStart = clock.now
+        let first = try #require(await scorer.addIndicator(.init(name: "executed_from_tmp", weight: 1),
+                                                           forProcess: 82, path: path, processStart: laterStart))
+        #expect(first.deliveryToken == crossing.deliveryToken && first.fromEarlierProcess)
+        // Nothing is added for a once-per-process indicator seen again, or an
+        // action indicator inside its cooldown, but the retry is still the
+        // earlier process's.
+        clock.advance(1)
+        let once = try #require(await scorer.addIndicator(.init(name: "executed_from_tmp", weight: 1),
+                                                          forProcess: 82, path: path, processStart: laterStart))
+        #expect(once.deliveryToken == crossing.deliveryToken)
+        #expect(once.fromEarlierProcess)
+        _ = await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2),
+                                      forProcess: 82, path: path, processStart: laterStart)
+        clock.advance(1)
+        let repeated = try #require(await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2),
+                                                              forProcess: 82, path: path, processStart: laterStart))
+        #expect(repeated.fromEarlierProcess)
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
+    @Test("a crossing whose exited process's score has left is marked when retried")
+    func detachedCrossingIsMarked() async throws {
+        let clock = Clock()
+        let scorer = scorer(clock)
+        let path = "/bin/sh"
+        let crossing = try #require(await scorer.addIndicators(
+            [.init(name: "ai_tool_runs_sudo", weight: 6), .init(name: "ai_tool_installs_unknown_pkg", weight: 4)],
+            forProcess: 83, path: path, processStart: clock.now))
+        await scorer.recordThresholdDeliveryFailure(deliveryToken: crossing.deliveryToken)
+        await scorer.processExited(pid: 83)
+        clock.advance(601)
+        // Any later exit drains the queue: the exited score leaves after its
+        // grace, and its undelivered crossing stays pending.
+        await scorer.processExited(pid: 84)
+        #expect(await scorer.score(forPid: 83, path: path) == 0)
+        let retried = try #require(await scorer.addIndicator(.init(name: "connects_raw_ip", weight: 2),
+                                                             forProcess: 83, path: path, processStart: clock.now))
+        #expect(retried.deliveryToken == crossing.deliveryToken)
+        #expect(retried.fromEarlierProcess, "another process's crossing, retried on this one's event")
+        #expect(await scorer.resolveThreshold(deliveryToken: retried.deliveryToken, as: .committed))
+        #expect(await scorer.thresholdTelemetry().conservesCrossings)
+        #expect(await scorer.lifecycleInvariantFailures().isEmpty)
+    }
+
     @Test("the emitter delivers an earlier process's crossing without the triggering event")
     func emitterDropsTheTriggeringEvent() throws {
         let root = URL(fileURLWithPath: #filePath)

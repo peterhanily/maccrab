@@ -108,10 +108,6 @@ public actor BehaviorScoring {
         var indicatorLastAdd: [String: Date] = [:]
         /// Set by the process's exit; the score leaves after `exitGrace`.
         var exitedAt: Date?
-        /// When a later process reusing the pid and path replaced an exited
-        /// entry. A delivery pending from before then is the earlier
-        /// process's crossing.
-        var generationStartedAt: Date?
 
         var totalScore: Double { staticScore + rawScore }
     }
@@ -171,7 +167,9 @@ public actor BehaviorScoring {
         /// The crossing belongs to an earlier process that held this pid and
         /// path, and is being retried. It must be delivered without the
         /// current process's event: that event's evidence, noise judgement
-        /// and response target are another process's.
+        /// and response target are another process's. Stored on the pending
+        /// crossing when a new generation replaces its process's score, or
+        /// when that exited process's score leaves, so every retry carries it.
         public internal(set) var fromEarlierProcess = false
     }
 
@@ -409,10 +407,10 @@ public actor BehaviorScoring {
         // exited process's own late events started before it exited.
         if let processStart, let exitedAt = processScores[key]?.exitedAt, processStart > exitedAt {
             var fresh = ProcessScore(lastUpdate: timestamp)
-            fresh.generationStartedAt = timestamp
             if let exited = lastExitAt[pid], exited > processStart { fresh.exitedAt = exited }
             processScores[key] = fresh
             alerted.remove(key)
+            pendingThresholds[key]?.fromEarlierProcess = true
             if let index = insertionOrder.firstIndex(of: key) { insertionOrder.remove(at: index) }
             insertionOrder.append(key)
         }
@@ -443,9 +441,7 @@ public actor BehaviorScoring {
             // static-only total never decays, so its delivery stays pending,
             // and so does an earlier generation's crossing, which a new
             // process's low score says nothing about.
-            let earlierGeneration = entry.generationStartedAt.map { start in
-                pendingThresholds[key].map { $0.createdAt < start } ?? false
-            } ?? false
+            let earlierGeneration = pendingThresholds[key]?.fromEarlierProcess == true
             if entry.totalScore < alertThreshold, !earlierGeneration {
                 abandonPendingThreshold(for: key)
             }
@@ -513,14 +509,11 @@ public actor BehaviorScoring {
         if addedNewKey { evictIfNeeded(at: timestamp, inserted: key) }
         let score = entry
 
-        // Check threshold
-        if var pending = pendingThresholds[key] {
-            // Only a generation reset, which an observed exit gates, says the
-            // crossing is another process's: a network or log event's start
-            // time is when it was seen, not when its process started.
-            if let generationStart = entry.generationStartedAt, pending.createdAt < generationStart {
-                pending.fromEarlierProcess = true
-            }
+        // Check threshold. Only a generation reset, which an observed exit
+        // gates, or the exited process's score leaving marks a pending
+        // crossing as another process's: a network or log event's start time
+        // is when it was seen, not when its process started.
+        if let pending = pendingThresholds[key] {
             return pending
         }
 
@@ -578,8 +571,7 @@ public actor BehaviorScoring {
         // score generation left on which to retain a one-shot alert latch,
         // and an earlier process's crossing must not latch the process now
         // holding this pid and path.
-        if let entry = processScores[key],
-           settled.createdAt >= (entry.generationStartedAt ?? .distantPast) {
+        if processScores[key] != nil, !settled.fromEarlierProcess {
             alerted.insert(key)
         }
         switch resolution {
@@ -755,6 +747,9 @@ public actor BehaviorScoring {
             for key in expired {
                 processScores.removeValue(forKey: key)
                 alerted.remove(key)
+                // Its undelivered crossing outlives it: a later event for this
+                // pid and path is another process's.
+                pendingThresholds[key]?.fromEarlierProcess = true
             }
             let remaining = keys.subtracting(expired)
             if remaining.isEmpty {
