@@ -260,6 +260,7 @@ struct CommandLineRedactionParityTests {
             ["/usr/bin/env", "SVN_SSH=sshpass -p Hunter22 ssh", "svn", "up"],
             ["/opt/homebrew/bin/hg", "--config", "ui.ssh=sshpass -p Hunter22 ssh", "pull"],
             ["/usr/local/bin/docker", "run", "--entrypoint=sshpass", "img", "-p", "Hunter22", "ssh", "h"],
+            ["/opt/homebrew/bin/sshuttle", "--ssh-cmd=sshpass -p Hunter22 ssh", "-r", "u@h", "0/0"],
         ] {
             let process = try stored(argv)
             #expect(!process.commandLine.contains("Hunter22"), "\(process.commandLine)")
@@ -267,6 +268,13 @@ struct CommandLineRedactionParityTests {
             let line = argv.joined(separator: " ")
             #expect(!CommandSanitizer.sanitize(line).contains("Hunter22"), "\(line)")
         }
+        // A letters-only compact password has no digit for the bare `-pVALUE`
+        // pattern to key on: only the program behind `--health-cmd=` marks it.
+        let health = ["/usr/local/bin/docker", "run", "--health-cmd=mysqladmin ping -uroot -pHunterpw", "mysql:8"]
+        let healthProcess = try stored(health)
+        #expect(!healthProcess.commandLine.contains("Hunterpw"), "\(healthProcess.commandLine)")
+        #expect(!healthProcess.args.contains { $0.contains("Hunterpw") }, "\(healthProcess.args)")
+        #expect(!CommandSanitizer.sanitize(health.joined(separator: " ")).contains("Hunterpw"))
         // A command substitution starts its own command: its program is not the
         // value of the outer `-p`, and its dash-leading password is redacted.
         let substituted = "mysql -p $(sshpass -p -Secret1 ssh h cat pw) db"

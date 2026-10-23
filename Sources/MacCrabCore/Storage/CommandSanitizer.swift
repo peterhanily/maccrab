@@ -871,11 +871,12 @@ enum CommandSanitizer {
     /// Options and variables whose value is a command line, by suffix of
     /// the lowercased key: `command` (ssh's `ProxyCommand`, `RemoteCommand`,
     /// `LocalCommand`, git's `core.sshCommand`, `GIT_SSH_COMMAND` and other
-    /// `*_COMMAND` variables), `ssh` (`GIT_SSH`, `SVN_SSH`, hg's `ui.ssh`),
-    /// rsync's `--rsh` and `--rsync-path`, and docker's `--entrypoint`. None
-    /// ends a container name or a database variable (`--name`, `*_DATABASE`).
+    /// `*_COMMAND` variables), `cmd` (sshuttle's `--ssh-cmd`, docker's
+    /// `--health-cmd`), `ssh` (`GIT_SSH`, `SVN_SSH`, hg's `ui.ssh`), rsync's
+    /// `--rsh` and `--rsync-path`, and docker's `--entrypoint`. None ends a
+    /// container name or a database variable (`--name`, `*_DATABASE`).
     private static let commandCarryingKeySuffixes = [
-        "command", "ssh", "rsh", "rsync-path", "entrypoint",
+        "command", "cmd", "ssh", "rsh", "rsync-path", "entrypoint",
     ]
 
     /// `alice:secret` -> `alice:[REDACTED]`; nil when the token is not a
