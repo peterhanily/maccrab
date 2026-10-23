@@ -152,30 +152,95 @@ extension MacCrabCtl {
     static func unsuppressRule(ruleId: String, processPath: String?) async {
         let dataDir = maccrabDataDir()
         let removal: RuleSuppressionRemoval
+        var submissionFailure: PartialRemovalSubmission?
         do {
             removal = try await removeRuleSuppressions(directory: dataDir, ruleId: ruleId, processPath: processPath,
                                                        inboxDirectory: requestInboxDirectory(dataDir: dataDir))
+        } catch let partial as PartialRemovalSubmission {
+            removal = .requested(partial.queued)
+            submissionFailure = partial
         } catch { cliFailure("unsuppress: \(error.localizedDescription)") }
         switch removal {
         case let .savedLegacy(removed):
             print("Saved removal of \(removed) suppression(s). Runtime reload may still be pending.")
         case let .requested(requests):
-            var pending: [UUID] = []
-            for (id, request) in requests {
-                let receipt = await awaitTerminalReceipt(directory: dataDir, requestID: request, timeout: 15)
-                switch receipt?.state {
-                case .applied?: print("Removed \(id).")
-                case .rejected?, .superseded?:
-                    cliFailure("unsuppress: the engine did not remove \(id): \(receipt?.reason ?? "")")
-                default: pending.append(request)
+            let outcomes = await removalOutcomes(requests, timeout: 15) {
+                try? RuntimeConfigurationFiles.readReceipt(directory: dataDir, requestID: $0)
+            }
+            let report = unsuppressReport(outcomes, submissionFailure: submissionFailure)
+            report.lines.forEach { print($0) }
+            if let failure = report.failure { cliFailure(failure) }
+        }
+    }
+
+    enum RemovalOutcome: Equatable {
+        case applied
+        case rejected(reason: String)
+        case pending
+    }
+
+    /// Every request's outcome, waiting once for all of them until each is
+    /// applied, rejected or superseded, or `timeout` passes: twenty entries
+    /// with the engine stopped cost one wait, not twenty. Each receipt is
+    /// read at least once.
+    static func removalOutcomes(_ requests: [(id: String, request: UUID)], timeout: TimeInterval,
+                                receipt: (UUID) -> RuntimeRequestReceipt?) async
+        -> [(id: String, request: UUID, outcome: RemovalOutcome)] {
+        let deadline = Date().addingTimeInterval(timeout)
+        var outcomes = [RemovalOutcome?](repeating: nil, count: requests.count)
+        while true {
+            for (index, entry) in requests.enumerated() where outcomes[index] == nil {
+                guard let found = receipt(entry.request) else { continue }
+                switch found.state {
+                case .applied: outcomes[index] = .applied
+                case .rejected, .superseded: outcomes[index] = .rejected(reason: found.reason)
+                case .accepted: break
                 }
             }
-            if !pending.isEmpty {
-                print("\(pending.count) removal(s) are queued, but the engine has not confirmed them yet "
-                      + "(is it running?). They apply when the engine reads its inbox. Check: "
-                      + pending.map { "maccrabctl config status \($0.uuidString)" }.joined(separator: "; "))
+            guard outcomes.contains(nil), Date() < deadline else { break }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return requests.enumerated().map { ($1.id, $1.request, outcomes[$0] ?? .pending) }
+    }
+
+    /// The lines `rules unsuppress` prints, and the failure it exits with
+    /// after them: a rejection or a failed submission no longer hides the
+    /// outcome of the other entries.
+    static func unsuppressReport(_ outcomes: [(id: String, request: UUID, outcome: RemovalOutcome)],
+                                 submissionFailure: PartialRemovalSubmission?) -> (lines: [String], failure: String?) {
+        var lines: [String] = []
+        var rejected = 0
+        var pending: [UUID] = []
+        for (id, request, outcome) in outcomes {
+            switch outcome {
+            case .applied: lines.append("Removed \(id).")
+            case let .rejected(reason):
+                rejected += 1
+                lines.append("The engine did not remove \(id): \(reason)")
+            case .pending: pending.append(request)
             }
         }
+        if !pending.isEmpty {
+            lines.append("\(pending.count) removal(s) are queued, but the engine has not confirmed them yet "
+                         + "(is it running?). They apply when the engine reads its inbox. Check: "
+                         + pending.map { "maccrabctl config status \($0.uuidString)" }.joined(separator: "; "))
+        }
+        var failures: [String] = []
+        if rejected > 0 { failures.append("the engine did not remove \(rejected) suppression(s)") }
+        if let submissionFailure {
+            failures.append("submitting the remaining removals failed after \(submissionFailure.queued.count) "
+                            + "were queued (requests "
+                            + submissionFailure.queued.map(\.request.uuidString).joined(separator: ", ")
+                            + "): \(submissionFailure.failure.localizedDescription)")
+        }
+        return (lines, failures.isEmpty ? nil : "unsuppress: " + failures.joined(separator: "; "))
+    }
+
+    /// Removal requests already in the engine's inbox when a later
+    /// submission failed. The caller reports them with the failure.
+    struct PartialRemovalSubmission: Error {
+        let queued: [(id: String, request: UUID)]
+        let failure: Error
     }
 
     /// What `rules unsuppress` did to the saved allowlist.
@@ -190,7 +255,9 @@ extension MacCrabCtl {
     }
 
     static func removeRuleSuppressions(directory: String, ruleId: String, processPath: String?,
-                                       inboxDirectory: String) async throws -> RuleSuppressionRemoval {
+                                       inboxDirectory: String,
+                                       submit: ((String) throws -> UUID)? = nil) async throws -> RuleSuppressionRemoval {
+        let submit = submit ?? { try submitAllowRemoval(id: $0, dataDir: directory, inboxDirectory: inboxDirectory) }
         let path = directory + "/suppressions.json"
         guard let data = try RuntimeConfigurationFiles.readControlData(at: path, maximumBytes: 4 * 1024 * 1024) else {
             throw RuntimeConfigContractError("No suppression store is available")
@@ -206,9 +273,17 @@ extension MacCrabCtl {
                 }
             }
             guard !matching.isEmpty else { throw RuntimeConfigContractError("No matching rule suppression is present") }
-            return .requested(try matching.map { entry in
-                (entry.id, try submitAllowRemoval(id: entry.id, dataDir: directory, inboxDirectory: inboxDirectory))
-            })
+            var queued: [(id: String, request: UUID)] = []
+            for entry in matching {
+                do {
+                    queued.append((entry.id, try submit(entry.id)))
+                } catch {
+                    // The requests before this one are already in the inbox.
+                    if queued.isEmpty { throw error }
+                    throw PartialRemovalSubmission(queued: queued, failure: error)
+                }
+            }
+            return .requested(queued)
         }
         var legacy = try JSONDecoder().decode([String: [String]].self, from: data)
         guard let paths = legacy[ruleId] else { throw RuntimeConfigContractError("No suppression is present for this rule") }

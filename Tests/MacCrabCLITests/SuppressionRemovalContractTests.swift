@@ -71,6 +71,88 @@ struct SuppressionRemovalContractTests {
         #expect(!body.contains("removePersisted("))
     }
 
+    private func receipt(_ request: UUID, _ state: RuntimeRequestReceipt.State, reason: String = "") -> RuntimeRequestReceipt {
+        RuntimeRequestReceipt(requestID: request, operation: "remove-suppression", state: state,
+                              engineIdentity: EngineTelemetryIdentity(pid: 42, startedAtUnix: 1000,
+                                                                      version: "1.22.0", build: "fixture"),
+                              reason: reason)
+    }
+
+    @Test("unconfirmed removals share one wait instead of one wait each")
+    func removalsShareOneWait() async {
+        let requests = (0..<10).map { (id: "entry-\($0)", request: UUID()) }
+        final class Reads: @unchecked Sendable { var count: [UUID: Int] = [:] }
+        let reads = Reads()
+        let start = Date()
+        let outcomes = await MacCrabCtl.removalOutcomes(requests, timeout: 0.3) { request in
+            reads.count[request, default: 0] += 1
+            return nil
+        }
+        let elapsed = Date().timeIntervalSince(start)
+        // Ten requests waited for in turn would take at least 3 s.
+        #expect(elapsed < 2.5, "elapsed \(elapsed) s")
+        #expect(outcomes.map(\.outcome) == Array(repeating: .pending, count: 10))
+        #expect(requests.allSatisfy { (reads.count[$0.request] ?? 0) >= 1 })
+    }
+
+    @Test("a rejection in the middle still reports every other entry")
+    func rejectionReportsTheRest() async {
+        let requests = ["a", "b", "c"].map { (id: $0, request: UUID()) }
+        let states: [UUID: RuntimeRequestReceipt] = [
+            requests[0].request: receipt(requests[0].request, .applied),
+            requests[1].request: receipt(requests[1].request, .rejected, reason: "no longer present"),
+            requests[2].request: receipt(requests[2].request, .applied),
+        ]
+        let outcomes = await MacCrabCtl.removalOutcomes(requests, timeout: 1) { states[$0] }
+        #expect(outcomes.map(\.outcome) == [.applied, .rejected(reason: "no longer present"), .applied])
+        let report = MacCrabCtl.unsuppressReport(outcomes, submissionFailure: nil)
+        #expect(report.lines == ["Removed a.", "The engine did not remove b: no longer present", "Removed c."])
+        #expect(report.failure == "unsuppress: the engine did not remove 1 suppression(s)")
+    }
+
+    @Test("a submission that fails partway reports the requests already queued")
+    func partialSubmissionIsReported() async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = SuppressionManager(dataDir: root.path, publishReadableSnapshot: true)
+        for scope in [SuppressionScope.rule("fixture.rule"),
+                      .rulePath(ruleId: "fixture.rule", path: "/Applications/One.app"),
+                      .ruleHash(ruleId: "fixture.rule", sha256: "fixture-hash")] {
+            await manager.add(Suppression(scope: scope, source: .cli, reason: "Ordinary fixture"))
+        }
+        struct DiskFull: Error {}
+        final class Calls: @unchecked Sendable { var ids: [String] = [] }
+        let calls = Calls()
+        let firstRequest = UUID()
+        do {
+            _ = try await MacCrabCtl.removeRuleSuppressions(directory: root.path, ruleId: "fixture.rule",
+                processPath: nil, inboxDirectory: root.appendingPathComponent("inbox").path) { id in
+                calls.ids.append(id)
+                guard calls.ids.count == 1 else { throw DiskFull() }
+                return firstRequest
+            }
+            Issue.record("the failed second submission must be reported")
+        } catch let partial as MacCrabCtl.PartialRemovalSubmission {
+            #expect(partial.queued.map(\.id) == [calls.ids[0]])
+            #expect(partial.queued.map(\.request) == [firstRequest])
+            #expect(partial.failure is DiskFull)
+            let report = MacCrabCtl.unsuppressReport([(calls.ids[0], firstRequest, .pending)], submissionFailure: partial)
+            #expect(report.lines.joined().contains(firstRequest.uuidString))
+            #expect(report.failure?.contains("after 1 were queued") == true)
+            #expect(report.failure?.contains(firstRequest.uuidString) == true)
+        }
+        #expect(calls.ids.count == 2, "submission stops at the failure")
+
+        // Nothing queued yet: the failure itself is reported, as before.
+        do {
+            _ = try await MacCrabCtl.removeRuleSuppressions(directory: root.path, ruleId: "fixture.rule",
+                processPath: nil, inboxDirectory: root.appendingPathComponent("inbox").path) { _ in throw DiskFull() }
+            Issue.record("the failed submission must be reported")
+        } catch {
+            #expect(error is DiskFull)
+        }
+    }
+
     @Test("an unavailable storage directory refuses removal and leaves runtime state unchanged")
     func failedSave() async throws {
         let root = try directory()
