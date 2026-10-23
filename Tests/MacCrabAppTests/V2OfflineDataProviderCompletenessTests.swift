@@ -62,7 +62,7 @@ struct V2OfflineDataProviderCompletenessTests {
 
         // Read surfaces backed by PROTOCOL DEFAULTS (the offline type inherits
         // these — they must still be empty, which is the point of covering them).
-        #expect(await p.agentSessions(limit: 1000).isEmpty)
+        #expect(await p.agentSessions(limit: 1000)?.isEmpty == true, "empty, not a failed read")
         #expect(await p.integrations().isEmpty)
         #expect(await p.compositeRuleLabels().isEmpty)
         #expect(await p.suppressedCampaigns(limit: 1000).isEmpty)

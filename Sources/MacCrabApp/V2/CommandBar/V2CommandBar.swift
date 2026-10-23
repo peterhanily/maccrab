@@ -78,6 +78,7 @@ public struct V2CommandBar: View {
                         tooltip: "Refresh \(tab.title)"
                     ) {
                         state.refreshTick &+= 1
+                        state.manualRefreshTick &+= 1
                     }
                 }
             }

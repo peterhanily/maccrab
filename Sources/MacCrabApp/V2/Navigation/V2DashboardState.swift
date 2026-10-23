@@ -87,6 +87,10 @@ public final class V2DashboardState: ObservableObject {
     /// Bumped by the auto-refresh timer; workspaces key their
     /// `.task` modifiers off this so they re-fetch on each tick.
     @Published public var refreshTick: Int = 0
+    /// Bumped, with `refreshTick`, only by an explicit refresh request. A read
+    /// reused across automatic ticks, like the recorded-session list, is read
+    /// again on request.
+    @Published public var manualRefreshTick: Int = 0
     private(set) var autoRefreshTask: Task<Void, Never>? = nil
     /// Whether the dashboard window is active. Driven by the shell's
     /// `controlActiveState`. The auto-refresh loop keeps sleeping while this is

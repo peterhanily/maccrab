@@ -53,17 +53,21 @@ final class V2DetectionLoadSession: ObservableObject {
         case rules(V2DetectionRuleSnapshot)
         case browser([V2MockExtension])
         case mcp([V2MockMCP])
-        case agents([V2AgentSession])
+        /// Nil when the read failed, which is not the same as none recorded.
+        case agents([V2AgentSession]?)
     }
     struct Operations {
         var rules: () async -> V2DetectionRuleSnapshot
         var browser: () async -> [V2MockExtension]
         var mcp: () async -> [V2MockMCP]
-        var agents: () async -> [V2AgentSession]
+        var agents: () async -> [V2AgentSession]?
     }
     private struct Flight {
         let id: UUID
         let provider: ObjectIdentifier
+        /// The event-query epoch and explicit refresh the read started under.
+        let epoch: UInt64
+        let refresh: Int
         let task: Task<Snapshot, Never>
     }
     private var flights: [Tab: Flight] = [:]
@@ -74,11 +78,13 @@ final class V2DetectionLoadSession: ObservableObject {
     /// one read transaction. Reloaded on every 5 s refresh tick it could hold
     /// a core, and the engine's WAL checkpoint, for as long as the tab was
     /// open, so a result is reused for `agentsReuseInterval` per provider and
-    /// event-query epoch.
+    /// event-query epoch. A failed read is not kept, and an explicit refresh
+    /// reads again.
     static let agentsReuseInterval: Duration = .seconds(60)
     private struct AgentsResult {
         let provider: ObjectIdentifier
         let epoch: UInt64
+        let refresh: Int
         let at: ContinuousClock.Instant
         let rows: [V2AgentSession]
     }
@@ -96,7 +102,7 @@ final class V2DetectionLoadSession: ObservableObject {
         for flight in flights.values { flight.task.cancel() }
     }
 
-    func load(tab: Tab, provider: any V2DataProvider, epoch: UInt64 = 0) async -> Snapshot? {
+    func load(tab: Tab, provider: any V2DataProvider, epoch: UInt64 = 0, refresh: Int = 0) async -> Snapshot? {
         let directory = provider.dataDir
         return await load(tab: tab, providerID: ObjectIdentifier(provider), operations: Operations(
             rules: {
@@ -106,26 +112,32 @@ final class V2DetectionLoadSession: ObservableObject {
                     V2DetectionRuleSnapshot.prepare(rules, directory: directory)
                 }.value
             }, browser: { await provider.extensions() }, mcp: { await provider.mcpServers() },
-            agents: { await provider.agentSessions(limit: 50) }), epoch: epoch)
+            agents: { await provider.agentSessions(limit: 50) }), epoch: epoch, refresh: refresh)
     }
 
-    func load(tab: Tab, providerID: ObjectIdentifier, operations: Operations, epoch: UInt64 = 0) async -> Snapshot? {
+    func load(tab: Tab, providerID: ObjectIdentifier, operations: Operations,
+              epoch: UInt64 = 0, refresh: Int = 0) async -> Snapshot? {
         guard !Task.isCancelled else { return nil }
         if tab == .agents, let reused = agentsResult, reused.provider == providerID, reused.epoch == epoch,
-           now() - reused.at < Self.agentsReuseInterval {
+           reused.refresh == refresh, now() - reused.at < Self.agentsReuseInterval {
             // As a fresh read would: older requests and other tabs' work end.
             generation = UUID()
             for (other, flight) in flights where other != tab { flight.task.cancel() }
             return .agents(reused.rows)
         }
-        let result = await read(tab: tab, providerID: providerID, operations: operations)
-        if tab == .agents, case .agents(let rows)? = result {
-            agentsResult = AgentsResult(provider: providerID, epoch: epoch, at: now(), rows: rows)
+        guard let completed = await read(tab: tab, providerID: providerID, operations: operations,
+                                         epoch: epoch, refresh: refresh) else { return nil }
+        // A failed read is not kept. A joined read's rows belong to the epoch,
+        // provider and refresh it started under, not to this caller's.
+        if case .agents(let rows?) = completed.snapshot {
+            agentsResult = AgentsResult(provider: completed.flight.provider, epoch: completed.flight.epoch,
+                                        refresh: completed.flight.refresh, at: now(), rows: rows)
         }
-        return result
+        return completed.snapshot
     }
 
-    private func read(tab: Tab, providerID: ObjectIdentifier, operations: Operations) async -> Snapshot? {
+    private func read(tab: Tab, providerID: ObjectIdentifier, operations: Operations,
+                      epoch: UInt64, refresh: Int) async -> (snapshot: Snapshot, flight: Flight)? {
         let request = UUID()
         generation = request
         for (other, flight) in flights where other != tab { flight.task.cancel() }
@@ -135,7 +147,7 @@ final class V2DetectionLoadSession: ObservableObject {
             let result = await current.task.value
             if flights[tab]?.id == current.id { flights[tab] = nil }
             guard !Task.isCancelled, generation == request else { return nil }
-            if current.provider == providerID, !current.task.isCancelled { return result }
+            if current.provider == providerID, !current.task.isCancelled { return (result, current) }
         }
         let task = Task { @MainActor in
             switch tab {
@@ -145,12 +157,12 @@ final class V2DetectionLoadSession: ObservableObject {
             case .agents: return Snapshot.agents(await operations.agents())
             }
         }
-        let current = Flight(id: UUID(), provider: providerID, task: task)
+        let current = Flight(id: UUID(), provider: providerID, epoch: epoch, refresh: refresh, task: task)
         flights[tab] = current
         let result = await task.value
         if flights[tab]?.id == current.id { flights[tab] = nil }
         guard !Task.isCancelled, generation == request, !task.isCancelled else { return nil }
-        return result
+        return (result, current)
     }
 }
 

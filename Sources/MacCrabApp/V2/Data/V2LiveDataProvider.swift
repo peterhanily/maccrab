@@ -266,14 +266,15 @@ public final class V2LiveDataProvider: V2DataProvider, V2DetectionRuleReading {
         }
     }
 
-    /// Wave-3 recorder: durable AI-agent sessions from events.db.
-    public func agentSessions(limit: Int) async -> [V2AgentSession] {
-        guard !eventReadsRetired else { return [] }
-        if engineSource.defersEventReads() { retireEventReads(); return [] }
-        guard let eventStore else { return [] }
+    /// Wave-3 recorder: durable AI-agent sessions from events.db. Nil, not an
+    /// empty list, whenever there was no complete read to report.
+    public func agentSessions(limit: Int) async -> [V2AgentSession]? {
+        guard !eventReadsRetired else { return nil }
+        if engineSource.defersEventReads() { retireEventReads(); return nil }
+        guard let eventStore else { return nil }
         do {
             let raw = try await eventStore.agentSessions(limit: limit)
-            guard !eventReadsRetired, !Task.isCancelled else { return [] }
+            guard !eventReadsRetired, !Task.isCancelled else { return nil }
             return raw.map { s in
                 V2AgentSession(
                     id: s.sessionId,
@@ -286,9 +287,9 @@ public final class V2LiveDataProvider: V2DataProvider, V2DetectionRuleReading {
             }
         } catch {
             guard !eventReadsRetired, !Task.isCancelled,
-                  !(error is CancellationError) else { return [] }
+                  !(error is CancellationError) else { return nil }
             lastErrorDescription = "agent sessions read: \(error)"
-            return []
+            return nil
         }
     }
 

@@ -207,4 +207,97 @@ struct V2DetectionAgentsReuseTests {
         _ = await session.load(tab: .agents, providerID: ObjectIdentifier(identity), operations: operations, epoch: 1)
         #expect(reads == 4, "leaving the workspace discards the result")
     }
+
+    @Test("a failed read is reported as such and not kept, and an explicit refresh reads again")
+    func failedReadIsNotKept() async {
+        let clock = Clock(), identity = ProviderIdentity()
+        let session = V2DetectionLoadSession(now: { clock.instant })
+        var reads = 0
+        var fail = true
+        let operations = V2DetectionLoadSession.Operations(
+            rules: { .prepare([], directory: nil) }, browser: { [] }, mcp: { [] },
+            agents: { reads += 1; return fail ? nil : [] })
+        guard case .agents(let failed)? = await session.load(
+            tab: .agents, providerID: ObjectIdentifier(identity), operations: operations) else {
+            Issue.record("a failed read must still answer"); return
+        }
+        #expect(failed == nil, "a failure is not an empty list")
+        fail = false
+        clock.instant = clock.instant.advanced(by: .seconds(5))
+        guard case .agents(let rows)? = await session.load(
+            tab: .agents, providerID: ObjectIdentifier(identity), operations: operations) else {
+            Issue.record("missing snapshot"); return
+        }
+        #expect(rows != nil && reads == 2, "the failure was not reused")
+        _ = await session.load(tab: .agents, providerID: ObjectIdentifier(identity), operations: operations)
+        #expect(reads == 2, "a success is reused")
+        _ = await session.load(tab: .agents, providerID: ObjectIdentifier(identity), operations: operations, refresh: 1)
+        #expect(reads == 3, "an explicit refresh reads again")
+        _ = await session.load(tab: .agents, providerID: ObjectIdentifier(identity), operations: operations, refresh: 1)
+        #expect(reads == 3)
+    }
+
+    @Test("a read joined under a newer epoch is kept under the epoch it started with")
+    func joinedReadKeepsItsEpoch() async throws {
+        let entered = V2DetectionFixtureGate(), release = V2DetectionFixtureGate(), joined = V2DetectionFixtureGate()
+        let session = V2DetectionLoadSession(onJoin: { _ in Task { await joined.open() } })
+        let identity = ProviderIdentity()
+        var reads = 0
+        var holdFirst = true
+        let operations = V2DetectionLoadSession.Operations(
+            rules: { .prepare([], directory: nil) }, browser: { [] }, mcp: { [] },
+            agents: {
+                reads += 1
+                if holdFirst {
+                    holdFirst = false
+                    await entered.open()
+                    await release.waitOrRecord()
+                }
+                return []
+            })
+        let first = Task { await session.load(tab: .agents, providerID: ObjectIdentifier(identity),
+                                              operations: operations, epoch: 0) }
+        defer { first.cancel(); session.invalidate(); Task { await release.open() } }
+        try await entered.wait()
+        first.cancel()
+        let second = Task { await session.load(tab: .agents, providerID: ObjectIdentifier(identity),
+                                               operations: operations, epoch: 1) }
+        try await joined.wait()
+        await release.open()
+        guard case .agents? = await second.value else { Issue.record("the joining caller did not publish"); return }
+        #expect(reads == 1, "the second caller joined the first read")
+        _ = await session.load(tab: .agents, providerID: ObjectIdentifier(identity), operations: operations, epoch: 1)
+        #expect(reads == 2, "epoch 0's rows were not kept as epoch 1's")
+    }
+
+    @Test("the live provider answers nil, not an empty list, when there is no event store to read")
+    func liveProviderReportsUnavailable() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maccrab-agent-sessions-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let now = Date().timeIntervalSince1970
+        let heartbeat: [String: Any] = [
+            "engine_pid": 101, "engine_started_at_unix": now - 60, "engine_version": "1.22.0",
+            "engine_build": "test", "written_at_unix": now, "boot_phase": "ready", "liveness": true,
+            "rules_loaded": 10, "collector_health": [["name": "DNSCollector", "state": "healthy", "healthy": true]],
+        ]
+        try JSONSerialization.data(withJSONObject: heartbeat).write(to: root.appendingPathComponent("heartbeat.json"))
+        let provider = try #require(await V2LiveDataProvider(source: .init(directory: root.path)))
+        #expect(await provider.agentSessions(limit: 5) == nil)
+    }
+
+    @Test("the workspace passes explicit refreshes and says when the session read failed")
+    func workspaceWiring() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func source(_ path: String) throws -> String {
+            try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
+        }
+        let workspace = try source("Sources/MacCrabApp/V2/Workspaces/V2DetectionWorkspace.swift")
+        #expect(workspace.contains("refresh: state.manualRefreshTick),"))
+        #expect(workspace.contains("agentSessionsUnavailable = rows == nil\n                guard let rows else { return }"))
+        #expect(workspace.contains("Text(agentSessionsUnavailable\n                         ? String(localized: \"events.readUnavailable\""))
+        let commandBar = try source("Sources/MacCrabApp/V2/CommandBar/V2CommandBar.swift")
+        #expect(commandBar.contains("state.refreshTick &+= 1\n                        state.manualRefreshTick &+= 1"))
+    }
 }

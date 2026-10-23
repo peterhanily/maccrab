@@ -93,6 +93,9 @@ public struct V2DetectionWorkspace: View {
     @State private var mcpServers: [V2MockMCP] = []
     @State private var selectedMCP: V2MockMCP? = nil
     @State private var agentSessions: [V2AgentSession] = []
+    /// The last recorded-session read failed: an empty list is then not
+    /// "none recorded".
+    @State private var agentSessionsUnavailable = false
     /// v1.12.0: in-app YAML viewer sheet. Replaces the v1.11.x
     /// external-editor opener which exposed the read-only bundled
     /// YAML in TextEdit and confused users when Cmd+S failed.
@@ -223,7 +226,8 @@ public struct V2DetectionWorkspace: View {
             }
             presentation.leave()
             guard let snapshot = await loads.load(tab: .init(tab), provider: provider,
-                                                  epoch: appState.eventQueryEpoch),
+                                                  epoch: appState.eventQueryEpoch,
+                                                  refresh: state.manualRefreshTick),
                   !Task.isCancelled,
                   ObjectIdentifier(state.provider) == ObjectIdentifier(provider),
                   selectedTab == tab else { return }
@@ -232,6 +236,8 @@ public struct V2DetectionWorkspace: View {
             case .browser(let rows): self.extensions = rows
             case .mcp(let rows): self.mcpServers = rows
             case .agents(let rows):
+                agentSessionsUnavailable = rows == nil
+                guard let rows else { return }
                 self.agentSessions = rows
                 await appState.refreshAgentLineage()
             }
@@ -1285,7 +1291,9 @@ public struct V2DetectionWorkspace: View {
             if agentSessions.isEmpty {
                 HStack(spacing: 8) {
                     Image(systemName: "wand.and.stars").foregroundStyle(V2Theme.aiAccent)
-                    Text(String(localized: "ui.V2DetectionWorkspace.no.ai.agent.sessions.recorded.yet.sessions", defaultValue: "No AI-agent sessions recorded yet. Sessions appear once the engine observes a coding agent (Claude Code, Cursor, …) and its descendant activity."))
+                    Text(agentSessionsUnavailable
+                         ? String(localized: "events.readUnavailable", defaultValue: "Event data is unavailable.")
+                         : String(localized: "ui.V2DetectionWorkspace.no.ai.agent.sessions.recorded.yet.sessions", defaultValue: "No AI-agent sessions recorded yet. Sessions appear once the engine observes a coding agent (Claude Code, Cursor, …) and its descendant activity."))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(12)

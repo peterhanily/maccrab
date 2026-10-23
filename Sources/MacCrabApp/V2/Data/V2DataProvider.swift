@@ -88,9 +88,10 @@ public protocol V2DataProvider: AnyObject {
     func events(limit: Int) async -> [V2MockEvent]
     func campaigns(since: Date, limit: Int) async -> [V2MockCampaign]
     func traces(limit: Int) async -> [V2MockTrace]
-    /// Wave-3 recorder: durable AI-agent sessions. Default [] so existing
-    /// conformers don't break; the live provider overrides with real data.
-    func agentSessions(limit: Int) async -> [V2AgentSession]
+    /// Wave-3 recorder: durable AI-agent sessions, nil when the read failed
+    /// or the store is unavailable. Default [] so existing conformers don't
+    /// break; the live provider overrides with real data.
+    func agentSessions(limit: Int) async -> [V2AgentSession]?
     func rules() async -> [V2MockRule]
 
     /// Composite (sequence + graph) rule id → display title. These
@@ -368,7 +369,7 @@ extension V2DataProvider {
     public func compositeRuleLabels() async -> [String: String] { [:] }
     /// Default to empty — only the live provider reads agent sessions
     /// from events.db.
-    public func agentSessions(limit: Int) async -> [V2AgentSession] { [] }
+    public func agentSessions(limit: Int) async -> [V2AgentSession]? { [] }
     /// Default nil — mock/offline providers can't fail a store read, so they
     /// need no override. Only the live provider tracks this.
     public var alertsReadError: String? { nil }
