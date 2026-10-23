@@ -176,6 +176,40 @@ struct FileHasherIdentityTests {
         #expect(FileHasher.computeSHA256(path: base + "/moved/bin", matching: key) != nil)
     }
 
+    @Test("a parent swapped for a symlink fails the key step, before any cache or hash")
+    func symlinkedParentFailsTheKey() async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let parent = base + "/dir"
+        try FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: false)
+        let path = parent + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
+        #expect(FileHasher.cacheKey(path: path) != nil)
+        // The same file through a symlinked parent, which could as well have
+        // led to an automount trigger or a stalled network volume.
+        #expect(rename(parent, base + "/moved") == 0)
+        try FileManager.default.createSymbolicLink(atPath: parent, withDestinationPath: base + "/moved")
+        #expect(FileHasher.probe(path: path) == .unavailable)
+        let hasher = FileHasher()
+        #expect(await hasher.hash(path: path) == nil)
+        #expect(await hasher.stats().skippedMissing == 1)
+        #expect(await hasher.hash(path: base + "/moved/bin") != nil)
+    }
+
+    @Test("the hasher's path probes run off its actor, and network-ness comes from the descriptor")
+    func probesRunOffTheActor() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/FileHasher.swift"),
+            encoding: .utf8)
+        #expect(source.contains("switch await HeavyEnrichmentBlockingWork.run({ Self.probe(path: path) }) {"))
+        #expect(source.contains("if await HeavyEnrichmentBlockingWork.run({ Self.cacheKey(path: path) == key }) {"))
+        #expect(source.contains("if fstatfs(descriptor, &volume) == 0, volume.f_flags & UInt32(MNT_LOCAL) == 0 {"))
+        #expect(!source.contains("lstat("), "a path probe that follows a parent symlink")
+        #expect(!source.contains("resourceValues("), "a path-based volume lookup on the actor")
+    }
+
     @Test("the read stops at the key's size while the file grows")
     func readStopsAtTheKeySize() throws {
         let base = try directory()

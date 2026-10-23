@@ -99,22 +99,23 @@ public actor FileHasher {
     /// Returns the SHA-256 hex digest of `path`, or `nil` if the file is
     /// unavailable, too large, on a network mount, or errors during I/O.
     public func hash(path: String) async -> String? {
-        // Type, size and identity in one call. lstat: regular files only, as
-        // before, so a symlink is never followed.
-        guard let key = Self.cacheKey(path: path) else {
+        // Type, size, identity and volume, off the actor: a probe that walks
+        // into a stalled network volume must not hold every other hash.
+        let key: CacheKey
+        switch await HeavyEnrichmentBlockingWork.run({ Self.probe(path: path) }) {
+        case .unavailable:
             statsStore.skippedMissing += 1
             return nil
+        case .network:
+            statsStore.skippedNetwork += 1
+            return nil
+        case .file(let probed):
+            key = probed
         }
 
         // Size cap.
         if key.size > maxFileBytes {
             statsStore.skippedSize += 1
-            return nil
-        }
-
-        // Network-filesystem skip.
-        if isOnNetworkFS(path: path) {
-            statsStore.skippedNetwork += 1
             return nil
         }
 
@@ -150,18 +151,39 @@ public actor FileHasher {
 
         statsStore.misses += 1
         // Cache only a digest of bytes that stayed in place while hashing.
-        if Self.cacheKey(path: path) == key {
+        if await HeavyEnrichmentBlockingWork.run({ Self.cacheKey(path: path) == key }) {
             insert(key, digest: digest)
         }
         return digest
     }
 
-    static func cacheKey(path: String) -> CacheKey? {
+    /// What one look at a path found.
+    enum Probe: Equatable, Sendable {
+        /// Missing, not a regular file, or reached through a symlink.
+        case unavailable
+        case network
+        case file(CacheKey)
+    }
+
+    /// Type, size, identity and volume from one descriptor, opened without
+    /// blocking, without adopting a terminal and without following a symlink
+    /// in any component: a swapped parent fails here at once instead of
+    /// walking into a tty, an automount trigger or another volume. Exec paths
+    /// are canonical; /var and /tmp are rewritten to /private first.
+    nonisolated static func probe(path: String) -> Probe {
+        guard let resolved = BoundedRegularFileReader.normalizedAbsolutePath(path) else { return .unavailable }
+        let descriptor = open(resolved, O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC | O_NOCTTY)
+        guard descriptor >= 0 else { return .unavailable }
+        defer { close(descriptor) }
         var st = stat()
-        guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
-            return nil
+        guard fstat(descriptor, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return .unavailable }
+        // Network volumes are skipped (NFS, SMB, AFP, WebDAV, FUSE). A volume
+        // that cannot be asked counts as local, as before.
+        var volume = statfs()
+        if fstatfs(descriptor, &volume) == 0, volume.f_flags & UInt32(MNT_LOCAL) == 0 {
+            return .network
         }
-        return CacheKey(
+        return .file(CacheKey(
             path: path,
             device: UInt64(st.st_dev),
             inode: UInt64(st.st_ino),
@@ -170,7 +192,12 @@ public actor FileHasher {
             mtimeNanoseconds: st.st_mtimespec.tv_nsec,
             ctimeSeconds: st.st_ctimespec.tv_sec,
             ctimeNanoseconds: st.st_ctimespec.tv_nsec
-        )
+        ))
+    }
+
+    nonisolated static func cacheKey(path: String) -> CacheKey? {
+        guard case .file(let key) = probe(path: path) else { return nil }
+        return key
     }
 
     /// Current observability counters (copy).
@@ -213,20 +240,6 @@ public actor FileHasher {
             let evicted = lru.removeLast()
             cache.removeValue(forKey: evicted)
         }
-    }
-
-    // MARK: - Private filesystem probes
-
-    /// Returns true if `path` resides on a non-local volume (network mount).
-    /// Conservative: treats lookup failure as "not network" so we don't skip
-    /// legitimate local files when URL resource lookup is flaky.
-    private func isOnNetworkFS(path: String) -> Bool {
-        let url = URL(fileURLWithPath: path)
-        guard let values = try? url.resourceValues(forKeys: [.volumeIsLocalKey]),
-              let isLocal = values.volumeIsLocal else {
-            return false
-        }
-        return !isLocal
     }
 
     // MARK: - Hashing
