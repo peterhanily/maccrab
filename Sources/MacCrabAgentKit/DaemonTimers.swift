@@ -6273,9 +6273,15 @@ enum DaemonTimers {
         // Empty environment — the probe needs nothing and this avoids leaking
         // the daemon's env (API keys etc.) into a child exec.
         let envp: [UnsafeMutablePointer<CChar>?] = [nil]
+        // Its own session: the engine holds a private controlling terminal
+        // (ControllingTerminalGuard) that the probe must not share.
+        var attributes: posix_spawnattr_t?
+        guard posix_spawnattr_init(&attributes) == 0 else { return false }
+        defer { posix_spawnattr_destroy(&attributes) }
+        guard posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID)) == 0 else { return false }
         let rc = argv.withUnsafeBufferPointer { aBuf in
             envp.withUnsafeBufferPointer { eBuf in
-                posix_spawn(&pid, spawnPath, nil, nil,
+                posix_spawn(&pid, spawnPath, nil, &attributes,
                             UnsafeMutablePointer(mutating: aBuf.baseAddress!),
                             UnsafeMutablePointer(mutating: eBuf.baseAddress!))
             }

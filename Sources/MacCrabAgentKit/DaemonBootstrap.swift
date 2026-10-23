@@ -99,6 +99,11 @@ public enum DaemonBootstrap {
     public static func prepare(printBanner: Bool = true) async throws -> DaemonHandles {
         logger.info("MacCrab daemon initialising")
 
+        // Before any collector, monitor or enricher opens a user-influenced
+        // path: hold a private controlling terminal so that no open, ours or
+        // Security.framework's, can make a user's tty the engine's terminal.
+        ControllingTerminalGuard.claimPrivateTerminalIfSessionLeader()
+
         let state = try await DaemonSetup.initialize()
 
         // DaemonSetup recovered and normally reprobed EventStore, AlertStore,

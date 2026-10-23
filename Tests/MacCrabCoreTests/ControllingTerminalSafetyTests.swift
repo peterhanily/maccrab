@@ -1,5 +1,7 @@
+import Darwin
 import Foundation
 import Testing
+@testable import MacCrabCore
 
 /// The root engine is a session leader with no controlling terminal. A tty it
 /// opens without O_NOCTTY becomes its controlling terminal, after which the
@@ -110,5 +112,53 @@ struct ControllingTerminalSafetyTests {
         }
         #expect(examined >= 25, "the scan found the engine's opens (\(examined))")
         #expect(offenders.isEmpty, "opens without O_NOCTTY: \(offenders)")
+    }
+
+    private static func devTTYOpens() -> Bool {
+        let descriptor = open("/dev/tty", O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
+        if descriptor >= 0 { close(descriptor) }
+        return descriptor >= 0
+    }
+
+    // Security.framework opens the paths it evaluates itself, without
+    // O_NOCTTY, so the engine also holds a private terminal from boot. Claiming
+    // one needs a session leader, which a test process is not; the claim itself
+    // was exercised as a session leader with the real source (F12 report).
+    @Test("the terminal claim leaves a process that is not a session leader alone",
+          .enabled(if: getsid(0) != getpid()))
+    func claimIsANoOpOutsideASessionLeader() {
+        let opensBefore = Self.devTTYOpens()
+        #expect(ControllingTerminalGuard.claimPrivateTerminalIfSessionLeader() == .notSessionLeader)
+        #expect(!ControllingTerminalGuard.holdsTerminal)
+        #expect(Self.devTTYOpens() == opensBefore)
+    }
+
+    @Test("boot claims the terminal before anything starts, and the canary runs in its own session")
+    func bootClaimsTheTerminalFirst() throws {
+        func source(_ relative: String) throws -> String {
+            try String(contentsOf: Self.root.appendingPathComponent(relative), encoding: .utf8)
+        }
+        for main in ["Sources/MacCrabAgent/main.swift", "Sources/maccrabd/main.swift"] {
+            #expect(try source(main).contains("try await DaemonBootstrap.runForever("), "\(main)")
+        }
+        let bootstrap = try source("Sources/MacCrabAgentKit/DaemonBootstrap.swift")
+        let runForever = try #require(bootstrap.range(of: "public static func runForever("))
+        #expect(bootstrap[runForever.upperBound...].contains("try await prepare(printBanner: printBanner)"))
+        let prepare = try #require(bootstrap.range(of: "public static func prepare("))
+        let claim = try #require(bootstrap.range(of: "ControllingTerminalGuard.claimPrivateTerminalIfSessionLeader()"))
+        let setup = try #require(bootstrap.range(of: "try await DaemonSetup.initialize()"))
+        #expect(prepare.upperBound < claim.lowerBound && claim.upperBound < setup.lowerBound,
+                "the claim must precede every collector, monitor and enricher")
+
+        let terminal = try source("Sources/MacCrabCore/Utilities/ControllingTerminalGuard.swift")
+        #expect(terminal.contains("guard getsid(0) == getpid() else { return (.notSessionLeader, nil) }"))
+        #expect(terminal.contains("posix_openpt(O_RDWR | O_NOCTTY)"))
+        #expect(terminal.contains("attributes.c_lflag &= ~tcflag_t(ISIG | ICANON | ECHO | IEXTEN | TOSTOP)"))
+        #expect(terminal.contains("ioctl(slave, TIOCSCTTY, 0)"))
+        #expect(terminal.contains("let drain = Thread {") && terminal.contains("drain.start()"))
+
+        let timers = try source("Sources/MacCrabAgentKit/DaemonTimers.swift")
+        #expect(timers.contains("posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))"))
+        #expect(timers.contains("posix_spawn(&pid, spawnPath, nil, &attributes,"))
     }
 }
