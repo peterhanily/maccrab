@@ -1766,6 +1766,14 @@ public actor AlertStore {
     /// stamped at or before the watermark (or the table is empty). It is a
     /// row that exists, so the reader can anchor on its id and follow rowids.
     public func notificationResumeRow(after watermark: Date) throws -> AlertRowReference? {
+        // With no row at or before the watermark (a fresh cursor, or an older
+        // build's watermark behind every kept row) the walk below visits the
+        // whole table, every tick while authorization is pending; the
+        // timestamp index answers that at once.
+        let probe = try prepare("SELECT 1 FROM alerts WHERE timestamp <= ?1 LIMIT 1")
+        defer { sqlite3_finalize(probe) }
+        sqlite3_bind_double(probe, 1, watermark.timeIntervalSince1970)
+        guard try AlertQueryReadStep.advance(statement: probe, database: db) else { return nil }
         // `+timestamp` keeps the planner on a backward rowid walk that stops
         // at the first row at or before the watermark, usually the newest;
         // the timestamp index would sort every row before it.

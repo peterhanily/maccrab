@@ -95,6 +95,13 @@ struct AlertNotificationReadTests {
         // the watermark to find the newest; a bare rowid or severity term in
         // the rewrite read walks the table, or every alert of a severity.
         #expect(source.contains("SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 ORDER BY rowid DESC LIMIT 1"))
+        // The walk visits every row when none qualifies, so the timestamp
+        // index answers that first.
+        let resume = try #require(source.range(of: "public func notificationResumeRow(after watermark: Date)"))
+        let probe = try #require(source.range(of: "SELECT 1 FROM alerts WHERE timestamp <= ?1 LIMIT 1"))
+        let walk = try #require(source.range(of: "SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 ORDER BY rowid DESC LIMIT 1"))
+        #expect(resume.upperBound < probe.lowerBound && probe.upperBound < walk.lowerBound)
+        #expect(source.contains("guard try AlertQueryReadStep.advance(statement: probe, database: db) else { return nil }"))
         #expect(source.contains("FROM alerts WHERE +rowid <= ?1 AND timestamp > ?2 AND suppressed = 0"))
         #expect(source.contains("AND +severity IN (\\(placeholders))"))
     }
