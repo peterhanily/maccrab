@@ -109,6 +109,21 @@ public actor LibraryInventory {
     /// Library signature checks wait at most `securityDeadline`.
     private let securityEvaluation: BoundedSecurityEvaluation
     private let securityDeadline: TimeInterval
+    /// Libraries skipped because the site was at its limit, for the log.
+    private var skippedAtLimit = 0
+
+    /// What a library's signature check found.
+    enum SignatureCheck: Equatable, Sendable {
+        case trusted
+        /// Evaluated and not trusted, or no longer a regular file.
+        case untrusted
+        /// Security.framework blocked on this library's own files past the
+        /// deadline: unverifiable, and as suspicious as unsigned.
+        case blocked
+        /// Not evaluated: the site was at its limit of blocked evaluations,
+        /// or the scan was cancelled. Looked at again next scan.
+        case skipped
+    }
 
     public struct InjectedLibrary: Sendable {
         public let pid: Int32
@@ -218,7 +233,8 @@ public actor LibraryInventory {
                 !lib.hasPrefix("/usr/") &&
                 !lib.hasPrefix("/System/") &&
                 !lib.hasPrefix("/Library/") {
-                if await !isTrustedSigned(path: lib) {
+                let check = await signatureCheck(path: lib)
+                if check == .untrusted || check == .blocked {
                     // Pair-dedup: don't re-emit the same (pid, library) alert
                     // across forensic scan cycles. Complements the process-
                     // level AlertDeduplicator which keys only on ruleId +
@@ -234,7 +250,9 @@ public actor LibraryInventory {
                     injected.append(InjectedLibrary(
                         pid: pid, processName: processName, processPath: processPath,
                         libraryPath: lib,
-                        reason: "Unsigned dylib loaded from unexpected location",
+                        reason: check == .blocked
+                            ? "Dylib loaded from unexpected location whose signature could not be verified: its evaluation blocked"
+                            : "Unsigned dylib loaded from unexpected location",
                         severity: .high
                     ))
                 }
@@ -248,19 +266,55 @@ public actor LibraryInventory {
     /// the Mac App Store, or a Developer ID certificate. Results are cached
     /// per-path to avoid repeated Security framework calls for the same dylib.
     func isTrustedSigned(path: String) async -> Bool {
-        if let cached = signatureCache[path] { return cached }
-        // A mapped library's path that no longer opens as a regular file,
-        // without a symlink, cannot vouch for what was loaded, and neither can
-        // one Security.framework did not finish with in time (a FIFO inside
-        // its bundle blocks it past the precheck): untrusted, and not cached,
-        // so the next scan looks again. The actor never waits on it.
-        guard let verdict = await securityEvaluation.run(.libraryInventory, key: path, deadline: securityDeadline, {
+        await signatureCheck(path: path) == .trusted
+    }
+
+    /// The library's signature verdict. A mapped library's path that no
+    /// longer opens as a regular file, without a symlink, cannot vouch for what
+    /// was loaded: untrusted. One Security.framework blocked on past the
+    /// deadline (a FIFO inside its bundle) is unverifiable. Neither is cached,
+    /// so the next scan looks again, and the actor never waits on either. A
+    /// library not evaluated because the site is at its limit is skipped, not
+    /// reported as unsigned.
+    func signatureCheck(path: String) async -> SignatureCheck {
+        if let cached = signatureCache[path] { return cached ? .trusted : .untrusted }
+        let outcome = await securityEvaluation.run(
+            .libraryInventory, key: Self.evaluationKey(path: path), deadline: securityDeadline
+        ) { _ in
             Self.trustedSignatureVerdict(path: path)
-        }), let trusted = verdict else {
-            return false
         }
-        storeSignatureResult(path: path, trusted: trusted)
-        return trusted
+        if case .refused = outcome {
+            if skippedAtLimit == 0 {
+                logger.warning("Library signature checks are at their limit of blocked evaluations; skipping until one returns")
+            }
+            skippedAtLimit += 1
+            return .skipped
+        }
+        if skippedAtLimit > 0 {
+            logger.notice("Library signature checks resumed after skipping \(self.skippedAtLimit, privacy: .public) at the limit")
+            skippedAtLimit = 0
+        }
+        switch outcome {
+        case .finished(let verdict?):
+            storeSignatureResult(path: path, trusted: verdict)
+            return verdict ? .trusted : .untrusted
+        case .finished(nil):
+            return .untrusted
+        case .timedOut, .blocked:
+            return .blocked
+        case .refused, .cancelled:
+            return .skipped
+        }
+    }
+
+    /// The library and its identity, so a file renamed over a stranded one is
+    /// evaluated afresh. Nothing here follows a symlink; /var and /tmp are
+    /// rewritten to /private first.
+    private nonisolated static func evaluationKey(path: String) -> String {
+        var st = stat()
+        guard let resolved = BoundedRegularFileReader.normalizedAbsolutePath(path),
+              fstatat(AT_FDCWD, resolved, &st, AT_SYMLINK_NOFOLLOW_ANY) == 0 else { return path + "\u{0}-" }
+        return path + "\u{0}\(st.st_dev):\(st.st_ino):\(st.st_ctimespec.tv_sec).\(st.st_ctimespec.tv_nsec)"
     }
 
     /// Nil when `path` does not open as a regular file without a symlink.

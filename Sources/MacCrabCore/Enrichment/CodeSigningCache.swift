@@ -61,6 +61,9 @@ public actor CodeSigningCache {
             ctimeSec = metadata.st_ctimespec.tv_sec
             ctimeNsec = metadata.st_ctimespec.tv_nsec
         }
+
+        /// The part of a bounded evaluation's key that changes with the file.
+        var evaluationKey: String { "\(dev):\(ino):\(ctimeSec).\(ctimeNsec)" }
     }
 
     // MARK: Storage
@@ -80,9 +83,12 @@ public actor CodeSigningCache {
     )
 
     /// Engine evaluations wait at most `evaluationDeadline`: a FIFO inside a
-    /// bundle blocks Security.framework past any precheck of the path.
+    /// bundle blocks Security.framework past any precheck of the path. Each
+    /// engine user has its own site, so runs stranded by one cannot use up
+    /// another's limit.
     private let securityEvaluation: BoundedSecurityEvaluation
     private let evaluationDeadline: TimeInterval
+    private let evaluationSite: BoundedSecurityEvaluation.Site
 
     private var cacheHits: Int = 0
     private var cacheMisses: Int = 0
@@ -99,10 +105,16 @@ public actor CodeSigningCache {
     /// - Parameter countLimit: Maximum number of entries to retain.
     ///   Defaults to 8192.
     public init(countLimit: Int = 8192) {
+        self.init(countLimit: countLimit, evaluationSite: .codeSigning)
+    }
+
+    /// A cache whose bounded evaluations count against `evaluationSite`.
+    init(countLimit: Int = 8192, evaluationSite: BoundedSecurityEvaluation.Site) {
         self.init(
             countLimit: countLimit,
             securityEvaluation: .shared,
             evaluationDeadline: BoundedSecurityEvaluation.codeSigningDeadline,
+            evaluationSite: evaluationSite,
             afterEvaluationForTesting: nil
         )
     }
@@ -123,12 +135,14 @@ public actor CodeSigningCache {
         countLimit: Int = 8192,
         securityEvaluation: BoundedSecurityEvaluation,
         evaluationDeadline: TimeInterval,
+        evaluationSite: BoundedSecurityEvaluation.Site = .codeSigning,
         afterEvaluationForTesting: (@Sendable (String) -> Void)?
     ) {
         self.cache = NSCache<NSString, CachedEntry>()
         self.cache.countLimit = countLimit
         self.securityEvaluation = securityEvaluation
         self.evaluationDeadline = evaluationDeadline
+        self.evaluationSite = evaluationSite
         self.afterEvaluationForTesting = afterEvaluationForTesting
     }
 
@@ -196,7 +210,9 @@ public actor CodeSigningCache {
     ///   open safely as a regular file or bundle reads as unsigned, as one
     ///   Security.framework cannot open does, and nothing is cached for it.
     ///   This waits for Security.framework however long it takes; engine
-    ///   callers use `evaluateWithinDeadline(path:)`.
+    ///   callers use `evaluateWithinDeadline(path:)`. Only the forensic
+    ///   plugins call it, in the user's own app, CLI or MCP process, where a
+    ///   deadline would report a slow but valid bundle as unsigned.
     public func evaluate(path: String) async -> CodeSignatureInfo {
         switch await evaluate(path: path, expected: .regularFileOrDirectory, canonical: false, bounded: false) {
         case .evaluated(let info): return info
@@ -250,7 +266,7 @@ public actor CodeSigningCache {
         cacheMisses += 1
         let before = Self.currentIdentity(path: path)
         let afterEvaluation = afterEvaluationForTesting
-        let work: @Sendable () -> CodeSignatureInfo? = { [self] in
+        let work: @Sendable (BoundedSecurityEvaluation.Attempt) -> CodeSignatureInfo? = { [self] attempt in
             // Security.framework opens the path itself, blocking on a FIFO and
             // without O_NOCTTY: hand it only what a safe open just found, and
             // only the file stat saw, when stat saw one.
@@ -259,6 +275,9 @@ public actor CodeSigningCache {
             ), before.map({ $0 == FileIdentity(opened) }) ?? true else { return nil }
             let info = Self.performEvaluation(path: path)
             afterEvaluation?(path)
+            // An interrupted evaluation failed because a blocked open was
+            // broken, not because of the code: never keep it.
+            guard !attempt.wasInterrupted() else { return nil }
             // Bind the verdict only to bytes that stayed in place for the whole
             // evaluation. Capturing the identity afterwards let a binary renamed
             // into place mid-evaluation inherit the previous file's verdict.
@@ -271,8 +290,11 @@ public actor CodeSigningCache {
         }
         let info: CodeSignatureInfo?
         if bounded {
-            guard let finished = await securityEvaluation.run(
-                .codeSigning, key: path, deadline: evaluationDeadline, on: Self.evaluationQueue, work
+            // The key follows the file, so a binary renamed over a stranded
+            // one is evaluated afresh.
+            let key = path + "\u{0}" + (before?.evaluationKey ?? "-")
+            guard case .finished(let finished) = await securityEvaluation.run(
+                evaluationSite, key: key, deadline: evaluationDeadline, work
             ) else { return .unfinished }
             info = finished
         } else {
@@ -282,9 +304,8 @@ public actor CodeSigningCache {
                     waitedOnAt: Task.currentPriority,
                     floor: .utility
                 ),
-                flags: .enforceQoS,
-                work
-            )
+                flags: .enforceQoS
+            ) { work(.unbounded) }
         }
         return info.map(Evaluation.evaluated) ?? .notOpened
     }
@@ -293,7 +314,8 @@ public actor CodeSigningCache {
 
     /// Perform the actual SecStaticCode evaluation.
     ///
-    /// Synchronous and blocking; `evaluate` runs it on `evaluationQueue`.
+    /// Synchronous and blocking; `evaluate` runs it on `evaluationQueue`, or
+    /// on a thread of its own when the evaluation is bounded.
     private nonisolated static func performEvaluation(path: String) -> CodeSignatureInfo {
         let url = URL(fileURLWithPath: path) as CFURL
 

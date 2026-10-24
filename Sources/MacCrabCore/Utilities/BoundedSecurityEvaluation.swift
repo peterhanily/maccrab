@@ -2,8 +2,10 @@
 // MacCrabCore
 //
 // Waits a bounded time for Security.framework to evaluate a path a local
-// user can shape, and bounds the threads such an evaluation can strand.
+// user can shape, breaks a blocked evaluation free, and bounds the threads
+// one can hold.
 
+import Darwin
 import Foundation
 import os.log
 
@@ -13,14 +15,52 @@ import os.log
 /// `SecurityEvaluationPrecheck` sees only the path it is given, so one
 /// `mkfifo` in `~/Downloads/X.app` stopped the system policy scan, the library
 /// scan or the TCC pass for good. A caller now waits at most its deadline.
-/// Work still running then is stuck for its site until it returns; a key with
-/// stuck work is not started again, and a site with `stuckLimit` stuck
-/// evaluations starts none, so stranded threads stay bounded.
-final class BoundedSecurityEvaluation: @unchecked Sendable {
-    enum Site: String, Sendable {
-        case codeSigning
+/// Every run has a thread of its own, so a run still waiting after its
+/// deadline can be interrupted: a signal to that thread alone fails the
+/// blocked open with EINTR and Security.framework returns an error. That
+/// reaches a FIFO wherever it is, renamed away or deep in a large bundle,
+/// which no path walk could. A run that stays blocked counts against its
+/// site, and a site with `stuckLimit` of them starts no more, so stranded
+/// threads stay bounded.
+public final class BoundedSecurityEvaluation: @unchecked Sendable {
+    enum Site: String, Sendable, CaseIterable {
+        case codeSigning = "code_signing"
+        case tcc
         case downloads
-        case libraryInventory
+        case libraryInventory = "library_inventory"
+    }
+
+    /// How a bounded evaluation ended for one caller.
+    enum Outcome<Value: Sendable>: Sendable {
+        /// The work returned within the deadline: this caller's run, or the
+        /// run for the same key it joined.
+        case finished(Value)
+        /// The deadline passed first. The work keeps running and is interrupted.
+        case timedOut
+        /// The same key's earlier run is still blocked; nothing was started.
+        case blocked
+        /// The site has `stuckLimit` blocked runs; nothing was started.
+        case refused
+        /// The waiting task was cancelled. The work keeps running.
+        case cancelled
+
+        var value: Value? {
+            if case .finished(let value) = self { return value }
+            return nil
+        }
+    }
+
+    /// What the work can ask about its own run.
+    struct Attempt: Sendable {
+        /// True once the runner has signalled the work's thread. Its result
+        /// then describes the interruption, not the code, and must not be kept.
+        let wasInterrupted: @Sendable () -> Bool
+        /// True once every caller stopped waiting: the result reaches none, so
+        /// only something the work stores itself can serve it later.
+        let isLate: @Sendable () -> Bool
+
+        /// For work that runs without a bound.
+        static let unbounded = Attempt(wasInterrupted: { false }, isLate: { false })
     }
 
     static let shared = BoundedSecurityEvaluation()
@@ -31,95 +71,328 @@ final class BoundedSecurityEvaluation: @unchecked Sendable {
     /// One Downloads entry or one loaded library.
     static let scanDeadline: TimeInterval = 10
 
+    /// Sent to one run's thread to fail its blocked call with EINTR. Nothing
+    /// else in MacCrab uses it; the handler does nothing and is installed
+    /// without SA_RESTART, so the interrupted call returns instead of resuming.
+    static let interruptSignal = SIGVTALRM
+    private static let interruptHandlerInstalled: Bool = {
+        var action = sigaction()
+        action.__sigaction_u.__sa_handler = { _ in }
+        action.sa_flags = 0
+        sigemptyset(&action.sa_mask)
+        return sigaction(interruptSignal, &action, nil) == 0
+    }()
+
+    /// Consecutive samples, 50 ms apart, that must find a stranded run's
+    /// thread waiting before it is signalled: a run that is computing (a large
+    /// bundle being hashed) is left to finish, and its late verdict kept.
+    static let waitingSamplesBeforeInterrupt = 3
+    /// Samples taken after a deadline before a run is left as blocked.
+    static let samplesAfterDeadline = 40
+
     let stuckLimit: Int
+    /// Off only in tests that need a run to stay blocked.
+    private let interruptsStranded: Bool
     private let lock = NSLock()
-    /// Stuck evaluations per site, by key. Guarded by `lock`.
-    private var stuck: [Site: [String: Int]] = [:]
-    private let queue = DispatchQueue(
-        label: "com.maccrab.security-evaluation",
-        qos: .utility,
-        attributes: .concurrent
-    )
+    /// The current run per site and key: running, or past its deadline and
+    /// still blocked. Guarded by `lock`.
+    private var runs: [Site: [String: Run]] = [:]
+    private var totals = Totals()
     private let deadlines = DispatchQueue(label: "com.maccrab.security-evaluation.deadline", qos: .utility)
     private let logger = Logger(subsystem: "com.maccrab", category: "security-evaluation")
 
-    init(stuckLimit: Int = 4) {
+    init(stuckLimit: Int = 4, interruptsStranded: Bool = true) {
         self.stuckLimit = stuckLimit
+        self.interruptsStranded = interruptsStranded
+        _ = Self.interruptHandlerInstalled
     }
 
-    /// Evaluations at `site` still running past their deadline.
+    /// Runs at `site` past their deadline and still blocked.
     func stuckCount(_ site: Site) -> Int {
         lock.lock()
         defer { lock.unlock() }
-        return total(site)
+        return blocked(site)
     }
 
-    /// `body`'s result, or nil when it did not return within `deadline`, when
-    /// `key` already has stuck work at `site`, or when `site` is at its limit;
-    /// the last two start no work. `body` runs on `queue`, this type's own by
-    /// default, at the waiting task's priority.
+    /// Blocked runs per site and lifetime counts, for the heartbeat.
+    public static func heartbeatDiagnostics() -> [String: Any] { shared.diagnostics() }
+
+    func diagnostics() -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        var stuck: [String: Int] = [:]
+        for site in Site.allCases { stuck[site.rawValue] = blocked(site) }
+        return [
+            "stuck": stuck,
+            "started_total": totals.started,
+            "timed_out_total": totals.timedOut,
+            "interrupted_total": totals.interrupted,
+            "blocked_total": totals.blocked,
+            "refused_total": totals.refused,
+        ]
+    }
+
+    /// Runs `body` on a thread of its own and waits at most `deadline` for it.
+    /// A caller for a key whose run is still within its deadline joins that
+    /// run instead of starting another. `key` must change when the object
+    /// does (callers add its identity), so a replaced file is evaluated afresh.
     func run<T: Sendable>(
         _ site: Site,
         key: String,
         deadline: TimeInterval,
-        on queue: DispatchQueue? = nil,
-        _ body: @escaping @Sendable () -> T
-    ) async -> T? {
-        lock.lock()
-        let admitted = stuck[site]?[key] == nil && total(site) < stuckLimit
-        lock.unlock()
-        guard admitted else { return nil }
-
-        let race = Race()
-        let qos = BlockingWorkOffload.dispatchQoS(waitedOnAt: Task.currentPriority, floor: .utility)
-        return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
-            let expiry = DispatchWorkItem { [self] in
-                lock.lock()
-                let expired = race.phase == .running
-                var reachedLimit = false
-                if expired {
-                    race.phase = .expired
-                    stuck[site, default: [:]][key, default: 0] += 1
-                    reachedLimit = total(site) == stuckLimit
+        _ body: @escaping @Sendable (Attempt) -> T
+    ) async -> Outcome<T> {
+        let qos = Self.threadQoS(waitedOnAt: Task.currentPriority)
+        let ticket = Ticket()
+        let outcome: Outcome<any Sendable> = await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Outcome<any Sendable>, Never>) in
+                switch admit(site: site, key: key, ticket: ticket, resume: { continuation.resume(returning: $0) }) {
+                case .answered(let answer):
+                    continuation.resume(returning: answer)
+                case .joined:
+                    break
+                case .started(let run):
+                    start(run, deadline: deadline, qos: qos, body)
                 }
-                lock.unlock()
-                guard expired else { return }
-                if reachedLimit {
-                    logger.warning("Security evaluations at \(site.rawValue, privacy: .public) are blocked at their limit of \(self.stuckLimit, privacy: .public); new ones are skipped until one returns")
-                }
-                continuation.resume(returning: nil)
             }
-            (queue ?? self.queue).async(qos: qos, flags: .enforceQoS) { [self] in
-                let value = body()
-                expiry.cancel()
-                lock.lock()
-                let onTime = race.phase == .running
-                var leftLimit = false
-                if onTime {
-                    race.phase = .finished
-                } else {
-                    leftLimit = total(site) == stuckLimit
-                    let count = stuck[site]?[key] ?? 0
-                    stuck[site]?[key] = count > 1 ? count - 1 : nil
-                }
-                lock.unlock()
-                if leftLimit {
-                    logger.notice("A blocked Security evaluation at \(site.rawValue, privacy: .public) returned; evaluations resume")
-                }
-                if onTime { continuation.resume(returning: value) }
-            }
-            deadlines.asyncAfter(deadline: .now() + deadline, execute: expiry)
+        } onCancel: {
+            cancel(ticket)
+        }
+        switch outcome {
+        case .finished(let value):
+            guard let typed = value as? T else { return .refused }
+            return .finished(typed)
+        case .timedOut: return .timedOut
+        case .blocked: return .blocked
+        case .refused: return .refused
+        case .cancelled: return .cancelled
         }
     }
 
-    /// Which of the work and its deadline finished first. Guarded by `lock`.
-    private final class Race: @unchecked Sendable {
-        enum Phase { case running, finished, expired }
+    // MARK: - Runs
+
+    private final class Run: @unchecked Sendable {
+        enum Phase { case running, expired, finished }
+        let site: Site
+        let key: String
         var phase = Phase.running
+        var thread: pthread_t?
+        var interrupted = false
+        var sampling = false
+        var waitingSamples = 0
+        var waiters: [Int: @Sendable (Outcome<any Sendable>) -> Void] = [:]
+        var nextWaiter = 0
+
+        init(site: Site, key: String) {
+            self.site = site
+            self.key = key
+        }
+
+        func addWaiter(_ resume: @escaping @Sendable (Outcome<any Sendable>) -> Void) -> Int {
+            let id = nextWaiter
+            nextWaiter += 1
+            waiters[id] = resume
+            return id
+        }
+    }
+
+    /// One caller's place in a run, so its cancellation can find it.
+    private final class Ticket: @unchecked Sendable {
+        var cancelled = false
+        var run: Run?
+        var waiter: Int?
+    }
+
+    private struct Totals {
+        var started = 0
+        var timedOut = 0
+        var interrupted = 0
+        var blocked = 0
+        var refused = 0
+    }
+
+    private enum Admission {
+        case answered(Outcome<any Sendable>)
+        case joined
+        case started(Run)
+    }
+
+    private func admit(
+        site: Site,
+        key: String,
+        ticket: Ticket,
+        resume: @escaping @Sendable (Outcome<any Sendable>) -> Void
+    ) -> Admission {
+        lock.lock()
+        defer { lock.unlock() }
+        if ticket.cancelled { return .answered(.cancelled) }
+        if let existing = runs[site]?[key] {
+            guard existing.phase == .running else {
+                totals.blocked += 1
+                sampleStranded(at: site)
+                return .answered(.blocked)
+            }
+            ticket.run = existing
+            ticket.waiter = existing.addWaiter(resume)
+            return .joined
+        }
+        guard blocked(site) < stuckLimit else {
+            totals.refused += 1
+            sampleStranded(at: site)
+            return .answered(.refused)
+        }
+        let run = Run(site: site, key: key)
+        ticket.run = run
+        ticket.waiter = run.addWaiter(resume)
+        runs[site, default: [:]][key] = run
+        totals.started += 1
+        return .started(run)
+    }
+
+    private func start<T: Sendable>(
+        _ run: Run,
+        deadline: TimeInterval,
+        qos: QualityOfService,
+        _ body: @escaping @Sendable (Attempt) -> T
+    ) {
+        let attempt = Attempt(
+            wasInterrupted: { [self] in lock.lock(); defer { lock.unlock() }; return run.interrupted },
+            isLate: { [self] in lock.lock(); defer { lock.unlock() }; return run.phase != .running }
+        )
+        let thread = Thread { [self] in
+            // A thread inherits its creator's signal mask, and the cooperative
+            // pool's threads block this signal.
+            var unblock = sigset_t()
+            sigemptyset(&unblock)
+            sigaddset(&unblock, Self.interruptSignal)
+            pthread_sigmask(SIG_UNBLOCK, &unblock, nil)
+            lock.lock()
+            run.thread = pthread_self()
+            lock.unlock()
+            finish(run, with: body(attempt))
+        }
+        thread.name = "com.maccrab.security-evaluation.\(run.site.rawValue)"
+        thread.qualityOfService = qos
+        thread.start()
+        deadlines.asyncAfter(deadline: .now() + deadline) { [self] in expire(run) }
+    }
+
+    private func finish(_ run: Run, with value: any Sendable) {
+        lock.lock()
+        let wasBlocked = run.phase == .expired
+        let interrupted = run.interrupted
+        let waiters = run.waiters
+        run.waiters = [:]
+        run.phase = .finished
+        if runs[run.site]?[run.key] === run { runs[run.site]?[run.key] = nil }
+        let resumed = wasBlocked && blocked(run.site) == stuckLimit - 1
+        lock.unlock()
+        if wasBlocked {
+            logger.notice("A Security evaluation at \(run.site.rawValue, privacy: .public) returned after its deadline (\(interrupted ? "interrupted" : "slow", privacy: .public))")
+        }
+        if resumed {
+            logger.notice("Security evaluations at \(run.site.rawValue, privacy: .public) are below their limit again")
+        }
+        for resume in waiters.values { resume(.finished(value)) }
+    }
+
+    private func expire(_ run: Run) {
+        lock.lock()
+        guard run.phase == .running else {
+            lock.unlock()
+            return
+        }
+        run.phase = .expired
+        let waiters = run.waiters
+        run.waiters = [:]
+        totals.timedOut += 1
+        let atLimit = blocked(run.site) >= stuckLimit
+        run.sampling = interruptsStranded
+        lock.unlock()
+        logger.warning("A Security evaluation at \(run.site.rawValue, privacy: .public) passed its deadline; interrupting it if it is blocked")
+        if atLimit {
+            logger.warning("Security evaluations at \(run.site.rawValue, privacy: .public) are blocked at their limit of \(self.stuckLimit, privacy: .public); new ones are skipped until one returns")
+        }
+        for resume in waiters.values { resume(.timedOut) }
+        if interruptsStranded { sample(run, remaining: Self.samplesAfterDeadline) }
+    }
+
+    /// Signals a stranded run's thread once it has been seen waiting in the
+    /// kernel for `waitingSamplesBeforeInterrupt` samples in a row.
+    private func sample(_ run: Run, remaining: Int) {
+        deadlines.asyncAfter(deadline: .now() + 0.05) { [self] in
+            lock.lock()
+            guard run.phase == .expired else {
+                run.sampling = false
+                lock.unlock()
+                return
+            }
+            if let thread = run.thread {
+                run.waitingSamples = Self.isWaiting(thread) ? run.waitingSamples + 1 : 0
+                if run.waitingSamples >= Self.waitingSamplesBeforeInterrupt {
+                    run.waitingSamples = 0
+                    run.interrupted = true
+                    totals.interrupted += 1
+                    // The run is still inside its body under this lock, so the
+                    // thread is alive and is this run's.
+                    pthread_kill(thread, Self.interruptSignal)
+                }
+            }
+            let more = remaining > 1
+            if !more { run.sampling = false }
+            lock.unlock()
+            if more { sample(run, remaining: remaining - 1) }
+        }
+    }
+
+    /// A caller turned away at `site` looks again at its stranded runs: a
+    /// thread may have moved into a wait an interrupt can end. Caller holds
+    /// `lock`.
+    private func sampleStranded(at site: Site) {
+        guard interruptsStranded else { return }
+        for run in (runs[site] ?? [:]).values where run.phase == .expired && !run.sampling {
+            run.sampling = true
+            run.waitingSamples = 0
+            sample(run, remaining: Self.waitingSamplesBeforeInterrupt + 2)
+        }
+    }
+
+    private func cancel(_ ticket: Ticket) {
+        lock.lock()
+        ticket.cancelled = true
+        var resume: (@Sendable (Outcome<any Sendable>) -> Void)?
+        if let run = ticket.run, let waiter = ticket.waiter {
+            resume = run.waiters.removeValue(forKey: waiter)
+        }
+        lock.unlock()
+        resume?(.cancelled)
     }
 
     /// Caller holds `lock`.
-    private func total(_ site: Site) -> Int {
-        stuck[site]?.values.reduce(0, +) ?? 0
+    private func blocked(_ site: Site) -> Int {
+        runs[site]?.values.reduce(0) { $0 + ($1.phase == .expired ? 1 : 0) } ?? 0
+    }
+
+    /// Whether `thread` is in an interruptible wait in the kernel, as a read
+    /// or open of a FIFO is; a computing thread is running.
+    private static func isWaiting(_ thread: pthread_t) -> Bool {
+        var info = thread_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                thread_info(pthread_mach_thread_np(thread), thread_flavor_t(THREAD_BASIC_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS && info.run_state == TH_STATE_WAITING
+    }
+
+    private static func threadQoS(waitedOnAt priority: TaskPriority) -> QualityOfService {
+        switch BlockingWorkOffload.dispatchQoS(waitedOnAt: priority, floor: .utility).qosClass {
+        case .userInteractive: return .userInteractive
+        case .userInitiated: return .userInitiated
+        case .default: return .default
+        case .background: return .background
+        default: return .utility
+        }
     }
 }

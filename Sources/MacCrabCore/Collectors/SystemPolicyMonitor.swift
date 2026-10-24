@@ -65,6 +65,8 @@ public actor SystemPolicyMonitor {
     /// Downloads signature checks wait at most `securityDeadline`.
     private let securityEvaluation: BoundedSecurityEvaluation
     private let securityDeadline: TimeInterval
+    /// Verdicts that arrived after their scan stopped waiting, for the next.
+    private let lateVerdicts = LateVerdicts()
 
     // MARK: - Types
 
@@ -555,9 +557,60 @@ public actor SystemPolicyMonitor {
     /// a FIFO inside a bundle blocks it past the precheck, and the actor
     /// never waits on it.
     func isSignedWithAppleAnchor(path: String, expected: SecurityEvaluationPrecheck.Expected) async -> Bool? {
-        await securityEvaluation.run(.downloads, key: path, deadline: securityDeadline) {
-            Self.appleAnchorVerdict(path: path, expected: expected)
-        } ?? nil
+        // The key follows the item and the bundle files Security.framework
+        // reads first, so neither a verdict nor a stranded run carries over to
+        // a replaced item.
+        let key = Self.downloadsKey(path: path)
+        if let late = lateVerdicts.take(key) { return late }
+        let lateVerdicts = self.lateVerdicts
+        return await securityEvaluation.run(.downloads, key: key, deadline: securityDeadline) { attempt in
+            let verdict = Self.appleAnchorVerdict(path: path, expected: expected)
+            // A verdict that comes after the scan stopped waiting serves the
+            // next scan, so a large bundle is not revalidated every poll.
+            if let verdict, attempt.isLate(), !attempt.wasInterrupted() {
+                lateVerdicts.store(verdict, for: key)
+            }
+            return verdict
+        }.value ?? nil
+    }
+
+    /// A Downloads item's identity and, for a bundle, that of the files
+    /// Security.framework reads first. Nothing here follows a symlink; /var
+    /// and /tmp are rewritten to /private first.
+    nonisolated static func downloadsKey(path: String) -> String {
+        let resolved = BoundedRegularFileReader.normalizedAbsolutePath(path) ?? path
+        func identity(_ path: String) -> String {
+            var st = stat()
+            guard fstatat(AT_FDCWD, path, &st, AT_SYMLINK_NOFOLLOW_ANY) == 0 else { return "-" }
+            return "\(st.st_dev):\(st.st_ino):\(st.st_ctimespec.tv_sec).\(st.st_ctimespec.tv_nsec)"
+        }
+        return ([path, identity(resolved)]
+            + ["/Contents/Info.plist", "/Contents/MacOS", "/Contents/_CodeSignature"].map { identity(resolved + $0) })
+            .joined(separator: "\u{0}")
+    }
+
+    /// At most 256 late Downloads verdicts, oldest dropped first. Each is used
+    /// once: the scan that uses it remembers the path in `quarantineAlerted`.
+    final class LateVerdicts: @unchecked Sendable {
+        private let lock = NSLock()
+        private var verdicts: [String: Bool] = [:]
+        private var order: [String] = []
+        private let capacity = 256
+
+        func store(_ verdict: Bool, for key: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            if verdicts.updateValue(verdict, forKey: key) == nil { order.append(key) }
+            while order.count > capacity { verdicts.removeValue(forKey: order.removeFirst()) }
+        }
+
+        func take(_ key: String) -> Bool? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let verdict = verdicts.removeValue(forKey: key) else { return nil }
+            order.removeAll { $0 == key }
+            return verdict
+        }
     }
 
     private nonisolated static func appleAnchorVerdict(

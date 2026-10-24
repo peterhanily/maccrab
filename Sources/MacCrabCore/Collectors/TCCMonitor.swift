@@ -157,7 +157,9 @@ public actor TCCMonitor {
     /// Resolves the code signature of the TCC client so SignerType is accurate.
     /// Before v1.18 the TCC event carried no codeSignature at all → SignerType
     /// resolved to nil → every "granted to unsigned" rule fired on signed apps.
-    private let codeSigningCache = CodeSigningCache()
+    /// Its bounded evaluations have a limit of their own, so evaluations the
+    /// enricher strands cannot leave TCC clients unevaluated.
+    private let codeSigningCache = CodeSigningCache(evaluationSite: .tcc)
     private var watchFileDescriptors: [Int32] = []
 
     /// Debounce interval to coalesce rapid database writes (in seconds).

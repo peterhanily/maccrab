@@ -5192,6 +5192,9 @@ enum DaemonTimers {
                 // claimed, failed (retried by the liveness heartbeat),
                 // not_session_leader or already_had_terminal. Diagnostic only.
                 "controlling_terminal": ControllingTerminalGuard.status,
+                // Security.framework evaluations still blocked past their
+                // deadline per site, and lifetime counts. Diagnostic only.
+                "security_evaluation": BoundedSecurityEvaluation.heartbeatDiagnostics(),
                 "deferred_enrichment_buffer":
                     deferredEnrichmentBufferDict,
                 "event_pipeline_live_memory":
