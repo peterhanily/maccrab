@@ -278,8 +278,12 @@ public actor LibraryInventory {
     /// reported as unsigned.
     func signatureCheck(path: String) async -> SignatureCheck {
         if let cached = signatureCache[path] { return cached ? .trusted : .untrusted }
+        // An interrupt only makes Security.framework fail, so a trusted
+        // verdict from an interrupted run is genuine and is not remembered
+        // as blocked.
         let outcome = await securityEvaluation.run(
-            .libraryInventory, key: Self.evaluationKey(path: path), deadline: securityDeadline
+            .libraryInventory, key: Self.evaluationKey(path: path), deadline: securityDeadline,
+            isConclusive: { $0 == true }
         ) { _ in
             Self.trustedSignatureVerdict(path: path)
         }

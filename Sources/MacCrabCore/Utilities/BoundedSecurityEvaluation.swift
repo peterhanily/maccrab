@@ -27,7 +27,9 @@ import os.log
 /// against its site, and a site with `stuckLimit` of them, or with its
 /// in-flight limit of runs, starts no more, so threads stay bounded. A key
 /// whose run had to be interrupted is answered as blocked from then on,
-/// until the object changes and with it the key.
+/// until the object changes and with it the key, unless the run still
+/// returned a verdict an interrupt cannot produce: the signal then landed
+/// in a wait that is retried, such as an XPC reply, and nothing blocked.
 public final class BoundedSecurityEvaluation: @unchecked Sendable {
     enum Site: String, Sendable, CaseIterable {
         case codeSigning = "code_signing"
@@ -41,11 +43,12 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         /// The work returned within the deadline: this caller's run, or the
         /// run for the same key it joined.
         case finished(Value)
-        /// The deadline passed first. The work keeps running and is interrupted.
+        /// The deadline passed first, or the same key's earlier run is still
+        /// past its deadline without having been interrupted (a large bundle
+        /// still validating). The work keeps running.
         case timedOut
-        /// The same key's earlier run is still blocked, or Security.framework
-        /// blocked on this object before and its run was interrupted; nothing
-        /// was started.
+        /// Security.framework blocked on this object: the same key's run had
+        /// to be interrupted. Nothing was started.
         case blocked
         /// The site has `stuckLimit` blocked runs, or its in-flight limit of
         /// runs; nothing was started.
@@ -62,7 +65,9 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
     /// What the work can ask about its own run.
     struct Attempt: Sendable {
         /// True once the runner has signalled the work's thread. Its result
-        /// then describes the interruption, not the code, and must not be kept.
+        /// then describes the interruption, not the code, and must not be kept,
+        /// unless it is one an interrupt cannot produce (the run's
+        /// `isConclusive`).
         let wasInterrupted: @Sendable () -> Bool
         /// True once every caller stopped waiting: the result reaches none, so
         /// only something the work stores itself can serve it later.
@@ -169,10 +174,14 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
     /// A caller for a key whose run is still within its deadline joins that
     /// run instead of starting another. `key` must change when the object
     /// does (callers add its identity), so a replaced file is evaluated afresh.
+    /// `isConclusive` names results an interrupt cannot produce, such as a
+    /// signature that verified: an interrupted run that returns one is not
+    /// remembered as blocked.
     func run<T: Sendable>(
         _ site: Site,
         key: String,
         deadline: TimeInterval,
+        isConclusive: @escaping @Sendable (T) -> Bool = { _ in false },
         _ body: @escaping @Sendable (Attempt) -> T
     ) async -> Outcome<T> {
         let qos = Self.threadQoS(waitedOnAt: Task.currentPriority)
@@ -185,7 +194,7 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
                 case .joined:
                     break
                 case .started(let run):
-                    start(run, deadline: deadline, qos: qos, body)
+                    start(run, deadline: deadline, qos: qos, isConclusive: isConclusive, body)
                 }
             }
         } onCancel: {
@@ -234,6 +243,13 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return runs[site]?[key]?.waiters.count ?? 0
+    }
+
+    /// Runs at `site` that have been signalled and have not returned.
+    func interruptedRunCount(_ site: Site) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return runs[site]?.values.reduce(0) { $0 + ($1.interrupted ? 1 : 0) } ?? 0
     }
 
     /// At most `capacity` keys, oldest dropped first; a hit counts as use.
@@ -291,8 +307,12 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         if ticket.cancelled { return .answered(.cancelled) }
         if let existing = runs[site]?[key] {
             guard existing.phase == .running else {
-                totals.blocked += 1
                 sampleStranded(at: site)
+                // Only an interrupted run shows Security.framework blocked on
+                // the object; one never interrupted is still computing, and
+                // its late verdict serves a later call.
+                guard existing.interrupted else { return .answered(.timedOut) }
+                totals.blocked += 1
                 return .answered(.blocked)
             }
             ticket.run = existing
@@ -320,6 +340,7 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         _ run: Run,
         deadline: TimeInterval,
         qos: QualityOfService,
+        isConclusive: @escaping @Sendable (T) -> Bool,
         _ body: @escaping @Sendable (Attempt) -> T
     ) {
         let attempt = Attempt(
@@ -336,7 +357,8 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
             lock.lock()
             run.thread = pthread_self()
             lock.unlock()
-            finish(run, with: body(attempt))
+            let value = body(attempt)
+            finish(run, with: value, conclusive: isConclusive(value))
         }
         thread.name = "com.maccrab.security-evaluation.\(run.site.rawValue)"
         thread.qualityOfService = qos
@@ -344,7 +366,7 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         deadlines.asyncAfter(deadline: .now() + deadline) { [self] in expire(run) }
     }
 
-    private func finish(_ run: Run, with value: any Sendable) {
+    private func finish(_ run: Run, with value: any Sendable, conclusive: Bool) {
         lock.lock()
         let wasBlocked = run.phase == .expired
         let interrupted = run.interrupted
@@ -352,7 +374,10 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         run.waiters = [:]
         run.phase = .finished
         if runs[run.site]?[run.key] === run { runs[run.site]?[run.key] = nil }
-        if interrupted {
+        // A signal can only make Security.framework fail. A conclusive result
+        // after one shows the signal landed in a wait that is retried, not in
+        // a blocked open, so the object is not remembered as blocking.
+        if interrupted && !conclusive {
             interruptedKeys[run.site, default: InterruptedKeys()].insert(run.key, capacity: Self.interruptedKeyCapacity)
         }
         let resumed = wasBlocked && blocked(run.site) == stuckLimit - 1

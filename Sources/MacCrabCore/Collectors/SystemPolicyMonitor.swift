@@ -67,6 +67,8 @@ public actor SystemPolicyMonitor {
     private let securityDeadline: TimeInterval
     /// Verdicts that arrived after their scan stopped waiting, for the next.
     private let lateVerdicts = LateVerdicts()
+    /// Test seam standing in for `appleAnchorVerdict`.
+    private let anchorVerdictForTesting: (@Sendable (String, SecurityEvaluationPrecheck.Expected) -> Bool?)?
 
     // MARK: - Types
 
@@ -104,6 +106,7 @@ public actor SystemPolicyMonitor {
         self.homesProvider = { RealUserHomeResolver.all() }
         self.securityEvaluation = .shared
         self.securityDeadline = BoundedSecurityEvaluation.scanDeadline
+        self.anchorVerdictForTesting = nil
         var capturedContinuation: AsyncStream<SystemPolicyEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
             capturedContinuation = continuation
@@ -115,12 +118,14 @@ public actor SystemPolicyMonitor {
         pollInterval: TimeInterval = 300,
         homesProvider: @escaping @Sendable () -> [RealUserHome],
         securityEvaluation: BoundedSecurityEvaluation = .shared,
-        securityDeadline: TimeInterval = BoundedSecurityEvaluation.scanDeadline
+        securityDeadline: TimeInterval = BoundedSecurityEvaluation.scanDeadline,
+        anchorVerdictForTesting: (@Sendable (String, SecurityEvaluationPrecheck.Expected) -> Bool?)? = nil
     ) {
         self.pollInterval = pollInterval
         self.homesProvider = homesProvider
         self.securityEvaluation = securityEvaluation
         self.securityDeadline = securityDeadline
+        self.anchorVerdictForTesting = anchorVerdictForTesting
         var capturedContinuation: AsyncStream<SystemPolicyEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
             capturedContinuation = continuation
@@ -587,11 +592,16 @@ public actor SystemPolicyMonitor {
         let key = Self.downloadsKey(path: path)
         if let late = lateVerdicts.take(key) { return late ? .anchored : .notAnchored }
         let lateVerdicts = self.lateVerdicts
-        let outcome = await securityEvaluation.run(.downloads, key: key, deadline: securityDeadline) { attempt in
-            let verdict = Self.appleAnchorVerdict(path: path, expected: expected)
+        let anchorVerdict = anchorVerdictForTesting ?? Self.appleAnchorVerdict
+        // An interrupt only makes Security.framework fail, so an anchored
+        // verdict is genuine even from an interrupted run.
+        let outcome = await securityEvaluation.run(
+            .downloads, key: key, deadline: securityDeadline, isConclusive: { $0 == true }
+        ) { attempt in
+            let verdict = anchorVerdict(path, expected)
             // A verdict that comes after the scan stopped waiting serves the
             // next scan, so a large bundle is not revalidated every poll.
-            if let verdict, attempt.isLate(), !attempt.wasInterrupted() {
+            if let verdict, attempt.isLate(), verdict || !attempt.wasInterrupted() {
                 lateVerdicts.store(verdict, for: key)
             }
             return verdict

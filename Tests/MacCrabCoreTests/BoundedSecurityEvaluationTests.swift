@@ -175,9 +175,10 @@ struct BoundedSecurityEvaluationTests {
         #expect(runner.stuckCount(.downloads) == 1)
         #expect(began.wait(timeout: .now() + 5) == .success, "the first body never started")
 
-        // The same key is not started again while its work is stuck.
+        // The same key is not started again while its work is stuck. It was
+        // never interrupted, so it is still running, not blocked.
         let again = await runner.run(.downloads, key: "a", deadline: 5) { _ -> Int in started.increment(); return 2 }
-        if case .blocked = again {} else { Issue.record("expected the stuck key to be refused, got \(again)") }
+        if case .timedOut = again {} else { Issue.record("expected the stuck key to be answered as still running, got \(again)") }
         #expect(started.value == 1)
         // Another site is unaffected, and finished work comes back.
         #expect(await runner.run(.libraryInventory, key: "a", deadline: 5) { _ in 3 }.value == 3)
@@ -557,6 +558,160 @@ struct BoundedSecurityEvaluationTests {
         #expect((runner.diagnostics()["interrupted_total"] as? Int ?? -1) == 0)
     }
 
+    @Test("a Downloads bundle still validating at the next scan is not reported, and its late verdict is used")
+    func stillValidatingBundleIsNotReported() async throws {
+        let home = try Self.directory()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let bundle = home + "/Downloads/Large.app"
+        try FileManager.default.createDirectory(atPath: bundle + "/Contents/MacOS", withIntermediateDirectories: true)
+        try Self.plist(executable: "Large").write(to: URL(fileURLWithPath: bundle + "/Contents/Info.plist"))
+        let gate = DispatchSemaphore(value: 0)
+        let began = DispatchSemaphore(value: 0)
+        var released = false
+        defer { if !released { gate.signal() } }
+        // A signed bundle large enough to outlast a scan: never interrupted
+        // here, so its run is only ever computing.
+        let runner = BoundedSecurityEvaluation(stuckLimit: 2, interruptsStranded: false)
+        let monitor = SystemPolicyMonitor(
+            homesProvider: { [] }, securityEvaluation: runner, securityDeadline: 0.3,
+            anchorVerdictForTesting: { _, _ in began.signal(); _ = gate.wait(timeout: .now() + 20); return true }
+        )
+        let user = RealUserHome(path: home, userID: getuid(), userName: NSUserName())
+
+        let first = await Self.promptly(releasing: []) { await monitor.scanDownloadsForMissingQuarantine(in: user) }
+        #expect(first.prompt)
+        #expect(began.wait(timeout: .now() + 5) == .success, "the bundle was never evaluated")
+        #expect(runner.stuckCount(.downloads) == 1)
+        // The next scan finds the same run still past its deadline: not judged.
+        #expect(await monitor.appleAnchorCheck(path: bundle, expected: .directory) == nil,
+                "a bundle that is still validating was judged")
+        let second = await Self.promptly(releasing: []) { await monitor.scanDownloadsForMissingQuarantine(in: user) }
+        #expect(second.prompt)
+        #expect(Self.started(runner) == 1)
+
+        // It finishes anchored; the following scan uses that verdict.
+        gate.signal()
+        released = true
+        #expect(await Self.eventually(within: 10) { runner.stuckCount(.downloads) == 0 })
+        let third = await Self.promptly(releasing: []) { await monitor.scanDownloadsForMissingQuarantine(in: user) }
+        #expect(third.prompt)
+        #expect(Self.started(runner) == 1, "the late verdict was not used")
+        await monitor.stop()
+        var reports: [SystemPolicyMonitor.SystemPolicyEvent] = []
+        for await event in monitor.events where event.type == .quarantineStripped { reports.append(event) }
+        #expect(reports.isEmpty, "a signed bundle still validating was reported: \(reports.map(\.description))")
+    }
+
+    @Test("an interrupted run that still returns a conclusive result is not remembered as blocked")
+    func conclusiveInterruptedRunIsNotRemembered() async throws {
+        let runner = BoundedSecurityEvaluation(stuckLimit: 4)
+        // A semaphore wait samples as waiting and is retried after the
+        // signal, as an XPC reply wait inside Security.framework is.
+        func waitsThenAnswers(_ gate: DispatchSemaphore, _ answer: Bool) -> @Sendable (BoundedSecurityEvaluation.Attempt) -> Bool {
+            { _ in _ = gate.wait(timeout: .now() + 20); return answer }
+        }
+        let verified = DispatchSemaphore(value: 0)
+        let failed = DispatchSemaphore(value: 0)
+        defer { verified.signal(); failed.signal() }
+        for (key, gate, answer) in [("verified", verified, true), ("failed", failed, false)] {
+            let first = await runner.run(.libraryInventory, key: key, deadline: 0.2, isConclusive: { $0 },
+                                         waitsThenAnswers(gate, answer))
+            if case .timedOut = first {} else { Issue.record("expected a timeout for \(key), got \(first)") }
+        }
+        // One run can be signalled more than once: wait for both runs.
+        #expect(await Self.eventually(within: 5) { runner.interruptedRunCount(.libraryInventory) == 2 },
+                "the waiting runs were not interrupted")
+        verified.signal()
+        failed.signal()
+        #expect(await Self.eventually(within: 10) { runner.stuckCount(.libraryInventory) == 0 })
+
+        let started = Self.started(runner)
+        // The verified result could not have come from an interrupt: the key
+        // is evaluated again, never answered blocked.
+        let again = await runner.run(.libraryInventory, key: "verified", deadline: 5, isConclusive: { $0 }) { _ in true }
+        if case .finished(true) = again {} else { Issue.record("a conclusive interrupted run was remembered: \(again)") }
+        #expect(Self.started(runner) == started + 1)
+        // A failure after an interrupt still says nothing about the object.
+        let blocked = await runner.run(.libraryInventory, key: "failed", deadline: 5, isConclusive: { $0 }) { _ in false }
+        if case .blocked = blocked {} else { Issue.record("an inconclusive interrupted run was not remembered: \(blocked)") }
+        #expect(Self.started(runner) == started + 1)
+    }
+
+    @Test("an interrupted evaluation keeps a verdict no interrupt can produce, and nothing weaker")
+    func interruptedCodeSigningVerdicts() async throws {
+        let dir = try Self.directory()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let script = dir + "/unsigned.sh"
+        try "#!/bin/sh\nexit 0\n".write(toFile: script, atomically: true, encoding: .utf8)
+        #expect(chmod(script, 0o755) == 0)
+
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal(); gate.signal() }
+        let runner = BoundedSecurityEvaluation(stuckLimit: 4)
+        // Holds each evaluation in a retried wait after Security answers, so
+        // the runner signals it past its deadline.
+        let cache = CodeSigningCache(securityEvaluation: runner, evaluationDeadline: 0.2,
+                                     afterEvaluationForTesting: { _ in _ = gate.wait(timeout: .now() + 20) })
+        #expect(await cache.evaluateExecutable(path: "/bin/ls") == nil)
+        #expect(await cache.evaluateExecutable(path: script) == nil)
+        #expect(await Self.eventually(within: 5) { runner.interruptedRunCount(.codeSigning) == 2 },
+                "the held evaluations were not interrupted")
+        gate.signal()
+        gate.signal()
+        #expect(await Self.eventually(within: 10) { runner.stuckCount(.codeSigning) == 0 })
+
+        // An Apple verdict cannot come from an interrupt: kept, and the file
+        // is not remembered as blocking.
+        #expect(cache.lookup(path: "/bin/ls")?.signerType == .apple, "an interrupted Apple verdict was discarded")
+        // Unsigned may be the interrupt's doing: discarded and remembered.
+        #expect(cache.lookup(path: script) == nil, "an interrupted unsigned verdict was cached")
+        let before = Self.started(runner)
+        #expect(await cache.evaluateExecutable(path: script) == nil)
+        #expect(Self.started(runner) == before, "an inconclusive interrupted evaluation was started again")
+        // Once the cache forgets the Apple binary, it is evaluated again.
+        await cache.removeAll()
+        gate.signal()
+        #expect(await cache.evaluateExecutable(path: "/bin/ls")?.signerType == .apple,
+                "an Apple binary verified after an interrupt was remembered as blocked")
+        #expect(Self.started(runner) == before + 1)
+
+        #expect(CodeSigningCache.survivesInterrupt(CodeSignatureInfo(signerType: .apple)))
+        #expect(CodeSigningCache.survivesInterrupt(CodeSignatureInfo(signerType: .appStore)))
+        for weaker in [SignerType.devId, .adHoc, .unsigned] {
+            #expect(!CodeSigningCache.survivesInterrupt(CodeSignatureInfo(signerType: weaker)),
+                    "\(weaker) can be an interrupted evaluation's under-classification")
+        }
+    }
+
+    @Test("an interrupted Downloads evaluation that verifies keeps its late verdict")
+    func interruptedAnchoredDownloadsVerdictIsKept() async throws {
+        let dir = try Self.directory()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let bundle = dir + "/Signed.app"
+        try FileManager.default.createDirectory(atPath: bundle + "/Contents/MacOS", withIntermediateDirectories: true)
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        let runner = BoundedSecurityEvaluation(stuckLimit: 2)
+        let monitor = SystemPolicyMonitor(
+            homesProvider: { [] }, securityEvaluation: runner, securityDeadline: 0.2,
+            anchorVerdictForTesting: { _, _ in _ = gate.wait(timeout: .now() + 20); return true }
+        )
+        #expect(await monitor.appleAnchorCheck(path: bundle, expected: .directory) == nil)
+        #expect(await Self.eventually(within: 5) { runner.interruptedRunCount(.downloads) == 1 },
+                "the held evaluation was not interrupted")
+        gate.signal()
+        #expect(await Self.eventually(within: 10) { runner.stuckCount(.downloads) == 0 })
+        #expect(await monitor.appleAnchorCheck(path: bundle, expected: .directory) == .anchored,
+                "an anchored verdict from an interrupted run was discarded")
+        #expect(Self.started(runner) == 1)
+        // Nor is the bundle remembered as one Security blocked on: once the
+        // late verdict is used, the next check evaluates it again.
+        gate.signal()
+        #expect(await monitor.appleAnchorCheck(path: bundle, expected: .directory) == .anchored,
+                "a bundle that verified after an interrupt was remembered as blocked")
+        #expect(Self.started(runner) == 2)
+    }
+
     @Test("a Downloads key changes when a bundle's main files are replaced")
     func downloadsKeyFollowsTheBundle() throws {
         let dir = try Self.directory()
@@ -583,12 +738,13 @@ struct BoundedSecurityEvaluationTests {
             .contains("let verified = await cache.evaluateExecutable(path: path)"))
         let policy = try source("Sources/MacCrabCore/Collectors/SystemPolicyMonitor.swift")
         #expect(policy.contains("let key = Self.downloadsKey(path: path)"))
-        #expect(policy.contains("let outcome = await securityEvaluation.run(.downloads, key: key, deadline: securityDeadline) { attempt in"))
+        #expect(policy.contains(".downloads, key: key, deadline: securityDeadline, isConclusive: { $0 == true }"))
+        #expect(policy.contains("if let verdict, attempt.isLate(), verdict || !attempt.wasInterrupted() {"))
         #expect(policy.contains("guard let check = await appleAnchorCheck("))
         #expect(policy.contains("case .blocked: return .blocked"))
         #expect(policy.contains("description: check == .blocked"))
         let library = try source("Sources/MacCrabCore/Detection/LibraryInventory.swift")
-        #expect(library.contains(".libraryInventory, key: Self.evaluationKey(path: path), deadline: securityDeadline"))
+        #expect(library.contains(".libraryInventory, key: Self.evaluationKey(path: path), deadline: securityDeadline,\n            isConclusive: { $0 == true }"))
         // Security.framework is called only from the off-actor verdicts.
         for (text, verdict) in [(policy, "private nonisolated static func appleAnchorVerdict("),
                                 (library, "private nonisolated static func trustedSignatureVerdict(")] {
@@ -603,6 +759,8 @@ struct BoundedSecurityEvaluationTests {
         #expect(library.contains("SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSSingleThreaded)"))
         let cache = try source("Sources/MacCrabCore/Enrichment/CodeSigningCache.swift")
         #expect(cache.contains("let info = Self.performEvaluation(path: path, singleThreaded: bounded)"))
+        #expect(cache.contains("guard !attempt.wasInterrupted() || Self.survivesInterrupt(info) else { return nil }"))
+        #expect(cache.contains("isConclusive: { $0.map(Self.survivesInterrupt) ?? false }, work"))
         #expect(cache.contains("let validation = SecCSFlags(rawValue: singleThreaded ? kSecCSSingleThreaded : 0)"))
         #expect(cache.contains("SecCSFlags(rawValue: kSecCSCheckAllArchitectures).union(validation)"))
         #expect(!cache.contains("SecStaticCodeCheckValidity(staticCode, [], "), "a requirement check validates off the run's thread")

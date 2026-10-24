@@ -275,9 +275,10 @@ public actor CodeSigningCache {
             ), before.map({ $0 == FileIdentity(opened) }) ?? true else { return nil }
             let info = Self.performEvaluation(path: path, singleThreaded: bounded)
             afterEvaluation?(path)
-            // An interrupted evaluation failed because a blocked open was
-            // broken, not because of the code: never keep it.
-            guard !attempt.wasInterrupted() else { return nil }
+            // An interrupted evaluation failed because a blocked call was
+            // broken, not because of the code: keep it only when it reached a
+            // class no interrupt can produce.
+            guard !attempt.wasInterrupted() || Self.survivesInterrupt(info) else { return nil }
             // Bind the verdict only to bytes that stayed in place for the whole
             // evaluation. Capturing the identity afterwards let a binary renamed
             // into place mid-evaluation inherit the previous file's verdict.
@@ -294,7 +295,8 @@ public actor CodeSigningCache {
             // one is evaluated afresh.
             let key = path + "\u{0}" + (before?.evaluationKey ?? "-")
             guard case .finished(let finished) = await securityEvaluation.run(
-                evaluationSite, key: key, deadline: evaluationDeadline, work
+                evaluationSite, key: key, deadline: evaluationDeadline,
+                isConclusive: { $0.map(Self.survivesInterrupt) ?? false }, work
             ) else { return .unfinished }
             info = finished
         } else {
@@ -308,6 +310,16 @@ public actor CodeSigningCache {
             ) { work(.unbounded) }
         }
         return info.map(Evaluation.evaluated) ?? .notOpened
+    }
+
+    /// Whether `info` is a verdict an interrupted evaluation cannot have
+    /// produced. A signal only makes a Security.framework check fail, and a
+    /// failed requirement check falls through to a weaker class, so an
+    /// interrupt can turn Apple or App Store code into Developer ID, ad-hoc
+    /// or unsigned, but no class into these two. Apple's own platform code
+    /// never carries the App Store leaf.
+    nonisolated static func survivesInterrupt(_ info: CodeSignatureInfo) -> Bool {
+        info.signerType == .apple || info.signerType == .appStore
     }
 
     // MARK: Security framework evaluation
