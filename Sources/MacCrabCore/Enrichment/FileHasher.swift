@@ -64,11 +64,21 @@ public actor FileHasher {
     /// The hash in flight for each (path, identity). The actor suspends
     /// while hashing, so N processes exec'ing one new binary would otherwise
     /// read it N times; later misses for the same bytes wait for this one.
-    private var inFlight: [CacheKey: Task<String?, Never>] = [:]
+    private var inFlight: [CacheKey: Task<Computed, Never>] = [:]
     private var statsStore = Stats()
     /// The digest computation; a seam so tests can hold or fail the hash
     /// that concurrent misses share.
-    private let computeDigest: @Sendable (String, CacheKey) -> String?
+    private let computeDigest: @Sendable (String, CacheKey) -> Computed
+
+    /// What one miss's hash found.
+    enum Computed: Equatable, Sendable {
+        /// The key's bytes, and whether the path still named them afterwards.
+        case digest(String, stillInPlace: Bool)
+        /// On a network volume (NFS, SMB, AFP, WebDAV, FUSE): not hashed.
+        case network
+        /// Missing, swapped, rewritten while read, or an I/O error.
+        case unavailable
+    }
 
     // MARK: - Init
 
@@ -79,13 +89,13 @@ public actor FileHasher {
     ///   - maxFileBytes: Files larger than this are skipped (default 256 MB).
     public init(capacity: Int = 4096, maxFileBytes: Int64 = 256 * 1024 * 1024) {
         self.init(capacity: capacity, maxFileBytes: maxFileBytes,
-                  computeDigest: { FileHasher.computeSHA256(path: $0, matching: $1) })
+                  computeDigest: { FileHasher.hashAndRecheck(path: $0, matching: $1) })
     }
 
     init(
         capacity: Int,
         maxFileBytes: Int64,
-        computeDigest: @escaping @Sendable (String, CacheKey) -> String?
+        computeDigest: @escaping @Sendable (String, CacheKey) -> Computed
     ) {
         precondition(capacity > 0, "capacity must be > 0")
         precondition(maxFileBytes > 0, "maxFileBytes must be > 0")
@@ -99,15 +109,12 @@ public actor FileHasher {
     /// Returns the SHA-256 hex digest of `path`, or `nil` if the file is
     /// unavailable, too large, on a network mount, or errors during I/O.
     public func hash(path: String) async -> String? {
-        // Type, size, identity and volume, off the actor: a probe that walks
-        // into a stalled network volume must not hold every other hash.
+        // Type, size and identity, off the actor: a probe that walks into a
+        // stalled network volume must not hold every other hash.
         let key: CacheKey
         switch await HeavyEnrichmentBlockingWork.run({ Self.probe(path: path) }) {
         case .unavailable:
             statsStore.skippedMissing += 1
-            return nil
-        case .network:
-            statsStore.skippedNetwork += 1
             return nil
         case .file(let probed):
             key = probed
@@ -126,9 +133,17 @@ public actor FileHasher {
         }
 
         if let pending = inFlight[key] {
-            let digest = await pending.value
-            if digest == nil { statsStore.errors += 1 } else { statsStore.hits += 1 }
-            return digest
+            switch await pending.value {
+            case .digest(let digest, _):
+                statsStore.hits += 1
+                return digest
+            case .network:
+                statsStore.skippedNetwork += 1
+                return nil
+            case .unavailable:
+                statsStore.errors += 1
+                return nil
+            }
         }
 
         // Cache miss: compute off the actor and the cooperative pool. Up to
@@ -136,53 +151,49 @@ public actor FileHasher {
         // later miss for this key waits on this one, so it must always end:
         // the hash reads only the file the key names, never what a swapped
         // path now resolves to (a FIFO that never opens, a device that never
-        // ends).
+        // ends). The recheck of the path runs in the same hop, and the digest
+        // is cached before the in-flight entry ends, so no later miss for
+        // these bytes can start a second read.
         let compute = computeDigest
-        let task = Task<String?, Never> {
+        let task = Task<Computed, Never> {
             await HeavyEnrichmentBlockingWork.run({ compute(path, key) })
         }
         inFlight[key] = task
         let computed = await task.value
-        inFlight.removeValue(forKey: key)
-        guard let digest = computed else {
+        defer { inFlight.removeValue(forKey: key) }
+        switch computed {
+        case .digest(let digest, let stillInPlace):
+            statsStore.misses += 1
+            // Cache only a digest of bytes that stayed in place while hashing.
+            if stillInPlace { insert(key, digest: digest) }
+            return digest
+        case .network:
+            statsStore.skippedNetwork += 1
+            return nil
+        case .unavailable:
             statsStore.errors += 1
             return nil
         }
-
-        statsStore.misses += 1
-        // Cache only a digest of bytes that stayed in place while hashing.
-        if await HeavyEnrichmentBlockingWork.run({ Self.cacheKey(path: path) == key }) {
-            insert(key, digest: digest)
-        }
-        return digest
     }
 
     /// What one look at a path found.
     enum Probe: Equatable, Sendable {
         /// Missing, not a regular file, or reached through a symlink.
         case unavailable
-        case network
         case file(CacheKey)
     }
 
-    /// Type, size, identity and volume from one descriptor, opened without
-    /// blocking, without adopting a terminal and without following a symlink
-    /// in any component: a swapped parent fails here at once instead of
-    /// walking into a tty, an automount trigger or another volume. Exec paths
-    /// are canonical; /var and /tmp are rewritten to /private first.
+    /// Type, size and identity from one `fstatat` that refuses a symlink in
+    /// any component: a swapped parent fails here at once instead of walking
+    /// into a tty, an automount trigger or another volume. Nothing is opened,
+    /// so a cache hit costs one call; network-ness comes from the hash's own
+    /// descriptor, and only local digests are cached. Exec paths are
+    /// canonical; /var and /tmp are rewritten to /private first.
     nonisolated static func probe(path: String) -> Probe {
         guard let resolved = BoundedRegularFileReader.normalizedAbsolutePath(path) else { return .unavailable }
-        let descriptor = open(resolved, O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC | O_NOCTTY)
-        guard descriptor >= 0 else { return .unavailable }
-        defer { close(descriptor) }
         var st = stat()
-        guard fstat(descriptor, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return .unavailable }
-        // Network volumes are skipped (NFS, SMB, AFP, WebDAV, FUSE). A volume
-        // that cannot be asked counts as local, as before.
-        var volume = statfs()
-        if fstatfs(descriptor, &volume) == 0, volume.f_flags & UInt32(MNT_LOCAL) == 0 {
-            return .network
-        }
+        guard fstatat(AT_FDCWD, resolved, &st, AT_SYMLINK_NOFOLLOW_ANY) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG else { return .unavailable }
         return .file(CacheKey(
             path: path,
             device: UInt64(st.st_dev),
@@ -198,6 +209,15 @@ public actor FileHasher {
     nonisolated static func cacheKey(path: String) -> CacheKey? {
         guard case .file(let key) = probe(path: path) else { return nil }
         return key
+    }
+
+    /// The miss path's one blocking hop: the key's bytes, hashed from a
+    /// descriptor that also answers network-ness, then whether the path
+    /// still names them.
+    nonisolated static func hashAndRecheck(path: String, matching key: CacheKey) -> Computed {
+        let computed = hashFile(path: path, matching: key)
+        guard case .digest(let digest, _) = computed else { return computed }
+        return .digest(digest, stillInPlace: cacheKey(path: path) == key)
     }
 
     /// Current observability counters (copy).
@@ -256,16 +276,35 @@ public actor FileHasher {
         matching key: CacheKey,
         afterIdentityCheckForTesting: ((Int32) -> Void)? = nil
     ) -> String? {
+        guard case .digest(let digest, _) = hashFile(
+            path: path, matching: key, afterIdentityCheckForTesting: afterIdentityCheckForTesting
+        ) else { return nil }
+        return digest
+    }
+
+    /// `computeSHA256(path:matching:)`, telling a network volume apart from
+    /// a failure. `stillInPlace` is always false here.
+    nonisolated static func hashFile(
+        path: String,
+        matching key: CacheKey,
+        afterIdentityCheckForTesting: ((Int32) -> Void)? = nil
+    ) -> Computed {
         // A swapped parent symlink would otherwise aim this root open at a
         // tty, an automount trigger that blocks, or /dev/fd before the
         // identity check: refuse a symlink anywhere in the path. Exec paths
         // are canonical; /var and /tmp are rewritten to /private first.
-        guard let resolved = BoundedRegularFileReader.normalizedAbsolutePath(path) else { return nil }
+        guard let resolved = BoundedRegularFileReader.normalizedAbsolutePath(path) else { return .unavailable }
         let descriptor = open(resolved, O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC | O_NOCTTY)
-        guard descriptor >= 0 else { return nil }
+        guard descriptor >= 0 else { return .unavailable }
         defer { close(descriptor) }
         var opened = stat()
-        guard fstat(descriptor, &opened) == 0, identity(of: opened, matches: key) else { return nil }
+        guard fstat(descriptor, &opened) == 0, identity(of: opened, matches: key) else { return .unavailable }
+        // Network volumes are skipped (NFS, SMB, AFP, WebDAV, FUSE). A volume
+        // that cannot be asked counts as local, as before.
+        var volume = statfs()
+        if fstatfs(descriptor, &volume) == 0, volume.f_flags & UInt32(MNT_LOCAL) == 0 {
+            return .network
+        }
         // Test seam: a fixture can change the file between the check and the
         // read. Production callers never supply it.
         afterIdentityCheckForTesting?(descriptor)
@@ -280,17 +319,17 @@ public actor FileHasher {
             }
             if count < 0 {
                 if errno == EINTR { continue }
-                return nil
+                return .unavailable
             }
-            if count == 0 { return nil }   // shorter than the key says
+            if count == 0 { return .unavailable }   // shorter than the key says
             buffer.withUnsafeBytes { bytes in
                 hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes[..<count]))
             }
             remaining -= count
         }
         var after = stat()
-        guard fstat(descriptor, &after) == 0, identity(of: after, matches: key) else { return nil }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        guard fstat(descriptor, &after) == 0, identity(of: after, matches: key) else { return .unavailable }
+        return .digest(hasher.finalize().map { String(format: "%02x", $0) }.joined(), stillInPlace: false)
     }
 
     private nonisolated static func identity(of info: stat, matches key: CacheKey) -> Bool {

@@ -145,8 +145,10 @@ struct FileHasherIdentityTests {
             calls.increment()
             _ = gate.wait(timeout: .now() + 10)
             let fifo = (path as NSString).deletingLastPathComponent + "/pipe"
-            guard mkfifo(fifo, 0o600) == 0, rename(fifo, path) == 0 else { return "not swapped" }
-            return FileHasher.computeSHA256(path: path, matching: key)
+            guard mkfifo(fifo, 0o600) == 0, rename(fifo, path) == 0 else {
+                return .digest("not swapped", stillInPlace: false)
+            }
+            return FileHasher.hashAndRecheck(path: path, matching: key)
         }
         async let first = hasher.hash(path: path)
         async let second = hasher.hash(path: path)
@@ -204,10 +206,63 @@ struct FileHasherIdentityTests {
             contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/FileHasher.swift"),
             encoding: .utf8)
         #expect(source.contains("switch await HeavyEnrichmentBlockingWork.run({ Self.probe(path: path) }) {"))
-        #expect(source.contains("if await HeavyEnrichmentBlockingWork.run({ Self.cacheKey(path: path) == key }) {"))
         #expect(source.contains("if fstatfs(descriptor, &volume) == 0, volume.f_flags & UInt32(MNT_LOCAL) == 0 {"))
         #expect(!source.contains("lstat("), "a path probe that follows a parent symlink")
         #expect(!source.contains("resourceValues("), "a path-based volume lookup on the actor")
+        // The key, which every call takes and a cache hit needs nothing more
+        // than, comes from one fstatat that refuses symlinks; nothing opens.
+        let probe = try #require(source.range(of: "nonisolated static func probe(path: String) -> Probe {"))
+        let probeEnd = try #require(source.range(of: "nonisolated static func cacheKey(path: String)"))
+        let body = source[probe.upperBound..<probeEnd.lowerBound]
+        #expect(body.contains("fstatat(AT_FDCWD, resolved, &st, AT_SYMLINK_NOFOLLOW_ANY)"))
+        #expect(!body.contains("open(") && !body.contains("fstatfs("))
+        // The path recheck runs inside the compute's hop, and a digest is
+        // cached before its in-flight entry ends: no window for a second read.
+        #expect(source.contains("return .digest(digest, stillInPlace: cacheKey(path: path) == key)"))
+        #expect(!source.contains("HeavyEnrichmentBlockingWork.run({ Self.cacheKey(path: path) == key })"))
+        let ending = try #require(source.range(of: "defer { inFlight.removeValue(forKey: key) }"))
+        let insert = try #require(source.range(of: "if stillInPlace { insert(key, digest: digest) }"))
+        #expect(ending.upperBound < insert.lowerBound, "the digest must be cached in the same actor turn the in-flight entry ends")
+    }
+
+    @Test("a miss that overlaps the hash in flight reads the file once, and later calls hit the cache")
+    func overlappingMissesReadOnce() async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
+        let gate = DispatchSemaphore(value: 0)
+        let calls = Counter()
+        let hasher = FileHasher(capacity: 16, maxFileBytes: 1_024) { path, key in
+            calls.increment()
+            _ = gate.wait(timeout: .now() + 10)
+            return FileHasher.hashAndRecheck(path: path, matching: key)
+        }
+        async let first = hasher.hash(path: path)
+        async let second = hasher.hash(path: path)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        gate.signal()
+        let results = await [first, second]
+        #expect(results[0] != nil && results[0] == results[1])
+        #expect(await hasher.hash(path: path) == results[0])
+        #expect(calls.value == 1, "one read for every request of the same bytes")
+        let stats = await hasher.stats()
+        #expect(stats.misses == 1 && stats.hits == 2)
+    }
+
+    @Test("the hash answers a network volume from its own descriptor; a local file is hashed")
+    func networkVolumeComesFromTheDescriptor() throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
+        let key = try #require(FileHasher.cacheKey(path: path))
+        guard case .digest(_, let stillInPlace) = FileHasher.hashAndRecheck(path: path, matching: key) else {
+            Issue.record("a local file was not hashed")
+            return
+        }
+        #expect(stillInPlace)
+        #expect(FileHasher.hashFile(path: path, matching: key) != .network)
     }
 
     @Test("the read stops at the key's size while the file grows")
@@ -239,7 +294,8 @@ struct FileHasherIdentityTests {
         let source = try String(
             contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/FileHasher.swift"),
             encoding: .utf8)
-        #expect(source.contains("computeDigest: { FileHasher.computeSHA256(path: $0, matching: $1) }"))
+        #expect(source.contains("computeDigest: { FileHasher.hashAndRecheck(path: $0, matching: $1) }"))
+        #expect(source.contains("let computed = hashFile(path: path, matching: key)"))
         #expect(source.contains("await HeavyEnrichmentBlockingWork.run({ compute(path, key) })"))
     }
 
