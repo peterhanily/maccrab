@@ -93,6 +93,9 @@ final class EventQuerySession: ObservableObject {
     private var queryLoaded = false
     private var retryNeeded = false
     private var liveGapPending = false
+    /// A live-gap reload keeps the shown rows on screen while it reads, past
+    /// the cached-rows lifetime: they are the window's own, not an old visit's.
+    private var retainedOverLiveGap = false
     private var lastLiveGapReloadAt: Date?
     /// At ~40 events/s every live page is full; reloading on each would drop
     /// the window's older pages every poll.
@@ -194,6 +197,7 @@ final class EventQuerySession: ObservableObject {
         isLoadingOlderEvents = false
         retryNeeded = false
         liveGapPending = false
+        retainedOverLiveGap = false
         queryLoaded = false
         readiness.invalidate()
         aggregateReadiness.invalidate()
@@ -230,7 +234,8 @@ final class EventQuerySession: ObservableObject {
     }
 
     func canDisplay(_ next: Query, key: PresentationKey?) -> Bool {
-        matchesPresentation(next, key: key) && (queryLoaded || canPresentCached(next, key: key))
+        matchesPresentation(next, key: key)
+            && (queryLoaded || retainedOverLiveGap || canPresentCached(next, key: key))
     }
 
     /// Compatibility is checked before first paint as well as before a read.
@@ -256,6 +261,7 @@ final class EventQuerySession: ObservableObject {
         queryLoaded = false
         retryNeeded = false
         liveGapPending = false
+        retainedOverLiveGap = false
         events = []
         cursor = nil
         hasMoreEvents = false
@@ -330,6 +336,7 @@ final class EventQuerySession: ObservableObject {
         // Combine delivers $events synchronously, before the setter completes.
         // Retire freshness before publishing any replacement table contents.
         queryLoaded = false
+        retainedOverLiveGap = overLiveGap && !retained.isEmpty
         showingCachedEvents = !retained.isEmpty
         if !retainRows { lastSuccessAt = nil }
         cursor = nil
@@ -342,6 +349,7 @@ final class EventQuerySession: ObservableObject {
         defer {
             if generation == queryGeneration {
                 isLoading = false
+                retainedOverLiveGap = false
                 if Task.isCancelled {
                     readiness.complete(.deferred, for: readyTicket)
                     eventSearchCoverageWarning = String(localized: "events.readInterrupted", defaultValue: "Event read was interrupted. Refresh to retry.")

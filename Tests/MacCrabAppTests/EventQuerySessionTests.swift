@@ -539,15 +539,46 @@ struct EventQuerySessionTests {
         #expect(await waitUntil { reader.pendingQueries[""] != nil })
         #expect(session.presentationResetTick == resets, "the shown table and its selection are not reset")
         #expect(session.events.map(\.processName) == ["shown"] && session.showingCachedEvents)
+        // The view presents only what canDisplay allows: kept rows must stay
+        // displayable while the read is pending, or the table still empties.
+        #expect(session.canDisplay(query(live: true), key: key), "the kept rows stay on screen while it reads")
         reader.finish("", with: .init(events: [row("newer"), row("shown")], nextCursor: nil))
         await pending.value
         #expect(session.events.map(\.processName) == ["newer", "shown"])
+        #expect(session.canDisplay(query(live: true), key: key))
 
         // An ordinary read that old still starts over.
         current = current.addingTimeInterval(EventQuerySession.retainedLifetime + 60)
         reader.blockedQueries = []
         await session.loadEvents(query(live: true), presentationKey: key)
         #expect(session.presentationResetTick == resets + 1)
+
+        // A reset while a gap reload is pending retires the kept rows.
+        current = current.addingTimeInterval(EventQuerySession.retainedLifetime + 60)
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        #expect(session.claimLiveGapReload(paused: false))
+        reader.blockedQueries = [""]
+        let interrupted = Task { await session.loadEvents(query(live: true), presentationKey: key, overLiveGap: true) }
+        #expect(await waitUntil { reader.pendingQueries[""] != nil })
+        #expect(session.canDisplay(query(live: true), key: key))
+        session.invalidatePendingReads()
+        #expect(!session.canDisplay(query(live: true), key: key), "stale rows are not presented after a reset")
+        reader.finish("", with: .init(events: [], nextCursor: nil))
+        await interrupted.value
+
+        // The kept rows last only as long as their read: a deferred one does
+        // not leave stale rows presented.
+        reader.blockedQueries = []
+        await session.loadEvents(query(live: true), presentationKey: key)
+        current = current.addingTimeInterval(EventQuerySession.retainedLifetime + 60)
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        #expect(session.claimLiveGapReload(paused: false))
+        reader.blockedQueries = [""]
+        let deferred = Task { await session.loadEvents(query(live: true), presentationKey: key, overLiveGap: true) }
+        #expect(await waitUntil { reader.pendingQueries[""] != nil })
+        reader.finish("", with: nil)
+        await deferred.value
+        #expect(!session.canDisplay(query(live: true), key: key))
     }
 
     @Test("a paused window keeps the gap for its resume, and gap reloads come at most every 15 s")
