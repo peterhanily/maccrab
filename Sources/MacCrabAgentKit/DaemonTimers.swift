@@ -5189,8 +5189,9 @@ enum DaemonTimers {
                     "assessments_in_flight_or_queued": notarizationCheckerCounters.assessmentsInFlightOrQueued,
                 ] as [String: Any],
                 "heavy_enrichment_plane": heavyEnrichmentPlaneDict,
-                // claimed, failed (retried by the liveness heartbeat),
-                // not_session_leader or already_had_terminal. Diagnostic only.
+                // claimed, failed (retried by the liveness heartbeat), adopted
+                // (a user's tty after a failure), not_session_leader or
+                // already_had_terminal. Diagnostic only.
                 "controlling_terminal": ControllingTerminalGuard.status,
                 // Security.framework evaluations still blocked past their
                 // deadline per site, and lifetime counts. Diagnostic only.

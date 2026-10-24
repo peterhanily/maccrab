@@ -26,6 +26,10 @@ public enum ControllingTerminalGuard {
         case claimed(slave: String)
         /// The claim failed; engine opens still pass O_NOCTTY.
         case failed(String)
+        /// After a failed claim, the session gained a controlling terminal
+        /// the engine never opened: a user's tty was adopted. A session never
+        /// replaces its terminal, so this lasts the engine's lifetime.
+        case adopted
     }
 
     private struct Terminal: Sendable {
@@ -43,13 +47,31 @@ public enum ControllingTerminalGuard {
     /// True once this process holds its private terminal.
     static var holdsTerminal: Bool { held.withLock { $0 != nil } }
 
-    /// True while the latest claim failed. A user's tty may then still become
-    /// the engine's terminal, so ^C on it must not stop the engine.
+    /// True while the latest claim failed, or once a user's tty was adopted.
+    /// ^C, ^Z or ^\ on that tty must not stop the engine.
     public static var ignoresTerminalInterrupts: Bool { ignoresTerminalInterrupts(after: latest.withLock { $0 }) }
 
     static func ignoresTerminalInterrupts(after outcome: Outcome?) -> Bool {
-        if case .failed? = outcome { return true }
-        return false
+        switch outcome {
+        case .failed?, .adopted?: return true
+        default: return false
+        }
+    }
+
+    /// The state after `attempt`, given the state before it. Once a claim has
+    /// failed only a claim clears that: a later probe that finds a terminal
+    /// found one the engine never opened, a user's tty the session adopted.
+    static func outcome(after previous: Outcome?, attempt: Outcome) -> Outcome {
+        switch previous {
+        case .failed?, .adopted?:
+            switch attempt {
+            case .claimed: return attempt
+            case .alreadyHasTerminal: return .adopted
+            default: return previous ?? attempt
+            }
+        default:
+            return attempt
+        }
     }
 
     /// The latest outcome, for the heartbeat.
@@ -60,6 +82,7 @@ public enum ControllingTerminalGuard {
         case .alreadyHasTerminal?: return "already_had_terminal"
         case .claimed?: return "claimed"
         case .failed?: return "failed"
+        case .adopted?: return "adopted"
         }
     }
 
@@ -73,7 +96,7 @@ public enum ControllingTerminalGuard {
             logger.notice("Holding a private controlling terminal (\(slave, privacy: .public)); no open can adopt another")
         case .failed(let reason):
             logger.warning("Could not claim a private controlling terminal (\(reason, privacy: .public)); engine opens still pass O_NOCTTY, and SIGINT, SIGQUIT and SIGTSTP are ignored until a retry succeeds")
-        case .notSessionLeader, .alreadyHasTerminal:
+        case .notSessionLeader, .alreadyHasTerminal, .adopted:
             break
         }
         return outcome
@@ -83,24 +106,35 @@ public enum ControllingTerminalGuard {
     /// One user can hold every pty while the engine starts, so a failure must
     /// not last the engine's lifetime. Quiet unless it succeeds.
     public static func retryClaimAfterFailure() {
-        guard ignoresTerminalInterrupts, !holdsTerminal else { return }
-        if case .claimed(let slave) = attemptClaim() {
+        guard case .failed? = latest.withLock({ $0 }), !holdsTerminal else { return }
+        switch attemptClaim() {
+        case .claimed(let slave):
             logger.notice("Holding a private controlling terminal (\(slave, privacy: .public)) after an earlier failed claim")
+        case .adopted:
+            logger.warning("The engine's session has a controlling terminal it never opened, so a user's tty was adopted after the failed claim; SIGINT, SIGQUIT and SIGTSTP stay ignored")
+        default:
+            break
         }
     }
 
     private static func attemptClaim() -> Outcome {
-        let outcome = held.withLock { terminal -> Outcome in
+        let attempt = held.withLock { terminal -> Outcome in
             guard terminal == nil else { return .alreadyHasTerminal }
             let (outcome, claimed) = claim()
             terminal = claimed
             return outcome
         }
-        latest.withLock { $0 = outcome }
-        if case .failed = outcome {
+        let outcome = latest.withLock { previous -> Outcome in
+            previous = Self.outcome(after: previous, attempt: attempt)
+            return previous ?? attempt
+        }
+        if ignoresTerminalInterrupts(after: outcome) {
             // Without the claim a user's tty can still become the engine's
-            // terminal: ^Z would stop the engine and ^\ would kill it. Neither
-            // signal has any use here. SignalHandlers ignores SIGINT meanwhile.
+            // terminal: ^C would stop the engine, ^Z would suspend it and ^\
+            // would kill it. None has any use here. SIGINT is ignored now, not
+            // only once SignalHandlers installs its source, which keeps
+            // ignoring it in the handler while this lasts.
+            signal(SIGINT, SIG_IGN)
             signal(SIGTSTP, SIG_IGN)
             signal(SIGQUIT, SIG_IGN)
         }

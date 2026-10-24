@@ -688,8 +688,9 @@ enum SignalHandlers {
         signal(SIGINT, SIG_IGN)
         sigIntSource.setEventHandler {
             // While the terminal claim has failed, a user's tty can still
-            // become the engine's, and ^C there must not stop it. SIGTERM,
-            // sysextd's and launchd's way to stop the engine, still does.
+            // become the engine's (or already has), and ^C there must not
+            // stop it. SIGTERM, sysextd's and launchd's way to stop the
+            // engine, still does.
             guard !ControllingTerminalGuard.ignoresTerminalInterrupts else {
                 logger.warning("Ignoring SIGINT: the engine holds no private terminal, so it may have come from a user's tty")
                 return

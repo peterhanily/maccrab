@@ -148,6 +148,22 @@ struct ControllingTerminalSafetyTests {
         #expect(!ControllingTerminalGuard.ignoresTerminalInterrupts)
     }
 
+    @Test("once a claim failed only a claim clears it: a terminal found later was adopted, and interrupts stay ignored")
+    func adoptedTerminalKeepsInterruptsIgnored() {
+        typealias Outcome = ControllingTerminalGuard.Outcome
+        let failed = Outcome.failed("posix_openpt errno 35")
+        let adopted = ControllingTerminalGuard.outcome(after: failed, attempt: .alreadyHasTerminal)
+        #expect(adopted == .adopted, "a retry that finds a terminal the engine never opened must not clear the failure")
+        #expect(ControllingTerminalGuard.ignoresTerminalInterrupts(after: adopted))
+        #expect(ControllingTerminalGuard.outcome(after: adopted, attempt: .alreadyHasTerminal) == .adopted)
+        #expect(ControllingTerminalGuard.outcome(after: failed, attempt: .failed("posix_openpt errno 23")) == failed)
+        #expect(ControllingTerminalGuard.outcome(after: failed, attempt: .claimed(slave: "/dev/ttys009"))
+                == .claimed(slave: "/dev/ttys009"))
+        // Without a failure first, a terminal is a shell's or sudo's.
+        #expect(ControllingTerminalGuard.outcome(after: nil, attempt: .alreadyHasTerminal) == .alreadyHasTerminal)
+        #expect(!ControllingTerminalGuard.ignoresTerminalInterrupts(after: .alreadyHasTerminal))
+    }
+
     @Test("a failed claim is retried by the liveness heartbeat and stops ^C, ^Z and ^\\ meanwhile")
     func failedClaimIsRetriedAndDefended() throws {
         func source(_ relative: String) throws -> String {
@@ -170,10 +186,17 @@ struct ControllingTerminalSafetyTests {
                 "SIGTERM must still shut the engine down")
 
         let terminal = try source("Sources/MacCrabCore/Utilities/ControllingTerminalGuard.swift")
-        let failure = try #require(terminal.range(of: "if case .failed = outcome {"))
+        let failure = try #require(terminal.range(of: "if ignoresTerminalInterrupts(after: outcome) {"))
+        // SIGINT too, at once: SignalHandlers' source is installed only at the
+        // end of boot, and until then SIGINT would kill the engine outright.
+        let int = try #require(terminal.range(of: "signal(SIGINT, SIG_IGN)"))
         let tstp = try #require(terminal.range(of: "signal(SIGTSTP, SIG_IGN)"))
         let quit = try #require(terminal.range(of: "signal(SIGQUIT, SIG_IGN)"))
-        #expect(failure.upperBound < tstp.lowerBound && failure.upperBound < quit.lowerBound)
+        #expect(failure.upperBound < int.lowerBound && failure.upperBound < tstp.lowerBound
+                && failure.upperBound < quit.lowerBound)
+        #expect(terminal.contains("previous = Self.outcome(after: previous, attempt: attempt)"))
+        #expect(terminal.contains("guard case .failed? = latest.withLock({ $0 }), !holdsTerminal else { return }"),
+                "an adopted terminal cannot be replaced, so only a plain failure is retried")
         #expect(terminal.contains("logger.warning(\"The private terminal's drain stopped"))
     }
 
