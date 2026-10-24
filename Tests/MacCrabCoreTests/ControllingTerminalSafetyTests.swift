@@ -133,6 +133,50 @@ struct ControllingTerminalSafetyTests {
         #expect(Self.devTTYOpens() == opensBefore)
     }
 
+    @Test("only a failed claim ignores terminal interrupts, and a retry outside a session leader changes nothing")
+    func failedClaimIgnoresTerminalInterrupts() {
+        #expect(ControllingTerminalGuard.ignoresTerminalInterrupts(after: .failed("posix_openpt errno 35")))
+        #expect(!ControllingTerminalGuard.ignoresTerminalInterrupts(after: .claimed(slave: "/dev/ttys009")))
+        #expect(!ControllingTerminalGuard.ignoresTerminalInterrupts(after: .notSessionLeader))
+        #expect(!ControllingTerminalGuard.ignoresTerminalInterrupts(after: .alreadyHasTerminal))
+        #expect(!ControllingTerminalGuard.ignoresTerminalInterrupts(after: nil))
+
+        guard getsid(0) != getpid() else { return }
+        #expect(ControllingTerminalGuard.claimPrivateTerminalIfSessionLeader() == .notSessionLeader)
+        ControllingTerminalGuard.retryClaimAfterFailure()
+        #expect(ControllingTerminalGuard.status == "not_session_leader")
+        #expect(!ControllingTerminalGuard.ignoresTerminalInterrupts)
+    }
+
+    @Test("a failed claim is retried by the liveness heartbeat and stops ^C, ^Z and ^\\ meanwhile")
+    func failedClaimIsRetriedAndDefended() throws {
+        func source(_ relative: String) throws -> String {
+            try String(contentsOf: Self.root.appendingPathComponent(relative), encoding: .utf8)
+        }
+        let timers = try source("Sources/MacCrabAgentKit/DaemonTimers.swift")
+        let liveness = try #require(timers.range(of: "livenessLifecycle.submit(label: \"liveness-heartbeat\""))
+        let retry = try #require(timers.range(of: "ControllingTerminalGuard.retryClaimAfterFailure()"))
+        let resume = try #require(timers.range(of: "livenessTimer.resume()"))
+        #expect(liveness.upperBound < retry.lowerBound && retry.upperBound < resume.lowerBound,
+                "the retry must run on the liveness heartbeat")
+        #expect(timers.contains("\"controlling_terminal\": ControllingTerminalGuard.status,"))
+
+        let signals = try source("Sources/MacCrabAgentKit/SignalHandlers.swift")
+        let interrupt = try #require(signals.range(of: "sigIntSource.setEventHandler {"))
+        let check = try #require(signals.range(of: "guard !ControllingTerminalGuard.ignoresTerminalInterrupts else {"))
+        let shutdown = try #require(signals.range(of: "shutdownHandler()", range: check.upperBound..<signals.endIndex))
+        #expect(interrupt.upperBound < check.lowerBound && check.upperBound < shutdown.lowerBound)
+        #expect(signals.contains("sigTermSource.setEventHandler { shutdownHandler() }"),
+                "SIGTERM must still shut the engine down")
+
+        let terminal = try source("Sources/MacCrabCore/Utilities/ControllingTerminalGuard.swift")
+        let failure = try #require(terminal.range(of: "if case .failed = outcome {"))
+        let tstp = try #require(terminal.range(of: "signal(SIGTSTP, SIG_IGN)"))
+        let quit = try #require(terminal.range(of: "signal(SIGQUIT, SIG_IGN)"))
+        #expect(failure.upperBound < tstp.lowerBound && failure.upperBound < quit.lowerBound)
+        #expect(terminal.contains("logger.warning(\"The private terminal's drain stopped"))
+    }
+
     @Test("boot claims the terminal before anything starts, and the canary runs in its own session")
     func bootClaimsTheTerminalFirst() throws {
         func source(_ relative: String) throws -> String {

@@ -686,7 +686,16 @@ enum SignalHandlers {
 
         let sigIntSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         signal(SIGINT, SIG_IGN)
-        sigIntSource.setEventHandler { shutdownHandler() }
+        sigIntSource.setEventHandler {
+            // While the terminal claim has failed, a user's tty can still
+            // become the engine's, and ^C there must not stop it. SIGTERM,
+            // sysextd's and launchd's way to stop the engine, still does.
+            guard !ControllingTerminalGuard.ignoresTerminalInterrupts else {
+                logger.warning("Ignoring SIGINT: the engine holds no private terminal, so it may have come from a user's tty")
+                return
+            }
+            shutdownHandler()
+        }
         sigIntSource.resume()
 
         // v1.6.17: SIGUSR1 triggers a one-shot threat-intel feed

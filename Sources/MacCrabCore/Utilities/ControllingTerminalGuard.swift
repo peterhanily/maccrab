@@ -36,28 +36,73 @@ public enum ControllingTerminalGuard {
     /// Both ends stay open for the process lifetime: closing the master would
     /// hang the terminal up.
     private static let held = OSAllocatedUnfairLock<Terminal?>(initialState: nil)
+    /// The latest claim's outcome; nil before the first.
+    private static let latest = OSAllocatedUnfairLock<Outcome?>(initialState: nil)
     private static let logger = Logger(subsystem: "com.maccrab", category: "controlling-terminal")
 
     /// True once this process holds its private terminal.
     static var holdsTerminal: Bool { held.withLock { $0 != nil } }
 
+    /// True while the latest claim failed. A user's tty may then still become
+    /// the engine's terminal, so ^C on it must not stop the engine.
+    public static var ignoresTerminalInterrupts: Bool { ignoresTerminalInterrupts(after: latest.withLock { $0 }) }
+
+    static func ignoresTerminalInterrupts(after outcome: Outcome?) -> Bool {
+        if case .failed? = outcome { return true }
+        return false
+    }
+
+    /// The latest outcome, for the heartbeat.
+    public static var status: String {
+        switch latest.withLock({ $0 }) {
+        case nil: return "not_attempted"
+        case .notSessionLeader?: return "not_session_leader"
+        case .alreadyHasTerminal?: return "already_had_terminal"
+        case .claimed?: return "claimed"
+        case .failed?: return "failed"
+        }
+    }
+
     /// Claim a private pty as the controlling terminal, only when this process
     /// leads a session that has none. Anything else is left exactly as it is.
     @discardableResult
     public static func claimPrivateTerminalIfSessionLeader() -> Outcome {
+        let outcome = attemptClaim()
+        switch outcome {
+        case .claimed(let slave):
+            logger.notice("Holding a private controlling terminal (\(slave, privacy: .public)); no open can adopt another")
+        case .failed(let reason):
+            logger.warning("Could not claim a private controlling terminal (\(reason, privacy: .public)); engine opens still pass O_NOCTTY, and SIGINT, SIGQUIT and SIGTSTP are ignored until a retry succeeds")
+        case .notSessionLeader, .alreadyHasTerminal:
+            break
+        }
+        return outcome
+    }
+
+    /// Claims again after a failed claim; the liveness heartbeat calls this.
+    /// One user can hold every pty while the engine starts, so a failure must
+    /// not last the engine's lifetime. Quiet unless it succeeds.
+    public static func retryClaimAfterFailure() {
+        guard ignoresTerminalInterrupts, !holdsTerminal else { return }
+        if case .claimed(let slave) = attemptClaim() {
+            logger.notice("Holding a private controlling terminal (\(slave, privacy: .public)) after an earlier failed claim")
+        }
+    }
+
+    private static func attemptClaim() -> Outcome {
         let outcome = held.withLock { terminal -> Outcome in
             guard terminal == nil else { return .alreadyHasTerminal }
             let (outcome, claimed) = claim()
             terminal = claimed
             return outcome
         }
-        switch outcome {
-        case .claimed(let slave):
-            logger.notice("Holding a private controlling terminal (\(slave, privacy: .public)); no open can adopt another")
-        case .failed(let reason):
-            logger.warning("Could not claim a private controlling terminal (\(reason, privacy: .public)); engine opens still pass O_NOCTTY")
-        case .notSessionLeader, .alreadyHasTerminal:
-            break
+        latest.withLock { $0 = outcome }
+        if case .failed = outcome {
+            // Without the claim a user's tty can still become the engine's
+            // terminal: ^Z would stop the engine and ^\ would kill it. Neither
+            // signal has any use here. SignalHandlers ignores SIGINT meanwhile.
+            signal(SIGTSTP, SIG_IGN)
+            signal(SIGQUIT, SIG_IGN)
         }
         return outcome
     }
@@ -111,6 +156,8 @@ public enum ControllingTerminalGuard {
             while true {
                 let count = buffer.withUnsafeMutableBytes { read(master, $0.baseAddress, $0.count) }
                 if count > 0 || (count < 0 && errno == EINTR) { continue }
+                let code = count < 0 ? errno : 0
+                logger.warning("The private terminal's drain stopped (read returned \(count, privacy: .public), errno \(code, privacy: .public)); a writer to /dev/tty may now block")
                 return
             }
         }

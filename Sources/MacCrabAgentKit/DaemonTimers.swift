@@ -3494,6 +3494,9 @@ enum DaemonTimers {
             // EsloggerCollector / FileHasher leak chain that put
             // ~1 GB of NSConcreteData into long-running daemons.
             autoreleasepool {
+                // A terminal claim that failed at boot (every pty held, for
+                // example) is retried here until it succeeds.
+                ControllingTerminalGuard.retryClaimAfterFailure()
                 let sysextHasFDA = probeSysextFDA()
                 let heartbeatClock = engineIdentity.heartbeatClockSample()
                 let nowUnix = heartbeatClock.writtenAtUnix
@@ -5186,6 +5189,9 @@ enum DaemonTimers {
                     "assessments_in_flight_or_queued": notarizationCheckerCounters.assessmentsInFlightOrQueued,
                 ] as [String: Any],
                 "heavy_enrichment_plane": heavyEnrichmentPlaneDict,
+                // claimed, failed (retried by the liveness heartbeat),
+                // not_session_leader or already_had_terminal. Diagnostic only.
+                "controlling_terminal": ControllingTerminalGuard.status,
                 "deferred_enrichment_buffer":
                     deferredEnrichmentBufferDict,
                 "event_pipeline_live_memory":
