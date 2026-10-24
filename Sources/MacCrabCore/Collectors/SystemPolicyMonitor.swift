@@ -481,7 +481,7 @@ public actor SystemPolicyMonitor {
         }
     }
 
-    private func scanDownloadsForMissingQuarantine(in home: RealUserHome) async {
+    func scanDownloadsForMissingQuarantine(in home: RealUserHome) async {
         let downloadsDir = home.appending("Downloads")
         guard let snapshot = BoundedDirectoryLister.list(
             at: downloadsDir,
@@ -526,12 +526,14 @@ public actor SystemPolicyMonitor {
             // is unsigned/ad-hoc or outright fails signature validation.
             // A name swapped since the listing onto another kind (a FIFO, a
             // device, a symlink) is skipped this scan, never evaluated, and so
-            // is one whose evaluation did not finish in time.
-            guard let anchored = await isSignedWithAppleAnchor(
+            // is one whose evaluation did not finish in time. One that
+            // Security.framework blocked on (a FIFO inside the bundle) cannot
+            // be verified, and is as suspicious as unsigned.
+            guard let check = await appleAnchorCheck(
                 path: fullPath,
                 expected: entry.kind == .directory ? .directory : .regularFile
             ) else { continue }
-            if anchored {
+            if check == .anchored {
                 quarantineAlerted.insert(fullPath)
                 continue
             }
@@ -539,7 +541,9 @@ public actor SystemPolicyMonitor {
             quarantineAlerted.insert(fullPath)
             emit(SystemPolicyEvent(
                 type: .quarantineStripped,
-                description: "Unsigned executable in Downloads missing quarantine xattr: \(item). May have had Gatekeeper protection removed.",
+                description: check == .blocked
+                    ? "Executable in Downloads missing quarantine xattr whose signature could not be verified, because its evaluation blocked: \(item). May have had Gatekeeper protection removed."
+                    : "Unsigned executable in Downloads missing quarantine xattr: \(item). May have had Gatekeeper protection removed.",
                 path: fullPath,
                 severity: .high,
                 mitreTactic: "attack.defense_evasion",
@@ -557,13 +561,33 @@ public actor SystemPolicyMonitor {
     /// a FIFO inside a bundle blocks it past the precheck, and the actor
     /// never waits on it.
     func isSignedWithAppleAnchor(path: String, expected: SecurityEvaluationPrecheck.Expected) async -> Bool? {
+        switch await appleAnchorCheck(path: path, expected: expected) {
+        case .anchored?: return true
+        case .notAnchored?: return false
+        case .blocked?, nil: return nil
+        }
+    }
+
+    /// What the Downloads check found for one item; nil when it was not
+    /// evaluated this scan.
+    enum AnchorCheck: Equatable, Sendable {
+        case anchored
+        case notAnchored
+        /// Security.framework blocked on the item's own files: unverifiable.
+        case blocked
+    }
+
+    /// `isSignedWithAppleAnchor`, telling an item Security.framework blocked
+    /// on (its run was interrupted, or is still stuck) from one it did not
+    /// get to.
+    func appleAnchorCheck(path: String, expected: SecurityEvaluationPrecheck.Expected) async -> AnchorCheck? {
         // The key follows the item and the bundle files Security.framework
         // reads first, so neither a verdict nor a stranded run carries over to
         // a replaced item.
         let key = Self.downloadsKey(path: path)
-        if let late = lateVerdicts.take(key) { return late }
+        if let late = lateVerdicts.take(key) { return late ? .anchored : .notAnchored }
         let lateVerdicts = self.lateVerdicts
-        return await securityEvaluation.run(.downloads, key: key, deadline: securityDeadline) { attempt in
+        let outcome = await securityEvaluation.run(.downloads, key: key, deadline: securityDeadline) { attempt in
             let verdict = Self.appleAnchorVerdict(path: path, expected: expected)
             // A verdict that comes after the scan stopped waiting serves the
             // next scan, so a large bundle is not revalidated every poll.
@@ -571,7 +595,12 @@ public actor SystemPolicyMonitor {
                 lateVerdicts.store(verdict, for: key)
             }
             return verdict
-        }.value ?? nil
+        }
+        switch outcome {
+        case .finished(let verdict?): return verdict ? .anchored : .notAnchored
+        case .blocked: return .blocked
+        case .finished(nil), .timedOut, .refused, .cancelled: return nil
+        }
     }
 
     /// A Downloads item's identity and, for a bundle, that of the files

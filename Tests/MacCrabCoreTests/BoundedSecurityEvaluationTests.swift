@@ -386,7 +386,7 @@ struct BoundedSecurityEvaluationTests {
         #expect(await monitor.isSignedWithAppleAnchor(path: "/bin/ls", expected: .regularFile) == true)
     }
 
-    @Test("an interrupted Downloads evaluation leaves no verdict for the next scan")
+    @Test("an interrupted Downloads evaluation leaves no verdict, and the next scan is told it blocked without a new run")
     func interruptedDownloadsVerdictIsNotKept() async throws {
         let dir = try Self.directory()
         defer { try? FileManager.default.removeItem(atPath: dir) }
@@ -402,15 +402,81 @@ struct BoundedSecurityEvaluationTests {
         let reclaimed = await Self.eventually(within: 5) { runner.stuckCount(.downloads) == 0 }
         if !reclaimed { _ = await Self.release([fifoExecutable.fifo]) { runner.stuckCount(.downloads) == 0 } }
         #expect(reclaimed, "the stranded Downloads run was not interrupted")
-        // The interrupted run's failure says nothing about the bundle: the next
-        // scan evaluates it again.
-        let again = await Self.promptly(releasing: [fifoExecutable.fifo]) {
-            await monitor.isSignedWithAppleAnchor(path: bundle, expected: .directory)
+        // The interrupted run's failure says nothing about the bundle, so no
+        // verdict is kept; Security.framework blocked on it, so the next scan
+        // is told so at once instead of stranding a thread for the deadline.
+        let again = await Self.promptly(releasing: [fifoExecutable.fifo], within: 0.4) {
+            await monitor.appleAnchorCheck(path: bundle, expected: .directory)
         }
-        #expect(again.prompt && again.value == .some(nil), "an interrupted run's failure served the next scan")
+        #expect(again.prompt && again.value == .some(.blocked), "the next scan waited on, or judged, a bundle Security blocked on")
+        #expect(await monitor.isSignedWithAppleAnchor(path: bundle, expected: .directory) == nil)
+        #expect(Self.started(runner) == 1, "a bundle Security blocked on was evaluated again")
+        // A replaced main executable makes it a new item.
+        try FileManager.default.removeItem(atPath: fifoExecutable.fifo)
+        try FileManager.default.copyItem(atPath: "/bin/ls", toPath: fifoExecutable.fifo)
+        let fresh = await monitor.appleAnchorCheck(path: bundle, expected: .directory)
+        #expect(fresh == .notAnchored || fresh == .anchored, "a replaced bundle was not evaluated afresh: \(String(describing: fresh))")
         #expect(Self.started(runner) == 2)
-        _ = await Self.eventually(within: 5) { runner.stuckCount(.downloads) == 0 }
-        _ = await Self.release([fifoExecutable.fifo]) { runner.stuckCount(.downloads) == 0 }
+    }
+
+    @Test("the Downloads scan reports an unquarantined bundle Security blocked on, once")
+    func downloadsScanAlertsOnABlockedBundle() async throws {
+        let home = try Self.directory()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        try FileManager.default.createDirectory(atPath: home + "/Downloads", withIntermediateDirectories: true)
+        let shield = try Self.bundleWithFIFOExecutable(in: home + "/Downloads", name: "Shield")
+        let runner = BoundedSecurityEvaluation(stuckLimit: 2)
+        let monitor = SystemPolicyMonitor(homesProvider: { [] }, securityEvaluation: runner, securityDeadline: 0.5)
+        let user = RealUserHome(path: home, userID: getuid(), userName: NSUserName())
+
+        // First scan: the evaluation passes its deadline, so nothing is judged.
+        let first = await Self.promptly(releasing: [shield.fifo]) { await monitor.scanDownloadsForMissingQuarantine(in: user) }
+        #expect(first.prompt)
+        let reclaimed = await Self.eventually(within: 5) { runner.stuckCount(.downloads) == 0 }
+        if !reclaimed { _ = await Self.release([shield.fifo]) { runner.stuckCount(.downloads) == 0 } }
+        #expect(reclaimed)
+        // Security blocked on it: the next scans report it once, unverified.
+        for _ in 0..<2 {
+            let scan = await Self.promptly(releasing: [shield.fifo]) { await monitor.scanDownloadsForMissingQuarantine(in: user) }
+            #expect(scan.prompt)
+        }
+        await monitor.stop()
+        var reports: [SystemPolicyMonitor.SystemPolicyEvent] = []
+        for await event in monitor.events where event.type == .quarantineStripped { reports.append(event) }
+        #expect(reports.count == 1, "a bundle Security blocked on was reported \(reports.count) times")
+        #expect(reports.first?.path?.hasSuffix("/Downloads/Shield.app") == true)
+        #expect(reports.first?.description.contains("could not be verified") == true)
+    }
+
+    @Test("a key whose run was interrupted is answered blocked at once until the key changes")
+    func interruptedKeyIsBlockedAtOnce() async throws {
+        let dir = try Self.directory()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let fifo = dir + "/pipe"
+        try #require(mkfifo(fifo, 0o600) == 0)
+        let runner = BoundedSecurityEvaluation(stuckLimit: 2)
+        let interrupted = Flag()
+        let first = await Self.promptly(releasing: [fifo]) {
+            await runner.run(.libraryInventory, key: "same", deadline: 0.3) { attempt -> Int in
+                let fd = open(fifo, O_RDONLY)
+                if fd >= 0 { close(fd) }
+                if attempt.wasInterrupted() { interrupted.raise() }
+                return 1
+            }
+        }
+        #expect(first.prompt)
+        if case .timedOut? = first.value {} else { Issue.record("expected a timeout, got \(String(describing: first.value))") }
+        let reclaimed = await Self.eventually(within: 5) { runner.stuckCount(.libraryInventory) == 0 }
+        if !reclaimed { _ = await Self.release([fifo]) { runner.stuckCount(.libraryInventory) == 0 } }
+        #expect(reclaimed && interrupted.isRaised, "the run blocked on the FIFO was not interrupted")
+
+        let start = Date()
+        let again = await runner.run(.libraryInventory, key: "same", deadline: 5) { _ in 2 }
+        if case .blocked = again {} else { Issue.record("expected the interrupted key to be answered blocked, got \(again)") }
+        #expect(Self.elapsed(since: start) < 1)
+        #expect(Self.started(runner) == 1)
+        #expect(await runner.run(.libraryInventory, key: "changed", deadline: 5) { _ in 3 }.value == 3)
+        #expect(await runner.run(.downloads, key: "same", deadline: 5) { _ in 4 }.value == 4, "another site shares the memory")
     }
 
     @Test("a site runs at most its in-flight limit at once; joiners do not count, and a finished run frees its slot")
@@ -516,8 +582,10 @@ struct BoundedSecurityEvaluationTests {
             .contains("let verified = await cache.evaluateExecutable(path: path)"))
         let policy = try source("Sources/MacCrabCore/Collectors/SystemPolicyMonitor.swift")
         #expect(policy.contains("let key = Self.downloadsKey(path: path)"))
-        #expect(policy.contains("return await securityEvaluation.run(.downloads, key: key, deadline: securityDeadline) { attempt in"))
-        #expect(policy.contains("guard let anchored = await isSignedWithAppleAnchor("))
+        #expect(policy.contains("let outcome = await securityEvaluation.run(.downloads, key: key, deadline: securityDeadline) { attempt in"))
+        #expect(policy.contains("guard let check = await appleAnchorCheck("))
+        #expect(policy.contains("case .blocked: return .blocked"))
+        #expect(policy.contains("description: check == .blocked"))
         let library = try source("Sources/MacCrabCore/Detection/LibraryInventory.swift")
         #expect(library.contains(".libraryInventory, key: Self.evaluationKey(path: path), deadline: securityDeadline"))
         // Security.framework is called only from the off-actor verdicts.

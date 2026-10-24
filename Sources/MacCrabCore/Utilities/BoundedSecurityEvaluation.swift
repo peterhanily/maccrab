@@ -25,7 +25,9 @@ import os.log
 /// workers, which block the signal, while the run's thread waits in a
 /// dispatch group the signal cannot end. A run that stays blocked counts
 /// against its site, and a site with `stuckLimit` of them, or with its
-/// in-flight limit of runs, starts no more, so threads stay bounded.
+/// in-flight limit of runs, starts no more, so threads stay bounded. A key
+/// whose run had to be interrupted is answered as blocked from then on,
+/// until the object changes and with it the key.
 public final class BoundedSecurityEvaluation: @unchecked Sendable {
     enum Site: String, Sendable, CaseIterable {
         case codeSigning = "code_signing"
@@ -41,7 +43,9 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         case finished(Value)
         /// The deadline passed first. The work keeps running and is interrupted.
         case timedOut
-        /// The same key's earlier run is still blocked; nothing was started.
+        /// The same key's earlier run is still blocked, or Security.framework
+        /// blocked on this object before and its run was interrupted; nothing
+        /// was started.
         case blocked
         /// The site has `stuckLimit` blocked runs, or its in-flight limit of
         /// runs; nothing was started.
@@ -82,6 +86,8 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
     /// exec storm of distinct binaries could start thousands. Code signing
     /// serves every exec, so it gets more.
     static let defaultInFlightLimits: [Site: Int] = [.codeSigning: 8, .tcc: 4, .downloads: 4, .libraryInventory: 4]
+    /// Interrupted keys remembered per site, oldest dropped first.
+    static let interruptedKeyCapacity = 256
 
     /// Sent to one run's thread to fail its blocked call with EINTR. Nothing
     /// else in MacCrab uses it; the handler does nothing and is installed
@@ -110,6 +116,10 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
     /// The current run per site and key: running, or past its deadline and
     /// still blocked. Guarded by `lock`.
     private var runs: [Site: [String: Run]] = [:]
+    /// Keys whose run was interrupted: Security.framework blocked on that
+    /// object, so starting it again would only strand another thread for
+    /// the deadline. Guarded by `lock`.
+    private var interruptedKeys: [Site: InterruptedKeys] = [:]
     private var totals = Totals()
     private let deadlines = DispatchQueue(label: "com.maccrab.security-evaluation.deadline", qos: .utility)
     private let logger = Logger(subsystem: "com.maccrab", category: "security-evaluation")
@@ -226,6 +236,29 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         return runs[site]?[key]?.waiters.count ?? 0
     }
 
+    /// At most `capacity` keys, oldest dropped first; a hit counts as use.
+    private struct InterruptedKeys {
+        private var keys: Set<String> = []
+        private var order: [String] = []
+
+        mutating func insert(_ key: String, capacity: Int) {
+            if keys.insert(key).inserted {
+                order.append(key)
+            } else {
+                order.removeAll { $0 == key }
+                order.append(key)
+            }
+            while order.count > capacity { keys.remove(order.removeFirst()) }
+        }
+
+        mutating func use(_ key: String) -> Bool {
+            guard keys.contains(key) else { return false }
+            order.removeAll { $0 == key }
+            order.append(key)
+            return true
+        }
+    }
+
     /// One caller's place in a run, so its cancellation can find it.
     private final class Ticket: @unchecked Sendable {
         var cancelled = false
@@ -265,6 +298,10 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
             ticket.run = existing
             ticket.waiter = existing.addWaiter(resume)
             return .joined
+        }
+        if interruptedKeys[site, default: InterruptedKeys()].use(key) {
+            totals.blocked += 1
+            return .answered(.blocked)
         }
         guard blocked(site) < stuckLimit, (runs[site]?.count ?? 0) < inFlightLimits[site, default: stuckLimit] else {
             totals.refused += 1
@@ -315,6 +352,9 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         run.waiters = [:]
         run.phase = .finished
         if runs[run.site]?[run.key] === run { runs[run.site]?[run.key] = nil }
+        if interrupted {
+            interruptedKeys[run.site, default: InterruptedKeys()].insert(run.key, capacity: Self.interruptedKeyCapacity)
+        }
         let resumed = wasBlocked && blocked(run.site) == stuckLimit - 1
         lock.unlock()
         if wasBlocked {
