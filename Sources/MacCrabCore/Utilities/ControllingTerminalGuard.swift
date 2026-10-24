@@ -28,7 +28,9 @@ public enum ControllingTerminalGuard {
         case failed(String)
         /// After a failed claim, the session gained a controlling terminal
         /// the engine never opened: a user's tty was adopted. A session never
-        /// replaces its terminal, so this lasts the engine's lifetime.
+        /// replaces its terminal, so this lasts the engine's lifetime. Only
+        /// ^C, ^Z and ^\ from that tty are ignored: whoever holds its master
+        /// can still send the engine SIGSTOP, SIGKILL or SIGTERM with TIOCSIG.
         case adopted
     }
 

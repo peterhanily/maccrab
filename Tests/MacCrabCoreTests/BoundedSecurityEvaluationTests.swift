@@ -213,7 +213,8 @@ struct BoundedSecurityEvaluationTests {
         let first = Task { await runner.run(.codeSigning, key: "k", deadline: 10, body).value }
         #expect(began.wait(timeout: .now() + 5) == .success)
         let second = Task { await runner.run(.codeSigning, key: "k", deadline: 10, body).value }
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // Open the gate only once the second caller has joined the run.
+        #expect(await Self.eventually(within: 5) { runner.waiterCount(.codeSigning, key: "k") == 2 })
         gate.signal()
         #expect(await first.value == 7)
         #expect(await second.value == 7)
