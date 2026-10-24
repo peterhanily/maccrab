@@ -121,7 +121,7 @@ struct SecurityEvaluationPrecheckTests {
         )
         let precheck = try #require(source.range(of: "guard let opened = SecurityEvaluationPrecheck.metadata("))
         let identity = try #require(source.range(of: "), before.map({ $0 == FileIdentity(opened) }) ?? true else { return nil }"))
-        let evaluation = try #require(source.range(of: "let info = Self.performEvaluation(path: path)"))
+        let evaluation = try #require(source.range(of: "let info = Self.performEvaluation(path: path, singleThreaded: bounded)"))
         #expect(precheck.upperBound < identity.lowerBound && identity.upperBound < evaluation.lowerBound)
     }
 

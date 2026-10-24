@@ -273,7 +273,7 @@ public actor CodeSigningCache {
             guard let opened = SecurityEvaluationPrecheck.metadata(
                 of: path, expected: expected, canonical: canonical
             ), before.map({ $0 == FileIdentity(opened) }) ?? true else { return nil }
-            let info = Self.performEvaluation(path: path)
+            let info = Self.performEvaluation(path: path, singleThreaded: bounded)
             afterEvaluation?(path)
             // An interrupted evaluation failed because a blocked open was
             // broken, not because of the code: never keep it.
@@ -315,9 +315,13 @@ public actor CodeSigningCache {
     /// Perform the actual SecStaticCode evaluation.
     ///
     /// Synchronous and blocking; `evaluate` runs it on `evaluationQueue`, or
-    /// on a thread of its own when the evaluation is bounded.
-    private nonisolated static func performEvaluation(path: String) -> CodeSignatureInfo {
+    /// on a thread of its own when the evaluation is bounded. A bounded one
+    /// validates on that thread alone: Security.framework otherwise opens
+    /// nested code and sealed resources on its GCD workers, where a FIFO
+    /// blocks out of the runner's reach.
+    private nonisolated static func performEvaluation(path: String, singleThreaded: Bool) -> CodeSignatureInfo {
         let url = URL(fileURLWithPath: path) as CFURL
+        let validation = SecCSFlags(rawValue: singleThreaded ? kSecCSSingleThreaded : 0)
 
         // --- Create static code reference ---
         var staticCodeRef: SecStaticCode?
@@ -328,7 +332,7 @@ public actor CodeSigningCache {
         }
 
         // --- Check validity (don't fail hard; we still want partial info) ---
-        let validityFlags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures)
+        let validityFlags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures).union(validation)
         let validStatus = SecStaticCodeCheckValidity(staticCode, validityFlags, nil)
         let isValid = (validStatus == errSecSuccess)
 
@@ -371,7 +375,7 @@ public actor CodeSigningCache {
         let issuerChain = Array(authorities.dropFirst())
 
         // --- Determine signer type via SecRequirement checks ---
-        let signerType = determineSignerType(staticCode: staticCode, isValid: isValid, flags: flags)
+        let signerType = determineSignerType(staticCode: staticCode, isValid: isValid, flags: flags, validation: validation)
 
         // Ad-hoc signing: bit 0x2 in CS_FLAGS per Apple cs_blobs.h. Fall back
         // to "signerType == .adHoc" when the flag isn't set but the signer
@@ -380,7 +384,7 @@ public actor CodeSigningCache {
         let isAdhocSigned = (flags & CS_ADHOC) != 0 || signerType == .adHoc
 
         // --- Check notarization (ticket stapled or notarization flag in flags) ---
-        let isNotarized = checkNotarization(staticCode: staticCode)
+        let isNotarized = checkNotarization(staticCode: staticCode, validation: validation)
 
         return CodeSignatureInfo(
             signerType: signerType,
@@ -406,14 +410,15 @@ public actor CodeSigningCache {
     private nonisolated static func determineSignerType(
         staticCode: SecStaticCode,
         isValid: Bool,
-        flags: UInt32
+        flags: UInt32,
+        validation: SecCSFlags
     ) -> SignerType {
         guard isValid else {
             return .unsigned
         }
 
         // Apple first-party: "anchor apple"
-        if satisfiesRequirement(staticCode: staticCode, requirement: "anchor apple") {
+        if satisfiesRequirement(staticCode: staticCode, requirement: "anchor apple", validation: validation) {
             return .apple
         }
 
@@ -421,12 +426,12 @@ public actor CodeSigningCache {
         let appStoreReq =
             "anchor apple generic and certificate leaf[subject.CN] = " +
             "\"Apple Mac OS Application Signing\""
-        if satisfiesRequirement(staticCode: staticCode, requirement: appStoreReq) {
+        if satisfiesRequirement(staticCode: staticCode, requirement: appStoreReq, validation: validation) {
             return .appStore
         }
 
         // Developer ID: signed with an Apple-issued Developer ID certificate.
-        if satisfiesRequirement(staticCode: staticCode, requirement: "anchor apple generic") {
+        if satisfiesRequirement(staticCode: staticCode, requirement: "anchor apple generic", validation: validation) {
             return .devId
         }
 
@@ -435,7 +440,11 @@ public actor CodeSigningCache {
     }
 
     /// Test whether a static code object satisfies a textual requirement string.
-    private nonisolated static func satisfiesRequirement(staticCode: SecStaticCode, requirement: String) -> Bool {
+    private nonisolated static func satisfiesRequirement(
+        staticCode: SecStaticCode,
+        requirement: String,
+        validation: SecCSFlags
+    ) -> Bool {
         var reqRef: SecRequirement?
         guard SecRequirementCreateWithString(
             requirement as CFString,
@@ -445,7 +454,7 @@ public actor CodeSigningCache {
             return false
         }
 
-        return SecStaticCodeCheckValidity(staticCode, [], req) == errSecSuccess
+        return SecStaticCodeCheckValidity(staticCode, validation, req) == errSecSuccess
     }
 
     /// Check whether the binary has a notarization ticket stapled.
@@ -453,7 +462,7 @@ public actor CodeSigningCache {
     /// Uses `SecStaticCodeCheckValidity` with the notarization requirement.
     /// A stapled ticket does not guarantee Apple's server-side check passed,
     /// but it is the best offline signal available.
-    private nonisolated static func checkNotarization(staticCode: SecStaticCode) -> Bool {
+    private nonisolated static func checkNotarization(staticCode: SecStaticCode, validation: SecCSFlags) -> Bool {
         // The notarized requirement checks for a stapled ticket.
         let notarizedReq =
             "notarized"
@@ -466,7 +475,7 @@ public actor CodeSigningCache {
         ) == errSecSuccess, let req = reqRef else {
             return false
         }
-        return SecStaticCodeCheckValidity(staticCode, [], req) == errSecSuccess
+        return SecStaticCodeCheckValidity(staticCode, validation, req) == errSecSuccess
     }
 
     // MARK: Diagnostics

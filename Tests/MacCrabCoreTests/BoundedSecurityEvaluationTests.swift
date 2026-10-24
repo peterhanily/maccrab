@@ -58,6 +58,43 @@ struct BoundedSecurityEvaluationTests {
         return (bundle, binary, fifo)
     }
 
+    /// A bundle ad-hoc signed with `codesign --deep`, whose nested
+    /// framework's executable is then replaced by a FIFO. Security.framework
+    /// validates nested code on its own GCD workers unless told to stay on
+    /// the calling thread. Nil when codesign is unavailable.
+    private static func bundleWithNestedFIFO(in directory: String, name: String) throws -> (bundle: String, fifo: String)? {
+        let codesign = "/usr/bin/codesign"
+        guard FileManager.default.isExecutableFile(atPath: codesign) else { return nil }
+        let bundle = directory + "/\(name).app"
+        let framework = bundle + "/Contents/Frameworks/Nested.framework"
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: bundle + "/Contents/MacOS", withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: framework + "/Versions/A/Resources", withIntermediateDirectories: true)
+        try plist(executable: name).write(to: URL(fileURLWithPath: bundle + "/Contents/Info.plist"))
+        try fm.copyItem(atPath: "/bin/ls", toPath: bundle + "/Contents/MacOS/" + name)
+        try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleExecutable": "Nested",
+            "CFBundleIdentifier": "com.example.nested",
+            "CFBundlePackageType": "FMWK",
+        ], format: .xml, options: 0).write(to: URL(fileURLWithPath: framework + "/Versions/A/Resources/Info.plist"))
+        try fm.copyItem(atPath: "/bin/ls", toPath: framework + "/Versions/A/Nested")
+        try fm.createSymbolicLink(atPath: framework + "/Versions/Current", withDestinationPath: "A")
+        try fm.createSymbolicLink(atPath: framework + "/Nested", withDestinationPath: "Versions/Current/Nested")
+        try fm.createSymbolicLink(atPath: framework + "/Resources", withDestinationPath: "Versions/Current/Resources")
+        let sign = Process()
+        sign.executableURL = URL(fileURLWithPath: codesign)
+        sign.arguments = ["--force", "--deep", "-s", "-", bundle]
+        sign.standardOutput = FileHandle.nullDevice
+        sign.standardError = FileHandle.nullDevice
+        try sign.run()
+        sign.waitUntilExit()
+        guard sign.terminationStatus == 0 else { return nil }
+        let fifo = framework + "/Versions/A/Nested"
+        try fm.removeItem(atPath: fifo)
+        try #require(mkfifo(fifo, 0o600) == 0)
+        return (bundle, fifo)
+    }
+
     private static func directory() throws -> String {
         let path = NSTemporaryDirectory() + "bounded-security-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
@@ -376,6 +413,51 @@ struct BoundedSecurityEvaluationTests {
         _ = await Self.release([fifoExecutable.fifo]) { runner.stuckCount(.downloads) == 0 }
     }
 
+    @Test("a FIFO in nested code is reached by the interrupt, because validation stays on the run's thread")
+    func nestedCodeFIFOIsReclaimed() async throws {
+        let dir = try Self.directory()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        guard let nested = try Self.bundleWithNestedFIFO(in: dir, name: "Outer") else {
+            print("skipping: /usr/bin/codesign is unavailable or could not sign the fixture")
+            return
+        }
+        let runner = BoundedSecurityEvaluation(stuckLimit: 2)
+        let cache = CodeSigningCache(securityEvaluation: runner, evaluationDeadline: 1, afterEvaluationForTesting: nil)
+        let bundle = nested.bundle
+        let answer = await Self.promptly(releasing: [nested.fifo]) { await cache.evaluateWithinDeadline(path: bundle) }
+        #expect(answer.prompt && answer.value == .some(nil), "a blocked evaluation must not yield a verdict")
+        // No writer opens the FIFO: only the interrupt can end the open.
+        let reclaimed = await Self.eventually(within: 5) { runner.stuckCount(.codeSigning) == 0 }
+        if !reclaimed { _ = await Self.release([nested.fifo]) { runner.stuckCount(.codeSigning) == 0 } }
+        #expect(reclaimed, "nested code was validated on a thread the interrupt cannot reach")
+        #expect((runner.diagnostics()["interrupted_total"] as? Int ?? 0) >= 1)
+        #expect(cache.lookup(path: bundle) == nil)
+    }
+
+    @Test("a run still computing past its deadline is never interrupted")
+    func computingRunIsNotInterrupted() async throws {
+        let runner = BoundedSecurityEvaluation(stuckLimit: 2)
+        let interrupted = Flag()
+        let finished = Flag()
+        let outcome = await runner.run(.codeSigning, key: "busy", deadline: 0.2) { attempt -> Int in
+            // Computes without a system call for about 1.5 s, as a large
+            // bundle's hashing does.
+            var timebase = mach_timebase_info_data_t()
+            mach_timebase_info(&timebase)
+            let end = mach_absolute_time() + 1_500_000_000 * UInt64(timebase.denom) / UInt64(timebase.numer)
+            var x: UInt64 = 1
+            while mach_absolute_time() < end { x = x &* 6364136223846793005 &+ 1442695040888963407 }
+            if attempt.wasInterrupted() { interrupted.raise() }
+            finished.raise()
+            return Int(truncatingIfNeeded: x & 1)
+        }
+        if case .timedOut = outcome {} else { Issue.record("expected a timeout, got \(outcome)") }
+        #expect(await Self.eventually(within: 10) { finished.isRaised })
+        #expect(await Self.eventually(within: 5) { runner.stuckCount(.codeSigning) == 0 })
+        #expect(!interrupted.isRaised, "a computing run was interrupted")
+        #expect((runner.diagnostics()["interrupted_total"] as? Int ?? -1) == 0)
+    }
+
     @Test("a Downloads key changes when a bundle's main files are replaced")
     func downloadsKeyFollowsTheBundle() throws {
         let dir = try Self.directory()
@@ -414,6 +496,16 @@ struct BoundedSecurityEvaluationTests {
             #expect(start.upperBound < first.lowerBound, "a Security.framework call outside the bounded verdict")
             #expect(text.components(separatedBy: "SecStaticCodeCreateWithPath(").count == 2)
         }
+        // Every bounded validation stays on the run's thread, where the
+        // interrupt reaches it.
+        #expect(policy.contains("SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSSingleThreaded)"))
+        #expect(library.contains("SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSSingleThreaded)"))
+        let cache = try source("Sources/MacCrabCore/Enrichment/CodeSigningCache.swift")
+        #expect(cache.contains("let info = Self.performEvaluation(path: path, singleThreaded: bounded)"))
+        #expect(cache.contains("let validation = SecCSFlags(rawValue: singleThreaded ? kSecCSSingleThreaded : 0)"))
+        #expect(cache.contains("SecCSFlags(rawValue: kSecCSCheckAllArchitectures).union(validation)"))
+        #expect(!cache.contains("SecStaticCodeCheckValidity(staticCode, [], "), "a requirement check validates off the run's thread")
+        #expect(cache.components(separatedBy: "SecStaticCodeCheckValidity(staticCode, validation, req)").count == 3)
         // The heartbeat shows blocked runs per site.
         #expect(try source("Sources/MacCrabAgentKit/DaemonTimers.swift")
             .contains("\"security_evaluation\": BoundedSecurityEvaluation.heartbeatDiagnostics(),"))

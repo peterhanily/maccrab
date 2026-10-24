@@ -625,7 +625,8 @@ public actor SystemPolicyMonitor {
         guard SecStaticCodeCreateWithPath(url, [], &staticCodeRef) == errSecSuccess,
               let staticCode = staticCodeRef else { return false }
 
-        let flags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures)
+        // On this thread alone, so the runner's interrupt reaches any open.
+        let flags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSSingleThreaded)
         guard SecStaticCodeCheckValidity(staticCode, flags, nil) == errSecSuccess else { return false }
 
         var reqRef: SecRequirement?

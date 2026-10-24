@@ -19,9 +19,13 @@ import os.log
 /// deadline can be interrupted: a signal to that thread alone fails the
 /// blocked open with EINTR and Security.framework returns an error. That
 /// reaches a FIFO wherever it is, renamed away or deep in a large bundle,
-/// which no path walk could. A run that stays blocked counts against its
-/// site, and a site with `stuckLimit` of them starts no more, so stranded
-/// threads stay bounded.
+/// which no path walk could. That holds only while Security.framework
+/// validates on the run's thread: callers pass `kSecCSSingleThreaded`,
+/// because by default it validates nested code and sealed resources on GCD
+/// workers, which block the signal, while the run's thread waits in a
+/// dispatch group the signal cannot end. A run that stays blocked counts
+/// against its site, and a site with `stuckLimit` of them starts no more, so
+/// stranded threads stay bounded.
 public final class BoundedSecurityEvaluation: @unchecked Sendable {
     enum Site: String, Sendable, CaseIterable {
         case codeSigning = "code_signing"

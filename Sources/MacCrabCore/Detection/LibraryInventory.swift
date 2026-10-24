@@ -331,7 +331,8 @@ public actor LibraryInventory {
             return false
         }
 
-        let validityFlags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures)
+        // On this thread alone, so the runner's interrupt reaches any open.
+        let validityFlags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSSingleThreaded)
         guard SecStaticCodeCheckValidity(staticCode, validityFlags, nil) == errSecSuccess else {
             return false
         }
