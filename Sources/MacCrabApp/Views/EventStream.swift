@@ -1186,11 +1186,15 @@ struct EventStream: View {
         .task(id: liveGapReloadTick) {
             guard liveGapReloadTick > 0, !Task.isCancelled, !isAggregateMode else { return }
             let selection = selectedEventID
+            let resets = querySession.presentationResetTick
             let key = eventQueryKey
-            await querySession.loadEvents(currentQuery(), presentationKey: presentationKey)
+            await querySession.loadEvents(currentQuery(), presentationKey: presentationKey, overLiveGap: true)
             guard !Task.isCancelled, key == eventQueryKey, !isPaused else { return }
             recomputeFilter()
-            selectedEventID = selection.flatMap { id in filteredCache.contains { $0.id == id } ? id : nil }
+            // A row clicked during the read wins; only a presentation reset's
+            // nil gives way to the selection the reload started with.
+            let wanted = querySession.presentationResetTick == resets ? selectedEventID : (selectedEventID ?? selection)
+            selectedEventID = wanted.flatMap { id in filteredCache.contains { $0.id == id } ? id : nil }
         }
         // v1.8.0: refresh aggregate rows whenever the time range crosses the
         // 24h boundary or the category filter changes. Runs only in aggregate

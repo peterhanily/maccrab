@@ -296,7 +296,8 @@ final class EventQuerySession: ObservableObject {
     }
 
     func loadEvents(_ next: Query, limit: Int = 500, debounce: Bool = false,
-                    isPresented: Bool = true, presentationKey nextKey: PresentationKey? = nil) async {
+                    isPresented: Bool = true, presentationKey nextKey: PresentationKey? = nil,
+                    overLiveGap: Bool = false) async {
         guard acceptsBackendReads, !Task.isCancelled else { return }
         guard isPresented else {
             deactivateExactPresentation()
@@ -308,7 +309,11 @@ final class EventQuerySession: ObservableObject {
         aggregateGeneration &+= 1
         aggregateReadiness.invalidate()
         synchronizeSourceEpoch()
+        // A live-gap reload reads the shown query again: its rows are on
+        // screen, not a cache from an earlier visit, so they stay however long
+        // ago the last full read was.
         let retainRows = canPresentCached(next, key: nextKey)
+            || (overLiveGap && matchesPresentation(next, key: nextKey) && !events.isEmpty)
         queryGeneration &+= 1
         pageGeneration &+= 1
         isLoadingOlderEvents = false

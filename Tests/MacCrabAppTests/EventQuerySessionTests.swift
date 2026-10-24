@@ -519,6 +519,37 @@ struct EventQuerySessionTests {
         #expect(session.events.map(\.processName) == ["latest", "newest", "older"], "a partial page prepends again")
     }
 
+    @Test("a gap reload keeps the shown rows however long ago the last full read was")
+    func gapReloadKeepsTheShownRows() async {
+        let reader = Reader()
+        var current = Date()
+        let session = EventQuerySession(reader: reader, now: { current })
+        let key = EventQuerySession.PresentationKey(range: "1h", filter: "", category: nil, center: nil,
+                                                    halfWindowSeconds: 0)
+        reader.result = .init(events: [row("shown", at: current.addingTimeInterval(-30))], nextCursor: nil)
+        await session.loadEvents(query(live: true), presentationKey: key)
+        // Live pages kept the window current, but only full reads stamp it:
+        // past the cached-rows lifetime an ordinary read would reset it.
+        current = current.addingTimeInterval(EventQuerySession.retainedLifetime + 60)
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        #expect(session.claimLiveGapReload(paused: false))
+        let resets = session.presentationResetTick
+        reader.blockedQueries = [""]
+        let pending = Task { await session.loadEvents(query(live: true), presentationKey: key, overLiveGap: true) }
+        #expect(await waitUntil { reader.pendingQueries[""] != nil })
+        #expect(session.presentationResetTick == resets, "the shown table and its selection are not reset")
+        #expect(session.events.map(\.processName) == ["shown"] && session.showingCachedEvents)
+        reader.finish("", with: .init(events: [row("newer"), row("shown")], nextCursor: nil))
+        await pending.value
+        #expect(session.events.map(\.processName) == ["newer", "shown"])
+
+        // An ordinary read that old still starts over.
+        current = current.addingTimeInterval(EventQuerySession.retainedLifetime + 60)
+        reader.blockedQueries = []
+        await session.loadEvents(query(live: true), presentationKey: key)
+        #expect(session.presentationResetTick == resets + 1)
+    }
+
     @Test("a paused window keeps the gap for its resume, and gap reloads come at most every 15 s")
     func liveGapReloadPolicy() async {
         let reader = Reader()
