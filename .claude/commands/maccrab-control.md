@@ -1,9 +1,11 @@
 Help the user customise MacCrab through the agent control-plane (MCP).
 
 First, call `agent_capabilities` to see which tiers (config / authoring / response)
-the human has enabled — all are off by default and only the human can turn them on
-(dashboard Settings → Agent Control). If the user asks for a change whose tier is
-off, tell them exactly which toggle to flip; do not attempt the change.
+the human has enabled — all are off by default and only the human can turn them on,
+with `sudo maccrabctl agent-capabilities set <tier> on` (the dashboard's Settings →
+Agent Control shows that command and can only turn tiers off). If the user asks for
+a change whose tier is off, tell them exactly which command to run; do not attempt
+the change.
 
 Then, based on the request:
 

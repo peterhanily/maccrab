@@ -10,8 +10,10 @@ mutate the engine's state, what each mutation can do, and what the residual risk
 are. It reflects the code as shipped, including the gate's known limitations.
 
 > Source of truth: `Sources/MacCrabAgentKit/DaemonTimers.swift`
-> (`consoleUserUID()`, `isAuthorizedInboxRequest(uid:)`, `requestOwnerUID(at:)`,
-> the per-verb `handle*Requests` functions, and `emitSelfProtectionAlert(...)`).
+> (`ensureRootInboxDirectory(at:)`, `dispatchInboxRequests`, `requestOwner(at:)`,
+> `consoleUserUID()`, `isAuthorizedInboxRequest(uid:rootChannel:)`, the per-verb
+> `handle*Requests` functions, and `emitSelfProtectionAlert(...)`), and
+> `Sources/MacCrabCore/Utilities/InboxDirectories.swift`.
 
 ---
 
@@ -29,15 +31,17 @@ single-user Mac). That user cannot mutate the engine's state directly:
 
 So control actions are issued as **request files dropped into a privileged
 inbox** that the engine drains. This is the only supported user → engine
-control channel.
+control channel. There are two inboxes, and each request is authorized by the
+inbox it arrived through.
 
-### The inbox directory
+### The public inbox
 
 - Path: `<support-dir>/inbox/` — for release builds,
   `/Library/Application Support/MacCrab/inbox/`.
 - Mode: **`1777`** (world-writable + sticky). World-writable so *any* local user
   can drop a request; the sticky bit prevents one user from deleting another
   user's request file.
+- The dashboard and `maccrabctl` run without `sudo` write here.
 - The engine polls the directory every **5 seconds**, partitions the files by
   request-type prefix, processes them in a defined order (mutations first, the
   expensive storage flush last), and **deletes each request file after handling**
@@ -49,6 +53,21 @@ Because the inbox is world-writable, the *authorization decision happens at the
 handler*, not at the filesystem layer. Every verb runs the same gate before
 acting.
 
+### The root-only inbox
+
+- Path: `<support-dir>/inbox-root/`, a directory owned by root with mode
+  **`0700`** and no extended ACL. `sudo maccrabctl` writes every request here
+  (rules reload, config changes, rollup flush, intel refresh, rule and action
+  changes, agent capability grants and trace keys), and refuses to write if the
+  directory is not owned by root, is not mode `0700` or carries an ACL.
+- The engine checks the same properties on every tick before reading it. If the
+  directory was ever found unsafe (another owner, a wider mode or an ACL entry
+  that would let another user add or rename a request in), it is marked
+  tainted, in a marker file that survives a restart, and the next safe check
+  discards every entry it holds, with an audit line, before anything is
+  dispatched. While the directory cannot be made safe, root requests and
+  capability grants are unavailable; revocations from the dashboard still work.
+
 ---
 
 ## The authorization gate
@@ -56,35 +75,55 @@ acting.
 For each request file, the engine determines the **UID of whoever dropped it**
 and decides whether that UID is authorized.
 
-### Establishing the requester's UID — `requestOwnerUID(at:)`
+### Establishing the requester's UID — `requestOwner(at:)`
 
 The owner UID is read from the request file with **`lstat()`** (not `stat()`),
 and the file is rejected outright if:
 
-- it is a **symlink** (`S_IFLNK`) — otherwise an attacker could symlink a
-  root-owned file into the `1777` inbox and have its request authorized *as
-  root*; or
-- it is **hard-linked** (`st_nlink > 1`) — same forgery via a hardlink to a
-  root-owned inode.
+- it is not a **regular file** — a symlink, FIFO, socket, device or directory
+  is never a request, so a symlink to a root-owned file cannot borrow that
+  file's owner; or
+- it is **hard-linked** (`st_nlink > 1`), because the inode also exists
+  elsewhere.
 
-On any stat failure or rejection condition the function returns `-1`, which can
-never satisfy the gate.
+The link-count check only stops a second link that still exists. It cannot stop
+**save-then-rename**: a user keeps a hard link to a file somewhere else, waits
+for the engine to replace or remove the original (MacCrab rewrites several of
+its own files with remove-and-move), and then renames the saved link into the
+inbox, where `lstat` reports the original owner with a single link. Any user can
+do this with a root-owned file. Two rules follow from it:
 
-### The decision — `isAuthorizedInboxRequest(uid:)`
+- **Root ownership counts only in the root-only inbox**, which no other user can
+  write to or rename into. A root-owned file in the public inbox is refused.
+- **Public-inbox requests must be fresh and unseen.** A request must have been
+  created no more than 10 minutes ago (and no more than one minute in the
+  future), because a rename or a link keeps a file's creation time. The engine
+  also remembers the inode of every fresh public-inbox entry it has seen,
+  accepted, rejected or discarded, until it could no longer pass the freshness
+  check, and refuses it if it comes back. These checks run before the
+  link-count check.
 
-A request is authorized **only if** the dropping UID is:
+On any stat failure or rejection condition the requester UID is `-1`, which can
+never satisfy the gate. A request refused as stale, future-dated or replayed is
+audited as such with its file's real owner, and the receipt gives the reason.
 
-1. **root (uid 0)** — launchd / `sudo` flows and the engine itself; or
-2. **the live GUI console user *who is also an admin*** — the human physically
-   at the keyboard running `MacCrab.app`, resolved via
-   `SCDynamicStoreCopyConsoleUser` (`consoleUserUID()`) **and** confirmed to be a
-   member of the macOS `admin` group (gid 80) via `isAdminUID()`
-   (`getgrouplist`). A console result of `loginwindow`, empty, or nil means "no
-   one is logged in" and the gate falls back to **root-only**.
+### The decision — `isAuthorizedInboxRequest(uid:rootChannel:)`
+
+A request is authorized **only if** it is:
+
+1. **in the root-only inbox and owned by root (uid 0)** — `sudo maccrabctl` and
+   the engine itself; or
+2. **in the public inbox and owned by the live GUI console user *who is also an
+   admin*** — the human physically at the keyboard running `MacCrab.app`,
+   resolved via `SCDynamicStoreCopyConsoleUser` (`consoleUserUID()`) **and**
+   confirmed to be a member of the macOS `admin` group (gid 80) via
+   `isAdminUID()` (`getgrouplist`). A console result of `loginwindow`, empty, or
+   nil means "no one is logged in", and the public inbox then accepts nothing.
 
 Anything else — a **standard (non-admin) user even while at the keyboard**, a
-guest user, a backgrounded session user under fast user switching, or a
-UID-forged file — is **rejected and audit-logged**.
+guest user, a backgrounded session user under fast user switching, a root-owned
+file in the public inbox, or a UID-forged file — is **rejected and
+audit-logged**.
 
 > **v1.19.1 (audit):** the admin-group requirement is now **enforced** in
 > `isAuthorizedInboxRequest(uid:)`. Pre-fix, any foreground console user — incl.
@@ -110,7 +149,9 @@ line. The mutating verbs:
 | `suppress-alert-*` | Marks an alert suppressed | `{ "id": "<uuid>" }` |
 | `unsuppress-alert-*` | Un-suppresses an alert | |
 | `delete-alert-*` | Deletes an alert row | |
+| `remove-suppression-*` | Removes one allowlist entry | Used by the dashboard, `maccrabctl allow remove` and `maccrabctl rules unsuppress`; the engine reloads the saved allowlist first and writes a receipt |
 | `suppress-campaign-*` | Suppresses a campaign **and fans out** to every contributing alert | Can suppress thousands of alerts in one request |
+| `unsuppress-campaign-*` | Restores a suppressed campaign | Used by the dashboard's campaign restore |
 | `refresh-intel-*` | Forces a threat-intel feed refresh | |
 | `reload-rules-*` | Reloads compiled detection rules | |
 | `install-rule-*` | Writes a user rule (`<support-dir>/user_rules/<id>.yml`+`.json`) and triggers a reload | id sanitized to `[a-z0-9-_]`, no path traversal; JSON ≤256 KB, YAML ≤64 KB; dir clamped to `0755` daemon-owned |
@@ -133,8 +174,9 @@ Notes on the sharper edges:
   the engine — not the agent — owns the grants file. The MCP server trusts that
   file *solely because it is root-owned*. A grant is honoured only from the
   root-only `inbox-root` directory: a root-owned file in the `1777` inbox does
-  not prove root wrote it, since any user can hard-link a root-owned file there,
-  including a saved copy of an earlier grants file.
+  not prove root wrote it, since any user can save a link to a root-owned file
+  (including an earlier grants file) and rename it in after the original is
+  replaced, as described above.
 
 ---
 
@@ -146,17 +188,23 @@ to, so operators have a single "who changed alert state" tail target). Format is
 ISO-8601 timestamp + space-separated `key=value` pairs:
 
 ```
-2026-06-24T... source=inbox prefix=suppress-alert id=<uuid> uid=501 result=ok
-2026-06-24T... source=inbox prefix=set-agent-capabilities id=- uid=502 result=rejected_uid
+2026-06-24T... source=inbox channel=public prefix=suppress-alert id=<uuid> uid=501 result=ok
+2026-06-24T... source=inbox channel=public prefix=set-agent-capabilities id=- uid=502 result=rejected_uid
+2026-06-24T... source=inbox channel=root prefix=reload-rules id=- uid=0 result=ok
 ```
+
+`channel` names the inbox the request arrived through (`root` or `public`).
 
 Attacker-controlled fields (request id, result detail) are **sanitized** before
 logging — newlines/CR/control chars are replaced and length is capped — so a
 crafted request id cannot forge additional "ok" audit lines (log injection).
 
 `result` values distinguish rejection reasons: `rejected_uid` (failed the gate),
-`rejected_key` / `rejected_type` (config validation), `rejected_malformed`,
-`url_rejected_nonloopback`, `ok`, `installed`, `removed`, etc.
+`refused_stale` / `refused_future` / `refused_replayed` (a public-inbox request
+too old, dated in the future, or seen before), `rejected_key` / `rejected_type`
+(config validation), `rejected_malformed`, `url_rejected_nonloopback`,
+`discarded_unsafe_directory` (purged from a root-only inbox that was unsafe),
+`ok`, `installed`, `removed`, etc.
 
 ---
 
@@ -191,8 +239,8 @@ This alert is:
 The gate's "console user" notion has explicit edge-case behaviour:
 
 - **No one logged in (early boot, login window):** `consoleUserUID()` returns
-  nil, and the gate falls back to **root-only**. Requests from any logged-out
-  user UID are rejected.
+  nil, so the public inbox accepts nothing and only the root-only inbox works.
+  Requests from any logged-out user UID are rejected.
 - **Locked screen:** the console user is still the same UID as far as
   `SCDynamicStoreCopyConsoleUser` is concerned, so a process already running as
   that user can still drive verbs while the screen is locked. The gate is a
@@ -207,11 +255,10 @@ The gate's "console user" notion has explicit edge-case behaviour:
   the engine — they fail the gate. This is the specific class of attack the gate
   was added to close (a `1777` inbox with no handler-level UID check would have
   let any local user silence the EDR).
-- **Shared Macs (multiple admins):** today, *whichever* admin (or non-admin)
-  is the live console user is treated as a trusted operator. The planned
-  admin-group requirement (above) is aimed primarily at multi-user / shared-Mac
-  deployments, where "at the keyboard" should not by itself confer the right to
-  weaken detection.
+- **Shared Macs (multiple admins):** *whichever* admin is the live console user
+  is treated as a trusted operator. A non-admin console user is refused, so on a
+  multi-user or shared Mac being "at the keyboard" does not by itself confer the
+  right to weaken detection.
 
 ### Residual risk (state plainly)
 
@@ -223,6 +270,11 @@ prevention**: every action is audit-logged, and detection-weakening actions
 raise a high-severity, noise-filter-bypassing self-protection alert. Operators
 and SOC teams should monitor `dashboard_audit.log` and the
 `maccrab.self-defense.*` alert class.
+
+The public inbox's freshness and replay checks do not cover one case: another
+local user can still link a fresh file owned by the console user from outside
+the inbox and rename it in within its 10-minute window. Closing that needs a
+per-user private inbox.
 
 ---
 
