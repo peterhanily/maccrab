@@ -55,7 +55,7 @@ struct AlertNotificationReadTests {
                 "nothing past the upper bound")
     }
 
-    @Test("a reader resumes on the row just below the oldest alert stamped after its watermark")
+    @Test("a reader resumes on the newest row stamped at or before its watermark, not behind an old alert stamped again")
     func resumeAfterWatermark() async throws {
         let (store, directory) = try store()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -66,25 +66,35 @@ struct AlertNotificationReadTests {
         try await store.insert(alert: alert("b2", at: 1_990))   // late commit, stamped before b1
         let rows = try await store.alertsForNotification(afterRowID: 0, throughRowID: Int64.max,
                                                           severities: Severity.allCases, limit: 10)
-        let resume = try await store.notificationResumeRow(after: Date(timeIntervalSince1970: 2_005))
-        #expect(resume == AlertStore.AlertRowReference(rowID: rows[0].rowID, id: "b0"),
-                "b1 and everything committed after it are read again")
+        // Everything committed after b2 is stamped after 2,005; b1, behind it,
+        // is the rewrite read's to find.
+        #expect(try await store.notificationResumeRow(after: Date(timeIntervalSince1970: 2_005))
+                == AlertStore.AlertRowReference(rowID: rows[2].rowID, id: "b2"))
         #expect(try await store.notificationResumeRow(after: Date(timeIntervalSince1970: 3_000))
                 == AlertStore.AlertRowReference(rowID: rows[2].rowID, id: "b2"))
         #expect(try await store.notificationResumeRow(after: Date(timeIntervalSince1970: 1_000)) == nil,
                 "every row is stamped after it: nothing precedes them")
         #expect(try await store.newestTimestamp(throughRowID: rows[0].rowID) == Date(timeIntervalSince1970: 2_000))
         #expect(try await store.newestTimestamp(throughRowID: rows[2].rowID) == Date(timeIntervalSince1970: 2_010))
+
+        // The oldest row, a deterministic id, is stamped again in place. A
+        // resume below the oldest row stamped after the watermark would now
+        // start before every alert and read all of them as new.
+        try await store.insert(alert: alert("b0", at: 5_000))
+        #expect(try await store.newestAlertRow()?.rowID == rows[2].rowID, "rewritten in place")
+        #expect(try await store.notificationResumeRow(after: Date(timeIntervalSince1970: 2_005))
+                == AlertStore.AlertRowReference(rowID: rows[2].rowID, id: "b2"))
     }
 
-    @Test("the resume and rewrite reads stay on the timestamp index")
+    @Test("the resume and rewrite reads keep their planned access paths")
     func readsStayOnTheTimestampIndex() throws {
         let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/MacCrabCore/Storage/AlertStore.swift"), encoding: .utf8)
-        // MIN(rowid) and a bare rowid or severity term let the planner walk the
-        // table in rowid order, or every alert of a severity, on every tick.
-        #expect(source.contains("SELECT MIN(+rowid) FROM alerts WHERE timestamp > ?1"))
+        // A bare timestamp term lets the planner sort every row at or before
+        // the watermark to find the newest; a bare rowid or severity term in
+        // the rewrite read walks the table, or every alert of a severity.
+        #expect(source.contains("SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 ORDER BY rowid DESC LIMIT 1"))
         #expect(source.contains("FROM alerts WHERE +rowid <= ?1 AND timestamp > ?2 AND suppressed = 0"))
         #expect(source.contains("AND +severity IN (\\(placeholders))"))
     }

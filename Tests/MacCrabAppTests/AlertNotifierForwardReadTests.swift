@@ -253,4 +253,77 @@ struct AlertNotifierForwardReadTests {
         try await store.insert(alert: alert("u3", at: 1_300))
         #expect(try await read(store, restored).alerts.map(\.id) == ["u3"])
     }
+
+    @Test("an alert stamped again after a tick's rewrite read is delivered on the next tick")
+    func restampDuringTheTickIsKept() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var cursor = try await read(store, nil).cursor
+        try await store.insert(alert: alert("vuln-CVE-1", at: 1_000, severity: .high))
+        cursor = try await read(store, cursor).cursor
+        try await store.insert(alert: alert("x", at: 2_000))
+        let rescored = alert("vuln-CVE-1", at: 3_000)
+        let step = try await AlertNotifier.readForward(
+            store: store, cursor: cursor, floor: .critical, enabled: true,
+            now: Date(timeIntervalSince1970: 10_000),
+            isAuthorizationDetermined: {
+                // The re-score commits after this tick's rewrite read ran.
+                try? await store.insert(alert: rescored)
+                return true
+            })
+        #expect(step.alerts.map(\.id) == ["x"])
+        #expect(try await read(store, step.cursor).alerts.map(\.id) == ["vuln-CVE-1"])
+    }
+
+    @Test("a tick with nothing new passes alerts stamped again below the floor")
+    func idleTickPassesRestampedRows() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var cursor = try await read(store, nil).cursor
+        try await store.insert(alert: alert("privacy-app-mic", at: 1_000, severity: .medium))
+        try await store.insert(alert: alert("c0", at: 1_001))
+        cursor = try await read(store, cursor).cursor
+        try await store.insert(alert: alert("privacy-app-mic", at: 4_600, severity: .medium))
+        let idle = try await read(store, cursor)
+        #expect(idle.outcome == .nothingFresh && idle.alerts.isEmpty)
+        #expect(idle.cursor.watermark == Date(timeIntervalSince1970: 4_600))
+        #expect(idle.cursor.alertID == "c0")
+    }
+
+    @Test("a lost anchor does not resume behind an old alert stamped again, so nothing is replayed")
+    func lostAnchorDoesNotReplay() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let seeded = try await read(store, nil).cursor
+        // A deterministic id below the floor, committed before the criticals.
+        try await store.insert(alert: alert("privacy-app-mic", at: 1_000, severity: .medium))
+        for index in 0..<3 { try await store.insert(alert: alert("c\(index)", at: 1_001 + Double(index))) }
+        let delivered = try await read(store, seeded)
+        #expect(delivered.alerts.map(\.id) == ["c0", "c1", "c2"])
+        // An hourly scan stamps the old row again, then the newest alert, the
+        // cursor's anchor, is deleted from the dashboard.
+        try await store.insert(alert: alert("privacy-app-mic", at: 4_600, severity: .medium))
+        #expect(try await store.delete(alertId: "c2"))
+        let after = try await read(store, delivered.cursor)
+        #expect(after.alerts.isEmpty, "c0 and c1 were shown already")
+        try await store.insert(alert: alert("c3", at: 4_700))
+        #expect(try await read(store, after.cursor).alerts.map(\.id) == ["c3"])
+    }
+
+    @Test("a new alert that reuses a deleted anchor's rowid is delivered exactly once")
+    func reusedRowIDIsDeliveredOnce() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let seeded = try await read(store, nil).cursor
+        for index in 0..<3 { try await store.insert(alert: alert("k\(index)", at: 1_000 + Double(index))) }
+        let delivered = try await read(store, seeded)
+        let anchor = try #require(try await store.newestAlertRow())
+        #expect(try await store.delete(alertId: anchor.id))
+        try await store.insert(alert: alert("k-new", at: 1_100))
+        #expect(try await store.newestAlertRow()?.rowID == anchor.rowID, "the rowid is reused")
+        let first = try await read(store, delivered.cursor)
+        #expect(first.alerts.map(\.id) == ["k-new"])
+        let second = try await read(store, first.cursor)
+        #expect(second.alerts.isEmpty && second.outcome == .nothingFresh)
+    }
 }

@@ -266,7 +266,8 @@ final class AlertNotifier: NSObject {
         var rowID: Int64
         var alertID: String?
         /// The newest alert timestamp considered (or when the cursor was
-        /// placed): where reading resumes when the rowid no longer counts.
+        /// placed): when the rowid no longer counts, reading resumes after
+        /// the newest row stamped at or before it.
         var watermark: Date
 
         init(rowID: Int64, alertID: String?, watermark: Date) {
@@ -304,10 +305,13 @@ final class AlertNotifier: NSObject {
         isAuthorizationDetermined: () async -> Bool
     ) async throws -> ForwardRead {
         // The watermark is the newest stamp the cursor has passed, so the
-        // rewrite read below finds only rows stamped again after that.
+        // rewrite read below finds only rows stamped again after that. It is
+        // capped at the newest stamp when this read began: a row stamped again
+        // after this tick's rewrite read stays above it, for the next tick.
+        var ceiling = Date.distantFuture
         func passed(_ row: AlertStore.AlertRowReference?, _ watermark: Date) async throws -> Date {
             guard let row, let newest = try await store.newestTimestamp(throughRowID: row.rowID) else { return watermark }
-            return max(watermark, newest)
+            return max(watermark, min(newest, ceiling))
         }
         // First run: start at the newest alert and notify none of the backlog.
         // An empty table has none, so every alert after it is new.
@@ -316,6 +320,7 @@ final class AlertNotifier: NSObject {
             return ForwardRead(outcome: .seeded,
                                cursor: NotificationCursor(newest, watermark: newest == nil ? .distantPast : try await passed(newest, now)))
         }
+        ceiling = try await store.newestTimestamp(throughRowID: .max) ?? .distantPast
         let named = cursor.alertID == nil ? nil : try await store.alertID(atRowID: cursor.rowID)
         if named == nil || named != cursor.alertID {
             // Resume after the watermark on a row that still exists, so later
@@ -330,6 +335,11 @@ final class AlertNotifier: NSObject {
         let rewritten = try await store.alertsRewrittenForNotification(
             throughRowID: cursor.rowID, after: cursor.watermark, severities: severities, limit: 1_000)
         guard let newest = try await store.newestAlertRow(), newest.rowID > cursor.rowID || !rewritten.isEmpty else {
+            // Nothing to read, but alerts behind the cursor may have been stamped
+            // again below the floor or while suppressed: pass those stamps, so a
+            // later resume by watermark does not start behind them.
+            let anchor = cursor.alertID.map { AlertStore.AlertRowReference(rowID: cursor.rowID, id: $0) }
+            cursor.watermark = try await passed(anchor, cursor.watermark)
             return ForwardRead(outcome: .nothingFresh, cursor: cursor)
         }
         guard enabled else {

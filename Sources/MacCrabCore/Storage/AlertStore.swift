@@ -1756,23 +1756,25 @@ public actor AlertStore {
     }
 
     /// Where a forward reader that has considered every alert stamped up to
-    /// `watermark` resumes: the row just below the oldest alert stamped after
-    /// it, so none of those is skipped, else the newest row. Nil when no row
-    /// precedes them (or the table is empty). It is a row that exists, so the
-    /// reader can anchor on its id and follow rowids again.
+    /// `watermark` resumes: the newest row stamped at or before it. Every row
+    /// committed after that one is stamped after the watermark and is new; a
+    /// row behind it stamped after the watermark (an old deterministic-id
+    /// alert stamped again in place) is left to the reader's rewrite read,
+    /// which keeps to the floor. Resuming below the oldest row stamped after
+    /// the watermark instead reached back to such an alert, re-stamped hourly,
+    /// and read every alert committed since it as new. Nil when no row is
+    /// stamped at or before the watermark (or the table is empty). It is a
+    /// row that exists, so the reader can anchor on its id and follow rowids.
     public func notificationResumeRow(after watermark: Date) throws -> AlertRowReference? {
-        // MIN(+rowid) keeps the planner on idx_alerts_timestamp, reading only
-        // the alerts stamped after the watermark; MIN(rowid) walks the whole
-        // table in rowid order when few or none are.
-        let oldestAfter = try prepare("SELECT MIN(+rowid) FROM alerts WHERE timestamp > ?1")
-        defer { sqlite3_finalize(oldestAfter) }
-        sqlite3_bind_double(oldestAfter, 1, watermark.timeIntervalSince1970)
-        guard try AlertQueryReadStep.advance(statement: oldestAfter, database: db) else {
-            throw AlertStoreError.stepFailed("Failed to find where notifications resume")
-        }
-        guard sqlite3_column_type(oldestAfter, 0) != SQLITE_NULL else { return try newestAlertRow() }
-        return try alertRow("SELECT rowid, id FROM alerts WHERE rowid < ?1 ORDER BY rowid DESC LIMIT 1",
-                            rowID: sqlite3_column_int64(oldestAfter, 0))
+        // `+timestamp` keeps the planner on a backward rowid walk that stops
+        // at the first row at or before the watermark, usually the newest;
+        // the timestamp index would sort every row before it.
+        let stmt = try prepare("SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 ORDER BY rowid DESC LIMIT 1")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, watermark.timeIntervalSince1970)
+        guard try AlertQueryReadStep.advance(statement: stmt, database: db),
+              let id = columnTextOrNil(stmt, index: 1) else { return nil }
+        return AlertRowReference(rowID: sqlite3_column_int64(stmt, 0), id: id)
     }
 
     /// The newest timestamp among rows up to `throughRowID`: what a forward
