@@ -66,9 +66,27 @@ struct SuppressionRemovalContractTests {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/maccrabctl/AlertCommands.swift"), encoding: .utf8)
         let start = try #require(source.range(of: "static func unsuppressRule(ruleId: String, processPath: String?) async {"))
-        let body = source[start.lowerBound...].prefix(2_000)
+        let end = try #require(source.range(of: "enum RemovalOutcome: Equatable {", range: start.upperBound..<source.endIndex))
+        let body = String(source[start.lowerBound..<end.lowerBound])
         #expect(body.contains("inboxDirectory: requestInboxDirectory(dataDir: dataDir)"))
         #expect(!body.contains("removePersisted("))
+        // One shared wait for every request, every outcome printed before the
+        // failure exit, and the queued requests kept when a submission fails.
+        #expect(body.contains("} catch let partial as PartialRemovalSubmission {"))
+        #expect(body.components(separatedBy: "removalOutcomes(requests, timeout: 15)").count == 2)
+        #expect(!body.contains("awaitTerminalReceipt("))
+        let printed = try #require(body.range(of: "report.lines.forEach { print($0) }"))
+        let exit = try #require(body.range(of: "if let failure = report.failure { cliFailure(failure) }"))
+        #expect(printed.upperBound <= exit.lowerBound)
+    }
+
+    @Test("a partial submission names its queued requests wherever it is printed")
+    func partialSubmissionDescribesItself() {
+        struct DiskFull: LocalizedError { var errorDescription: String? { "No space left on device" } }
+        let request = UUID()
+        let partial = MacCrabCtl.PartialRemovalSubmission(queued: [("entry-1", request)], failure: DiskFull())
+        #expect(partial.localizedDescription.contains(request.uuidString))
+        #expect(partial.localizedDescription.contains("No space left on device"))
     }
 
     private func receipt(_ request: UUID, _ state: RuntimeRequestReceipt.State, reason: String = "") -> RuntimeRequestReceipt {

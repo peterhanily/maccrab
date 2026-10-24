@@ -227,20 +227,22 @@ extension MacCrabCtl {
         }
         var failures: [String] = []
         if rejected > 0 { failures.append("the engine did not remove \(rejected) suppression(s)") }
-        if let submissionFailure {
-            failures.append("submitting the remaining removals failed after \(submissionFailure.queued.count) "
-                            + "were queued (requests "
-                            + submissionFailure.queued.map(\.request.uuidString).joined(separator: ", ")
-                            + "): \(submissionFailure.failure.localizedDescription)")
-        }
+        if let submissionFailure { failures.append(submissionFailure.localizedDescription) }
         return (lines, failures.isEmpty ? nil : "unsuppress: " + failures.joined(separator: "; "))
     }
 
     /// Removal requests already in the engine's inbox when a later
-    /// submission failed. The caller reports them with the failure.
-    struct PartialRemovalSubmission: Error {
+    /// submission failed. The caller reports them with the failure, and so
+    /// does any catch that only prints the error.
+    struct PartialRemovalSubmission: LocalizedError {
         let queued: [(id: String, request: UUID)]
         let failure: Error
+
+        var errorDescription: String? {
+            "submitting the remaining removals failed after \(queued.count) were queued (requests "
+                + queued.map(\.request.uuidString).joined(separator: ", ")
+                + "): \(failure.localizedDescription)"
+        }
     }
 
     /// What `rules unsuppress` did to the saved allowlist.
