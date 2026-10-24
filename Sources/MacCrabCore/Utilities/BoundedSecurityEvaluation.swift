@@ -24,8 +24,8 @@ import os.log
 /// because by default it validates nested code and sealed resources on GCD
 /// workers, which block the signal, while the run's thread waits in a
 /// dispatch group the signal cannot end. A run that stays blocked counts
-/// against its site, and a site with `stuckLimit` of them starts no more, so
-/// stranded threads stay bounded.
+/// against its site, and a site with `stuckLimit` of them, or with its
+/// in-flight limit of runs, starts no more, so threads stay bounded.
 public final class BoundedSecurityEvaluation: @unchecked Sendable {
     enum Site: String, Sendable, CaseIterable {
         case codeSigning = "code_signing"
@@ -43,7 +43,8 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         case timedOut
         /// The same key's earlier run is still blocked; nothing was started.
         case blocked
-        /// The site has `stuckLimit` blocked runs; nothing was started.
+        /// The site has `stuckLimit` blocked runs, or its in-flight limit of
+        /// runs; nothing was started.
         case refused
         /// The waiting task was cancelled. The work keeps running.
         case cancelled
@@ -75,6 +76,13 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
     /// One Downloads entry or one loaded library.
     static let scanDeadline: TimeInterval = 10
 
+    /// Runs per site in flight at once, running or past their deadline. Each
+    /// holds a thread and whatever Security.framework has open, and a caller
+    /// the heavy plane cancels frees its worker but not its run: unbounded, an
+    /// exec storm of distinct binaries could start thousands. Code signing
+    /// serves every exec, so it gets more.
+    static let defaultInFlightLimits: [Site: Int] = [.codeSigning: 8, .tcc: 4, .downloads: 4, .libraryInventory: 4]
+
     /// Sent to one run's thread to fail its blocked call with EINTR. Nothing
     /// else in MacCrab uses it; the handler does nothing and is installed
     /// without SA_RESTART, so the interrupted call returns instead of resuming.
@@ -95,6 +103,7 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
     static let samplesAfterDeadline = 40
 
     let stuckLimit: Int
+    let inFlightLimits: [Site: Int]
     /// Off only in tests that need a run to stay blocked.
     private let interruptsStranded: Bool
     private let lock = NSLock()
@@ -105,8 +114,13 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
     private let deadlines = DispatchQueue(label: "com.maccrab.security-evaluation.deadline", qos: .utility)
     private let logger = Logger(subsystem: "com.maccrab", category: "security-evaluation")
 
-    init(stuckLimit: Int = 4, interruptsStranded: Bool = true) {
+    init(
+        stuckLimit: Int = 4,
+        inFlightLimits: [Site: Int] = BoundedSecurityEvaluation.defaultInFlightLimits,
+        interruptsStranded: Bool = true
+    ) {
         self.stuckLimit = stuckLimit
+        self.inFlightLimits = inFlightLimits
         self.interruptsStranded = interruptsStranded
         _ = Self.interruptHandlerInstalled
     }
@@ -125,9 +139,14 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var stuck: [String: Int] = [:]
-        for site in Site.allCases { stuck[site.rawValue] = blocked(site) }
+        var inFlight: [String: Int] = [:]
+        for site in Site.allCases {
+            stuck[site.rawValue] = blocked(site)
+            inFlight[site.rawValue] = runs[site]?.count ?? 0
+        }
         return [
             "stuck": stuck,
+            "in_flight": inFlight,
             "started_total": totals.started,
             "timed_out_total": totals.timedOut,
             "interrupted_total": totals.interrupted,
@@ -200,6 +219,13 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
         }
     }
 
+    /// Callers waiting on `key`'s run at `site`.
+    func waiterCount(_ site: Site, key: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return runs[site]?[key]?.waiters.count ?? 0
+    }
+
     /// One caller's place in a run, so its cancellation can find it.
     private final class Ticket: @unchecked Sendable {
         var cancelled = false
@@ -240,7 +266,7 @@ public final class BoundedSecurityEvaluation: @unchecked Sendable {
             ticket.waiter = existing.addWaiter(resume)
             return .joined
         }
-        guard blocked(site) < stuckLimit else {
+        guard blocked(site) < stuckLimit, (runs[site]?.count ?? 0) < inFlightLimits[site, default: stuckLimit] else {
             totals.refused += 1
             sampleStranded(at: site)
             return .answered(.refused)

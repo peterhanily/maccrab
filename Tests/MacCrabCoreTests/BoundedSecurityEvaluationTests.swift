@@ -413,6 +413,38 @@ struct BoundedSecurityEvaluationTests {
         _ = await Self.release([fifoExecutable.fifo]) { runner.stuckCount(.downloads) == 0 }
     }
 
+    @Test("a site runs at most its in-flight limit at once; joiners do not count, and a finished run frees its slot")
+    func inFlightRunsAreCapped() async throws {
+        let runner = BoundedSecurityEvaluation(stuckLimit: 4, inFlightLimits: [.downloads: 2], interruptsStranded: false)
+        let gates = [DispatchSemaphore(value: 0), DispatchSemaphore(value: 0)]
+        let began = DispatchSemaphore(value: 0)
+        defer { gates.forEach { $0.signal(); $0.signal() } }
+        func gated(_ gate: DispatchSemaphore, _ value: Int) -> @Sendable (BoundedSecurityEvaluation.Attempt) -> Int {
+            { _ in began.signal(); _ = gate.wait(timeout: .now() + 10); return value }
+        }
+        let a = Task { await runner.run(.downloads, key: "a", deadline: 10, gated(gates[0], 1)).value }
+        let b = Task { await runner.run(.downloads, key: "b", deadline: 10, gated(gates[1], 2)).value }
+        #expect(began.wait(timeout: .now() + 5) == .success && began.wait(timeout: .now() + 5) == .success)
+        #expect((runner.diagnostics()["in_flight"] as? [String: Int])?["downloads"] == 2)
+
+        let start = Date()
+        let refused = await runner.run(.downloads, key: "c", deadline: 10) { _ in 3 }
+        if case .refused = refused {} else { Issue.record("expected the in-flight limit to refuse, got \(refused)") }
+        #expect(Self.elapsed(since: start) < 1)
+        #expect(Self.started(runner) == 2)
+        // A caller for a key already in flight joins it.
+        let joiner = Task { await runner.run(.downloads, key: "a", deadline: 10) { _ in 9 }.value }
+        #expect(await Self.eventually(within: 5) { runner.waiterCount(.downloads, key: "a") == 2 })
+
+        gates[0].signal()
+        #expect(await a.value == 1)
+        #expect(await joiner.value == 1)
+        #expect(await runner.run(.downloads, key: "d", deadline: 10) { _ in 4 }.value == 4, "a finished run kept its slot")
+        gates[1].signal()
+        #expect(await b.value == 2)
+        #expect(Self.started(runner) == 3)
+    }
+
     @Test("a FIFO in nested code is reached by the interrupt, because validation stays on the run's thread")
     func nestedCodeFIFOIsReclaimed() async throws {
         let dir = try Self.directory()
