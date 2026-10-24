@@ -781,12 +781,24 @@ public actor ResponseEngine {
         // Up to 30 s: wait on a dispatch thread, not a cooperative-pool one.
         guard let result = await BoundedPrivilegedProcessRunner.runAsync(
             executable: "/bin/sh",
-            arguments: ["--", trustedScript],
+            arguments: Self.scriptArguments(trustedScript),
             environment: environment,
             timeout: 30,
             maximumOutputBytes: nil
         ) else { return false }
         return result.succeeded
+    }
+
+    /// The script, and every command it starts, runs with SIGTTIN and SIGTTOU
+    /// ignored. The engine holds a private controlling terminal and a runner
+    /// child sits in a background group on it, so a command that prompts on
+    /// /dev/tty (ssh, scp, git, getpass) was stopped there until the 30 s
+    /// deadline, holding its lane. Ignored, its read fails at once, as it did
+    /// when the engine had no terminal. The script is read by the shell that
+    /// set the trap: Apple's bash 3.2 resets an inherited ignore to the default
+    /// for every command it starts. The path is `$0`, never command text.
+    static func scriptArguments(_ trustedScript: String) -> [String] {
+        ["-c", "trap '' TTIN TTOU; . \"$0\"", trustedScript]
     }
 }
 
