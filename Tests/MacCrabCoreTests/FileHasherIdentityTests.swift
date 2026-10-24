@@ -250,6 +250,76 @@ struct FileHasherIdentityTests {
         #expect(stats.misses == 1 && stats.hits == 2)
     }
 
+    /// The hasher a compute seam calls back into, set once it exists.
+    private final class HasherBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var hasher: FileHasher?
+        private var late: Task<String?, Never>?
+        func set(_ hasher: FileHasher) { lock.lock(); self.hasher = hasher; lock.unlock() }
+        /// Starts one more request for `path` from inside the compute, once.
+        func startLateRequest(for path: String) {
+            lock.lock(); defer { lock.unlock() }
+            guard late == nil, let hasher else { return }
+            late = Task { await hasher.hash(path: path) }
+        }
+        var lateRequest: Task<String?, Never>? { lock.lock(); defer { lock.unlock() }; return late }
+    }
+
+    @Test("a request that lands while the hash ends joins it or hits the cache, never reading again")
+    func requestAtTheEndOfAHashReadsNothing() async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
+        // The late request starts inside the compute, so it reaches the actor
+        // while the owner is finishing: with the in-flight entry gone and the
+        // digest not yet cached, it would read the file a second time.
+        for round in 0..<50 {
+            let calls = Counter()
+            let box = HasherBox()
+            let hasher = FileHasher(capacity: 16, maxFileBytes: 1_024) { path, key in
+                calls.increment()
+                let computed = FileHasher.hashAndRecheck(path: path, matching: key)
+                box.startLateRequest(for: path)
+                return computed
+            }
+            box.set(hasher)
+            let digest = await hasher.hash(path: path)
+            let late = try #require(box.lateRequest)
+            #expect(await late.value == digest)
+            #expect(calls.value == 1, "round \(round): a request at the end of the hash read the file again")
+            if calls.value != 1 { break }
+        }
+    }
+
+    @Test("misses sharing a hash on a network volume are all skipped, counted as such, and never cached")
+    func networkVolumeIsSkippedForEveryWaiter() async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/bin"
+        #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
+        let gate = DispatchSemaphore(value: 0)
+        let calls = Counter()
+        let hasher = FileHasher(capacity: 16, maxFileBytes: 1_024) { _, _ in
+            calls.increment()
+            _ = gate.wait(timeout: .now() + 10)
+            return .network
+        }
+        async let first = hasher.hash(path: path)
+        async let second = hasher.hash(path: path)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        gate.signal()
+        let results = await [first, second]
+        #expect(results[0] == nil && results[1] == nil)
+        #expect(calls.value == 1, "a waiter computed a second time")
+        let stats = await hasher.stats()
+        #expect(stats.skippedNetwork == 2 && stats.errors == 0, "\(stats)")
+        #expect(await hasher.cacheCount() == 0)
+        gate.signal()
+        #expect(await hasher.hash(path: path) == nil)
+        #expect(calls.value == 2, "a network result was remembered")
+    }
+
     @Test("the hash answers a network volume from its own descriptor; a local file is hashed")
     func networkVolumeComesFromTheDescriptor() throws {
         let base = try directory()
@@ -263,6 +333,24 @@ struct FileHasherIdentityTests {
         }
         #expect(stillInPlace)
         #expect(FileHasher.hashFile(path: path, matching: key) != .network)
+
+        // On a network volume nothing is read: the check comes before the
+        // test seam and the read loop, and answers .network.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/FileHasher.swift"),
+            encoding: .utf8)
+        let body = try #require(source.range(of: "nonisolated static func hashFile("))
+        let tail = source[body.upperBound...]
+        let check = try #require(tail.range(of: """
+                    if fstatfs(descriptor, &volume) == 0, volume.f_flags & UInt32(MNT_LOCAL) == 0 {
+                        return .network
+                    }
+            """))
+        let seam = try #require(tail.range(of: "afterIdentityCheckForTesting?(descriptor)"))
+        let read = try #require(tail.range(of: "var hasher = SHA256()"))
+        #expect(check.upperBound < seam.lowerBound && check.upperBound < read.lowerBound)
     }
 
     @Test("the read stops at the key's size while the file grows")
