@@ -72,15 +72,22 @@ final class AlertNotifier: NSObject {
     private static let cursorDefaultsKey = "maccrab.alertNotifier.cursor"
     private static let rowCursorDefaultsKey = "maccrab.alertNotifier.rowCursor"
 
+    /// The saved cursor. This build writes the watermark under the legacy key
+    /// too, always equal; an older build run in between (a downgrade, then
+    /// this one again) advances only that key, so a newer legacy value wins
+    /// and reading resumes after it rather than replaying what it showed.
+    static func restoredCursor(rowCursor data: Data?, legacy: Double?) -> NotificationCursor? {
+        let saved = data.flatMap { try? JSONDecoder().decode(NotificationCursor.self, from: $0) }
+        guard let legacy else { return saved }
+        if let saved, legacy <= saved.watermark.timeIntervalSince1970 + 0.001 { return saved }
+        return NotificationCursor(rowID: 0, alertID: nil, watermark: Date(timeIntervalSince1970: legacy))
+    }
+
     init(dataDir: String? = AlertNotifier.resolveDataDir()) {
         self.dataDir = dataDir
         let defaults = UserDefaults.standard
-        if let data = defaults.data(forKey: Self.rowCursorDefaultsKey),
-           let saved = try? JSONDecoder().decode(NotificationCursor.self, from: data) {
-            self.cursor = saved
-        } else if let t = defaults.object(forKey: Self.cursorDefaultsKey) as? Double {
-            self.cursor = NotificationCursor(rowID: 0, alertID: nil, watermark: Date(timeIntervalSince1970: t))
-        }
+        self.cursor = Self.restoredCursor(rowCursor: defaults.data(forKey: Self.rowCursorDefaultsKey),
+                                          legacy: defaults.object(forKey: Self.cursorDefaultsKey) as? Double)
         super.init()
         center.delegate = self
     }
@@ -296,52 +303,69 @@ final class AlertNotifier: NSObject {
         now: Date = Date(),
         isAuthorizationDetermined: () async -> Bool
     ) async throws -> ForwardRead {
+        // The watermark is the newest stamp the cursor has passed, so the
+        // rewrite read below finds only rows stamped again after that.
+        func passed(_ row: AlertStore.AlertRowReference?, _ watermark: Date) async throws -> Date {
+            guard let row, let newest = try await store.newestTimestamp(throughRowID: row.rowID) else { return watermark }
+            return max(watermark, newest)
+        }
         // First run: start at the newest alert and notify none of the backlog.
         // An empty table has none, so every alert after it is new.
         guard var cursor = saved else {
             let newest = try await store.newestAlertRow()
             return ForwardRead(outcome: .seeded,
-                               cursor: NotificationCursor(newest, watermark: newest == nil ? .distantPast : now))
+                               cursor: NotificationCursor(newest, watermark: newest == nil ? .distantPast : try await passed(newest, now)))
         }
         let named = cursor.alertID == nil ? nil : try await store.alertID(atRowID: cursor.rowID)
         if named == nil || named != cursor.alertID {
-            cursor.rowID = try await store.notificationResumeRowID(after: cursor.watermark)
-            cursor.alertID = nil
+            // Resume after the watermark on a row that still exists, so later
+            // ticks follow its rowid instead of resolving the watermark again.
+            cursor = NotificationCursor(try await store.notificationResumeRow(after: cursor.watermark),
+                                        watermark: cursor.watermark)
         }
-        guard let newest = try await store.newestAlertRow(), newest.rowID > cursor.rowID else {
+        let severities = MacCrabCore.Severity.allCases.filter { $0 >= floor }
+        // A deterministic id is rewritten on its own row, behind the cursor,
+        // with a new stamp and severity (a CVE re-scored as critical). Rare,
+        // so all of them go in this tick, ahead of newer commits.
+        let rewritten = try await store.alertsRewrittenForNotification(
+            throughRowID: cursor.rowID, after: cursor.watermark, severities: severities, limit: 1_000)
+        guard let newest = try await store.newestAlertRow(), newest.rowID > cursor.rowID || !rewritten.isEmpty else {
             return ForwardRead(outcome: .nothingFresh, cursor: cursor)
         }
         guard enabled else {
             // Muted: everything so far counts as considered, so unmuting does
             // not replay the muted period.
             return ForwardRead(outcome: .disabled,
-                               cursor: NotificationCursor(newest, watermark: max(cursor.watermark, now)))
+                               cursor: NotificationCursor(newest, watermark: try await passed(newest, max(cursor.watermark, now))))
         }
         // This tick's slice plus one row to learn whether more wait, at or
         // above the floor only: a flood below it must not hold a critical
         // banner back, a slice at a time, behind its own backlog.
-        let severities = MacCrabCore.Severity.allCases.filter { $0 >= floor }
-        let fresh = try await store.alertsForNotification(
-            afterRowID: cursor.rowID, throughRowID: newest.rowID,
-            severities: severities, limit: Self.maximumDeliveriesPerTick + 1
-        )
-        guard !fresh.isEmpty else {
-            return ForwardRead(outcome: .nothingFresh, cursor: NotificationCursor(newest, watermark: cursor.watermark))
+        let fresh = newest.rowID > cursor.rowID
+            ? try await store.alertsForNotification(
+                afterRowID: cursor.rowID, throughRowID: newest.rowID,
+                severities: severities, limit: Self.maximumDeliveriesPerTick + 1)
+            : []
+        guard !fresh.isEmpty || !rewritten.isEmpty else {
+            return ForwardRead(outcome: .nothingFresh,
+                               cursor: NotificationCursor(newest, watermark: try await passed(newest, cursor.watermark)))
         }
         guard await isAuthorizationDetermined() else {
             let backlog = try await store.notificationBacklogCount(afterRowID: cursor.rowID, severities: severities)
-            return ForwardRead(outcome: .authorizationPending, cursor: cursor, backlog: backlog)
+            return ForwardRead(outcome: .authorizationPending, cursor: cursor, backlog: backlog + rewritten.count)
         }
         let slice = Array(fresh.prefix(Self.maximumDeliveriesPerTick))
-        let watermark = max(cursor.watermark, slice.map(\.alert.timestamp).max() ?? cursor.watermark)
+        let alerts = rewritten.map(\.alert) + slice.map(\.alert)
+        let watermark = max(cursor.watermark, alerts.map(\.timestamp).max() ?? cursor.watermark)
         guard fresh.count > slice.count, let last = slice.last else {
             // Everything at or above the floor up to the newest row is here.
-            return ForwardRead(outcome: .delivered, alerts: slice.map(\.alert),
-                               cursor: NotificationCursor(newest, watermark: watermark))
+            return ForwardRead(outcome: .delivered, alerts: alerts,
+                               cursor: NotificationCursor(newest, watermark: try await passed(newest, watermark)))
         }
+        let reached = AlertStore.AlertRowReference(rowID: last.rowID, id: last.alert.id)
         return ForwardRead(
-            outcome: .delivered, alerts: slice.map(\.alert),
-            cursor: NotificationCursor(rowID: last.rowID, alertID: last.alert.id, watermark: watermark),
+            outcome: .delivered, alerts: alerts,
+            cursor: NotificationCursor(reached, watermark: try await passed(reached, watermark)),
             backlog: try await store.notificationBacklogCount(afterRowID: last.rowID, severities: severities)
         )
     }

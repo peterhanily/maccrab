@@ -72,6 +72,7 @@ struct AlertNotifierForwardReadTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let seeded = try await read(store, nil).cursor
         try await store.insert(alert: alert("c0", at: 300))
+        _ = try await store.insert(alerts: (0..<20).map { alert("quiet\($0)", at: 300.5, severity: .low) })
         try await store.insert(alert: alert("c1", at: 301))
         let pending = try await read(store, seeded, determined: false)
         #expect(pending.outcome == .authorizationPending && pending.alerts.isEmpty)
@@ -156,5 +157,100 @@ struct AlertNotifierForwardReadTests {
         defer { try? FileManager.default.removeItem(at: otherDirectory) }
         for index in 0..<5 { try await other.insert(alert: alert("o\(index)", at: 890 + Double(index * 10))) }
         #expect(try await read(other, migrated.cursor).alerts.map(\.id) == ["o2", "o3", "o4"])
+    }
+
+    @Test("the backlog counts only alerts at or above the floor")
+    func backlogCountsOnlyTheFloor() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let seeded = try await read(store, nil).cursor
+        var batch: [Alert] = []
+        for index in 0..<60 {
+            batch.append(alert("crit\(index)", at: 1_000 + Double(index)))
+            batch += (0..<5).map { alert("low\(index)-\($0)", at: 1_000 + Double(index), severity: .low) }
+        }
+        _ = try await store.insert(alerts: batch)
+        let step = try await read(store, seeded)
+        #expect(step.alerts.count == AlertNotifier.maximumDeliveriesPerTick)
+        #expect(step.backlog == 10, "the 10 criticals left, not the lows behind them")
+    }
+
+    @Test("a cursor resumed by watermark anchors on a row, so a later commit stamped earlier is still read")
+    func resumedCursorIsAnchored() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 0..<3 { try await store.insert(alert: alert("r\(index)", at: 100 + Double(index))) }
+        // An older app's cursor, already past every alert.
+        let resumed = try await read(store, Cursor(rowID: 0, alertID: nil, watermark: Date(timeIntervalSince1970: 500)))
+        #expect(resumed.outcome == .nothingFresh && resumed.alerts.isEmpty)
+        #expect(resumed.cursor.alertID == "r2", "anchored, so the next tick follows rowids")
+        try await store.insert(alert: alert("late", at: 400))
+        #expect(try await read(store, resumed.cursor).alerts.map(\.id) == ["late"])
+    }
+
+    @Test("an alert rewritten in place at or above the floor is delivered once")
+    func rewriteIsDeliveredOnce() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var cursor = try await read(store, nil).cursor
+        try await store.insert(alert: alert("vuln-CVE-1", at: 1_000, severity: .high))
+        let below = try await read(store, cursor)
+        #expect(below.alerts.isEmpty && below.cursor.alertID == "vuln-CVE-1", "passed below the floor")
+        cursor = below.cursor
+        // The next scan re-scores the CVE as critical on the same row.
+        try await store.insert(alert: alert("vuln-CVE-1", at: 4_600))
+        let rescored = try await read(store, cursor)
+        #expect(rescored.alerts.map(\.id) == ["vuln-CVE-1"])
+        #expect(rescored.alerts.first?.severity == .critical)
+        let again = try await read(store, rescored.cursor)
+        #expect(again.outcome == .nothingFresh && again.alerts.isEmpty, "once per new stamp")
+        // Unsuppressing an old alert flips a flag, not its stamp: no banner.
+        try await store.insert(alert: alert("silenced", at: 4_700))
+        try await store.suppress(alertId: "silenced")
+        let passed = try await read(store, again.cursor)
+        #expect(passed.alerts.isEmpty)
+        try await store.unsuppress(alertId: "silenced")
+        #expect(try await read(store, passed.cursor).alerts.isEmpty)
+    }
+
+    @Test("a cursor read that fails is an error, never a first-run seed of the whole table")
+    func failedReadDoesNotSeed() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 0..<3 { try await store.insert(alert: alert("h\(index)", at: 100 + Double(index))) }
+        await store.interruptReadsForTesting(true)
+        await #expect(throws: (any Error).self) { _ = try await read(store, nil) }
+        await store.interruptReadsForTesting(false)
+        let seeded = try await read(store, nil)
+        #expect(seeded.outcome == .seeded && seeded.cursor.alertID == "h2")
+    }
+
+    @Test("an older build run in between wins with its newer watermark")
+    func restoredCursor() throws {
+        let saved = Cursor(rowID: 7, alertID: "a7", watermark: Date(timeIntervalSince1970: 1_000))
+        let data = try JSONEncoder().encode(saved)
+        #expect(AlertNotifier.restoredCursor(rowCursor: nil, legacy: nil) == nil)
+        #expect(AlertNotifier.restoredCursor(rowCursor: data, legacy: nil) == saved)
+        #expect(AlertNotifier.restoredCursor(rowCursor: data, legacy: saved.watermark.timeIntervalSince1970) == saved,
+                "this build writes both, equal")
+        #expect(AlertNotifier.restoredCursor(rowCursor: data, legacy: 1_500)
+                == Cursor(rowID: 0, alertID: nil, watermark: Date(timeIntervalSince1970: 1_500)))
+        #expect(AlertNotifier.restoredCursor(rowCursor: nil, legacy: 1_500)
+                == Cursor(rowID: 0, alertID: nil, watermark: Date(timeIntervalSince1970: 1_500)))
+    }
+
+    @Test("after a downgrade and re-upgrade, alerts the older build showed are not shown again")
+    func downgradeDoesNotReplay() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let seeded = try await read(store, nil).cursor
+        try await store.insert(alert: alert("u0", at: 1_000))
+        let mine = try await read(store, seeded).cursor
+        // The older build then advanced only the legacy timestamp past these.
+        try await store.insert(alert: alert("u1", at: 1_100))
+        try await store.insert(alert: alert("u2", at: 1_200))
+        let restored = try #require(AlertNotifier.restoredCursor(rowCursor: try JSONEncoder().encode(mine), legacy: 1_200))
+        try await store.insert(alert: alert("u3", at: 1_300))
+        #expect(try await read(store, restored).alerts.map(\.id) == ["u3"])
     }
 }
