@@ -8,7 +8,11 @@ import Darwin
 /// Security.framework opens the paths it evaluates itself, without O_NOCTTY,
 /// and blocks on a FIFO until a writer appears. Callers open the path first in
 /// a way that can neither block nor adopt a terminal, and evaluate only the
-/// object they expected; what remains is the short gap to Security's own open.
+/// object they expected. That narrows swaps of the named path to the short
+/// gap before Security's own open. It cannot see the files inside a bundle
+/// that Security opens next (the main executable, `CodeResources`, sealed
+/// resources), so `BoundedSecurityEvaluation` is what keeps an evaluation
+/// blocked there from holding up its caller.
 enum SecurityEvaluationPrecheck {
     enum Expected: Sendable {
         case regularFile

@@ -62,6 +62,9 @@ public actor SystemPolicyMonitor {
     /// Without this, every full scan re-alerts on the same Downloads items,
     /// which previously accounted for the bulk of SystemPolicyMonitor noise.
     private var quarantineAlerted: Set<String> = []
+    /// Downloads signature checks wait at most `securityDeadline`.
+    private let securityEvaluation: BoundedSecurityEvaluation
+    private let securityDeadline: TimeInterval
 
     // MARK: - Types
 
@@ -97,6 +100,8 @@ public actor SystemPolicyMonitor {
     public init(pollInterval: TimeInterval = 300) { // Every 5 minutes
         self.pollInterval = pollInterval
         self.homesProvider = { RealUserHomeResolver.all() }
+        self.securityEvaluation = .shared
+        self.securityDeadline = BoundedSecurityEvaluation.scanDeadline
         var capturedContinuation: AsyncStream<SystemPolicyEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
             capturedContinuation = continuation
@@ -106,10 +111,14 @@ public actor SystemPolicyMonitor {
 
     init(
         pollInterval: TimeInterval = 300,
-        homesProvider: @escaping @Sendable () -> [RealUserHome]
+        homesProvider: @escaping @Sendable () -> [RealUserHome],
+        securityEvaluation: BoundedSecurityEvaluation = .shared,
+        securityDeadline: TimeInterval = BoundedSecurityEvaluation.scanDeadline
     ) {
         self.pollInterval = pollInterval
         self.homesProvider = homesProvider
+        self.securityEvaluation = securityEvaluation
+        self.securityDeadline = securityDeadline
         var capturedContinuation: AsyncStream<SystemPolicyEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
             capturedContinuation = continuation
@@ -179,7 +188,7 @@ public actor SystemPolicyMonitor {
         await checkAuthPlugins()
         await checkPluginDirectories()
         checkXProtectVersion()
-        scanDownloadsForMissingQuarantine()
+        await scanDownloadsForMissingQuarantine()
         await checkXPCServices()
         await checkMDMProfiles()
         await checkAPFSSnapshots()
@@ -464,13 +473,13 @@ public actor SystemPolicyMonitor {
 
     // MARK: - Quarantine xattr Scanning
 
-    private func scanDownloadsForMissingQuarantine() {
+    private func scanDownloadsForMissingQuarantine() async {
         for home in homesProvider() {
-            scanDownloadsForMissingQuarantine(in: home)
+            await scanDownloadsForMissingQuarantine(in: home)
         }
     }
 
-    private func scanDownloadsForMissingQuarantine(in home: RealUserHome) {
+    private func scanDownloadsForMissingQuarantine(in home: RealUserHome) async {
         let downloadsDir = home.appending("Downloads")
         guard let snapshot = BoundedDirectoryLister.list(
             at: downloadsDir,
@@ -514,8 +523,9 @@ public actor SystemPolicyMonitor {
             // without quarantine once installed. Only flag when the target
             // is unsigned/ad-hoc or outright fails signature validation.
             // A name swapped since the listing onto another kind (a FIFO, a
-            // device, a symlink) is skipped this scan, never evaluated.
-            guard let anchored = isSignedWithAppleAnchor(
+            // device, a symlink) is skipped this scan, never evaluated, and so
+            // is one whose evaluation did not finish in time.
+            guard let anchored = await isSignedWithAppleAnchor(
                 path: fullPath,
                 expected: entry.kind == .directory ? .directory : .regularFile
             ) else { continue }
@@ -541,7 +551,19 @@ public actor SystemPolicyMonitor {
     /// represent a meaningful "stripped quarantine" risk. Nil, unevaluated,
     /// when `path` no longer opens as the kind the listing saw: the listing
     /// pinned every directory no-follow, so a symlink anywhere is a swap.
-    func isSignedWithAppleAnchor(path: String, expected: SecurityEvaluationPrecheck.Expected) -> Bool? {
+    /// Nil too when Security.framework does not finish within the deadline:
+    /// a FIFO inside a bundle blocks it past the precheck, and the actor
+    /// never waits on it.
+    func isSignedWithAppleAnchor(path: String, expected: SecurityEvaluationPrecheck.Expected) async -> Bool? {
+        await securityEvaluation.run(.downloads, key: path, deadline: securityDeadline) {
+            Self.appleAnchorVerdict(path: path, expected: expected)
+        } ?? nil
+    }
+
+    private nonisolated static func appleAnchorVerdict(
+        path: String,
+        expected: SecurityEvaluationPrecheck.Expected
+    ) -> Bool? {
         guard SecurityEvaluationPrecheck.metadata(of: path, expected: expected, canonical: true) != nil else {
             return nil
         }

@@ -648,9 +648,11 @@ public actor TCCMonitor {
         // resolves to nil, which the (positive) `SignerType: unsigned` TCC rules
         // do NOT match — i.e. an unknown client is treated as "don't fire",
         // never as "unsigned". This is what fixes the whole TCC FP family.
+        // So is a client whose evaluation did not finish in time: a bundle
+        // with a FIFO inside never does, and the pass must not wait on it.
         let clientSignature = clientPath.isEmpty
             ? nil
-            : await codeSigningCache.evaluate(path: clientPath)
+            : await codeSigningCache.evaluateWithinDeadline(path: clientPath)
         guard lifecyclePhase == .running, !Task.isCancelled else { return nil }
 
         let tccInfo = TCCInfo(

@@ -79,6 +79,11 @@ public actor CodeSigningCache {
         attributes: .concurrent
     )
 
+    /// Engine evaluations wait at most `evaluationDeadline`: a FIFO inside a
+    /// bundle blocks Security.framework past any precheck of the path.
+    private let securityEvaluation: BoundedSecurityEvaluation
+    private let evaluationDeadline: TimeInterval
+
     private var cacheHits: Int = 0
     private var cacheMisses: Int = 0
 
@@ -94,16 +99,36 @@ public actor CodeSigningCache {
     /// - Parameter countLimit: Maximum number of entries to retain.
     ///   Defaults to 8192.
     public init(countLimit: Int = 8192) {
-        self.cache = NSCache<NSString, CachedEntry>()
-        self.cache.countLimit = countLimit
-        self.afterEvaluationForTesting = nil
+        self.init(
+            countLimit: countLimit,
+            securityEvaluation: .shared,
+            evaluationDeadline: BoundedSecurityEvaluation.codeSigningDeadline,
+            afterEvaluationForTesting: nil
+        )
     }
 
     /// Test seam: runs on the evaluation queue after Security answers and
     /// before the identity is re-checked.
     init(countLimit: Int = 8192, afterEvaluationForTesting: @escaping @Sendable (String) -> Void) {
+        self.init(
+            countLimit: countLimit,
+            securityEvaluation: .shared,
+            evaluationDeadline: BoundedSecurityEvaluation.codeSigningDeadline,
+            afterEvaluationForTesting: afterEvaluationForTesting
+        )
+    }
+
+    /// Test seam: the bound on engine evaluations.
+    init(
+        countLimit: Int = 8192,
+        securityEvaluation: BoundedSecurityEvaluation,
+        evaluationDeadline: TimeInterval,
+        afterEvaluationForTesting: (@Sendable (String) -> Void)?
+    ) {
         self.cache = NSCache<NSString, CachedEntry>()
         self.cache.countLimit = countLimit
+        self.securityEvaluation = securityEvaluation
+        self.evaluationDeadline = evaluationDeadline
         self.afterEvaluationForTesting = afterEvaluationForTesting
     }
 
@@ -170,41 +195,62 @@ public actor CodeSigningCache {
     /// - Returns: Signing information for the binary. A path that does not
     ///   open safely as a regular file or bundle reads as unsigned, as one
     ///   Security.framework cannot open does, and nothing is cached for it.
+    ///   This waits for Security.framework however long it takes; engine
+    ///   callers use `evaluateWithinDeadline(path:)`.
     public func evaluate(path: String) async -> CodeSignatureInfo {
-        await evaluate(path: path, expected: .regularFileOrDirectory, canonical: false)
-            ?? CodeSignatureInfo(signerType: .unsigned)
+        switch await evaluate(path: path, expected: .regularFileOrDirectory, canonical: false, bounded: false) {
+        case .evaluated(let info): return info
+        case .notOpened, .unfinished: return CodeSignatureInfo(signerType: .unsigned)
+        }
     }
 
-    /// `evaluate(path:)` for an executable path the kernel reported, which is
-    /// canonical and names a regular file. Nil, never a verdict, when the path
-    /// no longer opens as that file without following a symlink.
+    /// `evaluate(path:)` that waits at most the engine's deadline. Nil, never
+    /// a verdict, when Security.framework did not finish in time (a bundle
+    /// with a FIFO inside never does) or too many evaluations are blocked.
+    public func evaluateWithinDeadline(path: String) async -> CodeSignatureInfo? {
+        switch await evaluate(path: path, expected: .regularFileOrDirectory, canonical: false, bounded: true) {
+        case .evaluated(let info): return info
+        case .notOpened: return CodeSignatureInfo(signerType: .unsigned)
+        case .unfinished: return nil
+        }
+    }
+
+    /// `evaluateWithinDeadline(path:)` for an executable path the kernel
+    /// reported, which is canonical and names a regular file. Nil, never a
+    /// verdict, also when the path no longer opens as that file without
+    /// following a symlink.
     public func evaluateExecutable(path: String) async -> CodeSignatureInfo? {
-        await evaluate(path: path, expected: .regularFile, canonical: true)
+        guard case .evaluated(let info) = await evaluate(
+            path: path, expected: .regularFile, canonical: true, bounded: true
+        ) else { return nil }
+        return info
+    }
+
+    private enum Evaluation {
+        case evaluated(CodeSignatureInfo)
+        /// The path did not open safely as the expected kind.
+        case notOpened
+        /// Security.framework did not finish within the deadline.
+        case unfinished
     }
 
     private func evaluate(
         path: String,
         expected: SecurityEvaluationPrecheck.Expected,
-        canonical: Bool
-    ) async -> CodeSignatureInfo? {
+        canonical: Bool,
+        bounded: Bool
+    ) async -> Evaluation {
         // 1. Cache hit — fast path.
         if let cached = lookup(path: path) {
             cacheHits += 1
-            return cached
+            return .evaluated(cached)
         }
 
         // 2. Cache miss — perform Security framework evaluation off the actor.
         cacheMisses += 1
         let before = Self.currentIdentity(path: path)
         let afterEvaluation = afterEvaluationForTesting
-        let info: CodeSignatureInfo? = await BlockingWorkOffload.perform(
-            on: Self.evaluationQueue,
-            qos: BlockingWorkOffload.dispatchQoS(
-                waitedOnAt: Task.currentPriority,
-                floor: .utility
-            ),
-            flags: .enforceQoS
-        ) {
+        let work: @Sendable () -> CodeSignatureInfo? = { [self] in
             // Security.framework opens the path itself, blocking on a FIFO and
             // without O_NOCTTY: hand it only what a safe open just found, and
             // only the file stat saw, when stat saw one.
@@ -213,16 +259,34 @@ public actor CodeSigningCache {
             ), before.map({ $0 == FileIdentity(opened) }) ?? true else { return nil }
             let info = Self.performEvaluation(path: path)
             afterEvaluation?(path)
+            // Bind the verdict only to bytes that stayed in place for the whole
+            // evaluation. Capturing the identity afterwards let a binary renamed
+            // into place mid-evaluation inherit the previous file's verdict.
+            // Stored here, so a verdict that comes after its caller stopped
+            // waiting still serves the next event.
+            if let before, Self.currentIdentity(path: path) == before {
+                cache.setObject(CachedEntry(info, identity: before), forKey: path as NSString)
+            }
             return info
         }
-        guard let info else { return nil }
-        // Bind the verdict only to bytes that stayed in place for the whole
-        // evaluation. Capturing the identity afterwards let a binary renamed
-        // into place mid-evaluation inherit the previous file's verdict.
-        if let before, Self.currentIdentity(path: path) == before {
-            cache.setObject(CachedEntry(info, identity: before), forKey: path as NSString)
+        let info: CodeSignatureInfo?
+        if bounded {
+            guard let finished = await securityEvaluation.run(
+                .codeSigning, key: path, deadline: evaluationDeadline, on: Self.evaluationQueue, work
+            ) else { return .unfinished }
+            info = finished
+        } else {
+            info = await BlockingWorkOffload.perform(
+                on: Self.evaluationQueue,
+                qos: BlockingWorkOffload.dispatchQoS(
+                    waitedOnAt: Task.currentPriority,
+                    floor: .utility
+                ),
+                flags: .enforceQoS,
+                work
+            )
         }
-        return info
+        return info.map(Evaluation.evaluated) ?? .notOpened
     }
 
     // MARK: Security framework evaluation

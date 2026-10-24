@@ -106,6 +106,9 @@ public actor LibraryInventory {
     /// path to avoid re-running `SecStaticCodeCheckValidity` on every scan.
     private var signatureCache: [String: Bool] = [:]
     private let signatureCacheLimit = 4096
+    /// Library signature checks wait at most `securityDeadline`.
+    private let securityEvaluation: BoundedSecurityEvaluation
+    private let securityDeadline: TimeInterval
 
     public struct InjectedLibrary: Sendable {
         public let pid: Int32
@@ -116,10 +119,17 @@ public actor LibraryInventory {
         public let severity: Severity
     }
 
-    public init() {}
+    public init() {
+        self.init(securityEvaluation: .shared, securityDeadline: BoundedSecurityEvaluation.scanDeadline)
+    }
+
+    init(securityEvaluation: BoundedSecurityEvaluation, securityDeadline: TimeInterval) {
+        self.securityEvaluation = securityEvaluation
+        self.securityDeadline = securityDeadline
+    }
 
     /// Scan a specific process for injected libraries.
-    public func scanProcess(pid: Int32) -> [InjectedLibrary] {
+    public func scanProcess(pid: Int32) async -> [InjectedLibrary] {
         let libraries = getLoadedLibraries(pid: pid)
         guard !libraries.isEmpty else { return [] }
 
@@ -208,7 +218,7 @@ public actor LibraryInventory {
                 !lib.hasPrefix("/usr/") &&
                 !lib.hasPrefix("/System/") &&
                 !lib.hasPrefix("/Library/") {
-                if !isTrustedSigned(path: lib) {
+                if await !isTrustedSigned(path: lib) {
                     // Pair-dedup: don't re-emit the same (pid, library) alert
                     // across forensic scan cycles. Complements the process-
                     // level AlertDeduplicator which keys only on ruleId +
@@ -237,27 +247,38 @@ public actor LibraryInventory {
     /// Returns `true` when the library at `path` is validly signed by Apple,
     /// the Mac App Store, or a Developer ID certificate. Results are cached
     /// per-path to avoid repeated Security framework calls for the same dylib.
-    func isTrustedSigned(path: String) -> Bool {
+    func isTrustedSigned(path: String) async -> Bool {
         if let cached = signatureCache[path] { return cached }
-        // Security.framework opens the path itself, blocking on a FIFO. A
-        // mapped library's path that no longer opens as a regular file,
-        // without a symlink, cannot vouch for what was loaded: untrusted,
-        // and not cached, so the next scan looks again.
-        guard SecurityEvaluationPrecheck.metadata(of: path, expected: .regularFile, canonical: true) != nil else {
+        // A mapped library's path that no longer opens as a regular file,
+        // without a symlink, cannot vouch for what was loaded, and neither can
+        // one Security.framework did not finish with in time (a FIFO inside
+        // its bundle blocks it past the precheck): untrusted, and not cached,
+        // so the next scan looks again. The actor never waits on it.
+        guard let verdict = await securityEvaluation.run(.libraryInventory, key: path, deadline: securityDeadline, {
+            Self.trustedSignatureVerdict(path: path)
+        }), let trusted = verdict else {
             return false
+        }
+        storeSignatureResult(path: path, trusted: trusted)
+        return trusted
+    }
+
+    /// Nil when `path` does not open as a regular file without a symlink.
+    private nonisolated static func trustedSignatureVerdict(path: String) -> Bool? {
+        // Security.framework opens the path itself, blocking on a FIFO.
+        guard SecurityEvaluationPrecheck.metadata(of: path, expected: .regularFile, canonical: true) != nil else {
+            return nil
         }
 
         let url = URL(fileURLWithPath: path) as CFURL
         var staticCodeRef: SecStaticCode?
         guard SecStaticCodeCreateWithPath(url, [], &staticCodeRef) == errSecSuccess,
               let staticCode = staticCodeRef else {
-            storeSignatureResult(path: path, trusted: false)
             return false
         }
 
         let validityFlags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures)
         guard SecStaticCodeCheckValidity(staticCode, validityFlags, nil) == errSecSuccess else {
-            storeSignatureResult(path: path, trusted: false)
             return false
         }
 
@@ -268,15 +289,12 @@ public actor LibraryInventory {
         guard SecRequirementCreateWithString(
             "anchor apple generic" as CFString, [], &requirementRef
         ) == errSecSuccess, let requirement = requirementRef else {
-            storeSignatureResult(path: path, trusted: false)
             return false
         }
 
-        let trusted = SecStaticCodeCheckValidity(
+        return SecStaticCodeCheckValidity(
             staticCode, validityFlags, requirement
         ) == errSecSuccess
-        storeSignatureResult(path: path, trusted: trusted)
-        return trusted
     }
 
     private func storeSignatureResult(path: String, trusted: Bool) {
@@ -287,7 +305,7 @@ public actor LibraryInventory {
     }
 
     /// Scan all running processes for injected libraries.
-    public func scanAllProcesses() -> [InjectedLibrary] {
+    public func scanAllProcesses() async -> [InjectedLibrary] {
         let count = proc_listallpids(nil, 0)
         guard count > 0 else { return [] }
         var pids = [Int32](repeating: 0, count: Int(count) + 50)
@@ -296,7 +314,7 @@ public actor LibraryInventory {
 
         var results: [InjectedLibrary] = []
         for pid in pids.prefix(Int(actual)) where pid > 0 {
-            results.append(contentsOf: scanProcess(pid: pid))
+            results.append(contentsOf: await scanProcess(pid: pid))
         }
         return results
     }
