@@ -507,7 +507,7 @@ if /usr/bin/grep -E 'strip -S -x .*\|\|[[:space:]]*true' \
     exit 1
 fi
 for footprint_marker in \
-        'APP_FOOTPRINT_BUDGET_KIB=187392' \
+        'APP_FOOTPRINT_BUDGET_KIB=191488' \
         'APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)' \
         'APP_FOOTPRINT_KIB" -gt "$APP_FOOTPRINT_BUDGET_KIB'; do
     /usr/bin/grep -Fq "$footprint_marker" "$PROJECT_DIR/scripts/build-release.sh" \
@@ -545,20 +545,20 @@ def run(measurement, du_status='0', inherited_budget='999999999'):
                           stdin=subprocess.DEVNULL, capture_output=True,
                           text=True, timeout=5, env=environment)
 
-for size, margin in ((187391, 1), (187392, 0)):
+for size, margin in ((191487, 1), (191488, 0)):
     result = run(str(size) + '\t/fixture/MacCrab.app')
     assert result.returncode == 0 and not result.stderr, 'valid boundary refused'
-    assert f'budget: 187392 KiB, margin: {margin} KiB' in result.stdout, 'incorrect fixed cap/margin'
+    assert f'budget: 191488 KiB, margin: {margin} KiB' in result.stdout, 'incorrect fixed cap/margin'
 
-result = run('187393\t/fixture/MacCrab.app')
-assert result.returncode != 0 and 'exceeds the fixed 187392 KiB' in result.stderr, 'over-cap accepted'
+result = run('191489\t/fixture/MacCrab.app')
+assert result.returncode != 0 and 'exceeds the fixed 191488 KiB' in result.stderr, 'over-cap accepted'
 # A hostile inherited cap must neither enlarge nor shrink the approved limit.
-result = run('187392\t/fixture/MacCrab.app', inherited_budget='1')
-assert result.returncode == 0 and 'budget: 187392 KiB' in result.stdout, 'inherited cap overrides policy'
-for invalid in ('', 'unknown', '-1', '187392.0', '187392x', '187392\n1'):
+result = run('191488\t/fixture/MacCrab.app', inherited_budget='1')
+assert result.returncode == 0 and 'budget: 191488 KiB' in result.stdout, 'inherited cap overrides policy'
+for invalid in ('', 'unknown', '-1', '191488.0', '191488x', '191488\n1'):
     result = run(invalid)
     assert result.returncode != 0 and 'could not measure' in result.stderr, 'invalid measurement accepted'
-result = run('187392\t/fixture/MacCrab.app', du_status='23')
+result = run('191488\t/fixture/MacCrab.app', du_status='23')
 assert result.returncode == 23 and 'installed app footprint' not in result.stdout, 'failed du accepted'
 print('11 installed-footprint boundary and failure controls passed')
 FOOTPRINT_FIXTURES

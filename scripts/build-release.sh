@@ -1549,8 +1549,16 @@ ATTESTATION_EOF
         # 60 KiB of headroom. Existing local/debug stripping was verified;
         # measured lossless resource alternatives did not clear the old cap.
         # CPU, memory, write-rate, detection and free-disk limits are unchanged.
+        # 2026-10-26, v1.22.6-rc.13: 187392 -> 191488 (183 -> 187 MiB),
+        # explicitly approved for installed disk size only. The first signed
+        # RC13 measured 190692 KiB. Every one of its 1,595 payload files other
+        # than the four statically linked Swift executables was byte-identical
+        # to RC12; those four grew by 4,096 KiB in aggregate (CLI and MCP tools
+        # +1,748, system extension +1,384, app +988) for the RC13 fix code, so
+        # no resource trim could clear the old cap. CPU, memory, write-rate,
+        # detection and free-disk limits are unchanged.
         # BEGIN INSTALLED_APP_FOOTPRINT_GATE
-        APP_FOOTPRINT_BUDGET_KIB=187392
+        APP_FOOTPRINT_BUDGET_KIB=191488
         APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)
         case "$APP_FOOTPRINT_KIB" in
             ''|*[!0-9]*)
