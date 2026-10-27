@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import MacCrabAgentKit
 @testable import MacCrabCore
 
 /// `maccrabctl allow` writes rule+hash and host entries; the engine's
@@ -178,6 +179,80 @@ struct SuppressionScopeWiringTests {
         #expect(SuppressionManager.imageBoundSHA256(ProcessHashes(sha256: digest, imageBound: false)) == nil)
         #expect(SuppressionManager.imageBoundSHA256(ProcessHashes(sha256: digest, imageBound: true)) == digest)
         #expect(SuppressionManager.imageBoundSHA256(nil) == nil)
+    }
+
+    @Test("the engine's suppression decision never offers a laundered digest")
+    func engineDecisionUsesBoundDigestOnly() async throws {
+        let (directory, path, image) = try imageFixture()
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let original = try #require(await FileHasher().hash(path: path))
+        let replacement = directory + "/allowlisted"
+        try Data(repeating: 0x42, count: 8192).write(to: URL(fileURLWithPath: replacement))
+        let allowlisted = try #require(await FileHasher().hash(path: replacement))
+        let (mgr, store) = try manager()
+        defer { try? FileManager.default.removeItem(atPath: store) }
+        for digest in [original, allowlisted] {
+            _ = await mgr.add(Suppression(scope: .ruleHash(ruleId: "rule.x", sha256: digest),
+                                          source: .cli, reason: "test"))
+        }
+        // The exec'd image is still in place: its own entry applies.
+        let honest = try await hashedExec(path: path, image: image)
+        #expect(honest.process.hashes?.sha256 == original)
+        #expect(await DaemonState.isSuppressed(match, event: honest, manager: mgr))
+        // The allow-listed binary renamed onto the path after exec: the
+        // engine is asked exactly as EventLoop and MonitorTasks ask it.
+        #expect(rename(replacement, path) == 0)
+        let laundered = try await hashedExec(path: path, image: image)
+        #expect(laundered.process.hashes?.sha256 == allowlisted)
+        #expect(!(await DaemonState.isSuppressed(match, event: laundered, manager: mgr)))
+    }
+
+    @Test("a digest is bound only when the hasher read the kernel's image")
+    func bindingComparesTheHashedFile() throws {
+        let image = HeavyEnrichmentFileIdentity(
+            deviceID: 1, inodeNumber: 10, sizeBytes: 4096,
+            modificationSeconds: 1_700_000_000, modificationNanoseconds: 0,
+            statusChangeSeconds: 1_700_000_000, statusChangeNanoseconds: 0)
+        let other = HeavyEnrichmentFileIdentity(
+            deviceID: 1, inodeNumber: 11, sizeBytes: 4096,
+            modificationSeconds: 1_700_000_000, modificationNanoseconds: 0,
+            statusChangeSeconds: 1_700_000_000, statusChangeNanoseconds: 0)
+        #expect(EventEnricher.digestIsImageBound(hashed: image, image: image))
+        // The path read as the image before and after the hash, but the
+        // hasher's own probe found another file: unbound.
+        #expect(!EventEnricher.digestIsImageBound(hashed: other, image: image))
+        #expect(!EventEnricher.digestIsImageBound(hashed: nil, image: image))
+        #expect(!EventEnricher.digestIsImageBound(hashed: image, image: nil))
+        #expect(!EventEnricher.digestIsImageBound(hashed: nil, image: nil))
+    }
+
+    @Test("the binding is wired to the hasher's identity and the engine to the bound digest")
+    func bindingWiring() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let enricher = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/EventEnricher.swift"), encoding: .utf8)
+        #expect(enricher.contains("imageBound: Self.digestIsImageBound(hashed: computed.fileIdentity, image: image)"))
+        #expect(!enricher.contains("image == stable"))
+        let state = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/DaemonState.swift"), encoding: .utf8)
+        let instance = try #require(state.range(of: "func isSuppressed(_ match: RuleMatch, event: Event) async -> Bool {"))
+        #expect(state[instance.upperBound...].prefix(120).contains("Self.isSuppressed(match, event: event, manager: suppressionManager)"))
+    }
+
+    @Test("the kernel's image identity does not travel to the store")
+    func imageIdentityIsNotPersisted() async throws {
+        let (directory, path, image) = try imageFixture()
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let key = HeavyEnrichmentFileIdentity.execImageEnrichmentKey
+        let enriched = try await hashedExec(path: path, image: image)
+        #expect(enriched.enrichments[key] == nil)
+        #expect(enriched.enrichments["enriched"] == "true")
+        let store = try EventStore(path: directory + "/events.db")
+        try await store.insert(event: enriched)
+        let snapshot = try await store.exactEventsSnapshot(since: .distantPast, limit: 10)
+        #expect(snapshot.isComplete)
+        let row = try #require(snapshot.events.first { $0.id == enriched.id })
+        #expect(row.enrichments[key] == nil)
+        #expect(row.enrichments["enriched"] == "true", "enrichments do reach the store; the key was removed before")
     }
 
     @Test("an image identity survives its enrichment round trip and rejects damage")

@@ -4,7 +4,8 @@ import Testing
 
 /// A lane-inline notarization miss is assessed on the bounded follow-up
 /// plane; that plane's sheds are visible in the heartbeat and count as a
-/// protection gap; a rule+hash suppression uses only the event's own digest.
+/// protection gap; a rule+hash suppression uses only the event's image-bound
+/// digest, the one the enricher proved was read from the exec'd image.
 @Suite("Notarization follow-up wiring and visibility")
 struct NotarizationFollowUpWiringTests {
     private func source(_ path: String) throws -> String {
@@ -69,12 +70,16 @@ struct NotarizationFollowUpWiringTests {
         #expect(body.contains("await assessNotarization(await notarizationChecker.check(binaryPath: execPath))"))
     }
 
-    @Test("rule+hash suppression uses only the event's own digest, never a path-keyed cache")
+    @Test("rule+hash suppression uses only the event's image-bound digest, never a path-keyed cache")
     func suppressionUsesEventDigest() throws {
         let state = try source("Sources/MacCrabAgentKit/DaemonState.swift")
         let start = try #require(state.range(of: "func isSuppressed(_ match: RuleMatch, event: Event) async -> Bool {"))
-        let body = state[start.lowerBound...].prefix(400)
-        #expect(body.contains("processSHA256: event.process.hashes?.sha256"))
+        // The instance method EventLoop and MonitorTasks call, and the static
+        // decision it delegates to, both within reach of this window.
+        let body = state[start.lowerBound...].prefix(1_400)
+        #expect(body.contains("Self.isSuppressed(match, event: event, manager: suppressionManager)"))
+        #expect(body.contains("processSHA256: SuppressionManager.imageBoundSHA256(event.process.hashes),"))
+        #expect(!body.contains("hashes?.sha256"))
         for cache in ["cachedExecutableSHA256", "cachedSHA256", "cachedHash", "fileHasher"] {
             #expect(!body.contains(cache), "\(cache)")
         }

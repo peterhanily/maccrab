@@ -1657,14 +1657,20 @@ private func recoverEssentialSourceOrStayDegraded(
 
 extension DaemonState {
     /// Suppression check across every scope: rule, path, rule+path,
-    /// rule+hash and host. A rule+hash entry is offered only a digest the
-    /// enricher bound to the exec'd image (the file still had the device,
-    /// inode, size and times the kernel reported at exec). A digest looked up
-    /// by path alone is of whatever file is there now: a payload could rename
-    /// an allow-listed binary onto its own path right after exec and have its
-    /// events suppressed as that binary, so such a digest is never offered.
+    /// rule+hash and host, as EventLoop and MonitorTasks ask it for each match.
     func isSuppressed(_ match: RuleMatch, event: Event) async -> Bool {
-        await suppressionManager.isSuppressed(
+        await Self.isSuppressed(match, event: event, manager: suppressionManager)
+    }
+
+    /// The decision behind `isSuppressed(_:event:)`, against any manager. A
+    /// rule+hash entry is offered only a digest the enricher bound to the
+    /// exec'd image (the hasher read a file with the device, inode, size and
+    /// times the kernel reported at exec). A digest looked up by path alone
+    /// is of whatever file is there now: a payload could rename an
+    /// allow-listed binary onto its own path right after exec and have its
+    /// events suppressed as that binary, so such a digest is never offered.
+    static func isSuppressed(_ match: RuleMatch, event: Event, manager: SuppressionManager) async -> Bool {
+        await manager.isSuppressed(
             match: match,
             processPath: event.process.executable,
             processSHA256: SuppressionManager.imageBoundSHA256(event.process.hashes),
