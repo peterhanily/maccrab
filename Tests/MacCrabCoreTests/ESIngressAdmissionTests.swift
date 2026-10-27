@@ -1579,9 +1579,6 @@ struct ProtectedFileLaneTests {
         #expect(Double(admitted) > shared.refill * 60, "\(kind): the storm really saturates the class: \(admitted)")
     }
 
-    /// Five processes each burst their own OPEN bucket, then keep opening their
-    /// own alert-free `.env` at 64 a second: 320 a second against an aggregate
-    /// that refills 256, so it stays pinned near zero.
     /// Five processes each burst their own bucket, then, straight after, keep
     /// opening their own alert-free file at `perSecond` a second for three
     /// seconds: five times that is more than the class's shared bucket

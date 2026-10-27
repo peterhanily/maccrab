@@ -2407,9 +2407,10 @@ public final class ESCollector: @unchecked Sendable {
     }
 
     /// Protected OPENs a worker admitted as ordinary OPENs because their
-    /// top-slice allowance was full, summed across both workers. Each was still
-    /// offered the ordinary tier, so this is a demotion, not a loss. Surfaced
-    /// as `es_protected_open_slice_demoted_total`.
+    /// top-slice allowance was full, summed across both workers. Each was
+    /// still delivered, so this is a demotion, not a loss; one the ordinary
+    /// tier refused while an OPEN flood held it is counted only as an OPEN
+    /// backpressure drop. Surfaced as `es_protected_open_slice_demoted_total`.
     public func esProtectedOpenSliceDemoted() -> UInt64 {
         contexts.reduce(UInt64(0)) { $0 &+ $1.worker.protectedOpenSliceDemoted() }
     }
@@ -3703,14 +3704,16 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// as cheap as a write loop: unbounded, it would hold the whole budget and
     /// refuse every persistence and honeyfile write instead. So the slice is
     /// shared out per process, and a protected OPEN that finds no slot is
-    /// admitted as an ordinary OPEN — never at the write family's tier.
+    /// offered the ordinary OPEN tier instead, never the write family's.
+    /// While an OPEN flood holds that tier full it is refused there, and
+    /// counted only as an OPEN backpressure drop, not as a demotion.
     private let protectedOpenPerProcessCap: Int
     /// The tail of the slice (64 slots at the production cap) that only a
     /// process holding no slot may take. Floods by processes that already
     /// hold slots cannot reach it, so a process's first protected OPEN finds
     /// a slot there above the writes unless 64 other first-time processes
-    /// each hold one at that moment; then it is admitted as an ordinary OPEN,
-    /// like any demoted one.
+    /// each hold one at that moment; then it is offered the ordinary tier
+    /// like any demoted one, and refused there while an OPEN flood holds it.
     private let protectedOpenNewcomerReserve: Int
 
     private let lock = NSLock()
@@ -3838,11 +3841,12 @@ public final class ESMessageWorker: @unchecked Sendable {
         // top-slice slot while it is in flight: at most
         // `protectedOpenPerProcessCap` per source process and `topReserve` in
         // all, and the last `protectedOpenNewcomerReserve` slots only for a
-        // process holding none. Past those bounds it is admitted as an
-        // ordinary OPEN. It must not fall back to the write family's tier: an
-        // `open()` loop would then pin in-flight at that tier's cap and refuse
-        // every write behind it, which is exactly the inversion the slice
-        // exists to prevent.
+        // process holding none. Past those bounds it is offered the ordinary
+        // OPEN tier, where an OPEN flood can refuse it (counted only as an
+        // OPEN backpressure drop). It must not fall back to the write
+        // family's tier: an `open()` loop would then pin in-flight at that
+        // tier's cap and refuse every write behind it, which is exactly the
+        // inversion the slice exists to prevent.
         var sliceHolder: pid_t?
         var demoted = false
         if protectedOpen && lineageCritical && topReserve > 0 {
@@ -4008,7 +4012,8 @@ public final class ESMessageWorker: @unchecked Sendable {
 
     /// Protected OPENs that found their top-slice allowance full and were
     /// admitted as ordinary OPENs instead. Surfaced as
-    /// `es_protected_open_slice_demoted_total`; a demotion, not a loss.
+    /// `es_protected_open_slice_demoted_total`; a demotion, not a loss. One
+    /// the ordinary tier refused is counted only as an OPEN backpressure drop.
     public func protectedOpenSliceDemoted() -> UInt64 {
         lock.lock(); defer { lock.unlock() }
         return protectedOpenSliceDemotedTotal

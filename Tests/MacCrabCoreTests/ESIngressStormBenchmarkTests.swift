@@ -494,7 +494,7 @@ struct ESIngressStormBenchmarkTests {
     }
 
     @Test("file-client worker: eight flooding processes cannot fill the top slice against a ninth process's first credential OPEN")
-    func newcomerAlwaysFindsASliceSlot() {
+    func newcomerFindsASliceSlot() {
         let cap = 4096
         let gate = DispatchSemaphore(value: 0)
         let worker = ESMessageWorker(
@@ -537,7 +537,7 @@ struct ESIngressStormBenchmarkTests {
         for _ in 0..<(cap + 2048) { gate.signal() }
         worker.shutdownAndDrain()
         #expect(sliceAfterFlood == 194, "six floods fill the slice down to its newcomer reserve; the seventh and eighth get one slot each")
-        #expect(ninthAccepted, "a process holding no slot always finds one for its first protected OPEN")
+        #expect(ninthAccepted, "a process holding no slot finds one in the newcomer reserve, which only 64 first-time processes holding slots at once could fill")
         #expect(sliceAfterNinth == 195)
         #expect(floodAccepted == 3_074)
         #expect(writeAccepted == 765, "the write family keeps every slot above the ordinary tier and the slice holders")
