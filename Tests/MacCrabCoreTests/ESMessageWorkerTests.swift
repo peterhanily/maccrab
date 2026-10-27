@@ -583,6 +583,46 @@ extension ESMessageWorkerTopReserveTests {
 }
 
 extension ESMessageWorkerTopReserveTests {
+    @Test("a protected-OPEN flood on the file client holds one top-slice slot per process and leaves the write family its tier")
+    func protectedOpenSliceIsPerProcess() {
+        let open = ES_EVENT_TYPE_NOTIFY_OPEN.rawValue
+        let gate = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: 64,
+            uptimeNanoseconds: { DispatchTime.now().uptimeNanoseconds },
+            process: { _ in gate.wait() },
+            free: { _ in }
+        )
+        func handle() -> ESMessageWorker.Handle { UnsafeRawPointer(bitPattern: 0x1000)! }
+        let split = ESCollector.WorkerTierPolicy(subscribedTypes:
+            ESCollector.fileClientTypes(subscribeFileOpen: true, subscribeIntrospection: true))
+        let tier = split.tier(eventType: open, protectedOpen: true)
+        func submitProtected(pid: pid_t) -> Bool {
+            worker.submit(handle(), lineageCritical: tier.lineageCritical, writeFamily: tier.writeFamily,
+                          protectedOpen: true, sourceProcessID: pid, eventType: open)
+        }
+        // lineageReserve 16, top slice 4, one slice slot per process: the
+        // flood holds one slot, then rides the ordinary tier to 48.
+        var flood = 0
+        for _ in 0..<64 where submitProtected(pid: 1) { flood += 1 }
+        #expect(flood == 48, "an open() loop takes one slice slot and the ordinary tier, not the write family's")
+        #expect(submitProtected(pid: 2), "another process's protected OPEN takes its own slice slot")
+        #expect(!submitProtected(pid: 2), "and no second one while the ordinary tier is full")
+        var writes = 0
+        for _ in 0..<64 where worker.submit(
+            handle(), lineageCritical: false, writeFamily: true, eventType: ES_EVENT_TYPE_NOTIFY_WRITE.rawValue
+        ) { writes += 1 }
+        #expect(writes == 11, "the write family keeps its tier above the ordinary OPENs")
+        #expect(submitProtected(pid: 3), "a third process still finds a slice slot above the writes")
+        #expect(worker.protectedOpenInFlightCount() == 3)
+        #expect(worker.protectedOpenSliceDemoted() == 64)
+        for _ in 0..<80 { gate.signal() }
+        worker.shutdownAndDrain()
+        #expect(worker.protectedOpenInFlightCount() == 0, "completion releases every slice slot")
+    }
+}
+
+extension ESMessageWorkerTopReserveTests {
     @Test("a client's subscription decides whether a protected OPEN may take the top slice")
     func tierPolicyFollowsTheSubscription() throws {
         let open = ES_EVENT_TYPE_NOTIFY_OPEN.rawValue

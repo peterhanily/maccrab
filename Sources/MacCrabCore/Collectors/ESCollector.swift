@@ -1898,6 +1898,9 @@ public final class ESCollector: @unchecked Sendable {
                 UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()),
                 lineageCritical: tier.lineageCritical,
                 writeFamily: tier.writeFamily,
+                protectedOpen: protectedOpen,
+                sourceProcessID: protectedOpen
+                    ? audit_token_to_pid(message.pointee.process.pointee.audit_token) : 0,
                 eventType: evType
             )
             if !accepted, let canary = canary { canary.noteDroppedAtHandoff(canaryNonces) }
@@ -2336,6 +2339,14 @@ public final class ESCollector: @unchecked Sendable {
     /// loss. Surfaced as `es_protected_lane_refused_total`.
     public func esProtectedLaneRefused() -> UInt64 {
         contexts.reduce(UInt64(0)) { $0 &+ $1.tracker.protectedLaneRefusedTotal() }
+    }
+
+    /// Protected OPENs a worker admitted as ordinary OPENs because their
+    /// top-slice allowance was full, summed across both workers. Each was still
+    /// offered the ordinary tier, so this is a demotion, not a loss. Surfaced
+    /// as `es_protected_open_slice_demoted_total`.
+    public func esProtectedOpenSliceDemoted() -> UInt64 {
+        contexts.reduce(UInt64(0)) { $0 &+ $1.worker.protectedOpenSliceDemoted() }
     }
 
     /// Per-event-type normalized Events offered to the collector-local stream.
@@ -3570,6 +3581,9 @@ public final class ESMessageWorker: @unchecked Sendable {
     private struct Pending {
         let handle: Handle
         let enqueuedAt: UInt64
+        /// The source process of a protected OPEN holding a top-slice slot;
+        /// nil for every other message. Released when the message completes.
+        let protectedOpenProcessID: pid_t?
     }
 
     private let queue: DispatchQueue
@@ -3590,6 +3604,14 @@ public final class ESMessageWorker: @unchecked Sendable {
     private let lineageReserve: Int
     /// The part of `lineageReserve` that only top-tier messages may use.
     private let topReserve: Int
+    /// How many protected OPENs one source process may hold in the top slice
+    /// at once. The slice exists so a write flood cannot refuse a credential
+    /// or honeyfile OPEN, but an `open()` loop on a credential-named file is
+    /// as cheap as a write loop: unbounded, it would hold the whole budget and
+    /// refuse every persistence and honeyfile write instead. So the slice is
+    /// shared out per process, and a protected OPEN that finds no slot is
+    /// admitted as an ordinary OPEN — never at the write family's tier.
+    private let protectedOpenPerProcessCap: Int
 
     private let lock = NSLock()
     private var pending: [Pending?]
@@ -3614,6 +3636,14 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// v1.21.6 (audit DET-05): per-event-type breakdown of the same drops.
     /// Guarded by the same `lock` as the aggregate.
     private var backpressureDroppedByTypeCount: [UInt32: UInt64] = [:]
+    /// Protected OPENs currently holding a top-slice slot, in all and per
+    /// source process (entries removed at zero, so the map never holds more
+    /// than `topReserve` keys). Same lock.
+    private var protectedOpenInFlight = 0
+    private var protectedOpenInFlightByProcess: [pid_t: Int] = [:]
+    /// Protected OPENs admitted as ordinary OPENs because their slice was
+    /// full. A demotion, not a loss: the message was still offered a slot.
+    private var protectedOpenSliceDemotedTotal: UInt64 = 0
 
     /// - Parameters:
     ///   - maxInFlight: in-flight cap (clamped to ≥1).
@@ -3659,6 +3689,9 @@ public final class ESMessageWorker: @unchecked Sendable {
         self.topReserve = reservesLineageSlots
             ? Swift.max(1, Swift.min(cap - 1, cap / 4) / 4)
             : 0
+        // An eighth of the top slice per process: 32 of 256 at the production
+        // cap, so eight floods from eight processes are needed to fill it.
+        self.protectedOpenPerProcessCap = Swift.max(1, self.topReserve / 8)
         self.queue = DispatchQueue(label: label, qos: .userInitiated)
         self.process = process
         self.free = free
@@ -3685,6 +3718,8 @@ public final class ESMessageWorker: @unchecked Sendable {
         _ handle: Handle,
         lineageCritical: Bool = true,
         writeFamily: Bool = false,
+        protectedOpen: Bool = false,
+        sourceProcessID: pid_t = 0,
         eventType: UInt32 = 0
     ) -> Bool {
         lock.lock()
@@ -3695,6 +3730,24 @@ public final class ESMessageWorker: @unchecked Sendable {
             free(handle)                       // drain path — free once
             return false
         }
+        // A protected OPEN given the top tier (the split file client) holds a
+        // top-slice slot while it is in flight: at most
+        // `protectedOpenPerProcessCap` per source process and `topReserve` in
+        // all. Past either bound it is admitted as an ordinary OPEN. It must
+        // not fall back to the write family's tier: an `open()` loop would
+        // then pin in-flight at that tier's cap and refuse every write behind
+        // it, which is exactly the inversion the slice exists to prevent.
+        var sliceHolder: pid_t?
+        var demoted = false
+        if protectedOpen && lineageCritical && topReserve > 0 {
+            let held = protectedOpenInFlightByProcess[sourceProcessID] ?? 0
+            if protectedOpenInFlight < topReserve && held < protectedOpenPerProcessCap {
+                sliceHolder = sourceProcessID
+            } else {
+                demoted = true
+                protectedOpenSliceDemotedTotal &+= 1
+            }
+        }
         // v1.21.5 PERF: priority-aware admission. Lineage-critical messages may
         // use the whole budget; everything else is refused `lineageReserve` slots
         // early, so a low-yield flood can never consume the last slots and evict
@@ -3703,8 +3756,8 @@ public final class ESMessageWorker: @unchecked Sendable {
         // would have refused. Defaulting to `true` keeps every existing caller
         // (and the worker's unit tests) on the previous full-budget behaviour.
         // The write family reaches into the reserve but never its top slice.
-        let admissionCap = lineageCritical ? maxInFlight
-            : writeFamily ? maxInFlight - topReserve
+        let admissionCap = (lineageCritical && !demoted) ? maxInFlight
+            : (writeFamily && !demoted) ? maxInFlight - topReserve
             : maxInFlight - lineageReserve
         if inFlight >= admissionCap {
             backpressureDroppedCount &+= 1
@@ -3726,9 +3779,14 @@ public final class ESMessageWorker: @unchecked Sendable {
         inFlight += 1
         acceptedTotal &+= 1
         inFlightHighWater = Swift.max(inFlightHighWater, inFlight)
+        if let pid = sliceHolder {
+            protectedOpenInFlight += 1
+            protectedOpenInFlightByProcess[pid, default: 0] += 1
+        }
         // The current processing item still occupies an in-flight slot, so a
         // successful admission always has room in this same-capacity ring.
-        pending[tail] = Pending(handle: handle, enqueuedAt: uptimeNanoseconds())
+        pending[tail] = Pending(handle: handle, enqueuedAt: uptimeNanoseconds(),
+                                protectedOpenProcessID: sliceHolder)
         tail = (tail + 1) % maxInFlight
         queued += 1
         if !drainScheduled {
@@ -3763,6 +3821,12 @@ public final class ESMessageWorker: @unchecked Sendable {
             let service = finishedAt &- startedAt
             lock.lock()
             inFlight -= 1
+            if let pid = item.protectedOpenProcessID {
+                protectedOpenInFlight -= 1
+                if let held = protectedOpenInFlightByProcess[pid] {
+                    protectedOpenInFlightByProcess[pid] = held > 1 ? held - 1 : nil
+                }
+            }
             completedTotal &+= 1
             queueWaitNanosecondsTotal &+= wait
             queueWaitNanosecondsMax = Swift.max(queueWaitNanosecondsMax, wait)
@@ -3831,5 +3895,19 @@ public final class ESMessageWorker: @unchecked Sendable {
     public func inFlightCount() -> Int {
         lock.lock(); defer { lock.unlock() }
         return inFlight
+    }
+
+    /// Protected OPENs that found their top-slice allowance full and were
+    /// admitted as ordinary OPENs instead. Surfaced as
+    /// `es_protected_open_slice_demoted_total`; a demotion, not a loss.
+    public func protectedOpenSliceDemoted() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return protectedOpenSliceDemotedTotal
+    }
+
+    /// Protected OPENs currently holding a top-slice slot; a test aid.
+    public func protectedOpenInFlightCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return protectedOpenInFlight
     }
 }

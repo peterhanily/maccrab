@@ -377,10 +377,15 @@ struct ESIngressStormBenchmarkTests {
 
     // MARK: 3. Worker reserve on the file client
 
+    /// The split file client's hand-off tiers, as `openClient` decides them.
+    private static let fileClientTiers = ESCollector.WorkerTierPolicy(subscribedTypes:
+        ESCollector.fileClientTypes(subscribeFileOpen: true, subscribeIntrospection: true))
+
     /// Configure a worker exactly the way the file client does, hold its queue
     /// so nothing drains, fill it with an OPEN flood, then offer write-family
-    /// messages. The property: the OPEN flood cannot consume the slots the
-    /// write family needs. Deterministic — the gate is a semaphore, not a sleep.
+    /// messages at the tier the collector gives them. The property: the OPEN
+    /// flood cannot consume the slots the write family needs. Deterministic —
+    /// the gate is a semaphore, not a sleep.
     private func writeFamilySurvivesOpenFlood(
         reservesLineageSlots: Bool,
         openIsCritical: Bool
@@ -407,8 +412,10 @@ struct ESIngressStormBenchmarkTests {
                 openAccepted += 1
             }
         }
+        let writeTier = Self.fileClientTiers.tier(eventType: Self.writeType, protectedOpen: false)
         for _ in 0..<(cap / 4) {
-            if worker.submit(handle(), lineageCritical: true, eventType: Self.writeType) {
+            if worker.submit(handle(), lineageCritical: writeTier.lineageCritical,
+                             writeFamily: writeTier.writeFamily, eventType: Self.writeType) {
                 writeAccepted += 1
             } else {
                 writeRefused += 1
@@ -427,11 +434,63 @@ struct ESIngressStormBenchmarkTests {
         // v1.22.7 file-client configuration: reserve held; an ordinary OPEN is never critical.
         let after = writeFamilySurvivesOpenFlood(reservesLineageSlots: true, openIsCritical: false)
         print("BENCH worker_reserve before(open=\(before.openAccepted) write_accepted=\(before.writeAccepted) write_refused=\(before.writeRefused)) after(open=\(after.openAccepted) write_accepted=\(after.writeAccepted) write_refused=\(after.writeRefused))")
-        #expect(after.writeRefused == 0, "write-family must never be refused because OPENs filled the budget")
-        #expect(after.writeAccepted == 1024)
-        #expect(after.openAccepted == 3072)
+        #expect(after.openAccepted == 3072, "ordinary OPENs stop at the non-reserved budget")
+        #expect(after.writeAccepted == 768, "the write family gets every reserved slot below the top slice")
+        #expect(after.writeRefused == 256, "only the top slice, held for protected OPENs, is beyond the write family")
         // The base configuration is the regression this test exists to catch.
         #expect(before.writeRefused == 1024)
+    }
+
+    @Test("file-client worker: a protected-OPEN flood from one process cannot take the write family's slots or another process's credential OPEN")
+    func protectedOpenFloodCannotStarveWrites() {
+        let cap = 4096
+        let gate = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: cap, label: "bench.file-client.protected-flood", reservesLineageSlots: true,
+            process: { _ in gate.wait() }, free: { _ in }
+        )
+        var token = 1
+        func handle() -> UnsafeRawPointer {
+            token += 1
+            return UnsafeRawPointer(bitPattern: token)!
+        }
+        // Exactly the collector's hand-off for an OPEN whose raw path matched
+        // the protected markers, from the given source process.
+        func submitProtectedOpen(pid: pid_t) -> Bool {
+            let tier = Self.fileClientTiers.tier(eventType: Self.openType, protectedOpen: true)
+            return worker.submit(
+                handle(), lineageCritical: tier.lineageCritical, writeFamily: tier.writeFamily,
+                protectedOpen: true, sourceProcessID: pid, eventType: Self.openType
+            )
+        }
+        var floodAccepted = 0
+        for _ in 0..<cap where submitProtectedOpen(pid: 7) { floodAccepted += 1 }
+        let writeTier = Self.fileClientTiers.tier(eventType: Self.writeType, protectedOpen: false)
+        var writeAccepted = 0
+        var writeRefused = 0
+        for _ in 0..<(cap / 4) {
+            if worker.submit(handle(), lineageCritical: writeTier.lineageCritical,
+                             writeFamily: writeTier.writeFamily, eventType: Self.writeType) {
+                writeAccepted += 1
+            } else {
+                writeRefused += 1
+            }
+        }
+        let victimAccepted = submitProtectedOpen(pid: 9)
+        let demoted = worker.protectedOpenSliceDemoted()
+        let dropped = worker.backpressureDroppedByEventType()
+        let sliceInFlight = worker.protectedOpenInFlightCount()
+        print("BENCH worker_protected_open_flood flood_accepted=\(floodAccepted)/\(cap) write_accepted=\(writeAccepted) write_refused=\(writeRefused) victim_credential_open=\(victimAccepted) slice_in_flight=\(sliceInFlight) demoted=\(demoted) dropped_by_type=\(dropped)")
+        for _ in 0..<(cap + 2048) { gate.signal() }
+        worker.shutdownAndDrain()
+        #expect(floodAccepted == 3072, "past its slice allowance an open() loop is admitted as ordinary OPENs, no further")
+        #expect(writeAccepted == 768, "the write family keeps every slot above the ordinary OPEN tier")
+        #expect(writeRefused == 256, "only the top slice is beyond the write family")
+        #expect(victimAccepted, "another process's credential OPEN is admitted with the flood and the writes in flight")
+        #expect(sliceInFlight == 33, "the flood holds its per-process allowance; the victim holds one slot")
+        #expect(demoted == UInt64(cap) - 32)
+        #expect(dropped[Self.openType] == 1024, "the flood itself is what gets refused, and it is counted")
+        #expect(worker.protectedOpenInFlightCount() == 0, "completed slice holders release their slots")
     }
 
     @Test("file-client worker: a credential or agent-content OPEN is accepted with the ordinary-OPEN slots full")
