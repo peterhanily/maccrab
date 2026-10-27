@@ -209,7 +209,12 @@ struct FileHasherIdentityTests {
         #expect(source.contains("let volumeKnown = fstatfs(descriptor, &volume) == 0"))
         #expect(source.contains("if volumeKnown, volume.f_flags & UInt32(MNT_LOCAL) == 0 {"))
         // Bindability is asked of the same descriptor, and an unknown volume is not bindable.
-        #expect(source.contains("let imageBindable = volumeKnown && Self.fileSystemTypeName(of: volume) == \"apfs\""))
+        #expect(source.contains("let imageBindable = volumeKnown\n            && Self.volumeBindsImage(fileSystemTypeName: Self.fileSystemTypeName(of: volume), owner: volume.f_owner)"))
+        // A cached or shared digest is bindable only while its file's volume still binds,
+        // asked in production of the file's own descriptor.
+        #expect(source.contains("imageBindable: await stillBindable(cached.imageBindable, path: path, key: key))"))
+        #expect(source.contains("imageBindable: await stillBindable(imageBindable, path: path, key: key))"))
+        #expect(source.contains("FileHasher.currentVolumeBindsImage(path: $0, matching: $1)"))
         #expect(!source.contains("lstat("), "a path probe that follows a parent symlink")
         #expect(!source.contains("resourceValues("), "a path-based volume lookup on the actor")
         // The key, which every call takes and a cache hit needs nothing more
@@ -402,9 +407,21 @@ struct FileHasherIdentityTests {
     /// as APFS or not, optionally holding the read until `gate` is signalled.
     /// With `cacheResults` false a later miss can only join the read in
     /// flight or read again, never hit the cache.
+    /// `currentVolume` stands in for the question asked before a cached or
+    /// shared digest is handed out as bindable (nil asks the file's real
+    /// volume); `joins` counts calls that joined the read in flight.
     private func volumeSeam(apfs: Bool, cacheResults: Bool = true,
-                            gate: DispatchSemaphore? = nil, calls: Counter? = nil) -> FileHasher {
-        FileHasher(capacity: 16, maxFileBytes: 1 << 20) { path, key in
+                            gate: DispatchSemaphore? = nil, calls: Counter? = nil,
+                            currentVolume: Bool? = nil, volumeAsks: Counter? = nil,
+                            joins: Counter? = nil) -> FileHasher {
+        var observer: (@Sendable () -> Void)? = nil
+        if let joins { observer = { joins.increment() } }
+        return FileHasher(capacity: 16, maxFileBytes: 1 << 20,
+                          currentVolumeBinds: { path, key in
+                              volumeAsks?.increment()
+                              return currentVolume ?? FileHasher.currentVolumeBindsImage(path: path, matching: key)
+                          },
+                          joinObserverForTesting: observer) { path, key in
             calls?.increment()
             if let gate { _ = gate.wait(timeout: .now() + 10) }
             guard case .digest(let digest, let inPlace, _) = FileHasher.hashAndRecheck(path: path, matching: key) else {
@@ -447,7 +464,7 @@ struct FileHasherIdentityTests {
         }
     }
 
-    @Test("a real read reports whether its own descriptor's volume is APFS")
+    @Test("a real read reports whether its own descriptor's volume binds, and a cache hit asks again")
     func realReadReportsItsVolume() async throws {
         let base = try directory()
         defer { try? FileManager.default.removeItem(atPath: base) }
@@ -455,15 +472,111 @@ struct FileHasherIdentityTests {
         try Data(repeating: 0x41, count: 512).write(to: URL(fileURLWithPath: path))
         var volume = statfs()
         #expect(statfs(base, &volume) == 0)
-        let onAPFS = FileHasher.fileSystemTypeName(of: volume) == "apfs"
-        #expect(onAPFS, "the temporary directory is on APFS here, so the bindable path is exercised")
+        let binds = FileHasher.volumeBindsImage(
+            fileSystemTypeName: FileHasher.fileSystemTypeName(of: volume), owner: volume.f_owner)
+        #expect(binds, "the temporary directory is on APFS the system mounted here, so the bindable path is exercised")
         let key = try #require(FileHasher.cacheKey(path: path))
         guard case .digest(_, _, let bindable) = FileHasher.hashFile(path: path, matching: key) else {
             Issue.record("a local file was not hashed")
             return
         }
-        #expect(bindable == onAPFS)
-        #expect(await FileHasher().hashWithIdentity(path: path)?.imageBindable == onAPFS)
+        #expect(bindable == binds)
+        #expect(FileHasher.currentVolumeBindsImage(path: path, matching: key) == binds)
+        let hasher = FileHasher()
+        #expect(await hasher.hashWithIdentity(path: path)?.imageBindable == binds)
+        #expect(await hasher.hashWithIdentity(path: path)?.imageBindable == binds, "a hit asks the file's real volume")
+        #expect(await hasher.stats().hits == 1)
+    }
+
+    @Test("only APFS the system mounted may bind a digest to an image")
+    func bindingVolumeTable() {
+        let cases: [(type: String?, owner: uid_t?, binds: Bool)] = [
+            ("apfs", 0, true),
+            ("apfs", 501, false),
+            ("hfs", 0, false), ("msdos", 0, false), ("exfat", 0, false), ("nullfs", 0, false),
+            (nil, 0, false), ("apfs", nil, false), (nil, nil, false),
+        ]
+        for row in cases {
+            #expect(FileHasher.volumeBindsImage(fileSystemTypeName: row.type, owner: row.owner) == row.binds,
+                    "\(row.type ?? "unknown volume") owned by \(row.owner.map { String($0) } ?? "unknown")")
+        }
+    }
+
+    @Test("the current-volume question is asked of the key's own file")
+    func currentVolumeQuestionNeedsTheKeyedFile() throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/tool"
+        try Data(repeating: 0x41, count: 512).write(to: URL(fileURLWithPath: path))
+        let key = try #require(FileHasher.cacheKey(path: path))
+        #expect(FileHasher.currentVolumeBindsImage(path: path, matching: key),
+                "the temporary directory is on APFS the system mounted here")
+        let other = base + "/other"
+        try Data(repeating: 0x42, count: 512).write(to: URL(fileURLWithPath: other))
+        #expect(rename(other, path) == 0)
+        #expect(!FileHasher.currentVolumeBindsImage(path: path, matching: key), "another file now holds the path")
+        #expect(!FileHasher.currentVolumeBindsImage(path: base + "/missing", matching: key))
+    }
+
+    /// Waits until `condition` holds, recording an issue after `seconds`.
+    private func waitFor(_ seconds: Int = 10, _ condition: @escaping () -> Bool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(seconds))
+        while !condition() {
+            guard clock.now < deadline else {
+                Issue.record("timed out waiting for the condition")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    @Test("a cached or shared bindable digest is handed out unbound once its file's volume no longer binds",
+          .timeLimit(.minutes(1)))
+    func hitAndJoinAskTheVolumeAgain() async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/tool"
+        try Data(repeating: 0x41, count: 4096).write(to: URL(fileURLWithPath: path))
+        let digest = try #require(FileHasher.computeSHA256(path: path))
+
+        // The read was on APFS the system mounted; since then the volume was
+        // detached and one a user mounted attached on its device number,
+        // which the current-volume question reports.
+        let asks = Counter()
+        let hasher = volumeSeam(apfs: true, currentVolume: false, volumeAsks: asks)
+        let miss = try #require(await hasher.hashWithIdentity(path: path))
+        #expect(miss.imageBindable, "a miss decides from its own descriptor")
+        #expect(asks.value == 0)
+        let hit = try #require(await hasher.hashWithIdentity(path: path))
+        #expect(await hasher.stats().hits == 1)
+        #expect(hit.sha256 == digest, "the digest is still reported")
+        #expect(hit.identity == miss.identity)
+        #expect(!hit.imageBindable, "a cached digest is unbound once its file's volume no longer binds")
+        #expect(asks.value == 1)
+        // While the volume still binds, the hit keeps the binding.
+        let steady = volumeSeam(apfs: true, currentVolume: true)
+        _ = await steady.hashWithIdentity(path: path)
+        #expect(await steady.hashWithIdentity(path: path)?.imageBindable == true)
+
+        // A join: the second call waits on the read the first started, and
+        // the read is released only once the join is waiting.
+        let gate = DispatchSemaphore(value: 0)
+        let calls = Counter()
+        let joins = Counter()
+        let joinAsks = Counter()
+        let held = volumeSeam(apfs: true, cacheResults: false, gate: gate, calls: calls,
+                              currentVolume: false, volumeAsks: joinAsks, joins: joins)
+        async let first = held.hashWithIdentity(path: path)
+        async let second = held.hashWithIdentity(path: path)
+        try await waitFor { joins.value == 1 }
+        gate.signal()
+        let results = await [first, second].compactMap { $0 }
+        #expect(results.count == 2)
+        #expect(calls.value == 1, "the second call joined the read in flight")
+        #expect(results.allSatisfy { $0.sha256 == digest })
+        #expect(results.filter(\.imageBindable).count == 1, "only the read's own result is bound")
+        #expect(joinAsks.value == 1, "the join asked about the file's current volume")
     }
 
     @Test("a volume's type name is read within its fixed field")

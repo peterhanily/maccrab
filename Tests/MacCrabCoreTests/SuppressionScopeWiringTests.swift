@@ -305,9 +305,19 @@ struct SuppressionScopeWiringTests {
     /// as APFS or not, optionally holding the read until `gate` is signalled.
     /// With `cacheResults` false a later miss can only join the read in
     /// flight or read again, never hit the cache.
+    /// `currentVolume` stands in for the question asked before a cached or
+    /// shared digest is handed out as bindable (nil asks the file's real
+    /// volume); `joins` counts hashes that joined the read in flight.
     private static func volumeSeam(apfs: Bool, cacheResults: Bool = true,
-                                   gate: DispatchSemaphore? = nil, calls: Calls? = nil) -> FileHasher {
-        FileHasher(capacity: 16, maxFileBytes: 1 << 20) { path, key in
+                                   gate: DispatchSemaphore? = nil, calls: Calls? = nil,
+                                   currentVolume: Bool? = nil, joins: Calls? = nil) -> FileHasher {
+        var observer: (@Sendable () -> Void)? = nil
+        if let joins { observer = { joins.increment() } }
+        return FileHasher(capacity: 16, maxFileBytes: 1 << 20,
+                          currentVolumeBinds: { path, key in
+                              currentVolume ?? FileHasher.currentVolumeBindsImage(path: path, matching: key)
+                          },
+                          joinObserverForTesting: observer) { path, key in
             calls?.increment()
             if let gate { _ = gate.wait(timeout: .now() + 10) }
             guard case .digest(let digest, let inPlace, _) = FileHasher.hashAndRecheck(path: path, matching: key) else {
@@ -370,6 +380,72 @@ struct SuppressionScopeWiringTests {
             #expect((done.process.hashes?.imageBound == true) == apfs)
             #expect(await DaemonState.isSuppressed(match, event: done, manager: mgr) == apfs)
         }
+    }
+
+    /// Waits until `condition` holds, recording an issue after `seconds`.
+    private func waitFor(_ seconds: Int = 10, _ condition: @escaping () -> Bool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(seconds))
+        while !condition() {
+            guard clock.now < deadline else {
+                Issue.record("timed out waiting for the condition")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    @Test("a cached or shared digest whose file's volume no longer binds never reaches the hash scope",
+          .timeLimit(.minutes(1)))
+    func remountedVolumeDigestIsUnbound() async throws {
+        let (directory, path, image) = try imageFixture()
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let digest = try #require(FileHasher.computeSHA256(path: path))
+        let (mgr, store) = try manager()
+        defer { try? FileManager.default.removeItem(atPath: store) }
+        _ = await mgr.add(Suppression(scope: .ruleHash(ruleId: "rule.x", sha256: digest),
+                                      source: .cli, reason: "test"))
+
+        // The first exec's read was on APFS the system mounted, so it binds.
+        // By the second exec that volume was detached and one a user mounted
+        // attached on its device number, with the file's identity intact:
+        // the cache hit must not bind, and the entry must not apply.
+        let hasher = Self.volumeSeam(apfs: true, currentVolume: false)
+        let first = try await hashedExec(path: path, image: image, fileHasher: hasher)
+        #expect(first.process.hashes?.imageBound == true)
+        #expect(await DaemonState.isSuppressed(match, event: first, manager: mgr))
+        let second = try await hashedExec(path: path, image: image, fileHasher: hasher)
+        #expect(await hasher.stats().hits == 1)
+        #expect(second.process.hashes?.sha256 == digest, "the digest is still reported")
+        #expect(second.process.hashes?.imageBound == false)
+        #expect(!(await DaemonState.isSuppressed(match, event: second, manager: mgr)))
+
+        // Two processes exec'ing the image at once: the hash that joins the
+        // read in flight asks about the volume again, and is not bound.
+        let gate = DispatchSemaphore(value: 0)
+        let calls = Calls()
+        let joins = Calls()
+        let held = Self.volumeSeam(apfs: true, cacheResults: false, gate: gate, calls: calls,
+                                   currentVolume: false, joins: joins)
+        let plane = HeavyEnrichmentPlane(
+            configuration: .init(maximumConcurrentWorkers: 2, operationTimeoutSeconds: 30),
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting())
+        let enricher = EventEnricher(processHasher: ProcessHasher(fileHasher: held), heavyEnrichmentPlane: plane)
+        let started = Date(timeIntervalSince1970: 1_750_000_000)
+        let one = await enricher.enrich(execEvent(path: path, pid: 999_993, started: started, image: image))
+        let two = await enricher.enrich(execEvent(path: path, pid: 999_994, started: started, image: image))
+        try await waitFor { joins.value == 1 }
+        gate.signal()
+        let hashed = try await hashPatches(for: [one, two], from: enricher)
+        _ = await enricher.shutdownHeavyEnrichment()
+        #expect(calls.value == 1, "the second hash joined the read in flight")
+        var suppressed = 0
+        for event in [one, two] {
+            let done = try #require(hashed[event.id])
+            #expect(done.process.hashes?.sha256 == digest)
+            if await DaemonState.isSuppressed(match, event: done, manager: mgr) { suppressed += 1 }
+        }
+        #expect(suppressed == 1, "only the exec whose own read bound the digest is suppressed")
     }
 
     @Test("two execs of one path by one process are hashed and bound per image")
