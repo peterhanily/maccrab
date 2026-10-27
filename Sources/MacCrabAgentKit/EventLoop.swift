@@ -308,7 +308,7 @@ enum EventLoop {
             guard let signature, let signingId = signature.signingId,
                   identifiers.contains(signingId) else { return false }
             return process.isPlatformBinary
-                || (signature.teamId == CredentialFence.appleDeveloperToolsTeamId && signature.signerType == .apple)
+                || (signature.attestedTeamId == CredentialFence.appleDeveloperToolsTeamId && signature.signerType == .apple)
         }
         if credentialFenceExemptMacCrabTools.contains(subject) {
             return NoiseFilter.isMacCrabProcess(event: event, developmentEngine: developmentEngine)
@@ -348,7 +348,8 @@ enum EventLoop {
                 CredentialFence.AccessorIdentity(
                     isPlatformBinary: process.isPlatformBinary,
                     teamId: $0.teamId,
-                    signingId: $0.signingId
+                    signingId: $0.signingId,
+                    isAdHoc: $0.isAdHocFlagged
                 )
             }
         )

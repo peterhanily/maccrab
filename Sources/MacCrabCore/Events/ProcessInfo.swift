@@ -297,6 +297,21 @@ public struct CodeSignatureInfo: Codable, Sendable, Hashable {
         self.entitlements = entitlements
     }
 
+    /// True when the signature attests nothing about who signed it: CS_ADHOC
+    /// in `flags`, an ad-hoc verdict from the collector or from Security, or
+    /// the `.adHoc` signer. Its team and identifier are the author's choice.
+    public var isAdHocFlagged: Bool {
+        flags & SignerType.csAdhoc != 0 || isAdhocSigned == true || signerType == .adHoc
+    }
+
+    /// The team a certificate chain attests, or nil. An ad-hoc signature or
+    /// an unsigned binary names no team worth a decision, whatever string it
+    /// carries, so every team-based exemption reads this and never `teamId`.
+    public var attestedTeamId: String? {
+        guard let teamId, !teamId.isEmpty, !isAdHocFlagged, signerType != .unsigned else { return nil }
+        return teamId
+    }
+
     /// Return a copy with a corrected `signerType`, preserving every other
     /// field. Used by EventEnricher's v1.17.2 anti-spoof re-verification: a
     /// collector-side `.apple` classification derived from the

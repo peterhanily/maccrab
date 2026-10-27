@@ -381,9 +381,13 @@ public enum NoiseFilter {
     /// fire, so the gate sees it when those heuristics fire.
     public static func isTrustedSigner(event: Event) -> Bool {
         guard let sig = event.process.codeSignature else { return false }
-        // First-party (MacCrab) binaries are self-trusted by team id even when
-        // ad-hoc-signed (dev builds) — SelfDefense covers first-party tamper.
-        if sig.teamId == macCrabTeamId { return true }
+        // First-party (MacCrab) binaries are self-trusted by their attested
+        // team id — SelfDefense covers first-party tamper. An ad-hoc signature
+        // names whatever team its author chose and attests none.
+        if sig.attestedTeamId == macCrabTeamId,
+           sig.signerType == .devId || sig.signerType == .appStore {
+            return true
+        }
         // v1.19 (S1-T3): a third-party signer only earns trust-to-downgrade-a-
         // critical when it is a NOTARIZED Developer-ID binary that is NOT ad-hoc.
         // `isNotarized` is derived from SecStaticCodeCheckValidity against the
@@ -391,8 +395,9 @@ public enum NoiseFilter {
         // — so a REVOKED Developer-ID cert (the AMOS/Banshee post-takedown vector)
         // yields isNotarized == false and is NOT trusted here. (And the revoked-
         // cert event itself fires must-fire via developer_cert_revoked.) Bare
-        // valid-DevID-without-notarization no longer suffices.
-        if sig.signerType == .devId && sig.isNotarized && sig.isAdhocSigned != true {
+        // valid-DevID-without-notarization no longer suffices, and neither does
+        // a notarized claim on a code directory the kernel flags CS_ADHOC.
+        if sig.signerType == .devId && sig.isNotarized && !sig.isAdHocFlagged {
             return true
         }
         return false
@@ -413,7 +418,8 @@ public enum NoiseFilter {
     /// (app, sysext, legacy daemon, CLI, MCP server).
     ///
     /// Identity is MacCrab's code-signing team, which the kernel attests for
-    /// ES events. A name or path is forgeable: copying a payload to
+    /// ES events and which only a certificate chain carries: an ad-hoc code
+    /// directory naming the team is not it. A name or path is forgeable: copying a payload to
     /// `~/maccrabd`, or into a user-writable /Applications/MacCrab.app,
     /// silenced every rule for that process, because Gate 4a drops all
     /// severities. Development builds are ad-hoc signed without a team, so
@@ -423,7 +429,7 @@ public enum NoiseFilter {
         developmentEngine: Bool = engineIsDevelopmentBuild
     ) -> Bool {
         if let signature = event.process.codeSignature,
-           signature.teamId == macCrabTeamId,
+           signature.attestedTeamId == macCrabTeamId,
            signature.signerType == .devId || signature.signerType == .appStore {
             return true
         }

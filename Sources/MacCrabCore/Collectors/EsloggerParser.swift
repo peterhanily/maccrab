@@ -170,7 +170,7 @@ public enum EsloggerParser {
 
         let codeSignature = CodeSignatureInfo(
             signerType: signerType,
-            teamId: teamId.isEmpty ? nil : teamId,
+            teamId: teamId.isEmpty || signerType == .adHoc ? nil : teamId,
             signingId: signingId.isEmpty ? nil : signingId,
             flags: flags
         )

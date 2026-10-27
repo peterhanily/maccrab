@@ -119,9 +119,11 @@ func esProcessInfo(from f: ESProcessFields, args: [String] = [], commandLine: St
     // isNotarized / isAdhocSigned / issuerChain / certHashes are left nil
     // here — EventEnricher's NotarizationChecker backfills them via a cached
     // Security query. SignerType (populated here) is the reliable trust gate.
+    // An ad-hoc code directory names whatever team its author chose, so the
+    // event carries a team only when a certificate chain attests it.
     let codeSignature = CodeSignatureInfo(
         signerType: signerType,
-        teamId: f.teamId.isEmpty ? nil : f.teamId,
+        teamId: f.teamId.isEmpty || signerType == .adHoc ? nil : f.teamId,
         signingId: f.signingId.isEmpty ? nil : f.signingId,
         flags: f.codesigningFlags
     )

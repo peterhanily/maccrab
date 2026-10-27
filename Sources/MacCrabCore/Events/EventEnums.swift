@@ -91,9 +91,13 @@ public enum SignerType: String, Codable, Sendable, Hashable, CaseIterable {
     case adHoc
     case unsigned
 
-    /// CS_VALID from <sys/codesign.h> — the only signing flag this
-    /// classification needs. Not exposed to Swift, so redeclared here.
+    /// CS_VALID from <sys/codesign.h>. Not exposed to Swift, so redeclared here.
     private static let csValid: UInt32 = 0x00000001
+
+    /// CS_ADHOC from <sys/codesign.h>: the signature has no certificate
+    /// chain, so the team and identifier in its code directory are whatever
+    /// the author wrote there. The kernel reports them all the same.
+    public static let csAdhoc: UInt32 = 0x00000002
 
     /// Classify a process's signer from the kernel-attested code-signing
     /// signals. Shared by the Endpoint Security collector (`ESHelpers`) and
@@ -119,7 +123,10 @@ public enum SignerType: String, Codable, Sendable, Hashable, CaseIterable {
     /// a non-anchored binary to its real signer. The identifier check is also
     /// gated on a non-empty team_id so an AD-HOC binary (empty team_id) can
     /// never use it — that gate is the v1.17.1 hardening (a brief hoist had let
-    /// ad-hoc `com.apple.*` binaries reach `.apple`).
+    /// ad-hoc `com.apple.*` binaries reach `.apple`). An ad-hoc code directory
+    /// can also NAME a team, so CS_ADHOC is read before any team is: such a
+    /// signature is `.adHoc` whatever team or identifier it carries, and every
+    /// team-based exemption downstream reads `CodeSignatureInfo.attestedTeamId`.
     public static func classify(
         codesigningFlags: UInt32,
         teamId: String,
@@ -128,6 +135,7 @@ public enum SignerType: String, Codable, Sendable, Hashable, CaseIterable {
     ) -> SignerType {
         guard codesigningFlags & csValid != 0 else { return .unsigned }
         if isPlatformBinary { return .apple }
+        if codesigningFlags & csAdhoc != 0 { return .adHoc }
         if !teamId.isEmpty {
             if signingId.hasPrefix("com.apple.") { return .apple }
             return .devId
