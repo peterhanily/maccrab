@@ -392,7 +392,9 @@ public actor EventEnricher {
     /// Apple verdict confirms only an Apple claim. A Developer ID or App
     /// Store verdict on an Apple claim is the downgrade Security found and is
     /// published as found: Xcode from the App Store names itself com.apple.*
-    /// and is App Store signed. Any other trusted verdict leaves the claim
+    /// and is App Store signed. A Developer ID one loses its notarization,
+    /// which would otherwise make a notarized binary naming itself com.apple.*
+    /// a trusted signer. Any other trusted verdict leaves the claim
     /// unverified, carried as the collector carries an ad-hoc signature: no
     /// team, its identifier and the kernel's flags. A producer that reported
     /// no signature keeps none while the running image is unknown, and reads
@@ -417,7 +419,15 @@ public actor EventEnricher {
         guard hasProcess else { return found }
         let bound = kernelCdhash.map { verdict.cdhashes.contains($0) } ?? false
         let raisesClaim = found.signerType == .apple && claim.map { $0.signerType != .apple } == true
-        if bound, !raisesClaim { return found }
+        if bound, !raisesClaim {
+            guard found.signerType == .devId, claim?.signerType == .apple, found.isNotarized else { return found }
+            return CodeSignatureInfo(
+                signerType: found.signerType, teamId: found.teamId, signingId: found.signingId,
+                authorities: found.authorities, flags: found.flags, isNotarized: false,
+                issuerChain: found.issuerChain, certHashes: found.certHashes,
+                isAdhocSigned: found.isAdhocSigned, entitlements: found.entitlements,
+                kernelCdhash: kernelCdhash)
+        }
         if let claim {
             return CodeSignatureInfo(
                 signerType: .adHoc, signingId: claim.signingId, flags: claim.flags, kernelCdhash: kernelCdhash)

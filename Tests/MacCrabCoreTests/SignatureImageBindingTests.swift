@@ -295,6 +295,26 @@ struct SignatureImageBindingTests {
         _ = await store.shutdownHeavyEnrichment()
     }
 
+    @Test("a Developer ID verdict on an Apple claim keeps its class and team but not its notarization")
+    func developerIdOnAppleClaimIsNotTrusted() async throws {
+        let fixture = try Self.fixture(named: "helper")
+        defer { try? FileManager.default.removeItem(atPath: fixture.root) }
+        // A notarized Developer ID binary that names itself com.apple.*: the
+        // kernel classes the claim Apple, and Security finds Developer ID.
+        let team = "ZZZZZ99999"
+        let enricher = Self.enricher(Self.verdict(
+            .devId, team: team, signingId: "com.apple.helper",
+            authorities: Self.chain("Developer ID Application: Example (\(team))"), cdhashes: [Self.imageX]))
+        let outcome = try #require(await Self.published(enricher, Self.event(
+            fixture.path, claim: Self.claim(.apple, team: team, signingId: "com.apple.helper",
+                                            kernelCdhash: Self.imageX))))
+        #expect(outcome.signature?.signerType == .devId)
+        #expect(outcome.signature?.attestedTeamId == team)
+        #expect(outcome.signature?.isNotarized == false)
+        #expect(!NoiseFilter.isTrustedSigner(event: outcome.event))
+        _ = await enricher.shutdownHeavyEnrichment()
+    }
+
     @Test("a verdict that grants nothing needs no binding")
     func untrustedVerdictNeedsNoBinding() async throws {
         let fixture = try Self.fixture(named: "maccrabd")
