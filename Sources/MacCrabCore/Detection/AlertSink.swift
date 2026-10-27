@@ -329,7 +329,10 @@ public actor AlertSink {
         // own profile: a VS Code or Slack helper reading Chrome's Login Data
         // is the signed-stealer pattern, not sync. File-less alerts (an
         // own-store read followed by a sync upload) keep the down-weight.
-        if alert.severity > .low, let p = alert.processPath,
+        // A must-fire alert keeps its severity: a curated graph rule or a
+        // rule declared `suppressible: false` is not browser sync, and an
+        // agent bundled as an Electron app runs under these same prefixes.
+        if !mustFire, alert.severity > .low, let p = alert.processPath,
            NoiseFilter.isTrustedBrowserHelper(path: p),
            filePath.map({ NoiseFilter.isBrowserReadingOwnProfile(processPath: p, filePath: $0) }) ?? true {
             let blob = "\(alert.ruleTitle) \(alert.description ?? "")".lowercased()

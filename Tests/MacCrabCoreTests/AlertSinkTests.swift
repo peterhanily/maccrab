@@ -798,6 +798,36 @@ struct AlertSinkRecalibrationTests {
         #expect(eventLoop.contains("mitreTactics: match.tactics.isEmpty ? nil : match.tactics.joined(separator: \",\")"))
     }
 
+    @Test("a must-fire alert from a trusted browser or agent bundle keeps its severity")
+    func mustFireSurvivesTheBrowserStep() async throws {
+        // An agent bundled as an Electron app runs under the trusted-browser
+        // prefixes, and the lethal-trifecta graph rule carries a credential
+        // tactic, so the browser step took it for credential sync.
+        let cursor = "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin)"
+        func stored(mustFire: Bool) async throws -> Severity? {
+            let tempDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("maccrab-recal-browser-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+            let store = try AlertStore(directory: tempDir.path)
+            let sink = AlertSink(alertStore: store, deduplicator: AlertDeduplicator(suppressionWindow: 60))
+            let event = makeEvent(category: .network, type: .connection, action: "connect",
+                                  processName: "Cursor Helper (Plugin)", processPath: cursor,
+                                  commandLine: cursor, pid: 4244)
+            let a = alert(
+                ruleId: "maccrab_ai_agent_lethal_trifecta", ruleTitle: "AI agent lethal trifecta",
+                severity: .critical, processPath: cursor,
+                mitreTactics: "attack.execution,attack.credential_access,attack.exfiltration"
+            )
+            _ = try await sink.submit(alert: a, event: event, mustFire: mustFire)
+            return try await store.alerts(forEventId: a.eventId).first?.severity
+        }
+        #expect(try await stored(mustFire: true) == .critical)
+        // A suppressible alert of the same shape is still the step's
+        // credential-sync class.
+        #expect(try await stored(mustFire: false) == .low)
+    }
+
     @Test("a must-fire rule match keeps its severity through the engine batch, a suppressible one does not")
     func mustFireMatchSurvivesTheEngineBatch() async throws {
         let tempDir = FileManager.default.temporaryDirectory
