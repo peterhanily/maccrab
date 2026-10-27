@@ -588,70 +588,139 @@ final class PerProcessLaneBudgets {
 /// keeps only a fatal signal aimed at MacCrab or at a security tool, but one
 /// process can send that signal in a loop, or name a decoy after a security
 /// tool and signal it, and every kept message rides the lane that carries
-/// exec/fork/exit. Two bounds.
+/// exec/fork/exit.
 ///
-/// Each (source pid, target pid) pair gets a small bucket. A tracked pair is
-/// probed before any path is decoded; an untracked one is decoded first and
-/// enters the table only if its target proved relevant, so the build's
-/// fatal signals at ordinary processes never fill it. When the table is full
-/// of live pairs a new pair is refused, so cycling through sources or
-/// decoys cannot buy fresh budgets; the refusals are counted as
-/// `es_signal_pair_refused_total`.
+/// Each (source pid, target pid) pair gets a small bucket (8, then 2 a
+/// second). A tracked pair is probed before any path is decoded; an untracked
+/// one is decoded first and enters the table only if its target proved
+/// relevant, so the build's fatal signals at ordinary processes never fill
+/// it. A pair's first signal is kept. Its repeats also draw on a repeat
+/// budget (64, then 16 a second) chosen by target: the engine's own; one per
+/// executable identity (device and inode, from the stat ES reports) for a
+/// tool whose executable is root-owned and singly linked at a canonical
+/// path; and one decoy budget that every other target shares. A kill loop at
+/// decoys therefore spends neither the engine's budget nor a real tool's,
+/// and running more copies of one tool's binary buys no more budget.
 ///
-/// A pair's repeats then draw on a shared bucket: the target's own for the
-/// engine and for a tool whose executable is root-owned at a canonical path
-/// (read from the stat ES reports, with no syscall on the callback), and one
-/// decoy bucket that every other target shares, so a kill loop at decoys
-/// spends neither the engine's budget nor a real tool's. A pair's first
-/// signal bypasses it, so every distinct source keeps its first signal at a
-/// target whatever the others did. Kept signals are therefore bounded by the
-/// pair table's first sightings per idle window plus the shared buckets,
-/// whatever the attacker's process count. Locked: the ES callback may run on
-/// more than one thread across clients.
+/// A pair table full of live pairs fails closed for decoys: a new pair at a
+/// decoy is refused, so cycling through sources or decoys cannot buy fresh
+/// first signals. A new pair at the engine or at a canonical tool is not
+/// tracked either, but its signal is kept if that target's repeat budget
+/// admits it, so a table held full by decoy pairs cannot hide a genuine kill
+/// of either. Refusals are counted apart: a tracked pair out of tokens as
+/// `es_signal_pair_refused_total`, a signal whose new pair the full table
+/// could not take as `es_signal_pair_table_full_total` (kept or not), and a
+/// repeat budget's refusal as `es_signal_aggregate_refused_total`.
+///
+/// Over any T seconds:
+///
+///     kept ≤ P × (1 + T / W) + (2 + I) × (64 + 16 × T)
+///
+/// where P is the tracked pairs (1,024), W the pair idle window (10 s), and I
+/// the distinct canonical tool identities signalled. I cannot grow without
+/// root: each identity needs a root-owned, singly linked executable at a
+/// canonical path, named after a security tool. Locked: the ES callback may
+/// run on more than one thread across clients.
 final class SignalRateLimiter: @unchecked Sendable {
     struct Pair: Hashable {
         let source: pid_t
         let target: pid_t
     }
 
+    /// What ES reports about a signal target's executable file, read off the
+    /// message with no syscall.
+    struct ExecutableStat: Equatable {
+        let owner: uid_t
+        let links: nlink_t
+        let device: dev_t
+        let inode: ino_t
+
+        init(owner: uid_t, links: nlink_t, device: dev_t, inode: ino_t) {
+            self.owner = owner
+            self.links = links
+            self.device = device
+            self.inode = inode
+        }
+
+        init(_ value: Darwin.stat) {
+            self.init(owner: value.st_uid, links: value.st_nlink, device: value.st_dev, inode: value.st_ino)
+        }
+    }
+
+    /// The repeat budget a relevant target draws on.
+    enum RepeatBudget: Hashable {
+        case engine
+        /// A canonical tool, by the identity of its executable file.
+        case tool(device: dev_t, inode: ino_t)
+        case decoy
+    }
+
+    /// What became of a pair the table did not track yet.
+    enum PairVerdict: Equatable {
+        /// The pair entered the table: its first signal.
+        case first
+        /// Another thread inserted the pair first: a repeat.
+        case repeated
+        /// The pair's bucket had no token left.
+        case bucketEmpty
+        /// The table, full of live pairs, could not take the pair.
+        case tableFull
+    }
+
+    private struct ToolIdentity: Hashable {
+        let device: dev_t
+        let inode: ino_t
+    }
+
     private let lock = NSLock()
     private let pairs: BoundedTable<Pair, ProtectedFileLaneBudget>
-    private let targets: BoundedTable<pid_t, ProtectedFileLaneBudget>
+    private let engineRepeats: ProtectedFileLaneBudget
+    private let toolRepeats: BoundedTable<ToolIdentity, ProtectedFileLaneBudget>
     /// The one repeat budget every target outside a root-owned canonical
     /// location shares: a binary the attacker named after a tool, wherever
     /// and however many, draws on this and never on the engine's or a real
     /// tool's own bucket.
     private let decoyRepeats: ProtectedFileLaneBudget
-    private let rootOwnedCanonical: (_ path: String, _ ownerUID: uid_t?) -> Bool
+    private let rootOwnedCanonical: (_ path: String, _ stat: ExecutableStat?) -> Bool
 
     init(pairCapacity: Int = 8, pairRefillPerSecond: Double = 2,
          targetCapacity: Int = 64, targetRefillPerSecond: Double = 16,
-         trackedPairs: Int = 1024, trackedTargets: Int = 1024,
-         rootOwnedCanonical: @escaping (_ path: String, _ ownerUID: uid_t?) -> Bool
+         trackedPairs: Int = 1024, trackedTools: Int = 1024,
+         rootOwnedCanonical: @escaping (_ path: String, _ stat: ExecutableStat?) -> Bool
              = SignalRateLimiter.isRootOwnedCanonicalExecutable) {
         pairs = BoundedTable(capacity: trackedPairs, idleEvictionNanos: 10_000_000_000, policy: .refuseWhenFull) { _ in
             ProtectedFileLaneBudget(capacity: pairCapacity, refillPerSecond: pairRefillPerSecond)
         }
-        targets = BoundedTable(capacity: trackedTargets, idleEvictionNanos: 10_000_000_000, policy: .refuseWhenFull) { _ in
+        toolRepeats = BoundedTable(capacity: trackedTools, idleEvictionNanos: 10_000_000_000, policy: .refuseWhenFull) { _ in
             ProtectedFileLaneBudget(capacity: targetCapacity, refillPerSecond: targetRefillPerSecond)
         }
+        engineRepeats = ProtectedFileLaneBudget(capacity: targetCapacity, refillPerSecond: targetRefillPerSecond)
         decoyRepeats = ProtectedFileLaneBudget(capacity: targetCapacity, refillPerSecond: targetRefillPerSecond)
         self.rootOwnedCanonical = rootOwnedCanonical
     }
 
     /// Whether an executable lives where only root writes: the SIP-protected
     /// system trees by prefix, and under /Library or /Applications only when
-    /// the file is root-owned (`ownerUID`, from the stat in the ES message),
-    /// since an admin can create directories there. Anything else — /tmp, a
-    /// home, /opt/homebrew, a mounted volume, or an owner not known — is
-    /// where a decoy named after a tool would live.
-    static func isRootOwnedCanonicalExecutable(_ path: String, ownerUID: uid_t?) -> Bool {
+    /// the file is root-owned and has a single link (`stat`, from the ES
+    /// message), since an admin can create directories there, and a second
+    /// link could be a hard link to some other root-owned file. Anything
+    /// else (/tmp, a home, /opt/homebrew, a mounted volume, or a stat not
+    /// known) is where a decoy named after a tool would live.
+    static func isRootOwnedCanonicalExecutable(_ path: String, stat: ExecutableStat?) -> Bool {
         for prefix in ["/System/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/bin/", "/sbin/"]
         where path.hasPrefix(prefix) {
             return true
         }
-        guard path.hasPrefix("/Library/") || path.hasPrefix("/Applications/") else { return false }
-        return ownerUID == 0
+        guard path.hasPrefix("/Library/") || path.hasPrefix("/Applications/"), let stat else { return false }
+        return stat.owner == 0 && stat.links == 1
+    }
+
+    /// The repeat budget for a relevant target: the engine's, a canonical
+    /// tool's by executable identity, or the shared decoy budget.
+    func repeatBudget(engine: Bool, executable: String?, stat: ExecutableStat?) -> RepeatBudget {
+        if engine { return .engine }
+        guard let executable, rootOwnedCanonical(executable, stat) else { return .decoy }
+        return .tool(device: stat?.device ?? 0, inode: stat?.inode ?? 0)
     }
 
     /// For a tracked pair, whether a signal may still be kept; nil for a pair
@@ -665,30 +734,33 @@ final class SignalRateLimiter: @unchecked Sendable {
         return admitted
     }
 
-    /// Whether this pair may have a signal kept, inserting it if the table has
-    /// room, and whether this is the pair's first. A pair the table is too full
-    /// to take is refused.
-    func admitPair(source: pid_t, target: pid_t, nowNanos: UInt64) -> (admitted: Bool, firstSighting: Bool) {
+    /// Inserts an untracked pair whose target proved relevant, if the table
+    /// has room, and spends one of its tokens.
+    func admitPair(source: pid_t, target: pid_t, nowNanos: UInt64) -> PairVerdict {
         lock.lock(); defer { lock.unlock() }
         let lookup = pairs.lookup(key: Pair(source: source, target: target), nowNanos: nowNanos)
-        guard let bucket = lookup.entry, bucket.admit(nowNanos: nowNanos) else {
-            pairRefusedCount &+= 1
-            return (false, false)
+        guard let bucket = lookup.entry else {
+            pairTableFullCount &+= 1
+            return .tableFull
         }
-        return (true, lookup.firstSighting)
+        guard bucket.admit(nowNanos: nowNanos) else {
+            pairRefusedCount &+= 1
+            return .bucketEmpty
+        }
+        return lookup.firstSighting ? .first : .repeated
     }
 
-    /// Whether one more repeat signal at this relevant target may be kept:
-    /// from the target's own bucket for the engine (`executable` nil) and
-    /// for a tool root-owned at a canonical path, from the shared decoy
-    /// bucket for every other target.
-    func admitKept(target: pid_t, executable: String?, ownerUID: uid_t?, nowNanos: UInt64) -> Bool {
-        let ownBucket = executable.map { rootOwnedCanonical($0, ownerUID) } ?? true
+    /// Whether one more signal at a relevant target may be kept on `budget`.
+    func admitRepeat(_ budget: RepeatBudget, nowNanos: UInt64) -> Bool {
         lock.lock(); defer { lock.unlock() }
         let admitted: Bool
-        if ownBucket {
-            admitted = targets.lookup(key: target, nowNanos: nowNanos).entry?.admit(nowNanos: nowNanos) ?? false
-        } else {
+        switch budget {
+        case .engine:
+            admitted = engineRepeats.admit(nowNanos: nowNanos)
+        case .tool(let device, let inode):
+            admitted = toolRepeats.lookup(key: ToolIdentity(device: device, inode: inode), nowNanos: nowNanos)
+                .entry?.admit(nowNanos: nowNanos) ?? false
+        case .decoy:
             admitted = decoyRepeats.admit(nowNanos: nowNanos)
         }
         if !admitted { aggregateRefusedCount &+= 1 }
@@ -708,18 +780,27 @@ final class SignalRateLimiter: @unchecked Sendable {
     }
 
     private var pairRefusedCount: UInt64 = 0
+    private var pairTableFullCount: UInt64 = 0
     private var aggregateRefusedCount: UInt64 = 0
 
-    /// Fatal signals at a relevant target whose (source, target) pair had no
-    /// token left, or that a pair table full of live pairs refused. Surfaced
-    /// as `es_signal_pair_refused_total`.
+    /// Fatal signals at a relevant target whose tracked (source, target) pair
+    /// had no token left. Surfaced as `es_signal_pair_refused_total`.
     var pairRefusedTotal: UInt64 {
         lock.lock(); defer { lock.unlock() }
         return pairRefusedCount
     }
 
-    /// Fatal signals at a relevant target refused by the target's shared
-    /// budget. Surfaced as `es_signal_aggregate_refused_total`.
+    /// Fatal signals at a relevant target whose new pair a pair table full of
+    /// live pairs could not take: refused at a decoy, kept at the engine or a
+    /// canonical tool while its repeat budget lasts. Surfaced as
+    /// `es_signal_pair_table_full_total`.
+    var pairTableFullTotal: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return pairTableFullCount
+    }
+
+    /// Fatal signals at a relevant target refused by its repeat budget.
+    /// Surfaced as `es_signal_aggregate_refused_total`.
     var aggregateRefusedTotal: UInt64 {
         lock.lock(); defer { lock.unlock() }
         return aggregateRefusedCount

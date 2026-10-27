@@ -1121,7 +1121,7 @@ public final class ESCollector: @unchecked Sendable {
         signalTargetPID: Int32 = -1,
         signalNowNanos: UInt64 = 0,
         signalLimiter: SignalRateLimiter? = nil,
-        signalTargetOwnerUID: uid_t? = nil,
+        signalTargetStat: SignalRateLimiter.ExecutableStat? = nil,
         signalTargetExecutable: @autoclosure () -> String = ""
     ) -> Bool {
         switch eventType {
@@ -1148,7 +1148,7 @@ public final class ESCollector: @unchecked Sendable {
                 targetPID: signalTargetPID,
                 nowNanos: signalNowNanos,
                 limiter: signalLimiter,
-                targetOwnerUID: signalTargetOwnerUID,
+                targetStat: signalTargetStat,
                 targetExecutable: signalTargetExecutable()
             )
 
@@ -1188,7 +1188,7 @@ public final class ESCollector: @unchecked Sendable {
                 signalTargetPID: audit_token_to_pid(target.pointee.audit_token),
                 signalNowNanos: DispatchTime.now().uptimeNanoseconds,
                 signalLimiter: signalRateLimiter,
-                signalTargetOwnerUID: target.pointee.executable.pointee.stat.st_uid,
+                signalTargetStat: SignalRateLimiter.ExecutableStat(target.pointee.executable.pointee.stat),
                 signalTargetExecutable: esFileToPath(target.pointee.executable)
             )
 
@@ -1480,18 +1480,20 @@ public final class ESCollector: @unchecked Sendable {
     static let ownProcessID: Int32 = getpid()
 
     /// The kept-signal rate limit shared by every client's callback: 8 per
-    /// (source, target) pair with 2 more a second, and per relevant target 64
-    /// repeats with 16 more a second, a pair's first signal exempt. A `kill()`
-    /// loop at the engine, or at a decoy named after a security tool, used to
-    /// put every message on the priority lane.
+    /// (source, target) pair with 2 more a second, a pair's first signal
+    /// exempt, and 64 repeats with 16 more a second per repeat budget (the
+    /// engine's, each canonical tool binary's, and one shared by every
+    /// decoy). A `kill()` loop at the engine, or at a decoy named after a
+    /// security tool, used to put every message on the priority lane.
     static let signalRateLimiter = SignalRateLimiter()
 
     /// Keep a NOTIFY_SIGNAL only when it is fatal AND aimed at MacCrab itself or
     /// a security tool, and only within `limiter`'s budgets. `targetExecutable`
-    /// is an autoclosure so the borrowed path token is decoded only for the
-    /// rare fatal signal whose pair still has budget — never for the flood
-    /// (unit-tested: the closure is not evaluated for a non-fatal or
-    /// over-budget signal). A nil limiter is the pure policy, for tests.
+    /// is an autoclosure, so the borrowed path token is never decoded for a
+    /// non-fatal signal or for a tracked pair out of tokens (unit-tested); a
+    /// fatal signal from an untracked pair is decoded once, to decide its
+    /// relevance before the pair may enter the table. A nil limiter is the
+    /// pure policy, for tests.
     static func shouldKeepSignal(
         sig: Int32,
         sourcePID: Int32 = -1,
@@ -1499,7 +1501,7 @@ public final class ESCollector: @unchecked Sendable {
         ownPID: Int32 = ownProcessID,
         nowNanos: UInt64 = 0,
         limiter: SignalRateLimiter? = nil,
-        targetOwnerUID: uid_t? = nil,
+        targetStat: SignalRateLimiter.ExecutableStat? = nil,
         targetExecutable: @autoclosure () -> String
     ) -> Bool {
         guard fatalSignals.contains(sig) else { return false }
@@ -1519,19 +1521,25 @@ public final class ESCollector: @unchecked Sendable {
             guard securityToolProcessNames.contains(basename) else { return false }
             executable = path
         }
-        var firstFromThisPair = !tracked
-        if !tracked, let limiter {
-            let pair = limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos)
-            guard pair.admitted else { return false }
-            firstFromThisPair = pair.firstSighting
+        guard let limiter else { return true }
+        let budget = limiter.repeatBudget(engine: targetPID == ownPID, executable: executable, stat: targetStat)
+        if !tracked {
+            switch limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos) {
+            case .first:
+                // Kept whatever the repeat budget holds, so every distinct
+                // source keeps its first signal while the table has room.
+                return true
+            case .repeated:
+                break
+            case .bucketEmpty:
+                return false
+            case .tableFull:
+                // A full table fails closed for a decoy; the engine and a
+                // canonical tool fall back on their own repeat budget.
+                guard budget != .decoy else { return false }
+            }
         }
-        // A pair's first signal is kept whatever the target's shared budget
-        // holds, so every distinct source keeps its first; the repeats share it.
-        if !firstFromThisPair, let limiter,
-           !limiter.admitKept(target: targetPID, executable: executable, ownerUID: targetOwnerUID, nowNanos: nowNanos) {
-            return false
-        }
-        return true
+        return limiter.admitRepeat(budget, nowNanos: nowNanos)
     }
 
     // MARK: - Repeat coalescing policy (v1.22.7)
@@ -2406,23 +2414,33 @@ public final class ESCollector: @unchecked Sendable {
         contexts.reduce(UInt64(0)) { $0 &+ $1.worker.protectedOpenSliceDemoted() }
     }
 
-    /// Fatal signals at MacCrab or a security tool that the target's shared
-    /// signal budget refused at the callback (`SignalRateLimiter`). Also
-    /// inside the intentional-filter count; surfaced apart as
+    /// Fatal signals at MacCrab or a security tool that the target's repeat
+    /// budget refused at the callback (`SignalRateLimiter`). Also inside the
+    /// intentional-filter count; surfaced apart as
     /// `es_signal_aggregate_refused_total` so a kill loop at a tool is not
     /// read as ordinary filtering.
     public func esSignalAggregateRefused() -> UInt64 {
         Self.signalRateLimiter.aggregateRefusedTotal
     }
 
-    /// Fatal signals at MacCrab or a security tool refused because their
-    /// (source, target) pair had no token left, or because the pair table was
-    /// full of live pairs (`SignalRateLimiter`). Also inside the
+    /// Fatal signals refused because their tracked (source, target) pair had
+    /// no token left (`SignalRateLimiter`). Also inside the
     /// intentional-filter count; surfaced apart as
-    /// `es_signal_pair_refused_total`. Signals at ordinary processes never
-    /// reach the pair table, so this counts only relevant ones.
+    /// `es_signal_pair_refused_total`. A pair enters the table only once its
+    /// target proved relevant, but a tracked pair is refused before its
+    /// target is decoded again, so this also counts a pair whose target pid
+    /// has since been reused by an ordinary process.
     public func esSignalPairRefused() -> UInt64 {
         Self.signalRateLimiter.pairRefusedTotal
+    }
+
+    /// Fatal signals at MacCrab or a security tool whose new pair the pair
+    /// table, full of live pairs, could not take (`SignalRateLimiter`): those
+    /// at a decoy were refused, those at the engine or a canonical tool kept
+    /// while their repeat budget lasted. Surfaced as
+    /// `es_signal_pair_table_full_total`.
+    public func esSignalPairTableFull() -> UInt64 {
+        Self.signalRateLimiter.pairTableFullTotal
     }
 
     /// Per-event-type normalized Events offered to the collector-local stream.

@@ -357,10 +357,15 @@ struct ESIngressAdmissionTests {
             sig: SIGKILL, sourcePID: 50_000, targetPID: 1, ownPID: 1,
             nowNanos: t0 + 2_000, limiter: limiter, targetExecutable: "/x"),
                 "a genuine fatal signal at the engine is still kept")
+        let santa = SignalRateLimiter.ExecutableStat(owner: 0, links: 1, device: 1, inode: 4_242)
         #expect(ESCollector.shouldKeepSignal(
             sig: SIGKILL, sourcePID: 50_001, targetPID: 778, ownPID: 1, nowNanos: t0 + 2_001, limiter: limiter,
-            targetOwnerUID: 0, targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad"),
-                "and so is one at a real tool, whose target pid has a budget of its own")
+            targetStat: santa, targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad"),
+                "a first signal at a real tool is kept")
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 50_001, targetPID: 778, ownPID: 1, nowNanos: t0 + 2_002, limiter: limiter,
+            targetStat: santa, targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad"),
+                "and so is its repeat: the tool's own budget, not the drained decoy one, pays for it")
         var engineRepeats = 0
         for i in 0..<10 where ESCollector.shouldKeepSignal(
             sig: SIGKILL, sourcePID: 50_000, targetPID: 1, ownPID: 1,
@@ -428,7 +433,72 @@ struct ESIngressAdmissionTests {
         #expect(kept == 1_024 + 64)
         #expect(limiter.aggregateRefusedTotal > 0, "repeats past the decoy burst are counted")
         #expect(limiter.trackedPairCount <= 1_024)
-        #expect(limiter.pairRefusedTotal >= 76, "the pairs the full table refused are counted too")
+        #expect(limiter.pairTableFullTotal >= 76, "the pairs the full table refused are counted apart")
+    }
+
+    @Test("copies of one root-owned tool binary share one repeat budget: the churn shapes stay within the pair table plus one burst",
+          arguments: ["1,100 sources twice", "34 x 34 cycled four times", "1,100 targets twice"])
+    func copiesOfOneToolShareABudget(shape: String) {
+        let limiter = SignalRateLimiter(rootOwnedCanonical: { _, _ in true })
+        let tool = SignalRateLimiter.ExecutableStat(owner: 0, links: 1, device: 1, inode: 4_242)
+        let t0: UInt64 = 1_000_000_000
+        var kept = 0
+        var offered = 0
+        func send(_ source: Int, _ target: Int) {
+            offered += 1
+            if ESCollector.shouldKeepSignal(
+                sig: SIGKILL, sourcePID: Int32(source), targetPID: Int32(target), ownPID: 1,
+                nowNanos: t0 + UInt64(offered), limiter: limiter, targetStat: tool,
+                targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad") {
+                kept += 1
+            }
+        }
+        switch shape {
+        case "1,100 sources twice":
+            for _ in 0..<2 { for source in 0..<1_100 { send(60_000 + source, 777) } }
+        case "34 x 34 cycled four times":
+            for _ in 0..<4 { for source in 0..<34 { for target in 0..<34 { send(70_000 + source, 80_000 + target) } } }
+        default:
+            for _ in 0..<2 { for target in 0..<1_100 { send(90_000, 100_000 + target) } }
+        }
+        #expect(kept <= 1_024 + 64, "\(shape): the pair table's first signals plus the one binary's burst: \(kept)")
+        #expect(limiter.trackedPairCount <= 1_024)
+    }
+
+    @Test("a pair table held full by live decoy pairs refuses a new decoy pair, but keeps a new source's fatal signal at the engine and at a root-owned tool on their repeat budgets, and counts all three")
+    func fullPairTableStillKeepsTheEngineAndRealTools() {
+        let limiter = SignalRateLimiter()
+        let t0: UInt64 = 1_000_000_000
+        // 32 x 32 decoy pairs fill the table and are signalled again every
+        // five seconds, inside the ten-second idle window, so none idles out.
+        for round: UInt64 in 0..<3 {
+            for source in 0..<32 {
+                for target in 0..<32 {
+                    _ = ESCollector.shouldKeepSignal(
+                        sig: SIGKILL, sourcePID: Int32(200_000 + source), targetPID: Int32(300_000 + target), ownPID: 1,
+                        nowNanos: t0 + round * 5_000_000_000 + UInt64(source * 32 + target), limiter: limiter,
+                        targetStat: .init(owner: 501, links: 1, device: 1, inode: UInt64(target)),
+                        targetExecutable: "/tmp/d\(target)/santad")
+                }
+            }
+        }
+        #expect(limiter.trackedPairCount == 1_024)
+        let now = t0 + 10_000_002_000
+        #expect(!ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 400_000, targetPID: 300_000, ownPID: 1, nowNanos: now, limiter: limiter,
+            targetStat: .init(owner: 501, links: 1, device: 1, inode: 0), targetExecutable: "/tmp/d0/santad"),
+                "a new decoy pair stays fail-closed")
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 400_001, targetPID: 1, ownPID: 1, nowNanos: now + 1, limiter: limiter,
+            targetExecutable: "/x"),
+                "the engine's first fatal signal from a new source is kept")
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 400_002, targetPID: 900, ownPID: 1, nowNanos: now + 2, limiter: limiter,
+            targetStat: .init(owner: 0, links: 1, device: 1, inode: 4_242),
+            targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad"),
+                "and so is one at a root-owned tool")
+        #expect(limiter.pairTableFullTotal == 3, "all three met the full table and are counted")
+        #expect(limiter.trackedPairCount == 1_024, "none of them entered it")
     }
 
     @Test("cycling sources across many decoys, or one source across a thousand decoys, is bounded by the same constant")
@@ -504,8 +574,8 @@ struct ESIngressAdmissionTests {
             "Sources/MacCrabCore/Collectors/ESCollector.swift"), encoding: .utf8)
         #expect(collector.contains("signalSourcePID: audit_token_to_pid(msg.process.pointee.audit_token)"))
         #expect(collector.contains("signalLimiter: signalRateLimiter,"))
-        #expect(collector.contains("signalTargetOwnerUID: target.pointee.executable.pointee.stat.st_uid,"),
-                "the owner comes from the stat ES reports, not a syscall on the callback")
+        #expect(collector.contains("signalTargetStat: SignalRateLimiter.ExecutableStat(target.pointee.executable.pointee.stat),"),
+                "the owner, links and identity come from the stat ES reports, not a syscall on the callback")
         // The non-fatal flood is dropped before any pid, clock or path read.
         let start = try #require(collector.range(of: "private static func shouldDropAtCallback(\n        message: UnsafePointer<es_message_t>"))
         let signalCase = try #require(collector.range(of: "case ES_EVENT_TYPE_NOTIFY_SIGNAL:", range: start.upperBound..<collector.endIndex))
@@ -522,22 +592,29 @@ struct ESIngressAdmissionTests {
         #expect(timers.components(separatedBy: "\"es_signal_aggregate_refused_total\": esSignalAggregateRefused").count == 3,
                 "both heartbeat payloads report the shared-budget refusals")
         #expect(timers.components(separatedBy: "\"es_signal_pair_refused_total\": esSignalPairRefused").count == 3,
-                "both heartbeat payloads report the pair-budget and full-table refusals")
+                "both heartbeat payloads report the pair-budget refusals")
+        #expect(timers.components(separatedBy: "\"es_signal_pair_table_full_total\": esSignalPairTableFull").count == 3,
+                "both heartbeat payloads report the signals a full pair table met")
     }
 
-    @Test("a tool's own repeat budget needs its executable root-owned at a canonical path, as the ES stat reports it")
+    @Test("a tool's own repeat budget needs its executable root-owned and singly linked at a canonical path, as the ES stat reports it")
     func canonicalClassificationReadsTheReportedOwner() {
+        func reported(owner: uid_t, links: nlink_t = 1) -> SignalRateLimiter.ExecutableStat {
+            SignalRateLimiter.ExecutableStat(owner: owner, links: links, device: 1, inode: 4_242)
+        }
         for path in ["/usr/libexec/syspolicyd", "/System/Library/CoreServices/x", "/usr/sbin/x", "/sbin/x"] {
-            #expect(SignalRateLimiter.isRootOwnedCanonicalExecutable(path, ownerUID: 501), "\(path) is SIP-protected")
+            #expect(SignalRateLimiter.isRootOwnedCanonicalExecutable(path, stat: reported(owner: 501)), "\(path) is SIP-protected")
         }
         let santa = "/Applications/Santa.app/Contents/MacOS/santad"
-        #expect(SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, ownerUID: 0))
-        #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, ownerUID: 501),
+        #expect(SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, stat: reported(owner: 0)))
+        #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, stat: reported(owner: 501)),
                 "an admin can create a user-owned decoy under /Applications")
-        #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, ownerUID: nil), "an unknown owner is not trusted")
-        #expect(SignalRateLimiter.isRootOwnedCanonicalExecutable("/Library/CS/falcond", ownerUID: 0))
+        #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, stat: reported(owner: 0, links: 2)),
+                "a second link could be a hard link to some other root-owned file, named after a tool")
+        #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, stat: nil), "an unknown owner is not trusted")
+        #expect(SignalRateLimiter.isRootOwnedCanonicalExecutable("/Library/CS/falcond", stat: reported(owner: 0)))
         for path in ["/tmp/x/santad", "/Users/x/santad", "/opt/homebrew/bin/santad", "/Volumes/u/santad"] {
-            #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(path, ownerUID: 0), "\(path) is a decoy location")
+            #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(path, stat: reported(owner: 0)), "\(path) is a decoy location")
         }
         // A user-owned decoy under /Applications shares the decoy bucket: its
         // repeats cannot spend a real tool's own budget.
@@ -546,20 +623,20 @@ struct ESIngressAdmissionTests {
         for source in 0..<100 {
             _ = ESCollector.shouldKeepSignal(
                 sig: SIGKILL, sourcePID: Int32(120_000 + source), targetPID: 900, ownPID: 1,
-                nowNanos: t0 + UInt64(source), limiter: limiter, targetOwnerUID: 501,
+                nowNanos: t0 + UInt64(source), limiter: limiter, targetStat: reported(owner: 501),
                 targetExecutable: "/Applications/x/santad")
             _ = ESCollector.shouldKeepSignal(
                 sig: SIGKILL, sourcePID: Int32(120_000 + source), targetPID: 900, ownPID: 1,
-                nowNanos: t0 + 200 + UInt64(source), limiter: limiter, targetOwnerUID: 501,
+                nowNanos: t0 + 200 + UInt64(source), limiter: limiter, targetStat: reported(owner: 501),
                 targetExecutable: "/Applications/x/santad")
         }
         #expect(limiter.aggregateRefusedTotal == 36, "the decoy's repeats drained the shared decoy bucket")
         _ = ESCollector.shouldKeepSignal(
             sig: SIGKILL, sourcePID: 130_000, targetPID: 901, ownPID: 1, nowNanos: t0 + 1_000, limiter: limiter,
-            targetOwnerUID: 0, targetExecutable: santa)
+            targetStat: reported(owner: 0), targetExecutable: santa)
         #expect(ESCollector.shouldKeepSignal(
             sig: SIGKILL, sourcePID: 130_000, targetPID: 901, ownPID: 1, nowNanos: t0 + 1_001, limiter: limiter,
-            targetOwnerUID: 0, targetExecutable: santa),
+            targetStat: reported(owner: 0), targetExecutable: santa),
                 "a repeat at the root-owned real tool draws on its own untouched budget")
     }
 

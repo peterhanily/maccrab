@@ -734,10 +734,10 @@ struct ESIngressStormBenchmarkTests {
         let run = signalCallbackRuns(limiter: limiter, signal: SIGKILL, executable: "/tmp/x/santad",
                                      target: { _ in 777 }, from: t0 + 1_000_000)
         let n: UInt64 = 100_000
-        print("BENCH signal_decoy_pairs_full_table base_ns/msg=\(run.base / n) limited_ns/msg=\(run.limited / n) refused=\(limiter.pairRefusedTotal) sweeps=\(limiter.pairSweepCount)")
+        print("BENCH signal_decoy_pairs_full_table base_ns/msg=\(run.base / n) limited_ns/msg=\(run.limited / n) table_full=\(limiter.pairTableFullTotal) sweeps=\(limiter.pairSweepCount)")
         #expect(run.droppedBase == 0, "with no limiter every fatal signal at a tool-named target is kept")
-        #expect(run.dropped == 100_000, "a table full of live pairs refuses every new pair")
-        #expect(limiter.pairRefusedTotal == n)
+        #expect(run.dropped == 100_000, "a table full of live pairs refuses every new decoy pair")
+        #expect(limiter.pairTableFullTotal == n && limiter.pairRefusedTotal == 0, "counted as met by the full table, not as pair-budget refusals")
         #expect(limiter.pairSweepCount == 1, "one idle scan, then refusals without scanning")
         #expect(run.limited <= run.base * 3 + n * 1_000,
                 "a refusal costs the decode, a probe and a constant, not a scan of the table: \(run.limited / n) vs \(run.base / n) ns")
