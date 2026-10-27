@@ -356,17 +356,17 @@ public actor EventEnricher {
     /// platform flag, and a chain rooted anywhere can claim Developer ID with
     /// any team. Only a claim that would buy trust is re-checked: `.apple`
     /// off a platform binary, and a Developer ID or App Store claim naming an
-    /// exemption team or carrying Sparkle's signing identifier, which the
-    /// updater gate trusts at a user-writable path whatever the team.
-    /// Security classifies a chain not rooted at Apple as `.adHoc`, and the
-    /// merge carries that signer, so the team then attests nothing
-    /// downstream. The cost is one cold-cache evaluation per path.
+    /// exemption team. Security classifies a chain not rooted at Apple as
+    /// `.adHoc`, and the merge carries that signer, so the team then attests
+    /// nothing downstream. The cost is one cold-cache evaluation per path.
     static func needsCryptographicVerification(_ signature: CodeSignatureInfo?, isPlatformBinary: Bool) -> Bool {
         guard let signature else { return false }
         if signature.signerType == .apple { return !isPlatformBinary }
-        guard signature.signerType == .devId || signature.signerType == .appStore else { return false }
-        if let team = signature.teamId, exemptionTeamIds.contains(team) { return true }
-        return signature.signingId?.hasPrefix(NoiseFilter.sparkleSigningIdentifierPrefix) == true
+        if signature.signerType == .devId || signature.signerType == .appStore,
+           let team = signature.teamId, exemptionTeamIds.contains(team) {
+            return true
+        }
+        return false
     }
 
     private func resolveCodeSignature(

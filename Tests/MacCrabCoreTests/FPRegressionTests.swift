@@ -819,8 +819,10 @@ struct InteractiveAdminGateTests {
 /// was the second GoogleUpdater, but its *name* basename was mangled by
 /// Sigma's |contains matching). The engine-level gate walks all
 /// ancestors and drops non-critical matches regardless of chain depth.
-/// An ancestor counts only from a location root alone writes; a per-user
-/// install quiets only as a subject carrying its vendor's signature.
+/// An ancestor counts only from an installed location, two of which an
+/// administrator or the Homebrew user can write (see
+/// `CampaignDetector.isInstalledAutoUpdater`); a per-user Google install
+/// quiets only as a subject carrying Google's signature.
 @Suite("FP regression: auto-updater ancestor gate")
 struct AutoUpdaterAncestorGateTests {
 

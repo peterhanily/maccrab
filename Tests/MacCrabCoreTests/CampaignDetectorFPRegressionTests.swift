@@ -139,29 +139,34 @@ struct CampaignDetectorFPRegressionTests {
                 "the lane builds campaign summaries in one place")
     }
 
-    @Test("Sparkle Autoupdate path is allowlisted from coordinated attack")
+    @Test("Sparkle's Autoupdate inside an installed app is allowlisted from coordinated attack")
     func sparkleAutoupdateSilent() async {
-        let detector = CampaignDetector()
         // Even two distinct rules firing on Sparkle's Autoupdate binary
-        // should not produce a coordinated-attack — legitimate updater.
-        // The staging directory is the user's own; the exemption rests on the
-        // vendor signature the feed site records, not on the path.
-        _ = await detector.processAlert(
-            .init(ruleId: "defense_evasion.code_sig_check", ruleTitle: "A",
-                  severity: .medium,
-                  processPath: "/Users/x/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/aB/cD/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
-                  pid: 8000,
-                  tactics: ["attack.defense_evasion"], isVendorSignedUpdater: true)
-        )
-        let campaigns = await detector.processAlert(
-            .init(ruleId: "persistence.plist_write", ruleTitle: "B",
-                  severity: .medium,
-                  processPath: "/Users/x/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/aB/cD/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
-                  pid: 8000,
-                  tactics: ["attack.persistence"], isVendorSignedUpdater: true)
-        )
-        let coordinated = campaigns.filter { $0.type == .coordinatedAttack }
-        #expect(coordinated.isEmpty)
+        // should not produce a coordinated-attack — legitimate updater. The
+        // exemption rests on the installed location. Sparkle's staging
+        // directory is its user's to write and earns none, even when the
+        // summary arrives flagged vendor-signed.
+        func campaigns(at path: String, pid: Int, vendorSigned: Bool) async -> [CampaignDetector.Campaign] {
+            let detector = CampaignDetector()
+            _ = await detector.processAlert(
+                .init(ruleId: "defense_evasion.code_sig_check", ruleTitle: "A",
+                      severity: .medium, processPath: path, pid: pid,
+                      tactics: ["attack.defense_evasion"], isVendorSignedUpdater: vendorSigned)
+            )
+            return await detector.processAlert(
+                .init(ruleId: "persistence.plist_write", ruleTitle: "B",
+                      severity: .medium, processPath: path, pid: pid,
+                      tactics: ["attack.persistence"], isVendorSignedUpdater: vendorSigned)
+            )
+        }
+        let installed = await campaigns(
+            at: "/Applications/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+            pid: 8000, vendorSigned: false)
+        #expect(installed.filter { $0.type == .coordinatedAttack }.isEmpty)
+        let staged = await campaigns(
+            at: "/Users/x/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/aB/cD/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+            pid: 8001, vendorSigned: true)
+        #expect(!staged.filter { $0.type == .coordinatedAttack }.isEmpty)
     }
 
     @Test("GoogleUpdater path is allowlisted from coordinated attack")

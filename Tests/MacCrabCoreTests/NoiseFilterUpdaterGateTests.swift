@@ -3,9 +3,10 @@ import Testing
 @testable import MacCrabCore
 
 /// Gate 6 quiets the auto-updater trees that legitimately span tactics. Its
-/// markers name where each vendor installs, a location the user can write
-/// also needs the vendor's signature on the subject, an ancestor counts only
-/// from a root-owned location, and a credential read is never quieted.
+/// markers name where each vendor installs, Google's per-user locations also
+/// need Google's signature on the subject, Sparkle's staging directory is
+/// never an updater, an ancestor counts only from an installed location, and
+/// a credential read is never quieted.
 @Suite("NoiseFilter: auto-updater gate anchoring")
 struct NoiseFilterUpdaterGateTests {
     private static let systemUpdater =
@@ -41,6 +42,11 @@ struct NoiseFilterUpdaterGateTests {
         return Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: process)
     }
 
+    private func isUpdaterLocation(_ path: String) -> Bool {
+        CampaignDetector.isInstalledAutoUpdater(processPath: path)
+            || CampaignDetector.isUserAutoUpdater(processPath: path)
+    }
+
     @Test("updater markers match the vendors' install locations, not any path containing the name")
     func markersAreAnchored() {
         for path in [
@@ -51,16 +57,17 @@ struct NoiseFilterUpdaterGateTests {
             "/Users/u/Library/Caches/com.google.Keystone/Installer/x",
             "/Library/Caches/com.google.Keystone/Installer/x",
             "/Library/Application Support/Microsoft/MAU2.0/Microsoft AutoUpdate.app/Contents/MacOS/Microsoft Update Assistant",
-            "/Users/u/Library/Caches/com.example.app/org.sparkle-project.Sparkle/Installation/AbCd/Autoupdate",
             "/Applications/Example.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
-            "/Users/u/Applications/Example.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
             "/System/Library/PrivateFrameworks/SoftwareUpdate.framework/Versions/A/Resources/softwareupdated",
             "/opt/homebrew/bin/brew",
             "/opt/homebrew/Library/Homebrew/brew.rb",
         ] {
-            #expect(CampaignDetector.isAutoUpdater(processPath: path), "\(path)")
+            #expect(isUpdaterLocation(path), "\(path)")
         }
         for path in [
+            // Sparkle stages Autoupdate where its user writes: never an updater.
+            "/Users/u/Library/Caches/com.example.app/org.sparkle-project.Sparkle/Installation/AbCd/Autoupdate",
+            "/Users/u/Applications/Example.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
             "/Users/u/Library/GoogleUpdater/zsh",
             "/tmp/GoogleUpdater/x",
             "/Users/u/GoogleUpdater/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
@@ -75,7 +82,7 @@ struct NoiseFilterUpdaterGateTests {
             "/opt/homebrew/bin/brewX",
             "/Users/Shared/Library/Application Support/Google/GoogleUpdater/x",
         ] {
-            #expect(!CampaignDetector.isAutoUpdater(processPath: path), "\(path)")
+            #expect(!isUpdaterLocation(path), "\(path)")
         }
     }
 
@@ -83,8 +90,8 @@ struct NoiseFilterUpdaterGateTests {
     func keystoneCacheIsSubjectOnly() {
         // /Library/Caches is mode 1777: any uid creates com.google.Keystone there.
         let cache = "/Library/Caches/com.google.Keystone/Installer/x"
-        #expect(CampaignDetector.isAutoUpdater(processPath: cache))
-        #expect(!CampaignDetector.isRootAnchoredAutoUpdater(processPath: cache))
+        #expect(CampaignDetector.isUserAutoUpdater(processPath: cache))
+        #expect(!CampaignDetector.isInstalledAutoUpdater(processPath: cache))
         let noise = [match("mdm_enrollment_check", severity: .medium)]
         var unsigned = noise
         NoiseFilter.apply(&unsigned, event: event(cache), isWarmingUp: false)
@@ -111,34 +118,20 @@ struct NoiseFilterUpdaterGateTests {
         NoiseFilter.apply(&google, event: event(Self.userUpdater, signer: .devId, teamId: "EQHXZ8M8AV", flags: 0x1),
                           isWarmingUp: false)
         #expect(google.isEmpty)
+        // Sparkle's staged Autoupdate is never vendor-signed: the host app's
+        // team varies and any signer can carry Sparkle's identifier, so not
+        // even a chain Security anchored at Apple makes it the updater.
         let staged = "/Users/u/Library/Caches/com.example.app/org.sparkle-project.Sparkle/Installation/AbCd/Autoupdate"
-        // What the enricher passes on after Security anchored the chain at
-        // Apple: it re-verifies every claim carrying Sparkle's identifier.
-        var sparkle = noise
-        NoiseFilter.apply(&sparkle, event: event(staged, signer: .devId, teamId: "ABCDE12345",
-                                                 signingId: "org.sparkle-project.Sparkle.Autoupdate",
-                                                 authorities: ["Developer ID Application: Example (ABCDE12345)",
-                                                               "Developer ID Certification Authority", "Apple Root CA"],
-                                                 flags: 0x1),
-                          isWarmingUp: false)
-        #expect(sparkle.isEmpty, "a verified chain with the host app's team and Sparkle's identifier is the updater")
-        // A self-signed chain comes back from that verification as ad-hoc,
-        // with CS_ADHOC still clear, and is not.
-        var selfSigned = noise
-        NoiseFilter.apply(&selfSigned, event: event(staged, signer: .adHoc, teamId: "ABCDE12345",
-                                                    signingId: "org.sparkle-project.Sparkle.Autoupdate", flags: 0x1),
-                          isWarmingUp: false)
-        #expect(selfSigned.count == 1, "a chain Security did not anchor at Apple is not Sparkle's updater")
-        var renamed = noise
-        NoiseFilter.apply(&renamed, event: event(staged, signer: .devId, teamId: "ABCDE12345",
-                                                 signingId: "com.example.helper", flags: 0x1),
-                          isWarmingUp: false)
-        #expect(renamed.count == 1, "a Developer ID binary that is not Sparkle's is not the updater")
-        var adHoc = noise
-        NoiseFilter.apply(&adHoc, event: event(staged, signer: .adHoc, teamId: "ABCDE12345",
-                                               signingId: "org.sparkle-project.Sparkle.Autoupdate", flags: 0x3),
-                          isWarmingUp: false)
-        #expect(adHoc.count == 1)
+        let chain = ["Developer ID Application: Example (ABCDE12345)",
+                     "Developer ID Certification Authority", "Apple Root CA"]
+        for team in ["ABCDE12345", CredentialFence.googleTeamId] {
+            let anchored = event(staged, signer: .devId, teamId: team,
+                                 signingId: "org.sparkle-project.Sparkle.Autoupdate", authorities: chain, flags: 0x1)
+            #expect(!NoiseFilter.isVendorSignedUpdater(event: anchored), "\(team)")
+            var sparkle = noise
+            NoiseFilter.apply(&sparkle, event: anchored, isWarmingUp: false)
+            #expect(sparkle.count == 1, "a staged Sparkle path is not quieted, team \(team)")
+        }
     }
 
     @Test("a user-writable updater location needs the vendor's signature on the subject")
@@ -160,8 +153,8 @@ struct NoiseFilterUpdaterGateTests {
         #expect(system.isEmpty, "only an administrator writes the system Library")
     }
 
-    @Test("an ancestor quiets the tree only from a root-owned updater location")
-    func ancestorsCountOnlyWhenRootAnchored() {
+    @Test("an ancestor quiets the tree only from an installed updater location")
+    func ancestorsCountOnlyWhenInstalled() {
         let noise = [match("mdm_enrollment_check", severity: .medium)]
         var underUser = noise
         NoiseFilter.apply(&underUser, event: event("/tmp/stealer", ancestors: [

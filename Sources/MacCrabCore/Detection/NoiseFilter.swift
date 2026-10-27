@@ -262,9 +262,11 @@ public enum NoiseFilter {
         // Full ancestor walk so chains like Chrome → GoogleUpdater →
         // launcher → GoogleUpdater → profiles get caught regardless
         // of nesting depth. The markers name where the vendors install
-        // (see `isAutoUpdaterOrAncestor`), and as under Gates 3 and 8 a
-        // credential-theft match survives: an updater tree reading a
-        // keychain or a private key is the stealer pattern, not an update.
+        // (see `isAutoUpdaterOrAncestor` for which of those locations an
+        // administrator or the Homebrew user can write), and as under
+        // Gates 3 and 8 a credential-theft match survives: an updater tree
+        // reading a keychain or a private key is the stealer pattern, not
+        // an update.
         if isAutoUpdaterOrAncestor(event: event) {
             matches.removeAll {
                 !Self.isMustFire($0, trustedSubject: trustedSubject) && !isCredentialTheftMatch($0)
@@ -583,57 +585,45 @@ public enum NoiseFilter {
     }
 
     /// True when the event's subject process or any ancestor in its
-    /// lineage is a known auto-updater. Delegates to
-    /// `CampaignDetector.isAutoUpdater` (the narrow variant) — NOT
+    /// lineage is a known auto-updater, judged by
+    /// `CampaignDetector.isInstalledAutoUpdater` — NOT
     /// `isKnownBenignProcess`, which includes Apple system daemon paths
     /// that would sweep in Terminal, Finder, and every
     /// `/System/Applications/Utilities/` tool. Exposed publicly so the
     /// campaign and sequence engines can reuse the same definition.
     ///
-    /// A path is evidence only where root alone writes it. A subject at an
-    /// updater location inside the user's own home must also carry the
-    /// vendor's signature, and an ancestor, which carries no signature,
-    /// counts only from a root-owned location: `mkdir` under `~/Library`
-    /// otherwise silenced every suppressible rule for a payload's whole tree.
+    /// A subject also counts at a per-user Google updater location when it
+    /// carries Google's signature. An ancestor carries a path and no
+    /// signature, so it counts only at an installed location: `mkdir` under
+    /// `~/Library` otherwise silenced every suppressible rule for a payload's
+    /// whole tree. Two installed locations are not root's alone, the
+    /// /Applications bundles and the Homebrew prefix; see
+    /// `CampaignDetector.isInstalledAutoUpdater` for that accepted residual.
     public static func isAutoUpdaterOrAncestor(event: Event) -> Bool {
-        if CampaignDetector.isRootAnchoredAutoUpdater(processPath: event.process.executable)
+        if CampaignDetector.isInstalledAutoUpdater(processPath: event.process.executable)
             || isVendorSignedUpdater(event: event) {
             return true
         }
         for ancestor in event.process.ancestors
-        where CampaignDetector.isRootAnchoredAutoUpdater(processPath: ancestor.executable) {
+        where CampaignDetector.isInstalledAutoUpdater(processPath: ancestor.executable) {
             return true
         }
         return false
     }
 
-    /// True when the subject sits at a user-writable updater location and
-    /// carries that vendor's signature: Google's team for the Google updater
-    /// and Keystone paths; for Sparkle, whose host app's team varies, a
-    /// Developer ID or App Store signature with an attested team and
-    /// Sparkle's own signing identifier. A copied platform tool, an unsigned
-    /// payload or an ad-hoc signature naming the vendor's team never
-    /// qualifies. Notarization is not asked for: the live Endpoint Security
-    /// path never populates it. The campaign detector reads the same answer
-    /// from `AlertSummary.isVendorSignedUpdater`. The enricher re-verifies
-    /// every Developer ID or App Store claim carrying Sparkle's identifier,
-    /// so a chain not rooted at Apple reaches this test as ad-hoc.
+    /// True when the subject sits at a user-writable Google updater location
+    /// and carries Google's signature: a Developer ID or App Store signature
+    /// whose attested team is Google's. A copied platform tool, an unsigned
+    /// payload or an ad-hoc signature naming Google's team never qualifies.
+    /// Notarization is not asked for: the live Endpoint Security path never
+    /// populates it. The campaign detector reads the same answer from
+    /// `AlertSummary.isVendorSignedUpdater`.
     public static func isVendorSignedUpdater(event: Event) -> Bool {
-        guard let vendor = CampaignDetector.userWritableUpdaterVendor(processPath: event.process.executable),
+        guard CampaignDetector.isUserAutoUpdater(processPath: event.process.executable),
               let signature = event.process.codeSignature,
-              signature.signerType == .devId || signature.signerType == .appStore,
-              let team = signature.attestedTeamId else { return false }
-        switch vendor {
-        case .google:
-            return team == CredentialFence.googleTeamId
-        case .sparkle:
-            return signature.signingId?.hasPrefix(sparkleSigningIdentifierPrefix) == true
-        }
+              signature.signerType == .devId || signature.signerType == .appStore else { return false }
+        return signature.attestedTeamId == CredentialFence.googleTeamId
     }
-
-    /// The signing identifier Sparkle gives its updater binaries, whatever
-    /// team the host app signs them with.
-    static let sparkleSigningIdentifierPrefix = "org.sparkle-project.Sparkle"
 
     /// True when the path is a desktop terminal emulator bundle. Covers
     /// Apple Terminal, third-party terminals, multiplexers (tmux/screen)

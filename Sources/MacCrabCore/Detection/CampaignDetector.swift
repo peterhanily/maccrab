@@ -1001,35 +1001,24 @@ public actor CampaignDetector {
             || path.hasPrefix("/System/Applications/Utilities/")
     }
 
-    /// Strict auto-updater allow-list. Narrower than
-    /// `isKnownBenignProcess` — does NOT include Apple system daemon
-    /// paths (those would sweep in Terminal, Finder, Safari, any
-    /// /System/Applications/Utilities/ tool). Use this helper when you
-    /// want the engine to drop non-critical matches based on subject-
-    /// or-ancestor path, because matching Terminal or Safari as
-    /// ancestor would silently disable detection for all Terminal-
-    /// launched activity.
+    /// Auto-updater locations as their vendors install them system-wide: the
+    /// system Library (Google's updater and Keystone, Microsoft AutoUpdate),
+    /// the SIP-protected software-update stack, the Sparkle framework inside
+    /// an app under /Applications, and the Homebrew prefix. Narrower than
+    /// `isKnownBenignProcess`: no Apple system daemon paths, which would
+    /// sweep in Terminal, Finder, Safari and every
+    /// /System/Applications/Utilities/ tool when matched as an ancestor. A
+    /// lineage carries paths, not signatures, so only these locations are
+    /// honoured as an ancestor.
     ///
-    /// Empirically-driven: every entry corresponds to a specific field
-    /// FP, and each names where that vendor installs. A marker matched
-    /// anywhere in a path (`/GoogleUpdater/`, `Microsoft AutoUpdate`,
-    /// `/Sparkle.framework/`) made `mkdir ~/Library/GoogleUpdater` enough
-    /// to put a payload's whole tree under Gate 6.
-    static func isAutoUpdater(processPath: String?) -> Bool {
-        guard let path = processPath else { return false }
-        return isRootAnchoredAutoUpdater(processPath: path) || isUserAutoUpdater(processPath: path)
-    }
-
-    /// Updater locations only root, or an administrator's installer, writes:
-    /// the system Library, the SIP-protected software-update stack, an
-    /// installed app's Frameworks directory and the Homebrew prefix. A
-    /// lineage carries paths, not signatures, so an ancestor is honoured
-    /// only here. /Library/Caches is world-writable (mode 1777) and is no
-    /// anchor: Keystone's cache there is a user-writable marker below. On an
-    /// Apple silicon host /opt/homebrew and the bundles under /Applications
-    /// belong to the administrator who installed them; they stay path-only
-    /// trust here, the accepted residual until each is bound to its team.
-    static func isRootAnchoredAutoUpdater(processPath path: String) -> Bool {
+    /// Not every one of them is root's alone. /Applications is root:admin
+    /// 0775, so any administrator's process can place an app with a Sparkle
+    /// framework there, and on an Apple silicon host /opt/homebrew belongs to
+    /// the login user. A process at one of these paths quiets its tree's
+    /// suppressible non-credential matches, including suppressible CRITICAL
+    /// execution matches of Apple-binary descendants. That is an accepted
+    /// residual until each location is bound to its vendor's team.
+    static func isInstalledAutoUpdater(processPath path: String) -> Bool {
         // Homebrew — `brew upgrade` legitimately touches many tactics.
         if path == "/opt/homebrew/bin/brew" || path == "/usr/local/bin/brew" { return true }
         for prefix in [
@@ -1059,42 +1048,21 @@ public actor CampaignDetector {
         return false
     }
 
-    /// The vendor whose signature a subject at a user-writable updater
-    /// location must carry before Gate 6, or campaign tactic counting,
-    /// treats it as that updater; see `NoiseFilter.isVendorSignedUpdater`.
-    enum UpdaterVendor: Sendable, Equatable {
-        case google
-        case sparkle
-    }
-
-    /// The same updaters at locations any user can write: a user's own home,
-    /// and Keystone's cache under world-writable /Library/Caches. Nil for
-    /// every other path.
-    static func userWritableUpdaterVendor(processPath path: String) -> UpdaterVendor? {
-        if path.hasPrefix("/Library/Caches/com.google.Keystone/") { return .google }
-        guard let relative = userHomeRelativePath(path) else { return nil }
-        for prefix in [
+    /// Google's updater and Keystone where any user can write them: under a
+    /// user's own home, and Keystone's cache under world-writable
+    /// /Library/Caches. The path proves nothing there, so Gate 6 and campaign
+    /// tactic counting honour it only for a subject carrying Google's
+    /// signature, and never as an ancestor. Sparkle has no such case: nothing
+    /// about a binary in a staged update directory tells Sparkle's updater
+    /// from one planted there.
+    static func isUserAutoUpdater(processPath path: String) -> Bool {
+        if path.hasPrefix("/Library/Caches/com.google.Keystone/") { return true }
+        guard let relative = userHomeRelativePath(path) else { return false }
+        return [
             "Library/Application Support/Google/GoogleUpdater/",
             "Library/Google/GoogleSoftwareUpdate/",
             "Library/Caches/com.google.Keystone/",
-        ] where relative.hasPrefix(prefix) {
-            return .google
-        }
-        // Sparkle stages the update, Autoupdate included, under
-        // ~/Library/Caches/<bundle-id>/org.sparkle-project.Sparkle/Installation/<nonce>/.
-        if relative.hasPrefix("Library/Caches/"), relative.contains("/org.sparkle-project.Sparkle/Installation/") {
-            return .sparkle
-        }
-        if relative.hasPrefix("Applications/"), relative.contains(".app/Contents/Frameworks/Sparkle.framework/") {
-            return .sparkle
-        }
-        return nil
-    }
-
-    /// True at a user-writable updater location. The path alone proves
-    /// nothing there; callers pair it with the vendor's signature.
-    static func isUserAutoUpdater(processPath path: String) -> Bool {
-        userWritableUpdaterVendor(processPath: path) != nil
+        ].contains { relative.hasPrefix($0) }
     }
 
     /// For `/Users/<name>/<rest>` returns `<rest>`; nil for any other path,
@@ -1115,13 +1083,13 @@ public actor CampaignDetector {
     /// process filter where "is this process an OS component or an
     /// updater?" is the right question. DO NOT use this helper in
     /// ancestor-walk filters — Terminal.app would sweep in every admin
-    /// invocation. See `isAutoUpdater` for the narrower check. An updater
-    /// at a user-writable location counts only with its vendor's signature,
-    /// which the feed site records on the summary.
+    /// invocation. See `isInstalledAutoUpdater` for the narrower check. A
+    /// Google updater at a user-writable location counts only with Google's
+    /// signature, which the feed site records on the summary.
     static func isKnownBenignProcess(processPath: String?, vendorSignedUpdater: Bool) -> Bool {
         guard let path = processPath else { return false }
         if isAppleSystemDaemon(processPath: path) { return true }
-        return isRootAnchoredAutoUpdater(processPath: path)
+        return isInstalledAutoUpdater(processPath: path)
             || (isUserAutoUpdater(processPath: path) && vendorSignedUpdater)
     }
 

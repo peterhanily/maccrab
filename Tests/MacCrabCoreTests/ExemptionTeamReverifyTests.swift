@@ -73,19 +73,11 @@ struct ExemptionTeamReverifyTests {
             #expect(EventEnricher.needsCryptographicVerification(claim(.devId, team: team), isPlatformBinary: false), "\(team)")
             #expect(EventEnricher.needsCryptographicVerification(claim(.appStore, team: team), isPlatformBinary: false), "\(team)")
         }
-        // An ordinary team and identifier buy nothing, so they are taken as reported.
+        // An ordinary team or identifier, Sparkle's included, buys nothing,
+        // so they are taken as reported.
         #expect(!EventEnricher.needsCryptographicVerification(claim(.devId, team: "ABCDE12345"), isPlatformBinary: false))
-        // Sparkle's identifier buys the updater gate at a user-writable path with
-        // any team, so every such claim is re-anchored.
-        let sparkle = "org.sparkle-project.Sparkle.Autoupdate"
-        #expect(EventEnricher.needsCryptographicVerification(
-            claim(.devId, team: "ABCDE12345", signingId: sparkle), isPlatformBinary: false))
-        #expect(EventEnricher.needsCryptographicVerification(
-            claim(.appStore, team: "ABCDE12345", signingId: sparkle), isPlatformBinary: false))
-        #expect(EventEnricher.needsCryptographicVerification(
-            claim(.devId, team: nil, signingId: "org.sparkle-project.Sparkle.Updater"), isPlatformBinary: false))
         #expect(!EventEnricher.needsCryptographicVerification(
-            claim(.adHoc, team: nil, signingId: sparkle), isPlatformBinary: false))
+            claim(.devId, team: "ABCDE12345", signingId: "org.sparkle-project.Sparkle.Autoupdate"), isPlatformBinary: false))
         #expect(!EventEnricher.needsCryptographicVerification(claim(.devId, team: nil), isPlatformBinary: false))
         #expect(!EventEnricher.needsCryptographicVerification(claim(.adHoc, team: NoiseFilter.macCrabTeamId), isPlatformBinary: false))
         #expect(!EventEnricher.needsCryptographicVerification(claim(.unsigned, team: NoiseFilter.macCrabTeamId), isPlatformBinary: false))
@@ -125,46 +117,6 @@ struct ExemptionTeamReverifyTests {
             #expect(EventLoop.credentialFenceFinding(
                 event: read, fence: CredentialFence(), toolName: "Claude Code", toolType: .claudeCode,
                 developmentEngine: false) != nil)
-        }
-    }
-
-    @Test("a self-signed chain carrying Sparkle's identifier at a staged update path is not the updater")
-    func selfSignedSparkleClaimIsNotTheUpdater() async throws {
-        // Sparkle stages Autoupdate under the user's own Caches, so the fixture
-        // must sit in this user's home; skip where that home is not /Users/<name>.
-        let home = NSHomeDirectory()
-        guard home.hasPrefix("/Users/"), !home.hasPrefix("/Users/Shared") else { return }
-        let bundle = home + "/Library/Caches/com.maccrab.reverify-\(UUID().uuidString)"
-        let staging = bundle + "/org.sparkle-project.Sparkle/Installation/\(UUID().uuidString.prefix(8))"
-        try FileManager.default.createDirectory(atPath: staging, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: bundle) }
-        guard let autoupdate = adHocBinary(named: "Autoupdate", identifier: "org.sparkle-project.Sparkle.Autoupdate",
-                                           in: staging) else {
-            return  // codesign unavailable: skip rather than fail
-        }
-        // The path is one the updater gate recognises: a Developer ID chain
-        // carrying Sparkle's identifier would be quieted here.
-        let anchored = CodeSignatureInfo(
-            signerType: .devId, teamId: "ABCDE12345", signingId: "org.sparkle-project.Sparkle.Autoupdate",
-            authorities: ["Developer ID Application: Example (ABCDE12345)", "Developer ID Certification Authority",
-                          "Apple Root CA"], flags: 0x1, isNotarized: false)
-        let genuine = event(process(autoupdate, signer: .devId, teamId: nil, signingId: "", signature: anchored))
-        #expect(NoiseFilter.isVendorSignedUpdater(event: genuine))
-        // The collector saw CS_VALID without CS_ADHOC, a team and Sparkle's
-        // identifier, as a self-signed certificate chain presents.
-        let claim = process(autoupdate, signer: .devId, teamId: "ABCDE12345",
-                            signingId: "org.sparkle-project.Sparkle.Autoupdate")
-        let verdict = await enriched(claim)
-        #expect(verdict?.signerType == .adHoc)
-        #expect(verdict?.attestedTeamId == nil)
-        if let verdict {
-            let judged = event(process(autoupdate, signer: .adHoc, teamId: nil, signingId: "", signature: verdict))
-            #expect(!NoiseFilter.isVendorSignedUpdater(event: judged))
-            var matches = [RuleMatch(ruleId: "mdm_enrollment_check", ruleName: "MDM Enrollment Status Check",
-                                     severity: .medium, description: "", mitreTechniques: [], tags: [],
-                                     suppressible: true)]
-            NoiseFilter.apply(&matches, event: judged, isWarmingUp: false)
-            #expect(matches.count == 1, "Gate 6 keeps the match of a binary that is not Sparkle's updater")
         }
     }
 
