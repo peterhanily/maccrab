@@ -615,7 +615,9 @@ public enum NoiseFilter {
     /// payload or an ad-hoc signature naming the vendor's team never
     /// qualifies. Notarization is not asked for: the live Endpoint Security
     /// path never populates it. The campaign detector reads the same answer
-    /// from `AlertSummary.isVendorSignedUpdater`.
+    /// from `AlertSummary.isVendorSignedUpdater`. The enricher re-verifies
+    /// every Developer ID or App Store claim carrying Sparkle's identifier,
+    /// so a chain not rooted at Apple reaches this test as ad-hoc.
     public static func isVendorSignedUpdater(event: Event) -> Bool {
         guard let vendor = CampaignDetector.userWritableUpdaterVendor(processPath: event.process.executable),
               let signature = event.process.codeSignature,
@@ -625,9 +627,13 @@ public enum NoiseFilter {
         case .google:
             return team == CredentialFence.googleTeamId
         case .sparkle:
-            return signature.signingId?.hasPrefix("org.sparkle-project.Sparkle") == true
+            return signature.signingId?.hasPrefix(sparkleSigningIdentifierPrefix) == true
         }
     }
+
+    /// The signing identifier Sparkle gives its updater binaries, whatever
+    /// team the host app signs them with.
+    static let sparkleSigningIdentifierPrefix = "org.sparkle-project.Sparkle"
 
     /// True when the path is a desktop terminal emulator bundle. Covers
     /// Apple Terminal, third-party terminals, multiplexers (tmux/screen)

@@ -23,11 +23,12 @@ struct NoiseFilterUpdaterGateTests {
         signer: SignerType? = nil,
         teamId: String? = nil,
         signingId: String? = nil,
+        authorities: [String] = [],
         flags: UInt32 = 0,
         ancestors: [ProcessAncestor] = []
     ) -> Event {
         let signature = signer.map {
-            CodeSignatureInfo(signerType: $0, teamId: teamId, signingId: signingId, authorities: [],
+            CodeSignatureInfo(signerType: $0, teamId: teamId, signingId: signingId, authorities: authorities,
                               flags: flags, isNotarized: false)
         }
         let process = MacCrabCore.ProcessInfo(
@@ -111,11 +112,23 @@ struct NoiseFilterUpdaterGateTests {
                           isWarmingUp: false)
         #expect(google.isEmpty)
         let staged = "/Users/u/Library/Caches/com.example.app/org.sparkle-project.Sparkle/Installation/AbCd/Autoupdate"
+        // What the enricher passes on after Security anchored the chain at
+        // Apple: it re-verifies every claim carrying Sparkle's identifier.
         var sparkle = noise
         NoiseFilter.apply(&sparkle, event: event(staged, signer: .devId, teamId: "ABCDE12345",
-                                                 signingId: "org.sparkle-project.Sparkle.Autoupdate", flags: 0x1),
+                                                 signingId: "org.sparkle-project.Sparkle.Autoupdate",
+                                                 authorities: ["Developer ID Application: Example (ABCDE12345)",
+                                                               "Developer ID Certification Authority", "Apple Root CA"],
+                                                 flags: 0x1),
                           isWarmingUp: false)
-        #expect(sparkle.isEmpty, "Sparkle's staged Autoupdate carries the host app's team and Sparkle's identifier")
+        #expect(sparkle.isEmpty, "a verified chain with the host app's team and Sparkle's identifier is the updater")
+        // A self-signed chain comes back from that verification as ad-hoc,
+        // with CS_ADHOC still clear, and is not.
+        var selfSigned = noise
+        NoiseFilter.apply(&selfSigned, event: event(staged, signer: .adHoc, teamId: "ABCDE12345",
+                                                    signingId: "org.sparkle-project.Sparkle.Autoupdate", flags: 0x1),
+                          isWarmingUp: false)
+        #expect(selfSigned.count == 1, "a chain Security did not anchor at Apple is not Sparkle's updater")
         var renamed = noise
         NoiseFilter.apply(&renamed, event: event(staged, signer: .devId, teamId: "ABCDE12345",
                                                  signingId: "com.example.helper", flags: 0x1),
