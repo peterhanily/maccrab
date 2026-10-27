@@ -1007,7 +1007,7 @@ struct ProtectedFileLaneTests {
         #expect(tracker.protectedLaneRefusedTotal() == 45)
     }
 
-    @Test("a decoy, keychain or wallet read has a budget of its own, so an exhausted OPEN budget cannot demote it, and a loop on a decoy is still bounded")
+    @Test("a honeyfile, decoy, keychain or wallet read has a budget of its own, so an exhausted OPEN budget cannot demote it, and a loop on a decoy is still bounded")
     func highValueOpensHaveTheirOwnBudget() {
         let budgets = PerProcessLaneBudgets()
         let tracker = ESSeqTracker()
@@ -1016,7 +1016,7 @@ struct ProtectedFileLaneTests {
             var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 77)
             EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker)
         }
-        // Every default honeyfile is a high-value read, whatever its name.
+        // Every default honeyfile is a honeyfile-class read, whatever its name.
         let honeyfiles = HoneyfileManager.defaultHoneyfileSet(homeDir: "/Users/x").map(\.path)
         #expect(honeyfiles.count == 13)
         for path in honeyfiles {
@@ -1025,7 +1025,7 @@ struct ProtectedFileLaneTests {
                 &read, budgets: budgets, nowNanos: t0 + 350, refusals: tracker) == true, "\(path)")
             #expect(EventPipelineLane.finalLane(for: read) == .priority, "\(path)")
         }
-        for path in ["/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt",
+        for path in ["/Users/x/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary",
                      "/Users/x/Library/Keychains/login.keychain-db",
                      "/Users/x/Library/Application Support/Electrum/wallets/default_wallet",
                      "/Users/x/Documents/passwords_backup.csv"] {
@@ -1036,13 +1036,78 @@ struct ProtectedFileLaneTests {
         }
         var decoyAdmitted = 0
         for i in 0..<100 {
-            var read = fileEvent("open", "/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt", pid: 77)
+            var read = fileEvent("open", "/Users/x/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary", pid: 77)
             if EventPipelineLane.stampProtectedLane(
                 &read, budgets: budgets, nowNanos: t0 + 500 + UInt64(i), refusals: tracker) == true {
                 decoyAdmitted += 1
             }
         }
-        #expect(decoyAdmitted == 47, "the high-value class is a budget too: 64 reads, seventeen already spent")
+        #expect(decoyAdmitted == 49, "the honeyfile class is a budget too: 64 reads, fifteen already spent")
+    }
+
+    @Test("a deployed honeyfile or decoy is matched by its exact path inside a home, and the same name anywhere else is an ordinary protected OPEN")
+    func honeyfileClassIsExact() {
+        for home in ["/Users/x", "/var/root", "/private/var/root"] {
+            let deployed = HoneyfileManager.defaultHoneyfileSet(homeDir: home).map(\.path)
+                + HoneyPromptManager.defaultHoneyPromptSet(homeDir: home).map(\.path)
+            #expect(deployed.count == 16)
+            for path in deployed {
+                #expect(EventPipelineLane.isHoneyfileOrDecoyPath(path), "\(path)")
+                #expect(ESCollector.isProtectedOpenPath(path), "\(path): the callback keeps the read")
+            }
+        }
+        for path in ["/tmp/x/.aws/credentials.bak", "/Users/Shared/.aws/credentials.bak",
+                     "/Users/x/project/.aws/credentials.bak", "/Users/x/.aws/credentials",
+                     "/Users/x/Library/Application Support/MacCrab/decoys/junk",
+                     "/tmp/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary"] {
+            #expect(!EventPipelineLane.isHoneyfileOrDecoyPath(path), "\(path)")
+        }
+        #expect(ESCollector.isProtectedOpenPath("/tmp/x/.aws/credentials.bak"))
+        #expect(!ESCollector.highValueOpenPathMarkers.matches("/tmp/x/.aws/credentials.bak"),
+                "a honeyfile name outside a home is an ordinary protected OPEN, not a high-value one")
+    }
+
+    @Test("keychain-named junk spends the high-value budget, never the honeyfile class: a deployed honeyfile and decoy read after 64 junk opens still stamp priority")
+    func keychainJunkCannotDrainTheHoneyfileClass() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var junkAdmitted = 0
+        for n in 0..<64 {
+            var open = fileEvent("open", "/tmp/x/Library/Keychains/j\(n)", pid: 77)
+            if EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(n), refusals: tracker) == true {
+                junkAdmitted += 1
+            }
+        }
+        #expect(junkAdmitted == 64)
+        var more = fileEvent("open", "/tmp/x/Library/Keychains/j64", pid: 77)
+        #expect(EventPipelineLane.stampProtectedLane(&more, budgets: budgets, nowNanos: t0 + 64, refusals: tracker) == false,
+                "the junk spent the process's whole high-value budget")
+        for (i, path) in ["/Users/x/.aws/credentials.bak",
+                          "/Users/x/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary"].enumerated() {
+            var read = fileEvent("open", path, pid: 77)
+            #expect(EventPipelineLane.stampProtectedLane(
+                &read, budgets: budgets, nowNanos: t0 + 100 + UInt64(i), refusals: tracker) == true, "\(path)")
+            #expect(EventPipelineLane.finalLane(for: read) == .priority, "\(path)")
+        }
+    }
+
+    @Test("keychain-junk loopers pin the high-value aggregate, and a reader that spent its allowance on five junk opens still has its honeyfile read stamp priority")
+    func keychainLoopersCannotDemoteAHoneyfileRead() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let storm = pinTheAggregate(budgets, tracker, from: t0, path: { "/Users/x/Library/Keychains/junk\($0)" }, burst: 64, perSecond: 16)
+        for n in 0..<5 {
+            var junk = fileEvent("open", "/tmp/r/Library/Keychains/j\(n)", pid: 6)
+            #expect(EventPipelineLane.stampProtectedLane(
+                &junk, budgets: budgets, nowNanos: storm.lastAttempt + 100_000 + UInt64(n), refusals: tracker) == true,
+                    "the reader's first sighting and allowance")
+        }
+        var read = fileEvent("open", "/Users/x/.aws/credentials.bak", pid: 6)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &read, budgets: budgets, nowNanos: storm.lastAttempt + 200_000, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: read) == .priority)
     }
 
     @Test("every high-value marker is one of the protected OPEN markers, so the class is a subset and cannot drift")
@@ -1388,7 +1453,7 @@ struct ProtectedFileLaneTests {
     }
 
     @Test("a sustained storm stays within each class's stated bound, burst plus rate times seconds: 512 long-lived processes at two events a second and 40 fresh ones a second, for a minute",
-          arguments: ["write", "open", "high-value"])
+          arguments: ["write", "open", "high-value", "honeyfile"])
     func sustainedStormStaysWithinTheStatedBound(kind: String) {
         let budgets = PerProcessLaneBudgets()
         let tracker = ESSeqTracker()
@@ -1404,8 +1469,11 @@ struct ProtectedFileLaneTests {
         case "open":
             path = { "/tmp/\($0)/.env" }
             shared = (1_024, 256)
-        default:
+        case "high-value":
             path = { "/Users/x/Library/Keychains/junk\($0)" }
+            shared = (256, 64)
+        default:
+            path = { _ in "/Users/x/.aws/credentials.bak" }
             shared = (256, 64)
         }
         var offers: [(at: UInt64, pid: Int32)] = []

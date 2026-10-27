@@ -77,6 +77,23 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
             || homePersistenceFiles.contains(String(inHome))
     }
 
+    /// Every default honeyfile and honey-prompt decoy, relative to the home
+    /// it is deployed in.
+    private static let deployedDecoys: Set<String> = Set(
+        HoneyfileManager.defaultHoneyfileSet(homeDir: "").map(\.path)
+            + HoneyPromptManager.defaultHoneyPromptSet(homeDir: "").map(\.path))
+
+    /// Whether `path` is a deployed honeyfile or honey-prompt decoy: exactly
+    /// one of the default paths, inside a user's home or root's. The same
+    /// name anywhere else (`/tmp/x/.aws/credentials.bak`, `/Users/Shared/…`,
+    /// junk beside the decoys) is not, so no loop on files a process can
+    /// create spends this class's budget; reading the deployed files
+    /// themselves is the finding.
+    static func isHoneyfileOrDecoyPath(_ path: String) -> Bool {
+        guard !path.hasPrefix("/Users/Shared/"), let inHome = homeRelativePath(path) else { return false }
+        return deployedDecoys.contains(String(inHome))
+    }
+
     /// The part of `path` inside a user's home (`/Users/<name>`) or root's,
     /// starting with its `/`; nil for any other path.
     private static func homeRelativePath(_ path: String) -> Substring? {
@@ -118,8 +135,10 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
     /// per process and per class (`PerProcessLaneBudgets`): an `open()` loop
     /// on the caller's own `.env` spends only that process's OPEN tokens, so
     /// it can take neither another process's credential read nor its own
-    /// LaunchAgent write off the priority lane, and a decoy, keychain or
-    /// wallet read spends a class of its own that the loop cannot reach.
+    /// LaunchAgent write off the priority lane. A keychain, wallet or
+    /// password-database read spends a class of its own that the loop cannot
+    /// reach, and a deployed honeyfile or decoy read, matched by exact path,
+    /// another that no loop on junk files can reach either.
     @discardableResult
     static func stampProtectedLane(
         _ event: inout Event,
@@ -130,7 +149,14 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
         guard isProtectedFileCandidate(event) else { return nil }
         let kind: PerProcessLaneBudgets.Kind
         if event.eventAction == "open" {
-            kind = ESCollector.highValueOpenPathMarkers.matches(event.file?.path ?? "") ? .highValueOpen : .open
+            let path = event.file?.path ?? ""
+            if isHoneyfileOrDecoyPath(path) {
+                kind = .honeyfileOpen
+            } else if ESCollector.highValueOpenPathMarkers.matches(path) {
+                kind = .highValueOpen
+            } else {
+                kind = .open
+            }
         } else {
             kind = .write
         }
@@ -403,27 +429,30 @@ final class ProcessLaneBudget: BoundedTableEntry {
 }
 
 /// One ES worker's protected-lane budgets, split by class: the write family
-/// and SETMODE, the static credential / agent-content OPENs (every `git`
-/// reads `~/.gitconfig`), and the high-value OPENs — a deployed decoy or
-/// honeyfile, a keychain, a wallet — which get tokens of their own so that a
+/// and SETMODE; the static credential / agent-content OPENs (every `git`
+/// reads `~/.gitconfig`); the high-value OPENs of a keychain, a wallet or a
+/// password database; and the OPENs of a deployed honeyfile or decoy,
+/// matched by exact path. The last two get tokens of their own, so that a
 /// process which drained its OPEN budget on its own `.gitconfig` cannot then
-/// read a decoy or the login keychain off the priority lane.
+/// read the login keychain or a decoy off the priority lane, and junk named
+/// like a keychain spends only the high-value class, never the honeyfile
+/// one.
 ///
 /// In every class a process's protected event is admitted to the priority
 /// lane when its own bucket has a token and a payer has one.
 ///
 /// 1. Its own bucket (write 64 then 16 a second, OPEN 256 then 64,
-///    high-value 64 then 16): a loop spends only its own tokens, so it can
-///    take neither another process's credential read nor its own LaunchAgent
-///    write off the lane. Peeked, not spent, until a payer pays, so a refusal
-///    costs the process nothing.
+///    high-value and honeyfile 64 then 16): a loop spends only its own
+///    tokens, so it can take neither another process's credential read nor
+///    its own LaunchAgent write off the lane. Peeked, not spent, until a
+///    payer pays, so a refusal costs the process nothing.
 /// 2. The payer. A process seen for the first time pays nothing for its
 ///    first event. A tracked process pays from its allowance (four events,
 ///    refilling one every four seconds, that nothing else can spend) and then
 ///    from the worker's shared bucket (write 256 then 64 a second, OPEN 1,024
-///    then 256, high-value 256 then 64). The shared bucket refills at four
-///    processes' worth, so four or five long-lived loopers on their own
-///    alert-free files hold it at zero for as long as they run; the
+///    then 256, high-value and honeyfile 256 then 64). The shared bucket
+///    refills at four processes' worth, so four or five long-lived loopers on
+///    their own alert-free files hold it at zero for as long as they run; the
 ///    allowance is what still carries the credential read of an uninvolved
 ///    process, or of an IDE or shell tracked for an hour, past them.
 /// 3. Churn. When the table is full of live processes, a batch recycles the
@@ -447,8 +476,9 @@ final class ProcessLaneBudget: BoundedTableEntry {
 /// allowance (128) and n its refill (32/s), and W the idle window (60 s). The
 /// last term is the turnover: a slot can take a newly allowanced process at
 /// most once per idle window. That is B = 3,712 and R ≈ 459/s for OPEN, and
-/// B = 2,944 and R ≈ 267/s for write and for high-value. The rest rides the
-/// file lane, counted as refused.
+/// B = 2,944 and R ≈ 267/s for each of write, high-value and honeyfile; the
+/// four classes together put at most their sum on the lane. The rest rides
+/// the file lane, counted as refused.
 ///
 /// What remains:
 /// - A process's first event of a class is refused only while the class's
@@ -469,6 +499,7 @@ final class PerProcessLaneBudgets {
         case write
         case open
         case highValueOpen
+        case honeyfileOpen
     }
 
     typealias Shape = (capacity: Int, refillPerSecond: Double)
@@ -484,15 +515,18 @@ final class PerProcessLaneBudgets {
     private let write: Lane
     private let open: Lane
     private let highValueOpen: Lane
+    private let honeyfileOpen: Lane
     private let allowance: Shape
 
     init(trackedProcesses: Int = 512,
          write: Shape = (capacity: 64, refillPerSecond: 16),
          open: Shape = (capacity: 256, refillPerSecond: 64),
          highValueOpen: Shape = (capacity: 64, refillPerSecond: 16),
+         honeyfileOpen: Shape = (capacity: 64, refillPerSecond: 16),
          writeAggregate: Shape = (capacity: 256, refillPerSecond: 64),
          openAggregate: Shape = (capacity: 1_024, refillPerSecond: 256),
          highValueOpenAggregate: Shape = (capacity: 256, refillPerSecond: 64),
+         honeyfileOpenAggregate: Shape = (capacity: 256, refillPerSecond: 64),
          allowance: Shape = (capacity: 4, refillPerSecond: 0.25),
          newcomers: Shape = (capacity: 128, refillPerSecond: 32)) {
         func bucket(_ shape: Shape) -> ProtectedFileLaneBudget {
@@ -508,6 +542,7 @@ final class PerProcessLaneBudgets {
         self.write = lane(write, writeAggregate)
         self.open = lane(open, openAggregate)
         self.highValueOpen = lane(highValueOpen, highValueOpenAggregate)
+        self.honeyfileOpen = lane(honeyfileOpen, honeyfileOpenAggregate)
         self.allowance = allowance
     }
 
@@ -523,6 +558,7 @@ final class PerProcessLaneBudgets {
         case .write: lane = write
         case .open: lane = open
         case .highValueOpen: lane = highValueOpen
+        case .honeyfileOpen: lane = honeyfileOpen
         }
         let lookup = lane.processes.lookup(key: pid, nowNanos: nowNanos)
         guard let process = lookup.entry, process.bucket.hasToken(nowNanos: nowNanos) else { return false }
@@ -543,7 +579,8 @@ final class PerProcessLaneBudgets {
 
     /// The most processes any one class tracks; a test aid.
     var trackedProcessCount: Int {
-        Swift.max(write.processes.count, open.processes.count, highValueOpen.processes.count)
+        Swift.max(write.processes.count, open.processes.count, highValueOpen.processes.count,
+                  honeyfileOpen.processes.count)
     }
 }
 

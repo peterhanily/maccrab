@@ -668,13 +668,6 @@ public final class ESCollector: @unchecked Sendable {
         "/Documents/passwords_backup.csv",
         "/.gcp-service-account.json.bak",
         "/.gitconfig.bak",
-        // The other default honeyfiles (HoneyfileManager.defaultHoneyfileSet).
-        // Each already matches a broader marker above; they are named exactly
-        // so `highValueReadPathSubstrings` can list every default honeyfile
-        // and remain a subset of this list.
-        "/.aws/credentials.bak", "/.ssh/id_rsa.old", "/.kube/config.backup",
-        "/.netrc.backup", "/.docker/config.json.bak", "/.npmrc.bak", "/.pypirc.bak",
-        "/.config/gh/hosts.yml.bak", "/.cargo/credentials.toml.bak",
         "/Library/Keychains/",
         // v1.18 read-detection: the credential-read rules (safari/notes/password-
         // manager/shadow-hash) target these, so ES must emit NOTIFY_OPEN for them.
@@ -1621,23 +1614,18 @@ public final class ESCollector: @unchecked Sendable {
         protectedOpenPathMarkers.matches(path)
     }
 
-    /// The protected OPENs that are a finding in themselves rather than a
-    /// step: a read of a deployed decoy or honeyfile, of a keychain, or of a
-    /// wallet. The worker budgets these separately from the other credential
-    /// and agent-content reads (`PerProcessLaneBudgets`), so a process that
-    /// spent its OPEN budget on its own `.gitconfig` still has its decoy and
-    /// keychain reads delivered on the priority lane. Every entry is one of
+    /// The protected OPENs of a keychain, a wallet or a password database:
+    /// reads that are a finding in themselves rather than a step. The worker
+    /// budgets these separately from the other credential and agent-content
+    /// reads (`PerProcessLaneBudgets`), so a process that spent its OPEN
+    /// budget on its own `.gitconfig` still has its keychain reads delivered
+    /// on the priority lane. These are substrings, so any process can open
+    /// junk that matches them (`/tmp/x/Library/Keychains/j`) and spend this
+    /// class; a deployed honeyfile or decoy is therefore not matched here but
+    /// by its exact path, in a class of its own
+    /// (`EventPipelineLane.isHoneyfileOrDecoyPath`). Every entry is one of
     /// `credentialReadPathSubstrings`; a test pins the subset.
     static let highValueReadPathSubstrings: [String] = [
-        "Application Support/MacCrab/decoys/",
-        // Every default honeyfile (HoneyfileManager.defaultHoneyfileSet).
-        "/Library/Application Support/Passwords.backup",
-        "/Documents/passwords_backup.csv",
-        "/.gcp-service-account.json.bak",
-        "/.gitconfig.bak",
-        "/.aws/credentials.bak", "/.ssh/id_rsa.old", "/.kube/config.backup",
-        "/.netrc.backup", "/.docker/config.json.bak", "/.npmrc.bak", "/.pypirc.bak",
-        "/.config/gh/hosts.yml.bak", "/.cargo/credentials.toml.bak",
         "/Library/Keychains/",
         "/MetaMask/", "/Phantom/", "/Coinbase Wallet/",
         "/1Password/", "/Bitwarden/", ".kdbx",
