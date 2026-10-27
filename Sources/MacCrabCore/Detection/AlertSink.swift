@@ -826,12 +826,19 @@ public actor AlertSink {
     /// insertion path is introduced (preserves Pass 2 of
     /// pre-release-audit.sh: only one place writes to alerts.db).
     @discardableResult
+    ///
+    /// `collapseSameEvidence` false reserves the alert without the
+    /// same-evidence dimension (its event and tactics). A detection that is
+    /// not a variant of the per-event rules, such as a multi-entity graph
+    /// rule anchored on an event, then neither absorbs a rule alert on that
+    /// event nor is absorbed by one; its per-rule window still applies.
     public func submit(
         alert: Alert,
         event: Event,
         dedupProcessPath: String? = nil,
         journalAdmission: EventJournalAdmission? = nil,
-        mustFire: Bool = false
+        mustFire: Bool = false,
+        collapseSameEvidence: Bool = true
     ) async throws -> Bool {
         guard beginAlertAdmission(offers: 1) else { return false }
         defer { finishAlertAdmission() }
@@ -870,7 +877,7 @@ public actor AlertSink {
             processPath: dedupKey,
             eventId: reservedAlert.ruleId.hasPrefix("maccrab.campaign.")
                 ? nil : event.id.uuidString,
-            tactics: reservedAlert.mitreTactics,
+            tactics: collapseSameEvidence ? reservedAlert.mitreTactics : nil,
             severity: reservedAlert.severity
         ) {
         case .suppressed:

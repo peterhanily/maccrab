@@ -2869,8 +2869,11 @@ enum EventLoop {
                     do {
                         // Every graph rule is a curated multi-entity detection
                         // with no suppressible variant; the sink never lowers
-                        // it for an agent or dev-tooling path.
-                        _ = try await alertSink.submit(alert: alert, event: anchorEvent, mustFire: true)
+                        // it for an agent or dev-tooling path. Its tactics can
+                        // equal a rule alert's on the same anchor event, so it
+                        // is reserved without the same-evidence dimension:
+                        // neither alert may absorb the other.
+                        _ = try await alertSink.submit(alert: alert, event: anchorEvent, mustFire: true, collapseSameEvidence: false)
                     } catch {
                         await StorageErrorTracker.shared.recordAlertError(error)
                     }

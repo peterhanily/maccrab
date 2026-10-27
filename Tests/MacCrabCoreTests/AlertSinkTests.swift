@@ -94,6 +94,41 @@ struct AlertSinkTests {
         #expect(enrichedPreset.remediationHint == "operator note")
     }
 
+    @Test("a graph alert and a rule alert on one event and tactic both persist, in either order")
+    func graphAndRuleAlertOnOneEventBothPersist() async throws {
+        for graphFirst in [true, false] {
+            let (sink, store, dir) = try await makeSink()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let ev = event(executable: "/Users/x/.claude/tools/run.sh", pid: 4321)
+            let lane = Alert(
+                ruleId: "launch_agent_written", ruleTitle: "LaunchAgent Written", severity: .high,
+                eventId: ev.id.uuidString, processPath: ev.process.executable, processName: "run.sh",
+                description: "rule", mitreTactics: "attack.persistence", mitreTechniques: "attack.t1543.001"
+            )
+            let graph = Alert(
+                ruleId: "maccrab_agent_associated_shell_writes_to_login_item",
+                ruleTitle: "AI-associated shell wrote to a login item", severity: .high,
+                eventId: ev.id.uuidString, processPath: ev.process.executable, processName: "run.sh",
+                description: "graph", mitreTactics: "attack.persistence", mitreTechniques: "T1543.001,T1547"
+            )
+            // The graph lane's own submission (see the source pin in the
+            // recalibration suite).
+            func submitGraph() async throws {
+                _ = try await sink.submit(alert: graph, event: ev, mustFire: true, collapseSameEvidence: false)
+            }
+            func submitRule() async throws {
+                _ = try await sink.insertEngineBatch(alerts: [lane], event: ev)
+            }
+            if graphFirst {
+                try await submitGraph(); try await submitRule()
+            } else {
+                try await submitRule(); try await submitGraph()
+            }
+            let stored = try await store.alerts(forEventId: ev.id.uuidString)
+            #expect(Set(stored.map(\.ruleId)) == [lane.ruleId, graph.ruleId], "graph first: \(graphFirst)")
+        }
+    }
+
     @Test("submit(alert:event:) inserts the alert into AlertStore on first call")
     func submitInsertsFirst() async throws {
         let (sink, store, dir) = try await makeSink()
@@ -794,7 +829,8 @@ struct AlertSinkRecalibrationTests {
         let eventLoop = try String(
             contentsOf: repositoryRoot.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"),
             encoding: .utf8)
-        #expect(eventLoop.contains("_ = try await alertSink.submit(alert: alert, event: anchorEvent, mustFire: true)"))
+        #expect(eventLoop.contains(
+            "_ = try await alertSink.submit(alert: alert, event: anchorEvent, mustFire: true, collapseSameEvidence: false)"))
         #expect(eventLoop.contains("mitreTactics: match.tactics.isEmpty ? nil : match.tactics.joined(separator: \",\")"))
     }
 
