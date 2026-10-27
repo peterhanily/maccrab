@@ -203,6 +203,112 @@ final class ProtectedFileLaneBudget {
         tokens -= 1
         return true
     }
+
+    /// The last clock reading this bucket saw; nil until its first `admit`.
+    /// `BoundedBudgetTable` evicts by it.
+    var lastSeenNanos: UInt64? { lastNanos }
+}
+
+/// One `ProtectedFileLaneBudget` per key, so a budget drained by one source
+/// cannot refuse another's. Bounded: once `capacity` keys are held, an insert
+/// first drops every key idle for `idleEvictionNanos`, and if none is, the
+/// least recently seen one. Unlocked — the owner serializes access (the ES
+/// worker's queue, or `SignalRateLimiter`'s lock).
+final class BoundedBudgetTable<Key: Hashable> {
+    private let capacity: Int
+    private let idleEvictionNanos: UInt64
+    private let makeBudget: () -> ProtectedFileLaneBudget
+    private var budgets: [Key: ProtectedFileLaneBudget] = [:]
+
+    init(capacity: Int, idleEvictionNanos: UInt64 = 60_000_000_000,
+         makeBudget: @escaping () -> ProtectedFileLaneBudget) {
+        self.capacity = Swift.max(1, capacity)
+        self.idleEvictionNanos = idleEvictionNanos
+        self.makeBudget = makeBudget
+    }
+
+    /// Spends one of `key`'s tokens at `nowNanos`; a key never seen before
+    /// starts with a full bucket.
+    func admit(key: Key, nowNanos: UInt64) -> Bool {
+        if let budget = budgets[key] {
+            return budget.admit(nowNanos: nowNanos)
+        }
+        if budgets.count >= capacity {
+            evict(nowNanos: nowNanos)
+        }
+        let budget = makeBudget()
+        budgets[key] = budget
+        return budget.admit(nowNanos: nowNanos)
+    }
+
+    var count: Int { budgets.count }
+
+    private func evict(nowNanos: UInt64) {
+        var oldestKey: Key?
+        var oldestSeen = UInt64.max
+        for (key, budget) in budgets {
+            let seen = budget.lastSeenNanos ?? 0
+            if nowNanos > seen, nowNanos - seen >= idleEvictionNanos {
+                budgets[key] = nil
+            } else if seen < oldestSeen {
+                oldestSeen = seen
+                oldestKey = key
+            }
+        }
+        if budgets.count >= capacity, let key = oldestKey {
+            budgets[key] = nil
+        }
+    }
+}
+
+/// How many kept NOTIFY_SIGNAL messages reach the priority lane. The callback
+/// keeps only a fatal signal aimed at MacCrab or at a security tool, but one
+/// process can send that signal in a loop, or name a decoy after a security
+/// tool and signal it, and every kept message rides the lane that carries
+/// exec/fork/exit. Each (source pid, target pid) pair gets a small bucket,
+/// checked before any path is decoded, and the kept total is bounded by one
+/// aggregate bucket that only relevant targets spend. Locked: the ES callback
+/// may run on more than one thread across clients.
+final class SignalRateLimiter: @unchecked Sendable {
+    struct Pair: Hashable {
+        let source: pid_t
+        let target: pid_t
+    }
+
+    private let lock = NSLock()
+    private let pairs: BoundedBudgetTable<Pair>
+    private let aggregate: ProtectedFileLaneBudget
+
+    init(pairCapacity: Int = 8, pairRefillPerSecond: Double = 2,
+         aggregateCapacity: Int = 64, aggregateRefillPerSecond: Double = 16,
+         trackedPairs: Int = 1024) {
+        pairs = BoundedBudgetTable(capacity: trackedPairs, idleEvictionNanos: 10_000_000_000) {
+            ProtectedFileLaneBudget(capacity: pairCapacity, refillPerSecond: pairRefillPerSecond)
+        }
+        aggregate = ProtectedFileLaneBudget(capacity: aggregateCapacity, refillPerSecond: aggregateRefillPerSecond)
+    }
+
+    /// Whether this pair may still have a signal kept; spent before the
+    /// target's executable is decoded, so a flood at one target costs the
+    /// callback an integer probe per message, not a path decode.
+    func admitPair(source: pid_t, target: pid_t, nowNanos: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pairs.admit(key: Pair(source: source, target: target), nowNanos: nowNanos)
+    }
+
+    /// Whether the client may keep one more signal at a relevant target. Only
+    /// relevant targets spend this, so the build-storm SIGTERMs at ordinary
+    /// processes never use up the budget a real signal at the engine needs.
+    func admitKept(nowNanos: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return aggregate.admit(nowNanos: nowNanos)
+    }
+
+    /// Pairs currently tracked; a test aid.
+    var trackedPairCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pairs.count
+    }
 }
 
 /// Compile-time bounded identity for every collector feeding the merged

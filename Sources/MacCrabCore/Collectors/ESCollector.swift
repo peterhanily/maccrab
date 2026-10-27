@@ -1117,7 +1117,10 @@ public final class ESCollector: @unchecked Sendable {
         protection: Int32 = 0,
         mode: UInt32 = 0,
         signal: Int32 = 0,
+        signalSourcePID: Int32 = -1,
         signalTargetPID: Int32 = -1,
+        signalNowNanos: UInt64 = 0,
+        signalLimiter: SignalRateLimiter? = nil,
         signalTargetExecutable: @autoclosure () -> String = ""
     ) -> Bool {
         switch eventType {
@@ -1140,7 +1143,10 @@ public final class ESCollector: @unchecked Sendable {
         case ES_EVENT_TYPE_NOTIFY_SIGNAL.rawValue:
             return !shouldKeepSignal(
                 sig: signal,
+                sourcePID: signalSourcePID,
                 targetPID: signalTargetPID,
+                nowNanos: signalNowNanos,
+                limiter: signalLimiter,
                 targetExecutable: signalTargetExecutable()
             )
 
@@ -1174,7 +1180,10 @@ public final class ESCollector: @unchecked Sendable {
             return shouldDropAtCallback(
                 eventType: eventType,
                 signal: msg.event.signal.sig,
+                signalSourcePID: audit_token_to_pid(msg.process.pointee.audit_token),
                 signalTargetPID: audit_token_to_pid(target.pointee.audit_token),
+                signalNowNanos: DispatchTime.now().uptimeNanoseconds,
+                signalLimiter: signalRateLimiter,
                 signalTargetExecutable: esFileToPath(target.pointee.executable)
             )
 
@@ -1465,21 +1474,44 @@ public final class ESCollector: @unchecked Sendable {
     /// The engine's own pid, read once; a signal at it is always kept.
     static let ownProcessID: Int32 = getpid()
 
+    /// The kept-signal rate limit shared by every client's callback: 8 per
+    /// (source, target) pair with 2 more a second, 64 kept in all with 16
+    /// more a second. A `kill()` loop at the engine, or at a decoy named after
+    /// a security tool, used to put every message on the priority lane.
+    static let signalRateLimiter = SignalRateLimiter()
+
     /// Keep a NOTIFY_SIGNAL only when it is fatal AND aimed at MacCrab itself or
-    /// a security tool. `targetExecutable` is an autoclosure so the borrowed
-    /// path token is decoded only for the rare fatal signal — never for the
-    /// flood (unit-tested: the closure is not evaluated for a non-fatal signal).
+    /// a security tool, and only within `limiter`'s budgets. `targetExecutable`
+    /// is an autoclosure so the borrowed path token is decoded only for the
+    /// rare fatal signal whose pair still has budget — never for the flood
+    /// (unit-tested: the closure is not evaluated for a non-fatal or
+    /// over-budget signal). A nil limiter is the pure policy, for tests.
     static func shouldKeepSignal(
         sig: Int32,
+        sourcePID: Int32 = -1,
         targetPID: Int32,
         ownPID: Int32 = ownProcessID,
+        nowNanos: UInt64 = 0,
+        limiter: SignalRateLimiter? = nil,
         targetExecutable: @autoclosure () -> String
     ) -> Bool {
         guard fatalSignals.contains(sig) else { return false }
-        if targetPID == ownPID { return true }
-        let executable = targetExecutable()
-        let basename = executable.split(separator: "/").last.map(String.init) ?? executable
-        return securityToolProcessNames.contains(basename)
+        if let limiter, !limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos) {
+            return false
+        }
+        let relevant: Bool
+        if targetPID == ownPID {
+            relevant = true
+        } else {
+            let executable = targetExecutable()
+            let basename = executable.split(separator: "/").last.map(String.init) ?? executable
+            relevant = securityToolProcessNames.contains(basename)
+        }
+        guard relevant else { return false }
+        if let limiter, !limiter.admitKept(nowNanos: nowNanos) {
+            return false
+        }
+        return true
     }
 
     // MARK: - Repeat coalescing policy (v1.22.7)

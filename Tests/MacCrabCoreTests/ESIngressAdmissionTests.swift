@@ -11,7 +11,9 @@
 //     can claim the worker reserve and keep the priority lane;
 //   • NOTIFY_SIGNAL is dropped at the callback unless it is a fatal signal aimed
 //     at MacCrab itself or at a security tool (no rule, sequence, graph rule,
-//     built-in heuristic or AI Guard consumer reads signal events);
+//     built-in heuristic or AI Guard consumer reads signal events), and even
+//     then only within a per-(source, target) budget and one aggregate budget,
+//     so a kill() loop cannot ride the priority lane;
 //   • repeated WRITE/OPEN by the same (pid, pidversion) on the same path inside
 //     a window ANCHORED at the yielded callback are coalesced on the worker —
 //     the first always passes, a terminal event on the path ends every
@@ -251,6 +253,93 @@ struct ESIngressAdmissionTests {
         #expect(!ESCollector.shouldDropAtCallback(
             eventType: ES_EVENT_TYPE_NOTIFY_SIGNAL.rawValue,
             signal: SIGKILL, signalTargetPID: ESCollector.ownProcessID, signalTargetExecutable: "/x"))
+    }
+
+    @Test("a fatal-signal loop at the engine, or at a decoy named after a security tool, keeps its pair budget and no more; the rest never decode a path")
+    func signalFloodIsBoundedPerPair() {
+        let limiter = SignalRateLimiter()
+        let t0: UInt64 = 1_000_000_000
+        var kept = 0
+        for i in 0..<100_000 where ESCollector.shouldKeepSignal(
+            sig: SIGTERM, sourcePID: 500, targetPID: 1, ownPID: 1,
+            nowNanos: t0 + UInt64(i), limiter: limiter, targetExecutable: "/x"
+        ) {
+            kept += 1
+        }
+        #expect(kept == 8, "a kill() loop at the engine keeps the pair burst and no more")
+        var decodes = 0
+        var decoyKept = 0
+        for i in 0..<100_000 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 501, targetPID: 777, ownPID: 1,
+            nowNanos: t0 + UInt64(i), limiter: limiter,
+            targetExecutable: { decodes += 1; return "/tmp/x/santad" }()
+        ) {
+            decoyKept += 1
+        }
+        #expect(decoyKept == 8, "a loop at a self-named decoy keeps the pair burst and no more")
+        #expect(decodes == 8, "an over-budget signal is dropped before its target path is decoded")
+        var refilled = 0
+        for i in 0..<10 where ESCollector.shouldKeepSignal(
+            sig: SIGTERM, sourcePID: 500, targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 1_000_000_000 + UInt64(i), limiter: limiter, targetExecutable: "/x"
+        ) {
+            refilled += 1
+        }
+        #expect(refilled == 2, "a pair refills two tokens a second")
+    }
+
+    @Test("distinct sources each keep their first signals inside one aggregate budget that only relevant targets spend")
+    func signalKeepTotalIsBounded() {
+        let limiter = SignalRateLimiter()
+        let t0: UInt64 = 1_000_000_000
+        // The build-storm flood: fatal signals at ordinary processes, from and
+        // at thousands of pids. Dropped by relevance, and they must not spend
+        // the budget a real signal at the engine needs.
+        var keptAtOrdinary = 0
+        for i in 0..<5_000 where ESCollector.shouldKeepSignal(
+            sig: SIGTERM, sourcePID: Int32(2_000 + i), targetPID: Int32(20_000 + i), ownPID: 1,
+            nowNanos: t0 + UInt64(i), limiter: limiter, targetExecutable: "/usr/local/bin/node"
+        ) {
+            keptAtOrdinary += 1
+        }
+        #expect(keptAtOrdinary == 0)
+        var kept = 0
+        for source in 0..<200 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(10_000 + source), targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 10_000, limiter: limiter, targetExecutable: "/x"
+        ) {
+            kept += 1
+        }
+        #expect(kept == 64, "a fork bomb aimed at the engine keeps the aggregate burst and no more")
+        // A second later sixteen more are kept, two per pair at most.
+        var later = 0
+        for source in 0..<200 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(10_000 + source), targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 1_000_010_000, limiter: limiter, targetExecutable: "/x"
+        ) {
+            later += 1
+        }
+        #expect(later == 16)
+    }
+
+    @Test("the callback consults the limiter with the kernel-attested source and target pids, and an over-budget drop is intentional filtering")
+    func callbackWiresTheSignalLimiter() throws {
+        let limiter = SignalRateLimiter()
+        var dropped = 0
+        for i in 0..<20 where ESCollector.shouldDropAtCallback(
+            eventType: ES_EVENT_TYPE_NOTIFY_SIGNAL.rawValue,
+            signal: SIGKILL, signalSourcePID: 7, signalTargetPID: ESCollector.ownProcessID,
+            signalNowNanos: UInt64(i), signalLimiter: limiter, signalTargetExecutable: "/x"
+        ) {
+            dropped += 1
+        }
+        #expect(dropped == 12)
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let collector = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabCore/Collectors/ESCollector.swift"), encoding: .utf8)
+        #expect(collector.contains("signalSourcePID: audit_token_to_pid(msg.process.pointee.audit_token)"))
+        #expect(collector.contains("signalLimiter: signalRateLimiter,"))
     }
 
     // MARK: Repeat coalescing
