@@ -145,6 +145,12 @@ public actor CampaignDetector {
         /// existing call sites that don't supply it keep their old behavior.
         public let isTrustedSubject: Bool
 
+        /// The subject sits at a user-writable auto-updater location and
+        /// carries that vendor's signature, as `NoiseFilter.isVendorSignedUpdater`
+        /// judges at the feed site. Without it such a path is any user's to
+        /// write and earns no updater exemption from tactic counting.
+        public let isVendorSignedUpdater: Bool
+
         public init(
             ruleId: String,
             ruleTitle: String,
@@ -157,7 +163,8 @@ public actor CampaignDetector {
             mitreTechniques: Set<String> = [],
             aiTool: String? = nil,
             processTreeDepth: Int? = nil,
-            isTrustedSubject: Bool = false
+            isTrustedSubject: Bool = false,
+            isVendorSignedUpdater: Bool = false
         ) {
             self.ruleId = ruleId
             self.ruleTitle = ruleTitle
@@ -171,6 +178,7 @@ public actor CampaignDetector {
             self.aiTool = aiTool
             self.processTreeDepth = processTreeDepth
             self.isTrustedSubject = isTrustedSubject
+            self.isVendorSignedUpdater = isVendorSignedUpdater
         }
     }
 
@@ -694,7 +702,8 @@ public actor CampaignDetector {
         latestAlert: AlertSummary,
         evaluatedAt: Date
     ) -> CandidatePlan? {
-        if Self.isKnownBenignProcess(processPath: latestAlert.processPath) { return nil }
+        if Self.isKnownBenignProcess(processPath: latestAlert.processPath,
+                                     vendorSignedUpdater: latestAlert.isVendorSignedUpdater) { return nil }
         if let path = latestAlert.processPath, NoiseFilter.isTrustedBrowserHelper(path: path) { return nil }
 
         let keychainSingleEventRuleIds: Set<String> = [
@@ -1106,11 +1115,14 @@ public actor CampaignDetector {
     /// process filter where "is this process an OS component or an
     /// updater?" is the right question. DO NOT use this helper in
     /// ancestor-walk filters — Terminal.app would sweep in every admin
-    /// invocation. See `isAutoUpdater` for the narrower check.
-    static func isKnownBenignProcess(processPath: String?) -> Bool {
+    /// invocation. See `isAutoUpdater` for the narrower check. An updater
+    /// at a user-writable location counts only with its vendor's signature,
+    /// which the feed site records on the summary.
+    static func isKnownBenignProcess(processPath: String?, vendorSignedUpdater: Bool) -> Bool {
         guard let path = processPath else { return false }
         if isAppleSystemDaemon(processPath: path) { return true }
-        return isAutoUpdater(processPath: path)
+        return isRootAnchoredAutoUpdater(processPath: path)
+            || (isUserAutoUpdater(processPath: path) && vendorSignedUpdater)
     }
 
     /// v1.19.1 (HN-audit): developer-tooling / package-manager runtime paths
@@ -1164,7 +1176,8 @@ public actor CampaignDetector {
         alert.severity >= .medium
             && !alert.ruleId.hasPrefix("maccrab.usb.")
             && !alert.ruleId.hasPrefix("maccrab.deep.crypto_token_extension")
-            && !Self.isKnownBenignProcess(processPath: alert.processPath)
+            && !Self.isKnownBenignProcess(processPath: alert.processPath,
+                                          vendorSignedUpdater: alert.isVendorSignedUpdater)
             && !isLowSignalTrustedOrAgent(alert)
             && !isSubCriticalDevTooling(alert)
     }
@@ -1192,7 +1205,8 @@ public actor CampaignDetector {
             // covers Sparkle/GoogleUpdater/brew/softwareupdated alongside
             // Apple system daemons. Auto-updaters routinely touch
             // multiple tactics during a single update cycle.
-            && !Self.isKnownBenignProcess(processPath: $0.processPath)
+            && !Self.isKnownBenignProcess(processPath: $0.processPath,
+                                          vendorSignedUpdater: $0.isVendorSignedUpdater)
             // v1.19 (S1-T4): exclude LOW/MEDIUM trusted-subject / agent-lineage
             // alerts from tactic-counting (HIGH/CRITICAL still feed). Stops the
             // FP kill-chains on swiftpm-testing-helper / Xcode helpers / agents.
@@ -1391,7 +1405,8 @@ public actor CampaignDetector {
         // them — 15+ FPs in user's 24h field window.
         // v1.6.4: broadened to isKnownBenignProcess which also covers Sparkle's
         // Autoupdate, GoogleUpdater, softwareupdated, brew, and MDM agents.
-        if Self.isKnownBenignProcess(processPath: latestAlert.processPath) {
+        if Self.isKnownBenignProcess(processPath: latestAlert.processPath,
+                                     vendorSignedUpdater: latestAlert.isVendorSignedUpdater) {
             return nil
         }
         // v1.4.9: trusted browser helpers (Google Chrome Helper, Safari
@@ -1431,7 +1446,8 @@ public actor CampaignDetector {
             && $0.severity >= .medium
             && !$0.ruleId.hasPrefix("maccrab.usb.")
             && !$0.ruleId.hasPrefix("maccrab.deep.crypto_token_extension")
-            && !Self.isKnownBenignProcess(processPath: $0.processPath)
+            && !Self.isKnownBenignProcess(processPath: $0.processPath,
+                                          vendorSignedUpdater: $0.isVendorSignedUpdater)
             && !isLowSignalTrustedOrAgent($0)
             // v1.19.1 (HN-audit): same dev-tooling carve-out as checkKillChain —
             // sub-CRITICAL alerts from node_modules / Xcode / homebrew / AI agents

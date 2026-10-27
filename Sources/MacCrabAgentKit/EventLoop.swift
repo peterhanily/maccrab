@@ -3157,7 +3157,8 @@ enum EventLoop {
                     mitreTechniques: Set(techniqueTags),
                     aiTool: event.enrichments["ai_tool"],
                     processTreeDepth: event.process.ancestors.count,
-                    isTrustedSubject: isTrustedSubject
+                    isTrustedSubject: isTrustedSubject,
+                    isVendorSignedUpdater: NoiseFilter.isVendorSignedUpdater(event: event)
                 )
                 let campaigns = await state.campaignDetector.processAlert(alertSummary)
                 for campaign in campaigns {
