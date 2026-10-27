@@ -22,11 +22,12 @@ struct NoiseFilterUpdaterGateTests {
         _ path: String,
         signer: SignerType? = nil,
         teamId: String? = nil,
+        signingId: String? = nil,
         flags: UInt32 = 0,
         ancestors: [ProcessAncestor] = []
     ) -> Event {
         let signature = signer.map {
-            CodeSignatureInfo(signerType: $0, teamId: teamId, signingId: nil, authorities: [],
+            CodeSignatureInfo(signerType: $0, teamId: teamId, signingId: signingId, authorities: [],
                               flags: flags, isNotarized: false)
         }
         let process = MacCrabCore.ProcessInfo(
@@ -47,6 +48,7 @@ struct NoiseFilterUpdaterGateTests {
             Self.userUpdater,
             "/Users/u/Library/Google/GoogleSoftwareUpdate/GoogleSoftwareUpdate.bundle/Contents/MacOS/ksfetch",
             "/Users/u/Library/Caches/com.google.Keystone/Installer/x",
+            "/Library/Caches/com.google.Keystone/Installer/x",
             "/Library/Application Support/Microsoft/MAU2.0/Microsoft AutoUpdate.app/Contents/MacOS/Microsoft Update Assistant",
             "/Users/u/Library/Caches/com.example.app/org.sparkle-project.Sparkle/Installation/AbCd/Autoupdate",
             "/Applications/Example.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
@@ -69,9 +71,61 @@ struct NoiseFilterUpdaterGateTests {
             "/Users/u/Library/Caches/com.google.Keystone-x/y",
             "/tmp/softwareupdated",
             "/tmp/Homebrew/Library/Homebrew/x",
+            "/opt/homebrew/bin/brewX",
+            "/Users/Shared/Library/Application Support/Google/GoogleUpdater/x",
         ] {
             #expect(!CampaignDetector.isAutoUpdater(processPath: path), "\(path)")
         }
+    }
+
+    @Test("Keystone's cache under world-writable /Library/Caches is a subject-only marker")
+    func keystoneCacheIsSubjectOnly() {
+        // /Library/Caches is mode 1777: any uid creates com.google.Keystone there.
+        let cache = "/Library/Caches/com.google.Keystone/Installer/x"
+        #expect(CampaignDetector.isAutoUpdater(processPath: cache))
+        #expect(!CampaignDetector.isRootAnchoredAutoUpdater(processPath: cache))
+        let noise = [match("mdm_enrollment_check", severity: .medium)]
+        var unsigned = noise
+        NoiseFilter.apply(&unsigned, event: event(cache), isWarmingUp: false)
+        #expect(unsigned.count == 1, "an unsigned binary in a directory any user recreates is not Keystone")
+        var ancestor = noise
+        NoiseFilter.apply(&ancestor, event: event("/tmp/stealer", ancestors: [
+            ProcessAncestor(pid: 7004, executable: cache, name: "x"),
+        ]), isWarmingUp: false)
+        #expect(ancestor.count == 1, "the cache is never honoured as an ancestor")
+        var google = noise
+        NoiseFilter.apply(&google, event: event(cache, signer: .devId, teamId: "EQHXZ8M8AV", flags: 0x1),
+                          isWarmingUp: false)
+        #expect(google.isEmpty, "Google's own signature at the cache is still quieted")
+    }
+
+    @Test("a user-writable updater location is bound to its vendor, not to any Developer ID")
+    func vendorBindingPerMarker() {
+        let noise = [match("mdm_enrollment_check", severity: .medium)]
+        var otherTeam = noise
+        NoiseFilter.apply(&otherTeam, event: event(Self.userUpdater, signer: .devId, teamId: "ABCDE12345", flags: 0x1),
+                          isWarmingUp: false)
+        #expect(otherTeam.count == 1, "a Developer ID team other than Google's is not the Google updater")
+        var google = noise
+        NoiseFilter.apply(&google, event: event(Self.userUpdater, signer: .devId, teamId: "EQHXZ8M8AV", flags: 0x1),
+                          isWarmingUp: false)
+        #expect(google.isEmpty)
+        let staged = "/Users/u/Library/Caches/com.example.app/org.sparkle-project.Sparkle/Installation/AbCd/Autoupdate"
+        var sparkle = noise
+        NoiseFilter.apply(&sparkle, event: event(staged, signer: .devId, teamId: "ABCDE12345",
+                                                 signingId: "org.sparkle-project.Sparkle.Autoupdate", flags: 0x1),
+                          isWarmingUp: false)
+        #expect(sparkle.isEmpty, "Sparkle's staged Autoupdate carries the host app's team and Sparkle's identifier")
+        var renamed = noise
+        NoiseFilter.apply(&renamed, event: event(staged, signer: .devId, teamId: "ABCDE12345",
+                                                 signingId: "com.example.helper", flags: 0x1),
+                          isWarmingUp: false)
+        #expect(renamed.count == 1, "a Developer ID binary that is not Sparkle's is not the updater")
+        var adHoc = noise
+        NoiseFilter.apply(&adHoc, event: event(staged, signer: .adHoc, teamId: "ABCDE12345",
+                                               signingId: "org.sparkle-project.Sparkle.Autoupdate", flags: 0x3),
+                          isWarmingUp: false)
+        #expect(adHoc.count == 1)
     }
 
     @Test("a user-writable updater location needs the vendor's signature on the subject")

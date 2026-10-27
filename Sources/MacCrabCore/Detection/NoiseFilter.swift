@@ -596,9 +596,8 @@ public enum NoiseFilter {
     /// counts only from a root-owned location: `mkdir` under `~/Library`
     /// otherwise silenced every suppressible rule for a payload's whole tree.
     public static func isAutoUpdaterOrAncestor(event: Event) -> Bool {
-        let path = event.process.executable
-        if CampaignDetector.isAutoUpdater(processPath: path),
-           CampaignDetector.isRootAnchoredAutoUpdater(processPath: path) || hasVendorSignature(event: event) {
+        if CampaignDetector.isRootAnchoredAutoUpdater(processPath: event.process.executable)
+            || isVendorSignedUpdater(event: event) {
             return true
         }
         for ancestor in event.process.ancestors
@@ -608,12 +607,26 @@ public enum NoiseFilter {
         return false
     }
 
-    /// A Developer ID or App Store signature with an attested team: what a
-    /// vendor's updater carries, and what a copied platform tool, an unsigned
-    /// payload or an ad-hoc signature naming the vendor's team cannot.
-    private static func hasVendorSignature(event: Event) -> Bool {
-        guard let signature = event.process.codeSignature, signature.attestedTeamId != nil else { return false }
-        return signature.signerType == .devId || signature.signerType == .appStore
+    /// True when the subject sits at a user-writable updater location and
+    /// carries that vendor's signature: Google's team for the Google updater
+    /// and Keystone paths; for Sparkle, whose host app's team varies, a
+    /// Developer ID or App Store signature with an attested team and
+    /// Sparkle's own signing identifier. A copied platform tool, an unsigned
+    /// payload or an ad-hoc signature naming the vendor's team never
+    /// qualifies. Notarization is not asked for: the live Endpoint Security
+    /// path never populates it. The campaign detector reads the same answer
+    /// from `AlertSummary.isVendorSignedUpdater`.
+    public static func isVendorSignedUpdater(event: Event) -> Bool {
+        guard let vendor = CampaignDetector.userWritableUpdaterVendor(processPath: event.process.executable),
+              let signature = event.process.codeSignature,
+              signature.signerType == .devId || signature.signerType == .appStore,
+              let team = signature.attestedTeamId else { return false }
+        switch vendor {
+        case .google:
+            return team == CredentialFence.googleTeamId
+        case .sparkle:
+            return signature.signingId?.hasPrefix("org.sparkle-project.Sparkle") == true
+        }
     }
 
     /// True when the path is a desktop terminal emulator bundle. Covers

@@ -1015,19 +1015,22 @@ public actor CampaignDetector {
     /// the system Library, the SIP-protected software-update stack, an
     /// installed app's Frameworks directory and the Homebrew prefix. A
     /// lineage carries paths, not signatures, so an ancestor is honoured
-    /// only here.
+    /// only here. /Library/Caches is world-writable (mode 1777) and is no
+    /// anchor: Keystone's cache there is a user-writable marker below. On an
+    /// Apple silicon host /opt/homebrew and the bundles under /Applications
+    /// belong to the administrator who installed them; they stay path-only
+    /// trust here, the accepted residual until each is bound to its team.
     static func isRootAnchoredAutoUpdater(processPath path: String) -> Bool {
+        // Homebrew — `brew upgrade` legitimately touches many tactics.
+        if path == "/opt/homebrew/bin/brew" || path == "/usr/local/bin/brew" { return true }
         for prefix in [
             // Google's auto-updater (GoogleUpdater, ex-Keystone). Ships with
             // Chrome, Drive, and various Google apps. Checks MDM state,
             // watches install receipts, writes to its own cache.
             "/Library/Application Support/Google/GoogleUpdater/",
             "/Library/Google/GoogleSoftwareUpdate/",
-            "/Library/Caches/com.google.Keystone/",
             // Microsoft auto-update
             "/Library/Application Support/Microsoft/MAU2.0/",
-            // Homebrew — `brew upgrade` legitimately touches many tactics.
-            "/opt/homebrew/bin/brew", "/usr/local/bin/brew",
             "/opt/homebrew/Library/Homebrew/", "/usr/local/Homebrew/Library/Homebrew/",
         ] where path.hasPrefix(prefix) {
             return true
@@ -1047,35 +1050,52 @@ public actor CampaignDetector {
         return false
     }
 
-    /// The same updaters installed for one user, under that user's home. The
-    /// location is the user's to write, so `NoiseFilter` also requires the
-    /// vendor's signature on the subject before Gate 6 quiets it.
-    static func isUserAutoUpdater(processPath path: String) -> Bool {
-        guard let relative = userHomeRelativePath(path) else { return false }
+    /// The vendor whose signature a subject at a user-writable updater
+    /// location must carry before Gate 6, or campaign tactic counting,
+    /// treats it as that updater; see `NoiseFilter.isVendorSignedUpdater`.
+    enum UpdaterVendor: Sendable, Equatable {
+        case google
+        case sparkle
+    }
+
+    /// The same updaters at locations any user can write: a user's own home,
+    /// and Keystone's cache under world-writable /Library/Caches. Nil for
+    /// every other path.
+    static func userWritableUpdaterVendor(processPath path: String) -> UpdaterVendor? {
+        if path.hasPrefix("/Library/Caches/com.google.Keystone/") { return .google }
+        guard let relative = userHomeRelativePath(path) else { return nil }
         for prefix in [
             "Library/Application Support/Google/GoogleUpdater/",
             "Library/Google/GoogleSoftwareUpdate/",
             "Library/Caches/com.google.Keystone/",
         ] where relative.hasPrefix(prefix) {
-            return true
+            return .google
         }
         // Sparkle stages the update, Autoupdate included, under
         // ~/Library/Caches/<bundle-id>/org.sparkle-project.Sparkle/Installation/<nonce>/.
         if relative.hasPrefix("Library/Caches/"), relative.contains("/org.sparkle-project.Sparkle/Installation/") {
-            return true
+            return .sparkle
         }
         if relative.hasPrefix("Applications/"), relative.contains(".app/Contents/Frameworks/Sparkle.framework/") {
-            return true
+            return .sparkle
         }
-        return false
+        return nil
     }
 
-    /// For `/Users/<name>/<rest>` returns `<rest>`; nil for any other path.
+    /// True at a user-writable updater location. The path alone proves
+    /// nothing there; callers pair it with the vendor's signature.
+    static func isUserAutoUpdater(processPath path: String) -> Bool {
+        userWritableUpdaterVendor(processPath: path) != nil
+    }
+
+    /// For `/Users/<name>/<rest>` returns `<rest>`; nil for any other path,
+    /// /Users/Shared included, which every user writes.
     private static func userHomeRelativePath(_ path: String) -> String? {
         let prefix = "/Users/"
         guard path.hasPrefix(prefix) else { return nil }
         let remainder = path.dropFirst(prefix.count)
-        guard let slash = remainder.firstIndex(of: "/"), slash > remainder.startIndex else { return nil }
+        guard let slash = remainder.firstIndex(of: "/"), slash > remainder.startIndex,
+              remainder[..<slash] != "Shared" else { return nil }
         return String(remainder[remainder.index(after: slash)...])
     }
 

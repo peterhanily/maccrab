@@ -229,6 +229,11 @@ public struct CredentialFence: Sendable {
     /// by Apple but are not platform binaries.
     public static let appleDeveloperToolsTeamId = "59GAB85EFG"
 
+    /// Google's and Brave's Developer ID teams, which own their browsers'
+    /// keychain reads and, for Google, the per-user updater.
+    public static let googleTeamId = "EQHXZ8M8AV"
+    public static let braveTeamId = "KL8N8XSYF4"
+
     /// The accessing process's kernel-attested signing identity, from the
     /// Endpoint Security event. A copied or renamed platform binary keeps its
     /// own signing identifier (a copy of /bin/cp stays com.apple.cp), and an
@@ -264,9 +269,9 @@ public struct CredentialFence: Sendable {
                 || (attestedTeam == appleDeveloperToolsTeamId
                     && identity.signingId == "com.apple.git-credential-osxkeychain")
         case "google chrome", "google chrome helper":
-            return attestedTeam == "EQHXZ8M8AV"
+            return attestedTeam == googleTeamId
         case "brave browser":
-            return attestedTeam == "KL8N8XSYF4"
+            return attestedTeam == braveTeamId
         default:
             return false
         }
