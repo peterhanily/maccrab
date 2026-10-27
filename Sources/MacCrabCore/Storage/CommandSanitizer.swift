@@ -78,11 +78,14 @@ enum CommandSanitizer {
     )
 
     /// URLs with embedded credentials: `://user:pass@host`. The spans are
-    /// possessive and the password is bounded, so each `://` scans a fixed
-    /// distance instead of backtracking across the whole token. A raw `/` in
-    /// the password (`u:p/q@host`) is still redacted, as it was before.
+    /// possessive, and the password span stops at the next `://`, so a token
+    /// made of repeated `://u:p` prefixes costs each `://` only the distance
+    /// to the next one instead of a rescan to the token's end. The password
+    /// itself is unbounded: a 300-byte OAuth token or a JWT in userinfo is
+    /// redacted whole. A raw `/` in the password (`u:p/q@host`) is still
+    /// redacted, as it was before.
     private static let urlCredentials = try! NSRegularExpression(
-        pattern: #"(://[^:@/\s]++:)([^@\s]{1,256}+)(@)"#,
+        pattern: #"(://[^:@/\s]++:)((?:(?!://)[^@\s])++)(@)"#,
         options: []
     )
 

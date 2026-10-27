@@ -450,6 +450,19 @@ struct CommandLineRedactionParityTests {
         #expect(!quotedFlag.args.contains { $0.contains("Secret77") }, "\(quotedFlag.args)")
     }
 
+    @Test("URL passwords longer than 256 bytes are redacted")
+    func longURLPasswords() throws {
+        for length in [300, 4_000] {
+            let token = String(repeating: "t", count: length)
+            let url = "https://oauth2:\(token)@git.example.invalid/repo.git"
+            #expect(CommandSanitizer.sanitize("git clone " + url)
+                == "git clone https://oauth2:[REDACTED]@git.example.invalid/repo.git", "\(length) bytes")
+            let process = try stored(["/usr/bin/git", "clone", url])
+            #expect(!process.args.contains { $0.contains(token) }, "\(length) bytes in argv")
+            #expect(!process.commandLine.contains(token), "\(length) bytes in the command line")
+        }
+    }
+
     @Test("a URL password containing a slash is redacted")
     func urlPasswordsWithSlash() {
         #expect(CommandSanitizer.sanitize("git clone https://u:p/q@host/r.git")
