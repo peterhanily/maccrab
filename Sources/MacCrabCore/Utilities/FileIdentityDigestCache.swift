@@ -35,7 +35,7 @@ final class FileIdentityDigestCache: @unchecked Sendable {
         var st = stat()
         guard stat(path, &st) == 0 else { return nil }
         return Identity(
-            device: UInt64(st.st_dev),
+            device: HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: st.st_dev),
             inode: UInt64(st.st_ino),
             size: Int64(st.st_size),
             modifiedSeconds: st.st_mtimespec.tv_sec,

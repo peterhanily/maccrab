@@ -45,7 +45,7 @@ enum EventStoreLegacyUpgradeEnvelope {
         ) else { throw failure("cannot establish the database identity") }
         var metadata = stat()
         guard lstat(path, &metadata) == 0,
-              UInt64(metadata.st_dev) == snapshot.deviceID,
+              HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: metadata.st_dev) == snapshot.deviceID,
               UInt64(metadata.st_ino) == snapshot.inodeNumber,
               metadata.st_uid == geteuid(),
               metadata.st_nlink == 1,

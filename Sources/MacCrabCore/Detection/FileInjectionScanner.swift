@@ -307,7 +307,7 @@ public actor FileInjectionScanner {
               metadata.st_size >= 0,
               metadata.st_size <= Int64(maxFileSize) else { return nil }
         return SnapshotIdentity(
-            deviceID: UInt64(metadata.st_dev),
+            deviceID: HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: metadata.st_dev),
             inodeNumber: UInt64(metadata.st_ino),
             sizeBytes: metadata.st_size,
             statusChangeSeconds: Int64(metadata.st_ctimespec.tv_sec),

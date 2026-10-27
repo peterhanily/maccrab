@@ -502,6 +502,23 @@ struct FileHasherIdentityTests {
         #expect(key.fileIdentity == HeavyEnrichmentFileIdentity.capture(path: path))
     }
 
+    @Test("no source converts a stat device number with a conversion that traps")
+    func noTrappingDeviceConversion() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let sources = root.appendingPathComponent("Sources")
+        let pattern = try NSRegularExpression(pattern: #"UInt64\(\s*[A-Za-z_.]*st_dev\s*\)"#)
+        var offenders: [String] = []
+        let files = try #require(FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil))
+        for case let url as URL in files where url.pathExtension == "swift" {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            if pattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil {
+                offenders.append(url.lastPathComponent)
+            }
+        }
+        #expect(offenders.isEmpty, "UInt64(_:) traps on a negative dev_t: \(offenders)")
+    }
+
     @Test("a digest is returned with the identity of the file it hashed")
     func digestCarriesIdentity() async throws {
         let base = try directory()
