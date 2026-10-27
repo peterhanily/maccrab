@@ -463,6 +463,19 @@ struct CommandLineRedactionParityTests {
         }
     }
 
+    @Test("a URL password that itself contains :// is the documented exception and is left alone")
+    func urlPasswordContainingSchemeSeparator() {
+        // The password span stops at the next `://` so adversarial `://u:p`
+        // repetitions stay linear; RFC 3986 forbids an unencoded `/` in
+        // userinfo, so this input is malformed as a URL. Pinned so a change
+        // to the pattern revisits the trade-off deliberately.
+        let line = "git clone https://u:pa://ss@host/r.git"
+        #expect(CommandSanitizer.sanitize(line) == line)
+        // The percent-encoded form every tool emits is redacted whole.
+        #expect(CommandSanitizer.sanitize("git clone https://u:pa%3A%2F%2Fss@host/r.git")
+            == "git clone https://u:[REDACTED]@host/r.git")
+    }
+
     @Test("a URL password containing a slash is redacted")
     func urlPasswordsWithSlash() {
         #expect(CommandSanitizer.sanitize("git clone https://u:p/q@host/r.git")
