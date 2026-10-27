@@ -127,7 +127,17 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   The Endpoint Security callback now drops a signal unless it is a fatal
   signal aimed at MacCrab itself, at an EDR agent the EDR monitor knows, or at
   LuLu, BlockBlock, OverSight or Santa. Dropped signals are counted under
-  `es_intentionally_filtered_before_worker_by_type`.
+  `es_intentionally_filtered_before_worker_by_type`. The fatal signals that
+  are kept are budgeted. The first signal of each sender and target pair is
+  kept while fewer than 1,024 pairs are tracked. Repeats get 8 plus 2 a
+  second per pair and 64 plus 16 a second from a target budget: one for the
+  engine, one for each tool executable that is root-owned and singly linked
+  in a system location, and one decoy budget shared by every other target.
+  MacCrab's app, `maccrabctl` and `maccrab-mcp` use the decoy budget when the
+  installing user owns them, as a Homebrew or drag-to-Applications install
+  does. At a full pair table a new pair aimed at a decoy-budget target is
+  refused. Refusals are counted under `es_signal_pair_refused_total`,
+  `es_signal_pair_table_full_total` and `es_signal_aggregate_refused_total`.
 - **Repeated writes and reads of the same file by the same process are
   coalesced.** Repeated WRITE and OPEN callbacks from one process on one path
   within a 2-second window, anchored at the first one, are folded into it.
@@ -139,7 +149,8 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   so a re-read after a third-party modification is observed again.
 - **The file-client ES worker reserves a quarter of its budget for the write
   family and for protected opens.** An OPEN flood can no longer shed
-  persistence writes or credential reads at the hand-off.
+  persistence writes at the hand-off, nor a credential read within its
+  process's share of the reserve.
 - **The detection lanes no longer wait on TraceGraph.** Enriched events are
   handed to a bounded ingest queue of 8,192 entries, newest kept, drained by a
   dedicated service task. A slow or recovering causal-graph store cannot stall
@@ -263,13 +274,20 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   the priority detection lane.** An `open` admitted only by the dynamic-AI
   demand policy is stamped `open_admission=dynamic_ai` and rides the file
   lane. Credential, honeyfile and agent-content opens keep the priority lane
-  and the priority storage path, in order with their exec, so the
+  and the priority storage path, in order with their exec, within a budget
+  for each process and a ceiling for each sensor worker, so the
   credential-read rules, the wall-clock sequence windows and the
-  injection-evidence weld keep their inputs.
-- **A credential, honeyfile or agent-content read can no longer be shed at
-  the ES worker hand-off behind an OPEN flood.** The callback classifies the
-  raw path bytes, and such opens use the worker's reserved slots, which
-  ordinary opens and signals never can.
+  injection-evidence weld keep their inputs. Reads of exact deployed-decoy
+  paths have a budget of their own, and a process past its budget moves only
+  its own reads to the file lane.
+- **A credential, honeyfile or agent-content read holds reserved slots at
+  the ES worker hand-off, up to a share per process.** The callback classifies
+  the raw path bytes. Each process may hold up to 32 of a worker's 256
+  reserved slots, and the last 64 are kept for processes holding none. Beyond
+  its share a process's reads are offered the ordinary OPEN tier, where an
+  OPEN flood can shed them; such a loss is counted under
+  `es_copy_backpressure_dropped_by_type` (NOTIFY_OPEN), and the demotion under
+  `es_protected_open_slice_demoted_total`.
 - **`storage_errors.json` is no longer rewritten on every failed insert.** It
   was rewritten inline and non-atomically, about 52 times a second during a
   storage write pause. It is now published at most once per second with

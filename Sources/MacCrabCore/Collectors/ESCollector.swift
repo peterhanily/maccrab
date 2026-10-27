@@ -1105,7 +1105,10 @@ public final class ESCollector: @unchecked Sendable {
     // the retained-message worker (`processRetained` → `admitOnWorker`). The
     // one path the callback still looks at is a NOTIFY_OPEN's, and only as
     // raw bytes through `protectedOpenPathMarkers` (no decode, no lock) so a
-    // credential / agent-content OPEN can claim the worker reserve.
+    // credential / agent-content OPEN can claim the worker reserve. A
+    // relevant fatal NOTIFY_SIGNAL is the exception that takes a lock: the
+    // signal rate limiter takes its lock up to three times, and its idle
+    // sweep runs at most once every 2.5 seconds.
 
     /// The field-only callback policy. Pure so tests can pin it without an
     /// `es_message_t`. `signalTargetExecutable` is an autoclosure: the token is
@@ -1941,8 +1944,11 @@ public final class ESCollector: @unchecked Sendable {
             }
             // v1.22.7: classify a NOTIFY_OPEN path on the borrowed token bytes
             // (no decode) so a credential / honeyfile / agent-content OPEN can
-            // use the worker reserve and can never be shed behind the OPEN
-            // firehose at this hand-off. Budgeted in ESIngressStormBenchmarkTests.
+            // claim a top-slice slot of the worker reserve: 32 per process, 256
+            // in all, the last 64 for processes holding none. Past that it is
+            // offered the ordinary OPEN tier, where an OPEN flood can refuse
+            // it, and the refusal is counted only as an OPEN backpressure drop.
+            // Budgeted in ESIngressStormBenchmarkTests.
             let protectedOpen = evType == ES_EVENT_TYPE_NOTIFY_OPEN.rawValue
                 && ESCollector.protectedOpenPathMarkers.matches(
                     message.pointee.event.open.file.pointee.path

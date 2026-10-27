@@ -12,7 +12,8 @@
 //   • NOTIFY_SIGNAL is dropped at the callback unless it is a fatal signal aimed
 //     at MacCrab itself or at a security tool (no rule, sequence, graph rule,
 //     built-in heuristic or AI Guard consumer reads signal events), and even
-//     then only within a per-(source, target) budget and one aggregate budget,
+//     then only within a per-(source, target) budget and a per-target repeat
+//     budget (the engine's, each canonical tool identity's, or the shared decoy one),
 //     so a kill() loop cannot ride the priority lane;
 //   • repeated WRITE/OPEN by the same (pid, pidversion) on the same path inside
 //     a window ANCHORED at the yielded callback are coalesced on the worker —

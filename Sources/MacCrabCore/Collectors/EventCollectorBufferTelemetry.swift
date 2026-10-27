@@ -86,9 +86,11 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
     /// Whether `path` is a deployed honeyfile or honey-prompt decoy: exactly
     /// one of the default paths, inside a user's home or root's. The same
     /// name anywhere else (`/tmp/x/.aws/credentials.bak`, `/Users/Shared/…`,
-    /// junk beside the decoys) is not, so no loop on files a process can
-    /// create spends this class's budget; reading the deployed files
-    /// themselves is the finding.
+    /// junk beside the decoys) is not, so on a host where every default
+    /// decoy is deployed no loop on files a process can create spends this
+    /// class's budget; reading the deployed files themselves is the finding.
+    /// A default path that was never deployed (deception set up before
+    /// v1.12.0 and not redeployed) can be created and looped on.
     static func isHoneyfileOrDecoyPath(_ path: String) -> Bool {
         guard !path.hasPrefix("/Users/Shared/"), let inHome = homeRelativePath(path) else { return false }
         return deployedDecoys.contains(String(inHome))
@@ -264,7 +266,8 @@ protocol BoundedTableEntry: AnyObject {
 /// hash probe, not a scan. If the table is still full, the policy decides. A
 /// lane table frees an eighth of itself in one pass, idle keys first and then
 /// the most recently inserted live ones, so a storm of new keys recycles its
-/// own slots and never an established key's. A key that takes a slot a live
+/// own slots first; an established key is recycled only once at least 448
+/// live keys were inserted after it. A key that takes a slot a live
 /// entry left is `churned`: it is no first sighting, and its entry is built
 /// as the maker sees fit for a key that arrived under churn. A signal table
 /// refuses the key outright. Either way, cycling through fresh keys cannot
@@ -457,7 +460,8 @@ final class ProcessLaneBudget: BoundedTableEntry {
 ///    process, or of an IDE or shell tracked for an hour, past them.
 /// 3. Churn. When the table is full of live processes, a batch recycles the
 ///    most recently inserted ones (`BoundedTable`), so a storm of fresh pids
-///    recycles its own slots, never an established process's. A process that
+///    recycles its own slots first; an established process is recycled only
+///    once at least 448 live processes were inserted after it. A process that
 ///    takes such a slot is a newcomer under churn. Its first event is paid by
 ///    the newcomer allowance (128, refilling 32 a second), which no tracked
 ///    process can spend, and its later events by the shared bucket. It gets
@@ -605,9 +609,11 @@ final class PerProcessLaneBudgets {
 /// A pair table full of live pairs fails closed for decoys: a new pair at a
 /// decoy is refused, so cycling through sources or decoys cannot buy fresh
 /// first signals. A new pair at the engine or at a canonical tool is not
-/// tracked either, but its signal is kept if that target's repeat budget
-/// admits it, so a table held full by decoy pairs cannot hide a genuine kill
-/// of either. Refusals are counted apart: a tracked pair out of tokens as
+/// tracked either, but its signal is kept while that target's repeat budget
+/// lasts. Untracked senders signalling the same target spend that budget
+/// too, so about 64 cooperating processes (a table held full by decoy pairs
+/// plus a flood at the engine or tool) can still crowd out a genuine kill.
+/// Refusals are counted apart: a tracked pair out of tokens as
 /// `es_signal_pair_refused_total`, a signal whose new pair the full table
 /// could not take as `es_signal_pair_table_full_total` (kept or not), and a
 /// repeat budget's refusal as `es_signal_aggregate_refused_total`.
