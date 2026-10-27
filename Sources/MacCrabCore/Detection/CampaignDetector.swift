@@ -1002,42 +1002,81 @@ public actor CampaignDetector {
     /// launched activity.
     ///
     /// Empirically-driven: every entry corresponds to a specific field
-    /// FP. Sparkle's `Autoupdate` binary lives at a deep path under
-    /// `~/Library/Caches/<bundle-id>/org.sparkle-project.Sparkle/
-    /// Installation/**/Autoupdate` — matching the `/Sparkle/`
-    /// substring is safer than the full path variant with per-run
-    /// nonces.
+    /// FP, and each names where that vendor installs. A marker matched
+    /// anywhere in a path (`/GoogleUpdater/`, `Microsoft AutoUpdate`,
+    /// `/Sparkle.framework/`) made `mkdir ~/Library/GoogleUpdater` enough
+    /// to put a payload's whole tree under Gate 6.
     static func isAutoUpdater(processPath: String?) -> Bool {
         guard let path = processPath else { return false }
+        return isRootAnchoredAutoUpdater(processPath: path) || isUserAutoUpdater(processPath: path)
+    }
 
+    /// Updater locations only root, or an administrator's installer, writes:
+    /// the system Library, the SIP-protected software-update stack, an
+    /// installed app's Frameworks directory and the Homebrew prefix. A
+    /// lineage carries paths, not signatures, so an ancestor is honoured
+    /// only here.
+    static func isRootAnchoredAutoUpdater(processPath path: String) -> Bool {
+        for prefix in [
+            // Google's auto-updater (GoogleUpdater, ex-Keystone). Ships with
+            // Chrome, Drive, and various Google apps. Checks MDM state,
+            // watches install receipts, writes to its own cache.
+            "/Library/Application Support/Google/GoogleUpdater/",
+            "/Library/Google/GoogleSoftwareUpdate/",
+            "/Library/Caches/com.google.Keystone/",
+            // Microsoft auto-update
+            "/Library/Application Support/Microsoft/MAU2.0/",
+            // Homebrew — `brew upgrade` legitimately touches many tactics.
+            "/opt/homebrew/bin/brew", "/usr/local/bin/brew",
+            "/opt/homebrew/Library/Homebrew/", "/usr/local/Homebrew/Library/Homebrew/",
+        ] where path.hasPrefix(prefix) {
+            return true
+        }
         // Sparkle auto-update framework — bundled into many third-party
         // Mac apps (including MacCrab itself). The Autoupdate binary
         // does signing checks, file writes, and plist modifications as
         // part of an update; every one of those is a legitimate tactic.
-        if path.contains("/Sparkle.framework/") { return true }
-        if path.contains(".sparkle-project.Sparkle/Installation/") { return true }
-        if path.hasSuffix("/Autoupdate") && path.contains("/Sparkle") { return true }
-
-        // Google's auto-updater (GoogleUpdater, ex-Keystone). Ships with
-        // Chrome, Drive, and various Google apps. Checks MDM state,
-        // watches install receipts, writes to its own cache.
-        if path.contains("/GoogleUpdater/") { return true }
-        if path.contains("/GoogleSoftwareUpdate/") { return true }
-        if path.contains("/Library/Caches/com.google.Keystone/") { return true }
-
-        // Microsoft auto-update
-        if path.contains("Microsoft AutoUpdate") { return true }
-
+        if path.hasPrefix("/Applications/"), path.contains(".app/Contents/Frameworks/Sparkle.framework/") {
+            return true
+        }
         // macOS native software-update stack
-        if path.hasSuffix("/softwareupdated") { return true }
-        if path.contains("SoftwareUpdateNotificationManager") { return true }
-
-        // Homebrew — `brew upgrade` legitimately touches many tactics.
-        if path.hasPrefix("/opt/homebrew/bin/brew") { return true }
-        if path.hasPrefix("/usr/local/bin/brew") { return true }
-        if path.contains("/Homebrew/Library/Homebrew/") { return true }
-
+        if path.hasPrefix("/System/Library/"),
+           path.hasSuffix("/softwareupdated") || path.contains("SoftwareUpdateNotificationManager") {
+            return true
+        }
         return false
+    }
+
+    /// The same updaters installed for one user, under that user's home. The
+    /// location is the user's to write, so `NoiseFilter` also requires the
+    /// vendor's signature on the subject before Gate 6 quiets it.
+    static func isUserAutoUpdater(processPath path: String) -> Bool {
+        guard let relative = userHomeRelativePath(path) else { return false }
+        for prefix in [
+            "Library/Application Support/Google/GoogleUpdater/",
+            "Library/Google/GoogleSoftwareUpdate/",
+            "Library/Caches/com.google.Keystone/",
+        ] where relative.hasPrefix(prefix) {
+            return true
+        }
+        // Sparkle stages the update, Autoupdate included, under
+        // ~/Library/Caches/<bundle-id>/org.sparkle-project.Sparkle/Installation/<nonce>/.
+        if relative.hasPrefix("Library/Caches/"), relative.contains("/org.sparkle-project.Sparkle/Installation/") {
+            return true
+        }
+        if relative.hasPrefix("Applications/"), relative.contains(".app/Contents/Frameworks/Sparkle.framework/") {
+            return true
+        }
+        return false
+    }
+
+    /// For `/Users/<name>/<rest>` returns `<rest>`; nil for any other path.
+    private static func userHomeRelativePath(_ path: String) -> String? {
+        let prefix = "/Users/"
+        guard path.hasPrefix(prefix) else { return nil }
+        let remainder = path.dropFirst(prefix.count)
+        guard let slash = remainder.firstIndex(of: "/"), slash > remainder.startIndex else { return nil }
+        return String(remainder[remainder.index(after: slash)...])
     }
 
     /// Broader allow-list for processes that legitimately span multiple

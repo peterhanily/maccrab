@@ -261,9 +261,14 @@ public enum NoiseFilter {
         // Autoupdate, Microsoft AutoUpdate, softwareupdated, brew.
         // Full ancestor walk so chains like Chrome → GoogleUpdater →
         // launcher → GoogleUpdater → profiles get caught regardless
-        // of nesting depth.
+        // of nesting depth. The markers name where the vendors install
+        // (see `isAutoUpdaterOrAncestor`), and as under Gates 3 and 8 a
+        // credential-theft match survives: an updater tree reading a
+        // keychain or a private key is the stealer pattern, not an update.
         if isAutoUpdaterOrAncestor(event: event) {
-            matches.removeAll { !Self.isMustFire($0, trustedSubject: trustedSubject) }
+            matches.removeAll {
+                !Self.isMustFire($0, trustedSubject: trustedSubject) && !isCredentialTheftMatch($0)
+            }
             if matches.isEmpty { return }
         }
 
@@ -584,16 +589,31 @@ public enum NoiseFilter {
     /// that would sweep in Terminal, Finder, and every
     /// `/System/Applications/Utilities/` tool. Exposed publicly so the
     /// campaign and sequence engines can reuse the same definition.
+    ///
+    /// A path is evidence only where root alone writes it. A subject at an
+    /// updater location inside the user's own home must also carry the
+    /// vendor's signature, and an ancestor, which carries no signature,
+    /// counts only from a root-owned location: `mkdir` under `~/Library`
+    /// otherwise silenced every suppressible rule for a payload's whole tree.
     public static func isAutoUpdaterOrAncestor(event: Event) -> Bool {
-        if CampaignDetector.isAutoUpdater(processPath: event.process.executable) {
+        let path = event.process.executable
+        if CampaignDetector.isAutoUpdater(processPath: path),
+           CampaignDetector.isRootAnchoredAutoUpdater(processPath: path) || hasVendorSignature(event: event) {
             return true
         }
-        for ancestor in event.process.ancestors {
-            if CampaignDetector.isAutoUpdater(processPath: ancestor.executable) {
-                return true
-            }
+        for ancestor in event.process.ancestors
+        where CampaignDetector.isRootAnchoredAutoUpdater(processPath: ancestor.executable) {
+            return true
         }
         return false
+    }
+
+    /// A Developer ID or App Store signature with an attested team: what a
+    /// vendor's updater carries, and what a copied platform tool, an unsigned
+    /// payload or an ad-hoc signature naming the vendor's team cannot.
+    private static func hasVendorSignature(event: Event) -> Bool {
+        guard let signature = event.process.codeSignature, signature.attestedTeamId != nil else { return false }
+        return signature.signerType == .devId || signature.signerType == .appStore
     }
 
     /// True when the path is a desktop terminal emulator bundle. Covers
