@@ -11,7 +11,9 @@
 //     can claim the worker reserve and keep the priority lane;
 //   • NOTIFY_SIGNAL is dropped at the callback unless it is a fatal signal aimed
 //     at MacCrab itself or at a security tool (no rule, sequence, graph rule,
-//     built-in heuristic or AI Guard consumer reads signal events);
+//     built-in heuristic or AI Guard consumer reads signal events), and even
+//     then only within a per-(source, target) budget and one aggregate budget,
+//     so a kill() loop cannot ride the priority lane;
 //   • repeated WRITE/OPEN by the same (pid, pidversion) on the same path inside
 //     a window ANCHORED at the yielded callback are coalesced on the worker —
 //     the first always passes, a terminal event on the path ends every
@@ -253,6 +255,489 @@ struct ESIngressAdmissionTests {
             signal: SIGKILL, signalTargetPID: ESCollector.ownProcessID, signalTargetExecutable: "/x"))
     }
 
+    @Test("a fatal-signal loop at the engine, or at a decoy named after a security tool, keeps its pair budget and no more; the rest never decode a path")
+    func signalFloodIsBoundedPerPair() {
+        let limiter = SignalRateLimiter()
+        let t0: UInt64 = 1_000_000_000
+        var kept = 0
+        for i in 0..<100_000 where ESCollector.shouldKeepSignal(
+            sig: SIGTERM, sourcePID: 500, targetPID: 1, ownPID: 1,
+            nowNanos: t0 + UInt64(i), limiter: limiter, targetExecutable: "/x"
+        ) {
+            kept += 1
+        }
+        #expect(kept == 8, "a kill() loop at the engine keeps the pair burst and no more")
+        var decodes = 0
+        var decoyKept = 0
+        for i in 0..<100_000 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 501, targetPID: 777, ownPID: 1,
+            nowNanos: t0 + UInt64(i), limiter: limiter,
+            targetExecutable: { decodes += 1; return "/tmp/x/santad" }()
+        ) {
+            decoyKept += 1
+        }
+        #expect(decoyKept == 8, "a loop at a self-named decoy keeps the pair burst and no more")
+        #expect(decodes == 8, "an over-budget signal is dropped before its target path is decoded")
+        var refilled = 0
+        for i in 0..<10 where ESCollector.shouldKeepSignal(
+            sig: SIGTERM, sourcePID: 500, targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 1_000_000_000 + UInt64(i), limiter: limiter, targetExecutable: "/x"
+        ) {
+            refilled += 1
+        }
+        #expect(refilled == 2, "a pair refills two tokens a second")
+    }
+
+    @Test("each distinct source keeps its first signal at the engine; repeats share the target's budget, which only relevant targets spend")
+    func signalKeepTotalIsBounded() {
+        let limiter = SignalRateLimiter()
+        let t0: UInt64 = 1_000_000_000
+        // The build-storm flood: fatal signals at ordinary processes, from and
+        // at thousands of pids. Dropped by relevance, and they must not spend
+        // the budget a real signal at the engine needs.
+        var keptAtOrdinary = 0
+        for i in 0..<5_000 where ESCollector.shouldKeepSignal(
+            sig: SIGTERM, sourcePID: Int32(2_000 + i), targetPID: Int32(20_000 + i), ownPID: 1,
+            nowNanos: t0 + UInt64(i), limiter: limiter, targetExecutable: "/usr/local/bin/node"
+        ) {
+            keptAtOrdinary += 1
+        }
+        #expect(keptAtOrdinary == 0)
+        var kept = 0
+        for source in 0..<200 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(10_000 + source), targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 10_000, limiter: limiter, targetExecutable: "/x"
+        ) {
+            kept += 1
+        }
+        #expect(kept == 200, "every distinct source keeps its first signal at the engine")
+        #expect(limiter.aggregateRefusedTotal == 0)
+        // Their repeats share the engine's own budget: 64, then 16 a second.
+        var repeats = 0
+        for source in 0..<200 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(10_000 + source), targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 20_000, limiter: limiter, targetExecutable: "/x"
+        ) {
+            repeats += 1
+        }
+        #expect(repeats == 64, "a fork bomb's repeats at the engine keep the target's burst and no more")
+        #expect(limiter.aggregateRefusedTotal == 136, "the shared-budget refusals are counted apart")
+        var later = 0
+        for source in 0..<200 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(10_000 + source), targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 1_000_020_000, limiter: limiter, targetExecutable: "/x"
+        ) {
+            later += 1
+        }
+        #expect(later == 16, "a second later the engine's budget has sixteen tokens back")
+    }
+
+    @Test("a kill loop at a decoy named after a security tool spends only that target's budget: the engine and a real tool keep theirs")
+    func decoyFloodDoesNotDrainTheEngineBudget() {
+        let limiter = SignalRateLimiter()
+        let t0: UInt64 = 1_000_000_000
+        var kept = 0
+        for source in 0..<100 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(40_000 + source), targetPID: 777, ownPID: 1,
+            nowNanos: t0 + UInt64(source), limiter: limiter, targetExecutable: "/tmp/x/santad"
+        ) {
+            kept += 1
+        }
+        #expect(kept == 100, "each source's first signal at the decoy is kept")
+        var repeats = 0
+        for source in 0..<100 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(40_000 + source), targetPID: 777, ownPID: 1,
+            nowNanos: t0 + 1_000, limiter: limiter, targetExecutable: "/tmp/x/santad"
+        ) {
+            repeats += 1
+        }
+        #expect(repeats == 64, "repeats at the decoy keep its own budget and no more")
+        #expect(limiter.aggregateRefusedTotal == 36)
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 50_000, targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 2_000, limiter: limiter, targetExecutable: "/x"),
+                "a genuine fatal signal at the engine is still kept")
+        let santa = SignalRateLimiter.ExecutableStat(owner: 0, links: 1, device: 1, inode: 4_242)
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 50_001, targetPID: 778, ownPID: 1, nowNanos: t0 + 2_001, limiter: limiter,
+            targetStat: santa, targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad"),
+                "a first signal at a real tool is kept")
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 50_001, targetPID: 778, ownPID: 1, nowNanos: t0 + 2_002, limiter: limiter,
+            targetStat: santa, targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad"),
+                "and so is its repeat: the tool's own budget, not the drained decoy one, pays for it")
+        var engineRepeats = 0
+        for i in 0..<10 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 50_000, targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 3_000 + UInt64(i), limiter: limiter, targetExecutable: "/x"
+        ) {
+            engineRepeats += 1
+        }
+        #expect(engineRepeats == 7, "the pair's seven remaining tokens, every one admitted by the engine's untouched budget")
+    }
+
+    @Test("a bounded table evicts idle keys before live ones, refuses or recycles its newest live keys by policy, and a key inserted over a live one is no first sighting")
+    func boundedTableChurnSemantics() {
+        let t0: UInt64 = 1_000_000_000
+        func make(_ churned: Bool) -> ProtectedFileLaneBudget {
+            ProtectedFileLaneBudget(capacity: churned ? 1 : 3, refillPerSecond: 0)
+        }
+        // The signal tables fail closed.
+        let refusing = BoundedTable<Int, ProtectedFileLaneBudget>(
+            capacity: 2, idleEvictionNanos: 1_000_000_000, policy: .refuseWhenFull, make: make)
+        let a = refusing.lookup(key: 1, nowNanos: t0)
+        #expect(a.entry?.admit(nowNanos: t0) == true && a.firstSighting && !a.churned)
+        let b = refusing.lookup(key: 2, nowNanos: t0 + 1)
+        #expect(b.entry?.admit(nowNanos: t0 + 1) == true && b.firstSighting)
+        let c = refusing.lookup(key: 3, nowNanos: t0 + 2)
+        #expect(c.entry == nil && !c.firstSighting && !c.churned, "full of live keys, a new key is refused rather than given a bucket")
+        #expect(refusing.count == 2)
+        _ = refusing.lookup(key: 2, nowNanos: t0 + 900_000_000).entry?.admit(nowNanos: t0 + 900_000_000)
+        let d = refusing.lookup(key: 3, nowNanos: t0 + 1_100_000_000)
+        #expect(d.entry != nil && d.firstSighting && !d.churned, "once key 1 has idled out, key 3 takes its place as a genuine first sighting")
+        #expect(refusing.count == 2 && !refusing.contains(key: 1) && refusing.contains(key: 2),
+                "the idle key went, not the recently seen one")
+        // The lane tables recycle their most recently inserted live key, so
+        // the established key 1 is never the one displaced, and say so.
+        let recycling = BoundedTable<Int, ProtectedFileLaneBudget>(
+            capacity: 2, idleEvictionNanos: 1_000_000_000, policy: .evictNewestFirst, make: make)
+        _ = recycling.lookup(key: 1, nowNanos: t0).entry?.admit(nowNanos: t0)
+        _ = recycling.lookup(key: 2, nowNanos: t0 + 1).entry?.admit(nowNanos: t0 + 1)
+        let e = recycling.lookup(key: 3, nowNanos: t0 + 2)
+        #expect(e.entry != nil && !e.firstSighting && e.churned, "inserted over the live, most recently inserted key 2")
+        #expect(e.entry?.admit(nowNanos: t0 + 2) == true)
+        #expect(e.entry?.admit(nowNanos: t0 + 3) == false, "the maker builds a churned key's entry: here, one token")
+        #expect(recycling.contains(key: 1) && !recycling.contains(key: 2), "the established key keeps its entry")
+        let f = recycling.lookup(key: 2, nowNanos: t0 + 4)
+        #expect(!f.firstSighting && f.churned, "re-entry over a live key is no first sighting either")
+        #expect(recycling.contains(key: 1) && !recycling.contains(key: 3),
+                "the newcomers displace each other, never the established key")
+        let g = recycling.lookup(key: 2, nowNanos: t0 + 5)
+        #expect(g.entry != nil && !g.firstSighting && !g.churned, "a tracked key is neither")
+    }
+
+    @Test("cycling fresh pairs at one decoy cannot buy fresh budgets: kept signals are bounded by the pair table plus the decoy burst")
+    func pairChurnAtOneDecoyIsBounded() {
+        let limiter = SignalRateLimiter(rootOwnedCanonical: { _, _ in false })
+        let t0: UInt64 = 1_000_000_000
+        var kept = 0
+        for round in 0..<2 {
+            for source in 0..<1_100 where ESCollector.shouldKeepSignal(
+                sig: SIGKILL, sourcePID: Int32(60_000 + source), targetPID: 777, ownPID: 1,
+                nowNanos: t0 + UInt64(round * 2_000 + source), limiter: limiter, targetExecutable: "/tmp/x/santad"
+            ) {
+                kept += 1
+            }
+        }
+        #expect(kept <= 1_024 + 64, "at most the pair table's first sightings plus the shared decoy burst: \(kept)")
+        #expect(kept == 1_024 + 64)
+        #expect(limiter.aggregateRefusedTotal > 0, "repeats past the decoy burst are counted")
+        #expect(limiter.trackedPairCount <= 1_024)
+        #expect(limiter.pairTableFullTotal >= 76, "the pairs the full table refused are counted apart")
+    }
+
+    @Test("copies of one root-owned tool binary share one repeat budget: the churn shapes stay within the pair table plus one burst",
+          arguments: ["1,100 sources twice", "34 x 34 cycled four times", "1,100 targets twice"])
+    func copiesOfOneToolShareABudget(shape: String) {
+        let limiter = SignalRateLimiter(rootOwnedCanonical: { _, _ in true })
+        let tool = SignalRateLimiter.ExecutableStat(owner: 0, links: 1, device: 1, inode: 4_242)
+        let t0: UInt64 = 1_000_000_000
+        var kept = 0
+        var offered = 0
+        func send(_ source: Int, _ target: Int) {
+            offered += 1
+            if ESCollector.shouldKeepSignal(
+                sig: SIGKILL, sourcePID: Int32(source), targetPID: Int32(target), ownPID: 1,
+                nowNanos: t0 + UInt64(offered), limiter: limiter, targetStat: tool,
+                targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad") {
+                kept += 1
+            }
+        }
+        switch shape {
+        case "1,100 sources twice":
+            for _ in 0..<2 { for source in 0..<1_100 { send(60_000 + source, 777) } }
+        case "34 x 34 cycled four times":
+            for _ in 0..<4 { for source in 0..<34 { for target in 0..<34 { send(70_000 + source, 80_000 + target) } } }
+        default:
+            for _ in 0..<2 { for target in 0..<1_100 { send(90_000, 100_000 + target) } }
+        }
+        #expect(kept <= 1_024 + 64, "\(shape): the pair table's first signals plus the one binary's burst: \(kept)")
+        #expect(limiter.trackedPairCount <= 1_024)
+    }
+
+    @Test("a pair table held full by live decoy pairs refuses a new decoy pair, but keeps a new source's fatal signal at the engine and at a root-owned tool on their repeat budgets, and counts all three")
+    func fullPairTableStillKeepsTheEngineAndRealTools() {
+        let limiter = SignalRateLimiter()
+        let t0: UInt64 = 1_000_000_000
+        // 32 x 32 decoy pairs fill the table and are signalled again every
+        // five seconds, inside the ten-second idle window, so none idles out.
+        for round: UInt64 in 0..<3 {
+            for source in 0..<32 {
+                for target in 0..<32 {
+                    _ = ESCollector.shouldKeepSignal(
+                        sig: SIGKILL, sourcePID: Int32(200_000 + source), targetPID: Int32(300_000 + target), ownPID: 1,
+                        nowNanos: t0 + round * 5_000_000_000 + UInt64(source * 32 + target), limiter: limiter,
+                        targetStat: .init(owner: 501, links: 1, device: 1, inode: UInt64(target)),
+                        targetExecutable: "/tmp/d\(target)/santad")
+                }
+            }
+        }
+        #expect(limiter.trackedPairCount == 1_024)
+        let now = t0 + 10_000_002_000
+        #expect(!ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 400_000, targetPID: 300_000, ownPID: 1, nowNanos: now, limiter: limiter,
+            targetStat: .init(owner: 501, links: 1, device: 1, inode: 0), targetExecutable: "/tmp/d0/santad"),
+                "a new decoy pair stays fail-closed")
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 400_001, targetPID: 1, ownPID: 1, nowNanos: now + 1, limiter: limiter,
+            targetExecutable: "/x"),
+                "the engine's first fatal signal from a new source is kept")
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 400_002, targetPID: 900, ownPID: 1, nowNanos: now + 2, limiter: limiter,
+            targetStat: .init(owner: 0, links: 1, device: 1, inode: 4_242),
+            targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad"),
+                "and so is one at a root-owned tool")
+        #expect(limiter.pairTableFullTotal == 3, "all three met the full table and are counted")
+        #expect(limiter.trackedPairCount == 1_024, "none of them entered it")
+    }
+
+    @Test("cycling sources across many decoys, or one source across a thousand decoys, is bounded by the same constant")
+    func pairChurnAcrossDecoysIsBounded() {
+        let t0: UInt64 = 1_000_000_000
+        do {
+            let limiter = SignalRateLimiter(rootOwnedCanonical: { _, _ in false })
+            var kept = 0
+            var offered = 0
+            for _ in 0..<4 {
+                for source in 0..<34 {
+                    for target in 0..<34 {
+                        offered += 1
+                        if ESCollector.shouldKeepSignal(
+                            sig: SIGKILL, sourcePID: Int32(70_000 + source), targetPID: Int32(80_000 + target), ownPID: 1,
+                            nowNanos: t0 + UInt64(offered), limiter: limiter, targetExecutable: "/tmp/x/\(target)/santad"
+                        ) {
+                            kept += 1
+                        }
+                    }
+                }
+            }
+            #expect(kept <= 1_024 + 64, "34 x 34 pairs cycled four times: \(kept)")
+            #expect(limiter.trackedPairCount <= 1_024)
+        }
+        do {
+            let limiter = SignalRateLimiter(rootOwnedCanonical: { _, _ in false })
+            var kept = 0
+            for round in 0..<2 {
+                for target in 0..<1_100 where ESCollector.shouldKeepSignal(
+                    sig: SIGKILL, sourcePID: 90_000, targetPID: Int32(100_000 + target), ownPID: 1,
+                    nowNanos: t0 + UInt64(round * 2_000 + target), limiter: limiter, targetExecutable: "/tmp/x/\(target)/santad"
+                ) {
+                    kept += 1
+                }
+            }
+            #expect(kept <= 1_024 + 64, "one source across 1,100 decoys: \(kept)")
+            #expect(limiter.trackedPairCount <= 1_024)
+        }
+    }
+
+    @Test("fatal signals at ordinary targets never enter the pair table, so a kill round-robin over the build cannot fill it")
+    func ordinaryTargetsAreNotTracked() {
+        let limiter = SignalRateLimiter(rootOwnedCanonical: { _, _ in false })
+        let t0: UInt64 = 1_000_000_000
+        for i in 0..<3_000 {
+            _ = ESCollector.shouldKeepSignal(
+                sig: SIGSTOP, sourcePID: 500, targetPID: Int32(110_000 + i), ownPID: 1,
+                nowNanos: t0 + UInt64(i), limiter: limiter, targetExecutable: "/usr/local/bin/node")
+        }
+        #expect(limiter.trackedPairCount == 0, "relevance is decided before an untracked pair is inserted")
+        #expect(limiter.pairRefusedTotal == 0)
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 501, targetPID: 1, ownPID: 1, nowNanos: t0 + 5_000, limiter: limiter, targetExecutable: "/x"),
+                "the engine's first signal from a new source is kept after the round-robin")
+    }
+
+    @Test("the callback consults the limiter with the kernel-attested source and target pids, and an over-budget drop is intentional filtering")
+    func callbackWiresTheSignalLimiter() throws {
+        let limiter = SignalRateLimiter()
+        var dropped = 0
+        for i in 0..<20 where ESCollector.shouldDropAtCallback(
+            eventType: ES_EVENT_TYPE_NOTIFY_SIGNAL.rawValue,
+            signal: SIGKILL, signalSourcePID: 7, signalTargetPID: ESCollector.ownProcessID,
+            signalNowNanos: UInt64(i), signalLimiter: limiter, signalTargetExecutable: "/x"
+        ) {
+            dropped += 1
+        }
+        #expect(dropped == 12)
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let collector = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabCore/Collectors/ESCollector.swift"), encoding: .utf8)
+        #expect(collector.contains("signalSourcePID: audit_token_to_pid(msg.process.pointee.audit_token)"))
+        #expect(collector.contains("signalLimiter: signalRateLimiter,"))
+        #expect(collector.contains("signalTargetStat: SignalRateLimiter.ExecutableStat(target.pointee.executable.pointee.stat),"),
+                "the owner, links and identity come from the stat ES reports, not a syscall on the callback")
+        // The non-fatal flood is dropped before any pid, clock or path read.
+        let start = try #require(collector.range(of: "private static func shouldDropAtCallback(\n        message: UnsafePointer<es_message_t>"))
+        let signalCase = try #require(collector.range(of: "case ES_EVENT_TYPE_NOTIFY_SIGNAL:", range: start.upperBound..<collector.endIndex))
+        let nextCase = try #require(collector.range(of: "case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ", range: signalCase.upperBound..<collector.endIndex))
+        let body = String(collector[signalCase.upperBound..<nextCase.lowerBound])
+        let fatal = try #require(body.range(of: "guard fatalSignals.contains(msg.event.signal.sig) else { return true }"),
+                                 "the SIGNAL case checks the signal number first")
+        for read in ["audit_token_to_pid(", "DispatchTime.now()", "esFileToPath("] {
+            let use = try #require(body.range(of: read), "\(read) is read for a fatal signal")
+            #expect(fatal.upperBound <= use.lowerBound, "\(read) runs only after the fatal check")
+        }
+        let timers = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabAgentKit/DaemonTimers.swift"), encoding: .utf8)
+        #expect(timers.components(separatedBy: "\"es_signal_aggregate_refused_total\": esSignalAggregateRefused").count == 3,
+                "both heartbeat payloads report the shared-budget refusals")
+        #expect(timers.components(separatedBy: "\"es_signal_pair_refused_total\": esSignalPairRefused").count == 3,
+                "both heartbeat payloads report the pair-budget refusals")
+        #expect(timers.components(separatedBy: "\"es_signal_pair_table_full_total\": esSignalPairTableFull").count == 3,
+                "both heartbeat payloads report the signals a full pair table met")
+    }
+
+    @Test("a tool's own repeat budget needs its executable root-owned and singly linked at a canonical path, as the ES stat reports it")
+    func canonicalClassificationReadsTheReportedOwner() {
+        func reported(owner: uid_t, links: nlink_t = 1) -> SignalRateLimiter.ExecutableStat {
+            SignalRateLimiter.ExecutableStat(owner: owner, links: links, device: 1, inode: 4_242)
+        }
+        for path in ["/usr/libexec/syspolicyd", "/System/Library/CoreServices/x", "/usr/sbin/x", "/sbin/x"] {
+            #expect(SignalRateLimiter.isRootOwnedCanonicalExecutable(path, stat: reported(owner: 501)), "\(path) is SIP-protected")
+        }
+        let santa = "/Applications/Santa.app/Contents/MacOS/santad"
+        #expect(SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, stat: reported(owner: 0)))
+        #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, stat: reported(owner: 501)),
+                "an admin can create a user-owned decoy under /Applications")
+        #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, stat: reported(owner: 0, links: 2)),
+                "a second link could be a hard link to some other root-owned file, named after a tool")
+        #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(santa, stat: nil), "an unknown owner is not trusted")
+        #expect(SignalRateLimiter.isRootOwnedCanonicalExecutable("/Library/CS/falcond", stat: reported(owner: 0)))
+        for path in ["/tmp/x/santad", "/Users/x/santad", "/opt/homebrew/bin/santad", "/Volumes/u/santad"] {
+            #expect(!SignalRateLimiter.isRootOwnedCanonicalExecutable(path, stat: reported(owner: 0)), "\(path) is a decoy location")
+        }
+        // A user-owned decoy under /Applications shares the decoy bucket: its
+        // repeats cannot spend a real tool's own budget.
+        let limiter = SignalRateLimiter()
+        let t0: UInt64 = 1_000_000_000
+        for source in 0..<100 {
+            _ = ESCollector.shouldKeepSignal(
+                sig: SIGKILL, sourcePID: Int32(120_000 + source), targetPID: 900, ownPID: 1,
+                nowNanos: t0 + UInt64(source), limiter: limiter, targetStat: reported(owner: 501),
+                targetExecutable: "/Applications/x/santad")
+            _ = ESCollector.shouldKeepSignal(
+                sig: SIGKILL, sourcePID: Int32(120_000 + source), targetPID: 900, ownPID: 1,
+                nowNanos: t0 + 200 + UInt64(source), limiter: limiter, targetStat: reported(owner: 501),
+                targetExecutable: "/Applications/x/santad")
+        }
+        #expect(limiter.aggregateRefusedTotal == 36, "the decoy's repeats drained the shared decoy bucket")
+        _ = ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 130_000, targetPID: 901, ownPID: 1, nowNanos: t0 + 1_000, limiter: limiter,
+            targetStat: reported(owner: 0), targetExecutable: santa)
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 130_000, targetPID: 901, ownPID: 1, nowNanos: t0 + 1_001, limiter: limiter,
+            targetStat: reported(owner: 0), targetExecutable: santa),
+                "a repeat at the root-owned real tool draws on its own untouched budget")
+    }
+
+    @Test("a full recycling table frees an eighth of itself in one pass, idle keys first and then the most recently inserted live ones, and each key that takes a freed live slot is churned")
+    func recyclingTableEvictsInBatches() {
+        let t0: UInt64 = 1_000_000_000
+        let table = BoundedTable<Int, ProtectedFileLaneBudget>(
+            capacity: 16, idleEvictionNanos: 60_000_000_000, policy: .evictNewestFirst
+        ) { churned in ProtectedFileLaneBudget(capacity: churned ? 1 : 3, refillPerSecond: 0) }
+        // Every lookup is used at once, as the lane budgets do, so each entry
+        // has a last-seen time.
+        func use(_ key: Int, at nanos: UInt64) -> BoundedTable<Int, ProtectedFileLaneBudget>.Lookup {
+            let lookup = table.lookup(key: key, nowNanos: nanos)
+            _ = lookup.entry?.admit(nowNanos: nanos)
+            return lookup
+        }
+        for key in 0..<16 { _ = use(key, at: t0 + UInt64(key)) }
+        let first = use(100, at: t0 + 100)
+        #expect(first.churned && !first.firstSighting)
+        #expect(table.count == 15, "the two most recently inserted keys went in one pass; the newcomer took one slot")
+        #expect(!table.contains(key: 15) && !table.contains(key: 14) && table.contains(key: 13) && table.contains(key: 0))
+        let second = use(101, at: t0 + 101)
+        #expect(second.churned && !second.firstSighting, "the other slot a live key left is taken under churn too")
+        #expect(table.count == 16)
+        #expect(table.sweepCount == 1, "the second newcomer found room without a scan")
+        let third = use(102, at: t0 + 102)
+        #expect(third.churned && table.count == 15, "the next newcomer starts the next batch")
+        #expect(!table.contains(key: 100) && !table.contains(key: 101) && table.contains(key: 13) && table.contains(key: 0),
+                "the newcomers recycle each other's slots; the fourteen established keys stay")
+        #expect(table.sweepCount == 1, "no idle scan is due inside a quarter idle window")
+    }
+
+    @Test("a batch frees idle keys before any live one, and a batch that freed only idle keys neither churns the newcomer nor restarts the churn window")
+    func batchFreesIdleKeysFirst() {
+        let t0: UInt64 = 1_000_000_000
+        let table = BoundedTable<Int, ProtectedFileLaneBudget>(
+            capacity: 16, idleEvictionNanos: 60_000_000_000, policy: .evictNewestFirst
+        ) { churned in ProtectedFileLaneBudget(capacity: churned ? 1 : 3, refillPerSecond: 0) }
+        func use(_ key: Int, at nanos: UInt64) -> BoundedTable<Int, ProtectedFileLaneBudget>.Lookup {
+            let lookup = table.lookup(key: key, nowNanos: nanos)
+            _ = lookup.entry?.admit(nowNanos: nanos)
+            return lookup
+        }
+        for key in 0..<16 { _ = use(key, at: t0 + UInt64(key)) }
+        // At 55 s nothing is idle yet: the scan finds nothing, and the batch
+        // recycles the two newest live keys.
+        #expect(use(100, at: t0 + 55_000_000_000).churned)
+        #expect(use(101, at: t0 + 55_000_000_001).churned)
+        #expect(!table.churnIsForgotten(nowNanos: t0 + 61_000_000_000))
+        // At 61 s keys 0-13 are idle but no scan is due for another 9 s; the
+        // batch takes two of them and leaves the live newcomers alone.
+        let idleSlot = use(102, at: t0 + 61_000_000_000)
+        #expect(idleSlot.firstSighting && !idleSlot.churned, "a slot an idle key left is a first sighting")
+        #expect(table.contains(key: 100) && table.contains(key: 101), "no live key went while idle ones were left")
+        #expect(table.sweepCount == 1)
+        #expect(table.churnIsForgotten(nowNanos: t0 + 115_000_000_001),
+                "the churn window runs from the last live eviction at 55 s, not from the idle-only batch at 61 s")
+    }
+
+    @Test("churn is forgotten once an idle window passes with no live eviction, so a later newcomer is a first sighting")
+    func churnIsForgottenAfterAnIdleWindow() {
+        let t0: UInt64 = 1_000_000_000
+        let table = BoundedTable<Int, ProtectedFileLaneBudget>(
+            capacity: 16, idleEvictionNanos: 60_000_000_000, policy: .evictNewestFirst
+        ) { churned in ProtectedFileLaneBudget(capacity: churned ? 1 : 3, refillPerSecond: 0) }
+        func use(_ key: Int, at nanos: UInt64) -> BoundedTable<Int, ProtectedFileLaneBudget>.Lookup {
+            let lookup = table.lookup(key: key, nowNanos: nanos)
+            _ = lookup.entry?.admit(nowNanos: nanos)
+            return lookup
+        }
+        for key in 0..<16 { _ = use(key, at: t0 + UInt64(key)) }
+        #expect(use(100, at: t0 + 100).churned, "the batch freed two live slots; one is still unclaimed")
+        let soon = use(200, at: t0 + 30_000_000_000)
+        #expect(soon.churned, "half an idle window later that freed live slot is still churned")
+        #expect(use(201, at: t0 + 30_000_000_001).churned, "the next newcomer starts another batch")
+        let late = use(300, at: t0 + 91_000_000_000)
+        #expect(late.firstSighting && !late.churned, "a full idle window after the last live eviction, the credit is gone")
+    }
+
+    @Test("a full fail-closed table scans for idle keys at most once a quarter idle window and otherwise refuses at once")
+    func refusingTableSweepsRarely() {
+        let t0: UInt64 = 1_000_000_000
+        let table = BoundedTable<Int, ProtectedFileLaneBudget>(
+            capacity: 4, idleEvictionNanos: 1_000_000_000, policy: .refuseWhenFull
+        ) { _ in ProtectedFileLaneBudget(capacity: 3, refillPerSecond: 0) }
+        for key in 0..<4 {
+            _ = table.lookup(key: key, nowNanos: t0).entry?.admit(nowNanos: t0)
+        }
+        var refused = 0
+        for i in 0..<1_000 where table.lookup(key: 100 + i, nowNanos: t0 + 1 + UInt64(i)).entry == nil {
+            refused += 1
+        }
+        #expect(refused == 1_000)
+        #expect(table.sweepCount == 1, "one scan, then refusals without scanning")
+        #expect(table.lookup(key: 5_000, nowNanos: t0 + 250_000_001).entry == nil)
+        #expect(table.sweepCount == 2, "a quarter idle window later the next newcomer scans again")
+        let late = table.lookup(key: 5_001, nowNanos: t0 + 1_100_000_000)
+        #expect(late.entry != nil && late.firstSighting, "once the keys idle out the scan makes room")
+        #expect(table.sweepCount == 3)
+    }
+
     // MARK: Repeat coalescing
 
     private let bundle = "/Users/x/project/dist/bundle.js"
@@ -443,10 +928,11 @@ struct ESIngressAdmissionTests {
 @Suite("Protected file events ride the priority lane within a budget")
 struct ProtectedFileLaneTests {
     private func fileEvent(
-        _ action: String, _ path: String, stamped: Bool = false, enrichments: [String: String] = [:]
+        _ action: String, _ path: String, pid: Int32 = 77, stamped: Bool = false,
+        enrichments: [String: String] = [:]
     ) -> Event {
         let process = MacCrabCore.ProcessInfo(
-            pid: 77, ppid: 1, rpid: 1, name: "node", executable: "/usr/local/bin/node",
+            pid: pid, ppid: 1, rpid: 1, name: "node", executable: "/usr/local/bin/node",
             commandLine: "node", args: [], workingDirectory: "/", userId: 501, userName: "u",
             groupId: 20, startTime: Date())
         return Event(eventCategory: .file, eventType: .change, eventAction: action,
@@ -498,12 +984,12 @@ struct ProtectedFileLaneTests {
 
     @Test("the worker's stamp admits a protected event within the budget and sends it to the file lane past it")
     func stampAdmitsThenRefuses() {
-        let budget = ProtectedFileLaneBudget(capacity: 2, refillPerSecond: 0)
-        let openBudget = ProtectedFileLaneBudget(capacity: 1, refillPerSecond: 0)
+        let budgets = PerProcessLaneBudgets(
+            write: (capacity: 2, refillPerSecond: 0), open: (capacity: 1, refillPerSecond: 0),
+            highValueOpen: (capacity: 1, refillPerSecond: 0))
         let tracker = ESSeqTracker()
         func stamp(_ event: inout Event, at nanos: UInt64) -> Bool? {
-            EventPipelineLane.stampProtectedLane(
-                &event, budget: budget, openBudget: openBudget, nowNanos: nanos, refusals: tracker)
+            EventPipelineLane.stampProtectedLane(&event, budgets: budgets, nowNanos: nanos, refusals: tracker)
         }
         let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
         var first = fileEvent("write", plist), second = fileEvent("write", plist), third = fileEvent("write", plist)
@@ -537,46 +1023,677 @@ struct ProtectedFileLaneTests {
         let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
         // An OPEN flood spends only the OPEN budget...
         do {
-            let budget = ProtectedFileLaneBudget(capacity: 64, refillPerSecond: 16)
-            let openBudget = ProtectedFileLaneBudget.forProtectedOpens()
+            let budgets = PerProcessLaneBudgets()
             let tracker = ESSeqTracker()
             var refused = 0
             for i in 0..<10_000 {
                 var open = fileEvent("open", "/tmp/x/.env")
                 if EventPipelineLane.stampProtectedLane(
-                    &open, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i), refusals: tracker
+                    &open, budgets: budgets, nowNanos: 1_000 + UInt64(i), refusals: tracker
                 ) == false { refused += 1 }
             }
             #expect(refused == 10_000 - 256, "an OPEN burst gets the OPEN burst capacity")
             #expect(tracker.protectedLaneRefusedTotal() == UInt64(refused))
             var write = fileEvent("write", plist)
             #expect(EventPipelineLane.stampProtectedLane(
-                &write, budget: budget, openBudget: openBudget, nowNanos: 11_001, refusals: tracker) == true)
+                &write, budgets: budgets, nowNanos: 11_001, refusals: tracker) == true)
         }
         // ...and a write flood spends only the write budget.
         do {
-            let budget = ProtectedFileLaneBudget(capacity: 64, refillPerSecond: 16)
-            let openBudget = ProtectedFileLaneBudget.forProtectedOpens()
+            let budgets = PerProcessLaneBudgets()
             let tracker = ESSeqTracker()
             for i in 0..<1_000 {
                 var write = fileEvent("write", plist)
                 EventPipelineLane.stampProtectedLane(
-                    &write, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i), refusals: tracker)
+                    &write, budgets: budgets, nowNanos: 1_000 + UInt64(i), refusals: tracker)
             }
             var credential = fileEvent("open", "/Users/x/.ssh/id_ed25519")
             #expect(EventPipelineLane.stampProtectedLane(
-                &credential, budget: budget, openBudget: openBudget, nowNanos: 2_001, refusals: tracker) == true)
+                &credential, budgets: budgets, nowNanos: 2_001, refusals: tracker) == true)
         }
+    }
+
+    @Test("budgets are keyed by the source process: one process's open() loop cannot take another's credential read off the priority lane")
+    func budgetsAreKeyedPerProcess() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var admitted = 0
+        for i in 0..<300 {
+            var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 77)
+            if EventPipelineLane.stampProtectedLane(
+                &open, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker) == true {
+                admitted += 1
+            }
+        }
+        #expect(admitted == 256, "the loop spends only its own process's OPEN budget")
+        var victim = fileEvent("open", "/Users/x/.aws/credentials", pid: 78)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &victim, budgets: budgets, nowNanos: t0 + 300, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: victim) == .priority,
+                "another process's credential read keeps the priority lane")
+        var own = fileEvent("open", "/Users/x/.aws/credentials", pid: 77)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &own, budgets: budgets, nowNanos: t0 + 301, refusals: tracker) == false)
+        #expect(EventPipelineLane.finalLane(for: own) == .file,
+                "the looping process's own further ordinary reads ride the file lane until its budget refills")
+        var later = fileEvent("open", "/Users/x/.aws/credentials", pid: 77)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &later, budgets: budgets, nowNanos: t0 + 1_000_000_301, refusals: tracker) == true,
+                "64 tokens a second refill")
+        #expect(tracker.protectedLaneRefusedTotal() == 45)
+    }
+
+    @Test("a honeyfile, decoy, keychain or wallet read has a budget of its own, so an exhausted OPEN budget cannot demote it, and a loop on a decoy is still bounded")
+    func highValueOpensHaveTheirOwnBudget() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        for i in 0..<300 {
+            var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 77)
+            EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker)
+        }
+        // Every default honeyfile is a honeyfile-class read, whatever its name.
+        let honeyfiles = HoneyfileManager.defaultHoneyfileSet(homeDir: "/Users/x").map(\.path)
+        #expect(honeyfiles.count == 13)
+        for path in honeyfiles {
+            var read = fileEvent("open", path, pid: 77)
+            #expect(EventPipelineLane.stampProtectedLane(
+                &read, budgets: budgets, nowNanos: t0 + 350, refusals: tracker) == true, "\(path)")
+            #expect(EventPipelineLane.finalLane(for: read) == .priority, "\(path)")
+        }
+        for path in ["/Users/x/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary",
+                     "/Users/x/Library/Keychains/login.keychain-db",
+                     "/Users/x/Library/Application Support/Electrum/wallets/default_wallet",
+                     "/Users/x/Documents/passwords_backup.csv"] {
+            var read = fileEvent("open", path, pid: 77)
+            #expect(EventPipelineLane.stampProtectedLane(
+                &read, budgets: budgets, nowNanos: t0 + 400, refusals: tracker) == true, "\(path)")
+            #expect(EventPipelineLane.finalLane(for: read) == .priority, "\(path)")
+        }
+        var decoyAdmitted = 0
+        for i in 0..<100 {
+            var read = fileEvent("open", "/Users/x/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary", pid: 77)
+            if EventPipelineLane.stampProtectedLane(
+                &read, budgets: budgets, nowNanos: t0 + 500 + UInt64(i), refusals: tracker) == true {
+                decoyAdmitted += 1
+            }
+        }
+        #expect(decoyAdmitted == 49, "the honeyfile class is a budget too: 64 reads, fifteen already spent")
+    }
+
+    @Test("a deployed honeyfile or decoy is matched by its exact path inside a home, and the same name anywhere else is an ordinary protected OPEN")
+    func honeyfileClassIsExact() {
+        for home in ["/Users/x", "/var/root", "/private/var/root"] {
+            let deployed = HoneyfileManager.defaultHoneyfileSet(homeDir: home).map(\.path)
+                + HoneyPromptManager.defaultHoneyPromptSet(homeDir: home).map(\.path)
+            #expect(deployed.count == 16)
+            for path in deployed {
+                #expect(EventPipelineLane.isHoneyfileOrDecoyPath(path), "\(path)")
+                #expect(ESCollector.isProtectedOpenPath(path), "\(path): the callback keeps the read")
+            }
+        }
+        for path in ["/tmp/x/.aws/credentials.bak", "/Users/Shared/.aws/credentials.bak",
+                     "/Users/x/project/.aws/credentials.bak", "/Users/x/.aws/credentials",
+                     "/Users/x/Library/Application Support/MacCrab/decoys/junk",
+                     "/tmp/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary"] {
+            #expect(!EventPipelineLane.isHoneyfileOrDecoyPath(path), "\(path)")
+        }
+        #expect(ESCollector.isProtectedOpenPath("/tmp/x/.aws/credentials.bak"))
+        #expect(!ESCollector.highValueOpenPathMarkers.matches("/tmp/x/.aws/credentials.bak"),
+                "a honeyfile name outside a home is an ordinary protected OPEN, not a high-value one")
+    }
+
+    @Test("keychain-named junk spends the high-value budget, never the honeyfile class: a deployed honeyfile and decoy read after 64 junk opens still stamp priority")
+    func keychainJunkCannotDrainTheHoneyfileClass() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var junkAdmitted = 0
+        for n in 0..<64 {
+            var open = fileEvent("open", "/tmp/x/Library/Keychains/j\(n)", pid: 77)
+            if EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(n), refusals: tracker) == true {
+                junkAdmitted += 1
+            }
+        }
+        #expect(junkAdmitted == 64)
+        var more = fileEvent("open", "/tmp/x/Library/Keychains/j64", pid: 77)
+        #expect(EventPipelineLane.stampProtectedLane(&more, budgets: budgets, nowNanos: t0 + 64, refusals: tracker) == false,
+                "the junk spent the process's whole high-value budget")
+        for (i, path) in ["/Users/x/.aws/credentials.bak",
+                          "/Users/x/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary"].enumerated() {
+            var read = fileEvent("open", path, pid: 77)
+            #expect(EventPipelineLane.stampProtectedLane(
+                &read, budgets: budgets, nowNanos: t0 + 100 + UInt64(i), refusals: tracker) == true, "\(path)")
+            #expect(EventPipelineLane.finalLane(for: read) == .priority, "\(path)")
+        }
+    }
+
+    @Test("keychain-junk loopers pin the high-value aggregate, and a reader that spent its allowance on five junk opens still has its honeyfile read stamp priority")
+    func keychainLoopersCannotDemoteAHoneyfileRead() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let storm = pinTheAggregate(budgets, tracker, from: t0, path: { "/Users/x/Library/Keychains/junk\($0)" }, burst: 64, perSecond: 16)
+        for n in 0..<5 {
+            var junk = fileEvent("open", "/tmp/r/Library/Keychains/j\(n)", pid: 6)
+            #expect(EventPipelineLane.stampProtectedLane(
+                &junk, budgets: budgets, nowNanos: storm.lastAttempt + 100_000 + UInt64(n), refusals: tracker) == true,
+                    "the reader's first sighting and allowance")
+        }
+        var read = fileEvent("open", "/Users/x/.aws/credentials.bak", pid: 6)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &read, budgets: budgets, nowNanos: storm.lastAttempt + 200_000, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: read) == .priority)
+    }
+
+    @Test("every high-value marker is one of the protected OPEN markers, so the class is a subset and cannot drift")
+    func highValueMarkersAreProtectedMarkers() {
+        #expect(!ESCollector.highValueReadPathSubstrings.isEmpty)
+        for marker in ESCollector.highValueReadPathSubstrings {
+            #expect(ESCollector.credentialReadPathSubstrings.contains(marker), "\(marker) is not a credential-read marker")
+            let path = "/Users/x" + (marker.hasPrefix("/") ? "" : "/") + marker + "tail"
+            #expect(ESCollector.isProtectedOpenPath(path))
+            #expect(ESCollector.highValueOpenPathMarkers.matches(path))
+        }
+        for path in ["/Users/x/.ssh/id_ed25519", "/Users/x/.aws/credentials",
+                     "/Users/x/.claude/settings.json", "/Users/x/project/.env"] {
+            #expect(!ESCollector.highValueOpenPathMarkers.matches(path), "\(path) is an ordinary protected OPEN")
+        }
+    }
+
+    @Test("the write-family budget is per process too, and the tables are bounded")
+    func writeBudgetIsPerProcessAndBounded() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
+        var admitted = 0
+        for i in 0..<100 {
+            var write = fileEvent("write", plist, pid: 77)
+            if EventPipelineLane.stampProtectedLane(
+                &write, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker) == true {
+                admitted += 1
+            }
+        }
+        #expect(admitted == 64)
+        var other = fileEvent("write", plist, pid: 78)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &other, budgets: budgets, nowNanos: t0 + 100, refusals: tracker) == true,
+                "another process's persistence write is not behind the loop's budget")
+        for pid in 1_000..<2_000 {
+            var write = fileEvent("write", plist, pid: Int32(pid))
+            EventPipelineLane.stampProtectedLane(
+                &write, budgets: budgets, nowNanos: t0 + 200 + UInt64(pid), refusals: tracker)
+        }
+        #expect(budgets.trackedProcessCount <= 512, "a fork bomb cannot grow the tables")
+        // Ten seconds on, the storm's processes are still live, so a newcomer
+        // takes a slot one of them left: the newcomer allowance pays its
+        // first write, and the refilled write aggregate its next.
+        var fresh = fileEvent("write", plist, pid: 3_000)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &fresh, budgets: budgets, nowNanos: t0 + 10_000_000_000, refusals: tracker) == true,
+                "the newcomer allowance admits a newcomer's first write")
+        var again = fileEvent("write", plist, pid: 3_000)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &again, budgets: budgets, nowNanos: t0 + 10_000_000_001, refusals: tracker) == true,
+                "a newcomer under churn has a bucket of its own; its next write draws on the refilled aggregate")
+    }
+
+    @Test("the worker's aggregate bounds what many fresh processes can put on the priority lane: a fork-and-open storm gets the aggregate burst and no more")
+    func aggregateBoundsAForkAndOpenStorm() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var admitted = 0
+        var offered = 0
+        for pid in 10_000..<10_600 {
+            for i in 0..<256 {
+                var open = fileEvent("open", "/tmp/x/.gitconfig", pid: Int32(pid))
+                offered += 1
+                if EventPipelineLane.stampProtectedLane(
+                    &open, budgets: budgets, nowNanos: t0 + UInt64(offered), refusals: tracker) == true {
+                    admitted += 1
+                }
+            }
+        }
+        #expect(offered == 153_600)
+        #expect(admitted == 512 * 5 + 1_024 + 88,
+                "the 512 tracked processes get their allowance of five each, the 88 churned ones the newcomer allowance for their first read; everything else is the worker's OPEN aggregate")
+        #expect(tracker.protectedLaneRefusedTotal() == UInt64(offered - admitted), "every refusal is counted")
+        // Right after the storm the table is still full of live processes, so
+        // a newcomer takes a slot one of them left: no free first read and no
+        // allowance, so rotating pids buys nothing the shared buckets do not
+        // pay for. Its own bucket is full, and the aggregate has refilled 256.
+        var churnedAdmitted = 0
+        for i in 0..<2_000 {
+            var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 20_000)
+            if EventPipelineLane.stampProtectedLane(
+                &open, budgets: budgets, nowNanos: t0 + 1_000_000_000 + UInt64(i), refusals: tracker) == true {
+                churnedAdmitted += 1
+            }
+        }
+        #expect(churnedAdmitted == 256, "one read on the newcomer allowance, then its own 255 from the refilled aggregate")
+        // Once the storm's processes have idled out, a new process starts with
+        // a full bucket, and the aggregate (spent only after a process's own
+        // bucket admits, so no loop drains it for the others) has refilled.
+        var loopAdmitted = 0
+        for i in 0..<2_000 {
+            var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 20_001)
+            if EventPipelineLane.stampProtectedLane(
+                &open, budgets: budgets, nowNanos: t0 + 61_000_000_000 + UInt64(i), refusals: tracker) == true {
+                loopAdmitted += 1
+            }
+        }
+        #expect(loopAdmitted == 256, "a minute later one process can take at most its own 256 from the refilled aggregate")
+        var other = fileEvent("open", "/Users/x/.aws/credentials", pid: 20_002)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &other, budgets: budgets, nowNanos: t0 + 62_000_000_000, refusals: tracker) == true,
+                "another process's credential read is admitted from the refilled aggregate")
+    }
+
+    @Test("the worker's write aggregate bounds a fork-and-write storm at persistence locations")
+    func aggregateBoundsAForkAndWriteStorm() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
+        var admitted = 0
+        var offered = 0
+        for pid in 30_000..<31_000 {
+            for _ in 0..<64 {
+                var write = fileEvent("write", plist, pid: Int32(pid))
+                offered += 1
+                if EventPipelineLane.stampProtectedLane(
+                    &write, budgets: budgets, nowNanos: t0 + UInt64(offered), refusals: tracker) == true {
+                    admitted += 1
+                }
+            }
+        }
+        #expect(offered == 64_000)
+        #expect(admitted == 512 * 5 + 256 + 128,
+                "the 512 tracked processes get their allowance of five each and the 488 churned ones share the newcomer allowance; everything else is the worker's write aggregate")
+        #expect(tracker.protectedLaneRefusedTotal() == UInt64(offered - admitted))
+    }
+
+    @Test("a fork-and-decoy-read storm pins the high-value aggregate within the same bound, and an uninvolved newcomer's first decoy read still stamps priority, whether or not the storm filled the table",
+          arguments: [300, 512, 600])
+    func aggregateBoundsADecoyReadStorm(processes: Int) {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let decoy = "/Users/x/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary"
+        var admitted = 0
+        var offered = 0
+        for pid in 40_000..<(40_000 + processes) {
+            for _ in 0..<8 {
+                var read = fileEvent("open", decoy, pid: Int32(pid))
+                offered += 1
+                if EventPipelineLane.stampProtectedLane(
+                    &read, budgets: budgets, nowNanos: t0 + UInt64(offered), refusals: tracker) == true {
+                    admitted += 1
+                }
+            }
+        }
+        let tracked = min(processes, 512)
+        let churned = processes - tracked
+        #expect(admitted == tracked * 5 + 256 + churned,
+                "\(processes) processes: the tracked ones' allowance of five, the churned ones' first read on the newcomer allowance, plus the aggregate")
+        #expect(tracker.protectedLaneRefusedTotal() == UInt64(offered - admitted))
+        var victim = fileEvent("open", decoy, pid: 50_000)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &victim, budgets: budgets, nowNanos: t0 + 10_000, refusals: tracker) == true,
+                "a process seen for the first time keeps its first decoy read on the priority lane")
+    }
+
+    /// A protected OPEN offered at `at` by `pid`; `probe` names one whose
+    /// verdict a test reads.
+    private struct Offer {
+        let at: UInt64
+        let pid: Int32
+        let path: String
+        var probe: String? = nil
+    }
+
+    /// Stamps the offers in time order (ties in the order given) and returns
+    /// each probe's verdict.
+    private func play(_ offers: [Offer], _ budgets: PerProcessLaneBudgets, _ tracker: ESSeqTracker) -> [String: Bool] {
+        var verdicts: [String: Bool] = [:]
+        let ordered = offers.enumerated().sorted { ($0.element.at, $0.offset) < ($1.element.at, $1.offset) }
+        for (_, offer) in ordered {
+            var open = fileEvent("open", offer.path, pid: offer.pid)
+            let admitted = EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: offer.at, refusals: tracker) == true
+            if let probe = offer.probe { verdicts[probe] = admitted }
+        }
+        return verdicts
+    }
+
+    /// Tight loopers `pids` on their own alert-free files in one class each:
+    /// `.env` at 64 a second, keychain junk and a decoy at 16, from `start`
+    /// to `end`, plus one more try by each just before every probe time, so
+    /// every shared bucket is empty when a probe arrives.
+    private func loopers(_ pids: ClosedRange<Int32>, from start: UInt64, to end: UInt64,
+                         decoy: String, probesAt: [UInt64]) -> [Offer] {
+        var offers: [Offer] = []
+        for pid in pids {
+            let paths = [("/tmp/\(pid)/.env", 64), ("/Users/x/Library/Keychains/junk\(pid)", 16), (decoy, 16)]
+            for (path, perSecond) in paths {
+                let spacing = UInt64(1_000_000_000 / perSecond)
+                var at = start + UInt64(pid) * 1_000
+                while at < end {
+                    offers.append(Offer(at: at, pid: pid, path: path))
+                    at += spacing
+                }
+                for probe in probesAt { offers.append(Offer(at: probe - 10_000 + UInt64(pid), pid: pid, path: path)) }
+            }
+        }
+        return offers
+    }
+
+    @Test("tight loopers, a 520-process burst and a steady fork rate cannot strip an IDE tracked before them, nor refuse a fresh process's first credential or decoy read while forks stay under the newcomer refill",
+          arguments: [(5, 10), (20, 10), (5, 50), (20, 50)])
+    func stormCannotStripAnEstablishedProcess(looperCount: Int, forksPerSecond: Int) {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let second: UInt64 = 1_000_000_000
+        let t0: UInt64 = second
+        let burst = t0 + 2 * second
+        let credential = "/Users/x/.aws/credentials"
+        let decoy = "/Users/x/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary"
+        let at30 = burst + 30 * second
+        let at60 = burst + 60 * second
+        // The IDE reads a credential and a decoy before the storm. Its pid,
+        // and the fresh process's, are outside every looper's and forker's.
+        let ide: Int32 = 90_001
+        let fresh: Int32 = 90_002
+        var offers = [Offer(at: t0, pid: ide, path: credential), Offer(at: t0 + 1, pid: ide, path: decoy)]
+        offers += loopers(1...Int32(looperCount), from: burst - second, to: burst + 61 * second, decoy: decoy,
+                          probesAt: [at30, at30 + 2_000_000, at60])
+        // 520 fresh processes in a millisecond, then a steady fork rate; each
+        // reads its own .env, its keychain junk and the decoy once.
+        func newProcess(_ pid: Int32, at: UInt64) -> [Offer] {
+            [Offer(at: at, pid: pid, path: "/tmp/\(pid)/.env"),
+             Offer(at: at + 1, pid: pid, path: "/Users/x/Library/Keychains/junk\(pid)"),
+             Offer(at: at + 2, pid: pid, path: decoy)]
+        }
+        for i in 0..<520 { offers += newProcess(Int32(10_000 + i), at: burst + UInt64(i) * 1_000) }
+        let forkSpacing = second / UInt64(forksPerSecond)
+        for k in 0..<(forksPerSecond * 60) {
+            offers += newProcess(Int32(20_000 + k), at: burst + second + UInt64(k) * forkSpacing + 500_000)
+        }
+        offers += [
+            Offer(at: at30, pid: ide, path: credential, probe: "ide credential at 30 s"),
+            Offer(at: at30 + 1_000, pid: ide, path: decoy, probe: "ide decoy at 30 s"),
+            Offer(at: at60, pid: ide, path: credential, probe: "ide credential at 60 s"),
+            Offer(at: at60 + 1_000, pid: ide, path: decoy, probe: "ide decoy at 60 s"),
+            Offer(at: at30 + 2_000_000, pid: fresh, path: credential, probe: "fresh credential"),
+            Offer(at: at30 + 2_001_000, pid: fresh, path: decoy, probe: "fresh decoy"),
+        ]
+        let verdicts = play(offers, budgets, tracker)
+        for probe in ["ide credential at 30 s", "ide decoy at 30 s", "ide credential at 60 s", "ide decoy at 60 s"] {
+            #expect(verdicts[probe] == true, "\(probe) with \(looperCount) loopers and \(forksPerSecond) forks a second")
+        }
+        if forksPerSecond < 32 {
+            #expect(verdicts["fresh credential"] == true, "\(looperCount) loopers, \(forksPerSecond) forks a second")
+            #expect(verdicts["fresh decoy"] == true, "\(looperCount) loopers, \(forksPerSecond) forks a second")
+        }
+    }
+
+    @Test("a process first seen in the middle of a burst, before or after the table filled, still has its credential read admitted under tight loopers five minutes later",
+          arguments: [300, 516])
+    func midBurstProcessKeepsItsStanding(position: Int) {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let second: UInt64 = 1_000_000_000
+        let t0: UInt64 = second
+        let credential = "/Users/x/.aws/credentials"
+        let decoy = "/Users/x/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary"
+        var offers: [Offer] = []
+        for i in 0..<520 {
+            let at = t0 + UInt64(i) * 1_000
+            offers.append(i == position
+                ? Offer(at: at, pid: 90_001, path: credential)
+                : Offer(at: at, pid: Int32(10_000 + i), path: "/tmp/\(10_000 + i)/.env"))
+        }
+        let later = t0 + 300 * second
+        offers += loopers(1...5, from: later - 30 * second, to: later, decoy: decoy, probesAt: [later])
+        offers.append(Offer(at: later, pid: 90_001, path: credential, probe: "five minutes on"))
+        #expect(play(offers, budgets, tracker)["five minutes on"] == true, "first seen as process \(position) of the burst")
+    }
+
+    @Test("once a storm's processes idle out, a newcomer is a first sighting with its allowance: at 61 s by the churn window, and at 60.5 s by the scan that finds them idle")
+    func newcomerAfterAStormIsNotChurned() {
+        for probe: UInt64 in [61_000_000_000, 60_500_000_000] {
+            // Both shared buckets empty: a churned newcomer would get nothing.
+            let budgets = PerProcessLaneBudgets(
+                openAggregate: (capacity: 0, refillPerSecond: 0), newcomers: (capacity: 0, refillPerSecond: 0))
+            let tracker = ESSeqTracker()
+            let t0: UInt64 = 1_000_000_000
+            for i in 0..<600 {
+                var open = fileEvent("open", "/tmp/\(i)/.env", pid: Int32(10_000 + i))
+                EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(i) * 1_000_000, refusals: tracker)
+            }
+            var admitted = 0
+            for k in 0..<5 {
+                var open = fileEvent("open", "/Users/x/.aws/credentials", pid: 20_000)
+                if EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + probe + UInt64(k), refusals: tracker) == true {
+                    admitted += 1
+                }
+            }
+            #expect(admitted == 5, "at \(probe / 1_000_000) ms: a first sighting pays its first read itself and four from its allowance")
+        }
+    }
+
+    @Test("a newcomer under churn has a full bucket of its own: the newcomer allowance pays its first read and the shared bucket, while it has tokens, its second a millisecond later")
+    func churnedNewcomerDrawsOnTheSharedBucket() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        for i in 0..<512 {
+            var open = fileEvent("open", "/tmp/\(i)/.env", pid: Int32(10_000 + i))
+            #expect(EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(i) * 1_000, refusals: tracker) == true)
+        }
+        var first = fileEvent("open", "/Users/x/.aws/credentials", pid: 20_000)
+        #expect(EventPipelineLane.stampProtectedLane(&first, budgets: budgets, nowNanos: t0 + 1_000_000_000, refusals: tracker) == true)
+        var second = fileEvent("open", "/Users/x/.aws/credentials", pid: 20_000)
+        #expect(EventPipelineLane.stampProtectedLane(&second, budgets: budgets, nowNanos: t0 + 1_001_000_000, refusals: tracker) == true,
+                "the full aggregate pays the churned newcomer's second read")
+    }
+
+    @Test("the newcomer allowance refills 32 a second: under churn, newcomers at 28 a second all have their first read admitted, at 36 a second some are refused",
+          arguments: [28, 36])
+    func newcomerAllowanceThreshold(perSecond: Int) {
+        // The OPEN aggregate is empty, so only the newcomer allowance can pay.
+        let budgets = PerProcessLaneBudgets(openAggregate: (capacity: 0, refillPerSecond: 0))
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        for i in 0..<512 {
+            var open = fileEvent("open", "/tmp/\(i)/.env", pid: Int32(10_000 + i))
+            EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(i) * 1_000, refusals: tracker)
+        }
+        let spacing = 1_000_000_000 / UInt64(perSecond)
+        var admitted = 0
+        for k in 0..<(perSecond * 50) {
+            var open = fileEvent("open", "/Users/x/.aws/credentials", pid: Int32(20_000 + k))
+            if EventPipelineLane.stampProtectedLane(
+                &open, budgets: budgets, nowNanos: t0 + 1_000_000_000 + UInt64(k) * spacing, refusals: tracker) == true {
+                admitted += 1
+            }
+        }
+        let refused = perSecond * 50 - admitted
+        if perSecond < 32 {
+            #expect(refused == 0, "below the refill every newcomer's first read is admitted")
+        } else {
+            #expect(refused > 0, "above the refill the allowance runs dry")
+            #expect(admitted <= 128 + 32 * 50, "the allowance's burst plus its refill over the 50 s: \(admitted)")
+        }
+    }
+
+    @Test("a sustained storm stays within each class's stated bound, burst plus rate times seconds: 512 long-lived processes at two events a second and 40 fresh ones a second, for a minute",
+          arguments: ["write", "open", "high-value", "honeyfile"])
+    func sustainedStormStaysWithinTheStatedBound(kind: String) {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let second: UInt64 = 1_000_000_000
+        let t0: UInt64 = second
+        let action = kind == "write" ? "write" : "open"
+        let path: (Int32) -> String
+        let shared: (capacity: Double, refill: Double)
+        switch kind {
+        case "write":
+            path = { "/Users/x/Library/LaunchAgents/com.evil\($0).plist" }
+            shared = (256, 64)
+        case "open":
+            path = { "/tmp/\($0)/.env" }
+            shared = (1_024, 256)
+        case "high-value":
+            path = { "/Users/x/Library/Keychains/junk\($0)" }
+            shared = (256, 64)
+        default:
+            path = { _ in "/Users/x/.aws/credentials.bak" }
+            shared = (256, 64)
+        }
+        var offers: [(at: UInt64, pid: Int32)] = []
+        for tick in 0..<120 {
+            for i in 0..<512 { offers.append((t0 + UInt64(tick) * second / 2 + UInt64(i) * 1_000, Int32(10_000 + i))) }
+        }
+        for k in 0..<(40 * 60) { offers.append((t0 + UInt64(k) * (second / 40) + 700_000, Int32(30_000 + k))) }
+        offers.sort { $0.at < $1.at }
+        var admitted = 0
+        for offer in offers {
+            var event = fileEvent(action, path(offer.pid), pid: offer.pid)
+            if EventPipelineLane.stampProtectedLane(&event, budgets: budgets, nowNanos: offer.at, refusals: tracker) == true {
+                admitted += 1
+            }
+        }
+        // The bound `PerProcessLaneBudgets` documents, per class and worker:
+        // burst = tracked × (1 + allowance) + shared capacity + newcomer capacity,
+        // rate = shared refill + newcomer refill + tracked × allowance refill
+        //        + tracked × (1 + allowance) / idle window,
+        // with 512 tracked, an allowance of 4 refilling 0.25/s, a newcomer
+        // allowance of 128 refilling 32/s and a 60 s idle window.
+        let burst = 512.0 * (1 + 4) + shared.capacity + 128
+        let rate = shared.refill + 32 + 512 * 0.25 + 512 * (1 + 4) / 60
+        let bound = burst + rate * 60
+        #expect(Double(admitted) <= bound, "\(kind): \(admitted) of \(offers.count) admitted against a bound of \(bound)")
+        #expect(Double(admitted) > shared.refill * 60, "\(kind): the storm really saturates the class: \(admitted)")
+    }
+
+    /// Five processes each burst their own bucket, then, straight after, keep
+    /// opening their own alert-free file at `perSecond` a second for three
+    /// seconds: five times that is more than the class's shared bucket
+    /// refills, so it stays pinned near zero throughout. Returns the
+    /// admissions in the last second and the time of the last attempt.
+    private func pinTheAggregate(
+        _ budgets: PerProcessLaneBudgets, _ tracker: ESSeqTracker, from t0: UInt64,
+        path: (Int32) -> String, burst: Int, perSecond: Int
+    ) -> (admittedInLastSecond: Int, lastAttempt: UInt64) {
+        for pid: Int32 in 1...5 {
+            for k in 0..<burst {
+                var open = fileEvent("open", path(pid), pid: pid)
+                EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(k) * 1_000, refusals: tracker)
+            }
+        }
+        let steady = t0 + 1_000_000
+        let spacing = UInt64(1_000_000_000 / perSecond)
+        var admittedInLastSecond = 0
+        var lastAttempt = steady
+        for second: UInt64 in 0..<3 {
+            for k in 0..<perSecond {
+                for pid: Int32 in 1...5 {
+                    var open = fileEvent("open", path(pid), pid: pid)
+                    lastAttempt = steady + second * 1_000_000_000 + UInt64(k) * spacing + UInt64(pid) * 1_000
+                    if EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: lastAttempt, refusals: tracker) == true,
+                       second == 2 {
+                        admittedInLastSecond += 1
+                    }
+                }
+            }
+        }
+        return (admittedInLastSecond, lastAttempt)
+    }
+
+    @Test("long-lived loopers on their own alert-free .env pin the OPEN aggregate, and an uninvolved process's credential read still stamps priority")
+    func loopersCannotDemoteAnUninvolvedProcess() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let storm = pinTheAggregate(budgets, tracker, from: t0, path: { "/tmp/\($0)/.env" }, burst: 256, perSecond: 64)
+        #expect(storm.admittedInLastSecond <= 262, "the loopers hold the aggregate at its refill plus their trickle of allowance: \(storm.admittedInLastSecond) of 320")
+        #expect(storm.admittedInLastSecond >= 200, "the storm shape really is admitted at the refill rate")
+        var victim = fileEvent("open", "/Users/x/.aws/credentials", pid: 6)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &victim, budgets: budgets, nowNanos: storm.lastAttempt + 1_000_000, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: victim) == .priority,
+                "a process the loopers never touched keeps its credential read on the priority lane")
+    }
+
+    @Test("a process tracked for half a minute before the loopers started keeps its allowance, so its credential read stamps priority too")
+    func trackedProcessKeepsItsAllowanceUnderLoopers() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var early = fileEvent("open", "/Users/x/.gitconfig", pid: 7)
+        #expect(EventPipelineLane.stampProtectedLane(&early, budgets: budgets, nowNanos: t0, refusals: tracker) == true)
+        let storm = pinTheAggregate(budgets, tracker, from: t0 + 30_000_000_000, path: { "/tmp/\($0)/.env" }, burst: 256, perSecond: 64)
+        var later = fileEvent("open", "/Users/x/.aws/credentials", pid: 7)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &later, budgets: budgets, nowNanos: storm.lastAttempt + 1_000_000, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: later) == .priority,
+                "an IDE or shell that read a credential half a minute ago is not coupled to the loopers")
+    }
+
+    @Test("loopers on their own keychain junk pin the high-value aggregate, and an uninvolved process's decoy read still stamps priority")
+    func highValueLoopersCannotDemoteAnUninvolvedProcess() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let storm = pinTheAggregate(budgets, tracker, from: t0, path: { "/Users/x/Library/Keychains/junk\($0)" }, burst: 64, perSecond: 16)
+        #expect(storm.admittedInLastSecond <= 70, "the loopers hold the high-value aggregate at its refill plus their trickle of allowance: \(storm.admittedInLastSecond) of 80")
+        var victim = fileEvent("open", "/Users/x/Documents/passwords_backup.csv", pid: 6)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &victim, budgets: budgets, nowNanos: storm.lastAttempt + 1_000_000, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: victim) == .priority)
+    }
+
+    @Test("an aggregate refusal does not spend the process's own token: the bucket is peeked, and debited only on admission")
+    func aggregateRefusalRefundsTheProcessBucket() {
+        let budgets = PerProcessLaneBudgets(
+            open: (capacity: 256, refillPerSecond: 0),
+            openAggregate: (capacity: 10, refillPerSecond: 1_000))
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var first = 0
+        for i in 0..<300 {
+            var open = fileEvent("open", "/Users/x/.gitconfig", pid: 77)
+            if EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker) == true {
+                first += 1
+            }
+        }
+        #expect(first == 15, "the allowance of five plus the aggregate's ten")
+        // A second later, one attempt a millisecond: the aggregate refills a
+        // token between attempts, so only the process's own bucket can limit.
+        var second = 0
+        for i in 0..<300 {
+            var open = fileEvent("open", "/Users/x/.gitconfig", pid: 77)
+            if EventPipelineLane.stampProtectedLane(
+                &open, budgets: budgets, nowNanos: t0 + 1_000_000_000 + UInt64(i) * 1_000_000, refusals: tracker) == true {
+                second += 1
+            }
+        }
+        #expect(second == 241, "the 241 tokens the earlier refusals left untouched are all admitted")
     }
 
     @Test("the worker stamps through the budget and counts its refusals")
     func workerStampsAndCountsRefusals() throws {
         let tracker = ESSeqTracker()
-        let budget = ProtectedFileLaneBudget(capacity: 0, refillPerSecond: 0)
+        let budgets = PerProcessLaneBudgets(
+            write: (capacity: 0, refillPerSecond: 0), open: (capacity: 0, refillPerSecond: 0),
+            highValueOpen: (capacity: 0, refillPerSecond: 0))
         for _ in 0..<2 {
             var write = fileEvent("write", "/Users/x/Library/LaunchAgents/com.evil.plist")
             #expect(EventPipelineLane.stampProtectedLane(
-                &write, budget: budget, openBudget: budget, nowNanos: 1, refusals: tracker) == false)
+                &write, budgets: budgets, nowNanos: 1, refusals: tracker) == false)
         }
         #expect(tracker.protectedLaneRefusedTotal() == 2)
         tracker.reset()
@@ -590,11 +1707,13 @@ struct ProtectedFileLaneTests {
         let body = collector[start.upperBound..<end.lowerBound]
         #expect(body.contains("EventPipelineLane.stampProtectedLane("))
         #expect(body.contains("refusals: tracker"))
-        #expect(!body.contains("protectedLaneBudget.admit("), "the budget is spent only through the stamp")
+        #expect(!body.contains("laneBudgets.admit("), "the budget is spent only through the stamp")
         let timers = try String(contentsOf: root.appendingPathComponent(
             "Sources/MacCrabAgentKit/DaemonTimers.swift"), encoding: .utf8)
         #expect(timers.components(separatedBy: "\"es_protected_lane_refused_total\": esProtectedLaneRefused").count == 3,
                 "both heartbeat payloads report the refusals")
+        #expect(timers.components(separatedBy: "\"es_protected_open_slice_demoted_total\": esProtectedOpenSliceDemoted").count == 3,
+                "both heartbeat payloads report the top-slice demotions")
     }
 
     @Test("only the worker's stamp moves a protected file event to the priority lane")

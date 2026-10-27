@@ -377,10 +377,15 @@ struct ESIngressStormBenchmarkTests {
 
     // MARK: 3. Worker reserve on the file client
 
+    /// The split file client's hand-off tiers, as `openClient` decides them.
+    private static let fileClientTiers = ESCollector.WorkerTierPolicy(subscribedTypes:
+        ESCollector.fileClientTypes(subscribeFileOpen: true, subscribeIntrospection: true))
+
     /// Configure a worker exactly the way the file client does, hold its queue
     /// so nothing drains, fill it with an OPEN flood, then offer write-family
-    /// messages. The property: the OPEN flood cannot consume the slots the
-    /// write family needs. Deterministic — the gate is a semaphore, not a sleep.
+    /// messages at the tier the collector gives them. The property: the OPEN
+    /// flood cannot consume the slots the write family needs. Deterministic —
+    /// the gate is a semaphore, not a sleep.
     private func writeFamilySurvivesOpenFlood(
         reservesLineageSlots: Bool,
         openIsCritical: Bool
@@ -407,8 +412,10 @@ struct ESIngressStormBenchmarkTests {
                 openAccepted += 1
             }
         }
+        let writeTier = Self.fileClientTiers.tier(eventType: Self.writeType, protectedOpen: false)
         for _ in 0..<(cap / 4) {
-            if worker.submit(handle(), lineageCritical: true, eventType: Self.writeType) {
+            if worker.submit(handle(), lineageCritical: writeTier.lineageCritical,
+                             writeFamily: writeTier.writeFamily, eventType: Self.writeType) {
                 writeAccepted += 1
             } else {
                 writeRefused += 1
@@ -427,11 +434,117 @@ struct ESIngressStormBenchmarkTests {
         // v1.22.7 file-client configuration: reserve held; an ordinary OPEN is never critical.
         let after = writeFamilySurvivesOpenFlood(reservesLineageSlots: true, openIsCritical: false)
         print("BENCH worker_reserve before(open=\(before.openAccepted) write_accepted=\(before.writeAccepted) write_refused=\(before.writeRefused)) after(open=\(after.openAccepted) write_accepted=\(after.writeAccepted) write_refused=\(after.writeRefused))")
-        #expect(after.writeRefused == 0, "write-family must never be refused because OPENs filled the budget")
-        #expect(after.writeAccepted == 1024)
-        #expect(after.openAccepted == 3072)
+        #expect(after.openAccepted == 3072, "ordinary OPENs stop at the non-reserved budget")
+        #expect(after.writeAccepted == 768, "the write family gets every reserved slot below the top slice")
+        #expect(after.writeRefused == 256, "only the top slice, held for protected OPENs, is beyond the write family")
         // The base configuration is the regression this test exists to catch.
         #expect(before.writeRefused == 1024)
+    }
+
+    @Test("file-client worker: a protected-OPEN flood from one process cannot take the write family's slots or another process's credential OPEN")
+    func protectedOpenFloodCannotStarveWrites() {
+        let cap = 4096
+        let gate = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: cap, label: "bench.file-client.protected-flood", reservesLineageSlots: true,
+            process: { _ in gate.wait() }, free: { _ in }
+        )
+        var token = 1
+        func handle() -> UnsafeRawPointer {
+            token += 1
+            return UnsafeRawPointer(bitPattern: token)!
+        }
+        // Exactly the collector's hand-off for an OPEN whose raw path matched
+        // the protected markers, from the given source process.
+        func submitProtectedOpen(pid: pid_t) -> Bool {
+            let tier = Self.fileClientTiers.tier(eventType: Self.openType, protectedOpen: true)
+            return worker.submit(
+                handle(), lineageCritical: tier.lineageCritical, writeFamily: tier.writeFamily,
+                protectedOpen: true, sourceProcessID: pid, eventType: Self.openType
+            )
+        }
+        var floodAccepted = 0
+        for _ in 0..<cap where submitProtectedOpen(pid: 7) { floodAccepted += 1 }
+        let writeTier = Self.fileClientTiers.tier(eventType: Self.writeType, protectedOpen: false)
+        var writeAccepted = 0
+        var writeRefused = 0
+        for _ in 0..<(cap / 4) {
+            if worker.submit(handle(), lineageCritical: writeTier.lineageCritical,
+                             writeFamily: writeTier.writeFamily, eventType: Self.writeType) {
+                writeAccepted += 1
+            } else {
+                writeRefused += 1
+            }
+        }
+        let victimAccepted = submitProtectedOpen(pid: 9)
+        let demoted = worker.protectedOpenSliceDemoted()
+        let dropped = worker.backpressureDroppedByEventType()
+        let sliceInFlight = worker.protectedOpenInFlightCount()
+        print("BENCH worker_protected_open_flood flood_accepted=\(floodAccepted)/\(cap) write_accepted=\(writeAccepted) write_refused=\(writeRefused) victim_credential_open=\(victimAccepted) slice_in_flight=\(sliceInFlight) demoted=\(demoted) dropped_by_type=\(dropped)")
+        for _ in 0..<(cap + 2048) { gate.signal() }
+        worker.shutdownAndDrain()
+        #expect(floodAccepted == 3072, "past its slice allowance an open() loop is admitted as ordinary OPENs, no further")
+        #expect(writeAccepted == 768, "the write family keeps every slot above the ordinary OPEN tier")
+        #expect(writeRefused == 256, "only the top slice is beyond the write family")
+        #expect(victimAccepted, "another process's credential OPEN is admitted with the flood and the writes in flight")
+        #expect(sliceInFlight == 33, "the flood holds its per-process allowance; the victim holds one slot")
+        #expect(demoted == 3_040, "only demoted OPENs that were admitted count; a refused one is a capacity drop")
+        #expect(dropped[Self.openType] == 1024, "the flood itself is what gets refused, and it is counted")
+        #expect(worker.protectedOpenInFlightCount() == 0, "completed slice holders release their slots")
+    }
+
+    @Test("file-client worker: eight flooding processes cannot fill the top slice against a ninth process's first credential OPEN")
+    func newcomerFindsASliceSlot() {
+        let cap = 4096
+        let gate = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: cap, label: "bench.file-client.eight-floods", reservesLineageSlots: true,
+            process: { _ in gate.wait() }, free: { _ in }
+        )
+        var token = 1
+        func handle() -> UnsafeRawPointer {
+            token += 1
+            return UnsafeRawPointer(bitPattern: token)!
+        }
+        let tier = Self.fileClientTiers.tier(eventType: Self.openType, protectedOpen: true)
+        func submitProtectedOpen(pid: pid_t) -> Bool {
+            worker.submit(
+                handle(), lineageCritical: tier.lineageCritical, writeFamily: tier.writeFamily,
+                protectedOpen: true, sourceProcessID: pid, eventType: Self.openType
+            )
+        }
+        var floodAccepted = 0
+        for pid: pid_t in 1...8 {
+            for _ in 0..<600 where submitProtectedOpen(pid: pid) { floodAccepted += 1 }
+        }
+        let sliceAfterFlood = worker.protectedOpenInFlightCount()
+        let ninthAccepted = submitProtectedOpen(pid: 9)
+        let sliceAfterNinth = worker.protectedOpenInFlightCount()
+        let writeTier = Self.fileClientTiers.tier(eventType: Self.writeType, protectedOpen: false)
+        var writeAccepted = 0
+        var writeRefused = 0
+        for _ in 0..<(cap / 4) {
+            if worker.submit(handle(), lineageCritical: writeTier.lineageCritical,
+                             writeFamily: writeTier.writeFamily, eventType: Self.writeType) {
+                writeAccepted += 1
+            } else {
+                writeRefused += 1
+            }
+        }
+        let demoted = worker.protectedOpenSliceDemoted()
+        let dropped = worker.backpressureDroppedByEventType()
+        print("BENCH worker_eight_floods flood_accepted=\(floodAccepted) slice_after_flood=\(sliceAfterFlood) ninth=\(ninthAccepted) slice_after_ninth=\(sliceAfterNinth) write_accepted=\(writeAccepted) write_refused=\(writeRefused) demoted=\(demoted) dropped_by_type=\(dropped)")
+        for _ in 0..<(cap + 2048) { gate.signal() }
+        worker.shutdownAndDrain()
+        #expect(sliceAfterFlood == 194, "six floods fill the slice down to its newcomer reserve; the seventh and eighth get one slot each")
+        #expect(ninthAccepted, "a process holding no slot finds one in the newcomer reserve, which only 64 first-time processes holding slots at once could fill")
+        #expect(sliceAfterNinth == 195)
+        #expect(floodAccepted == 3_074)
+        #expect(writeAccepted == 765, "the write family keeps every slot above the ordinary tier and the slice holders")
+        #expect(writeRefused == 259)
+        #expect(demoted == 2_880, "only demoted OPENs that were admitted count")
+        #expect(dropped[Self.openType] == 1_726)
+        #expect(worker.protectedOpenInFlightCount() == 0, "completed slice holders release their slots")
     }
 
     @Test("file-client worker: a credential or agent-content OPEN is accepted with the ordinary-OPEN slots full")
@@ -447,15 +560,15 @@ struct ESIngressStormBenchmarkTests {
             token += 1
             return UnsafeRawPointer(bitPattern: token)!
         }
-        func submitOpen(_ path: String) -> Bool {
-            // Exactly the handler's decision: reserve-eligible iff the raw path
-            // is on the static credential / agent-content allowlists.
-            worker.submit(
-                handle(),
-                lineageCritical: ESCollector.usesWorkerReserve(
-                    eventType: Self.openType, protectedOpen: ESCollector.isProtectedOpenPath(path)
-                ),
-                eventType: Self.openType
+        func submitOpen(_ path: String, pid: pid_t = 43) -> Bool {
+            // Exactly the handler's hand-off: the raw path is classified on the
+            // callback, the file client's tier policy picks the tier, and a
+            // protected OPEN carries its source process for the slice.
+            let protected = ESCollector.isProtectedOpenPath(path)
+            let tier = Self.fileClientTiers.tier(eventType: Self.openType, protectedOpen: protected)
+            return worker.submit(
+                handle(), lineageCritical: tier.lineageCritical, writeFamily: tier.writeFamily,
+                protectedOpen: protected, sourceProcessID: pid, eventType: Self.openType
             )
         }
         var ordinaryAccepted = 0
@@ -467,7 +580,8 @@ struct ESIngressStormBenchmarkTests {
         let decoyAccepted = submitOpen("/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt")
         let ordinaryRefused = !submitOpen("/Users/x/project/README.md")
         let refusedByType = worker.backpressureDroppedByEventType()
-        print("BENCH worker_protected_open ordinary_accepted=\(ordinaryAccepted)/\(cap) ssh=\(sshAccepted) agent_config=\(agentConfigAccepted) decoy=\(decoyAccepted) ordinary_refused_after=\(ordinaryRefused) dropped_by_type=\(refusedByType)")
+        let sliceInFlight = worker.protectedOpenInFlightCount()
+        print("BENCH worker_protected_open ordinary_accepted=\(ordinaryAccepted)/\(cap) ssh=\(sshAccepted) agent_config=\(agentConfigAccepted) decoy=\(decoyAccepted) ordinary_refused_after=\(ordinaryRefused) slice_in_flight=\(sliceInFlight) dropped_by_type=\(refusedByType)")
         for _ in 0..<cap { gate.signal() }
         worker.shutdownAndDrain()
         #expect(ordinaryAccepted == 3072, "ordinary OPENs stop at the non-reserved budget")
@@ -476,6 +590,8 @@ struct ESIngressStormBenchmarkTests {
         #expect(decoyAccepted, "a honeyfile OPEN must never be shed behind the OPEN flood")
         #expect(ordinaryRefused, "the flood itself is what gets refused, and it is counted")
         #expect(refusedByType[Self.openType] == 1025)
+        #expect(sliceInFlight == 3, "each protected OPEN held a top-slice slot, as the collector's hand-off gives it")
+        #expect(worker.protectedOpenSliceDemoted() == 0)
     }
 
     // MARK: 4. Coalesced repeat cost on the worker
@@ -554,5 +670,76 @@ struct ESIngressStormBenchmarkTests {
         print("BENCH worker_storm submitted=\(submitted) submits_per_s=\(perSecond) lineage_refused=\(lineageRefused) dropped_by_type=\(dropped)")
         #expect(lineageRefused == 0)
         #expect(perSecond >= 100_000, "worker submit floor (submits/s): \(perSecond)")
+    }
+
+    // MARK: 5. Kept-signal limiter cost on the callback
+
+    /// 100k fatal signals, each from its own source at its own target, through
+    /// the callback policy: once with no limiter (the decode-only base) and
+    /// once with `limiter`. Returns the nanoseconds of each run and how many
+    /// messages each dropped.
+    private func signalCallbackRuns(
+        limiter: SignalRateLimiter, signal: Int32, executable: String,
+        target: (Int) -> Int32, from t0: UInt64
+    ) -> (base: UInt64, limited: UInt64, droppedBase: Int, dropped: Int) {
+        let n = 100_000
+        var droppedBase = 0
+        let startBase = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<n where ESCollector.shouldDropAtCallback(
+            eventType: Self.signalType, signal: signal,
+            signalSourcePID: Int32(200_000 + i), signalTargetPID: target(i),
+            signalNowNanos: t0 + UInt64(i), signalTargetExecutable: executable
+        ) {
+            droppedBase += 1
+        }
+        let base = DispatchTime.now().uptimeNanoseconds &- startBase
+        var dropped = 0
+        let start = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<n where ESCollector.shouldDropAtCallback(
+            eventType: Self.signalType, signal: signal,
+            signalSourcePID: Int32(200_000 + i), signalTargetPID: target(i),
+            signalNowNanos: t0 + UInt64(i), signalLimiter: limiter, signalTargetExecutable: executable
+        ) {
+            dropped += 1
+        }
+        let limited = DispatchTime.now().uptimeNanoseconds &- start
+        return (base, limited, droppedBase, dropped)
+    }
+
+    @Test("100k fatal signals at distinct ordinary pairs cost the callback the decode plus a probe, and never enter the pair table")
+    func ordinaryFatalSignalsStayOffThePairTable() {
+        let limiter = SignalRateLimiter()
+        let run = signalCallbackRuns(limiter: limiter, signal: SIGTERM, executable: "/usr/local/bin/node",
+                                     target: { Int32(300_000 + $0) }, from: 1_000_000_000)
+        let n: UInt64 = 100_000
+        print("BENCH signal_ordinary_pairs base_ns/msg=\(run.base / n) limited_ns/msg=\(run.limited / n) tracked_pairs=\(limiter.trackedPairCount) sweeps=\(limiter.pairSweepCount)")
+        #expect(run.droppedBase == 100_000 && run.dropped == 100_000, "a fatal signal at an ordinary process is filtered")
+        #expect(limiter.trackedPairCount == 0, "an ordinary target never enters the pair table")
+        #expect(limiter.pairRefusedTotal == 0 && limiter.pairSweepCount == 0)
+        #expect(run.limited <= run.base * 3 + n * 1_000,
+                "the limiter adds at most a probe per message to the decode-only base: \(run.limited / n) vs \(run.base / n) ns")
+    }
+
+    @Test("100k fatal signals at distinct decoy pairs against a full pair table are refused at a bounded cost each")
+    func decoyPairsAgainstAFullTableAreRefusedCheaply() {
+        let limiter = SignalRateLimiter(rootOwnedCanonical: { _, _ in false })
+        let t0: UInt64 = 1_000_000_000
+        // A pair table full of live relevant pairs.
+        for i in 0..<1_024 {
+            #expect(ESCollector.shouldKeepSignal(
+                sig: SIGKILL, sourcePID: Int32(400_000 + i), targetPID: 777, ownPID: 1,
+                nowNanos: t0 + UInt64(i), limiter: limiter, targetExecutable: "/tmp/x/santad"))
+        }
+        #expect(limiter.trackedPairCount == 1_024)
+        let run = signalCallbackRuns(limiter: limiter, signal: SIGKILL, executable: "/tmp/x/santad",
+                                     target: { _ in 777 }, from: t0 + 1_000_000)
+        let n: UInt64 = 100_000
+        print("BENCH signal_decoy_pairs_full_table base_ns/msg=\(run.base / n) limited_ns/msg=\(run.limited / n) table_full=\(limiter.pairTableFullTotal) sweeps=\(limiter.pairSweepCount)")
+        #expect(run.droppedBase == 0, "with no limiter every fatal signal at a tool-named target is kept")
+        #expect(run.dropped == 100_000, "a table full of live pairs refuses every new decoy pair")
+        #expect(limiter.pairTableFullTotal == n && limiter.pairRefusedTotal == 0, "counted as met by the full table, not as pair-budget refusals")
+        #expect(limiter.pairSweepCount == 1, "one idle scan, then refusals without scanning")
+        #expect(run.limited <= run.base * 3 + n * 1_000,
+                "a refusal costs the decode, a probe and a constant, not a scan of the table: \(run.limited / n) vs \(run.base / n) ns")
     }
 }

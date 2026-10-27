@@ -14,16 +14,23 @@ struct DetectionPlaneInlineContextTests {
         var recorded: [Bool] { lock.lock(); defer { lock.unlock() }; return values }
     }
 
-    @Test("only an inline overload run sees the lane context")
+    @Test("only an inline overload run sees the lane context", .timeLimit(.minutes(1)))
     func inlineRunIsMarked() async throws {
         let lifecycle = DaemonTimerLifecycle(maximumInFlightHandlers: 1)
         let flag = Flag()
         let gate = AsyncStream<Void>.makeStream()
-        // Occupy the plane's only slot.
+        let started = AsyncStream<Void>.makeStream()
+        // Occupy the plane's only slot. The slot is taken at submission, but
+        // the handler records only once it runs; shutdown cancels work that
+        // has not started, so wait for it before anything else happens.
         #expect(await lifecycle.submitOrRunInlineOnOverload(label: "occupant") {
             flag.record(DaemonWorkInlineContext.isRunningOnLane)
+            started.continuation.yield()
+            started.continuation.finish()
             for await _ in gate.stream { break }
         } == .accepted)
+        #expect(await Self.signalled(started.stream, within: .seconds(10)),
+                "the accepted occupant never started")
         #expect(await lifecycle.submitOrRunInlineOnOverload(label: "derived") {
             flag.record(DaemonWorkInlineContext.isRunningOnLane)
         } == .ranInlineOnOverload)
@@ -32,6 +39,24 @@ struct DetectionPlaneInlineContextTests {
         _ = await lifecycle.shutdown(deadline: 5)
         #expect(flag.recorded.sorted { !$0 && $1 } == [false, true])
         #expect(!DaemonWorkInlineContext.isRunningOnLane)
+    }
+
+    /// Whether `stream` yields within `limit`. An admission regression that
+    /// never runs the accepted occupant fails here instead of hanging the suite.
+    private static func signalled(_ stream: AsyncStream<Void>, within limit: Duration) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in stream { return true }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: limit)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
     }
 
     @Test("a follow-up submitted from a lane-inline run completes off the lane")

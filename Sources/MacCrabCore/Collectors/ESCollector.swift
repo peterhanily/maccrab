@@ -1117,7 +1117,11 @@ public final class ESCollector: @unchecked Sendable {
         protection: Int32 = 0,
         mode: UInt32 = 0,
         signal: Int32 = 0,
+        signalSourcePID: Int32 = -1,
         signalTargetPID: Int32 = -1,
+        signalNowNanos: UInt64 = 0,
+        signalLimiter: SignalRateLimiter? = nil,
+        signalTargetStat: SignalRateLimiter.ExecutableStat? = nil,
         signalTargetExecutable: @autoclosure () -> String = ""
     ) -> Bool {
         switch eventType {
@@ -1140,7 +1144,11 @@ public final class ESCollector: @unchecked Sendable {
         case ES_EVENT_TYPE_NOTIFY_SIGNAL.rawValue:
             return !shouldKeepSignal(
                 sig: signal,
+                sourcePID: signalSourcePID,
                 targetPID: signalTargetPID,
+                nowNanos: signalNowNanos,
+                limiter: signalLimiter,
+                targetStat: signalTargetStat,
                 targetExecutable: signalTargetExecutable()
             )
 
@@ -1170,11 +1178,17 @@ public final class ESCollector: @unchecked Sendable {
             )
 
         case ES_EVENT_TYPE_NOTIFY_SIGNAL:
+            // The flood is non-fatal: drop it before any pid, clock or path read.
+            guard fatalSignals.contains(msg.event.signal.sig) else { return true }
             let target = msg.event.signal.target
             return shouldDropAtCallback(
                 eventType: eventType,
                 signal: msg.event.signal.sig,
+                signalSourcePID: audit_token_to_pid(msg.process.pointee.audit_token),
                 signalTargetPID: audit_token_to_pid(target.pointee.audit_token),
+                signalNowNanos: DispatchTime.now().uptimeNanoseconds,
+                signalLimiter: signalRateLimiter,
+                signalTargetStat: SignalRateLimiter.ExecutableStat(target.pointee.executable.pointee.stat),
                 signalTargetExecutable: esFileToPath(target.pointee.executable)
             )
 
@@ -1213,20 +1227,19 @@ public final class ESCollector: @unchecked Sendable {
     /// Enrichment keys describing the TARGET of an actor->target introspection
     /// event (get_task_read / trace / remote_thread_create). Keys are the exact
     /// Sigma field names so RuleEngine.resolveField resolves them via its
-    /// enrichment passthrough — no model or engine change. `TargetIsSelf` and
-    /// `SameTeam` are the cheap FP gates rules use in place of the
-    /// not-yet-implemented |fieldref modifier.
+    /// enrichment passthrough. `TargetIsSelf` is a cheap FP gate rules use in
+    /// place of the not-yet-implemented |fieldref modifier. `TargetTeamId` is
+    /// the target's kernel-reported team: the rule engine derives `SameTeam`
+    /// from it and the actor's verified signature, because the actor's team
+    /// here is only what its code directory claims.
     static func introspectionEnrichments(actor: ProcessInfo, target: ProcessInfo) -> [String: String] {
-        let actorTeam = actor.codeSignature?.teamId ?? ""
-        let targetTeam = target.codeSignature?.teamId ?? ""
-        let sameTeam = !actorTeam.isEmpty && actorTeam == targetTeam
-        return [
+        [
             "TargetImage": target.executable,
             "TargetProcessName": target.name,
             "TargetSignerType": target.codeSignature?.signerType.rawValue ?? "unknown",
             "TargetPid": String(target.pid),
             "TargetIsSelf": actor.pid == target.pid ? "true" : "false",
-            "SameTeam": sameTeam ? "true" : "false",
+            "TargetTeamId": target.codeSignature?.teamId ?? "",
         ]
     }
 
@@ -1465,21 +1478,67 @@ public final class ESCollector: @unchecked Sendable {
     /// The engine's own pid, read once; a signal at it is always kept.
     static let ownProcessID: Int32 = getpid()
 
+    /// The kept-signal rate limit shared by every client's callback: 8 per
+    /// (source, target) pair with 2 more a second, a pair's first signal
+    /// exempt, and 64 repeats with 16 more a second per repeat budget (the
+    /// engine's, each canonical tool binary's, and one shared by every
+    /// decoy). A `kill()` loop at the engine, or at a decoy named after a
+    /// security tool, used to put every message on the priority lane.
+    static let signalRateLimiter = SignalRateLimiter()
+
     /// Keep a NOTIFY_SIGNAL only when it is fatal AND aimed at MacCrab itself or
-    /// a security tool. `targetExecutable` is an autoclosure so the borrowed
-    /// path token is decoded only for the rare fatal signal — never for the
-    /// flood (unit-tested: the closure is not evaluated for a non-fatal signal).
+    /// a security tool, and only within `limiter`'s budgets. `targetExecutable`
+    /// is an autoclosure, so the borrowed path token is never decoded for a
+    /// non-fatal signal or for a tracked pair out of tokens (unit-tested); a
+    /// fatal signal from an untracked pair is decoded once, to decide its
+    /// relevance before the pair may enter the table. A nil limiter is the
+    /// pure policy, for tests.
     static func shouldKeepSignal(
         sig: Int32,
+        sourcePID: Int32 = -1,
         targetPID: Int32,
         ownPID: Int32 = ownProcessID,
+        nowNanos: UInt64 = 0,
+        limiter: SignalRateLimiter? = nil,
+        targetStat: SignalRateLimiter.ExecutableStat? = nil,
         targetExecutable: @autoclosure () -> String
     ) -> Bool {
         guard fatalSignals.contains(sig) else { return false }
-        if targetPID == ownPID { return true }
-        let executable = targetExecutable()
-        let basename = executable.split(separator: "/").last.map(String.init) ?? executable
-        return securityToolProcessNames.contains(basename)
+        // A tracked pair is probed first, under one lock, and decoded only
+        // when admitted; an untracked pair is decoded first and enters the
+        // table only if its target is relevant, so the build's fatal signals
+        // at ordinary processes never fill it.
+        var tracked = false
+        if let limiter, let admitted = limiter.admitIfTracked(source: sourcePID, target: targetPID, nowNanos: nowNanos) {
+            guard admitted else { return false }
+            tracked = true
+        }
+        var executable: String?
+        if targetPID != ownPID {
+            let path = targetExecutable()
+            let basename = path.split(separator: "/").last.map(String.init) ?? path
+            guard securityToolProcessNames.contains(basename) else { return false }
+            executable = path
+        }
+        guard let limiter else { return true }
+        let budget = limiter.repeatBudget(engine: targetPID == ownPID, executable: executable, stat: targetStat)
+        if !tracked {
+            switch limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos) {
+            case .first:
+                // Kept whatever the repeat budget holds, so every distinct
+                // source keeps its first signal while the table has room.
+                return true
+            case .repeated:
+                break
+            case .bucketEmpty:
+                return false
+            case .tableFull:
+                // A full table fails closed for a decoy; the engine and a
+                // canonical tool fall back on their own repeat budget.
+                guard budget != .decoy else { return false }
+            }
+        }
+        return limiter.admitRepeat(budget, nowNanos: nowNanos)
     }
 
     // MARK: - Repeat coalescing policy (v1.22.7)
@@ -1561,6 +1620,45 @@ public final class ESCollector: @unchecked Sendable {
     static func isProtectedOpenPath(_ path: String) -> Bool {
         protectedOpenPathMarkers.matches(path)
     }
+
+    /// The protected OPENs of a keychain, a wallet or a password database:
+    /// reads that are a finding in themselves rather than a step. The worker
+    /// budgets these separately from the other credential and agent-content
+    /// reads (`PerProcessLaneBudgets`), so a process that spent its OPEN
+    /// budget on its own `.gitconfig` still has its keychain reads delivered
+    /// on the priority lane. These are substrings, so any process can open
+    /// junk that matches them (`/tmp/x/Library/Keychains/j`) and spend this
+    /// class; a deployed honeyfile or decoy is therefore not matched here but
+    /// by its exact path, in a class of its own
+    /// (`EventPipelineLane.isHoneyfileOrDecoyPath`). Every entry is one of
+    /// `credentialReadPathSubstrings`; a test pins the subset.
+    static let highValueReadPathSubstrings: [String] = [
+        "/Library/Keychains/",
+        "/MetaMask/", "/Phantom/", "/Coinbase Wallet/",
+        "/1Password/", "/Bitwarden/", ".kdbx",
+        "Application Support/Electrum/wallets/",
+        "Application Support/Exodus/exodus.wallet/",
+        "Application Support/Atomic/Local Storage/",
+        "Application Support/Coinomi/",
+        "Application Support/Daedalus/",
+        "Application Support/monero-project/",
+        "Application Support/Trezor Suite/",
+        "Application Support/Ledger Live/",
+        "Library/Containers/io.trezor.TrezorSuite/",
+        "/.ethereum/keystore/",
+        "/Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn",
+        "/Local Extension Settings/bfnaelmomeimhlpmgjnjophhpkkoljpa",
+        "/Local Extension Settings/hnfanknocfeofbddgcijnmhnfnkdnaad",
+        "/Local Extension Settings/fhbohimaelbohpjbbldcngcnapndodjp",
+        "/Local Extension Settings/egjidjbpglichdcondbcbdnbeeppgdph",
+        "/Local Extension Settings/lmenefjjbnabbnchedhpaichpfphndbg",
+        "/Local Extension Settings/efbglgofoippbgcjepnhiblaibcnclgk",
+    ]
+
+    /// `highValueReadPathSubstrings` as a byte matcher, for the worker's lane stamp.
+    static let highValueOpenPathMarkers = ESPathMarkerSet(
+        substrings: highValueReadPathSubstrings, suffixes: []
+    )
 
     /// Whether a retained message may use the slots the worker holds in
     /// reserve: lineage and the write family by type, plus a protected OPEN.
@@ -1716,8 +1814,7 @@ public final class ESCollector: @unchecked Sendable {
         // the locked tracker for the heartbeat.
         let coalescer = ESRepeatCoalescer()
         // Same ownership as the coalescer: this worker's serial queue only.
-        let protectedLaneBudget = ProtectedFileLaneBudget()
-        let protectedOpenLaneBudget = ProtectedFileLaneBudget.forProtectedOpens()
+        let laneBudgets = PerProcessLaneBudgets()
         let worker = ESMessageWorker(
             maxInFlight: maxInFlight,
             label: "com.maccrab.es.message-worker.\(label)",
@@ -1733,8 +1830,7 @@ public final class ESCollector: @unchecked Sendable {
                     deliveryTelemetry: deliveryTelemetry,
                     tracker: tracker,
                     coalescer: coalescer,
-                    protectedLaneBudget: protectedLaneBudget,
-                    protectedOpenLaneBudget: protectedOpenLaneBudget,
+                    laneBudgets: laneBudgets,
                     logger: logger
                 )
             },
@@ -1866,6 +1962,9 @@ public final class ESCollector: @unchecked Sendable {
                 UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()),
                 lineageCritical: tier.lineageCritical,
                 writeFamily: tier.writeFamily,
+                protectedOpen: protectedOpen,
+                sourceProcessID: protectedOpen
+                    ? audit_token_to_pid(message.pointee.process.pointee.audit_token) : 0,
                 eventType: evType
             )
             if !accepted, let canary = canary { canary.noteDroppedAtHandoff(canaryNonces) }
@@ -2306,6 +2405,44 @@ public final class ESCollector: @unchecked Sendable {
         contexts.reduce(UInt64(0)) { $0 &+ $1.tracker.protectedLaneRefusedTotal() }
     }
 
+    /// Protected OPENs a worker admitted as ordinary OPENs because their
+    /// top-slice allowance was full, summed across both workers. Each was
+    /// still delivered, so this is a demotion, not a loss; one the ordinary
+    /// tier refused while an OPEN flood held it is counted only as an OPEN
+    /// backpressure drop. Surfaced as `es_protected_open_slice_demoted_total`.
+    public func esProtectedOpenSliceDemoted() -> UInt64 {
+        contexts.reduce(UInt64(0)) { $0 &+ $1.worker.protectedOpenSliceDemoted() }
+    }
+
+    /// Fatal signals at MacCrab or a security tool that the target's repeat
+    /// budget refused at the callback (`SignalRateLimiter`). Also inside the
+    /// intentional-filter count; surfaced apart as
+    /// `es_signal_aggregate_refused_total` so a kill loop at a tool is not
+    /// read as ordinary filtering.
+    public func esSignalAggregateRefused() -> UInt64 {
+        Self.signalRateLimiter.aggregateRefusedTotal
+    }
+
+    /// Fatal signals refused because their tracked (source, target) pair had
+    /// no token left (`SignalRateLimiter`). Also inside the
+    /// intentional-filter count; surfaced apart as
+    /// `es_signal_pair_refused_total`. A pair enters the table only once its
+    /// target proved relevant, but a tracked pair is refused before its
+    /// target is decoded again, so this also counts a pair whose target pid
+    /// has since been reused by an ordinary process.
+    public func esSignalPairRefused() -> UInt64 {
+        Self.signalRateLimiter.pairRefusedTotal
+    }
+
+    /// Fatal signals at MacCrab or a security tool whose new pair the pair
+    /// table, full of live pairs, could not take (`SignalRateLimiter`): those
+    /// at a decoy were refused, those at the engine or a canonical tool kept
+    /// while their repeat budget lasted. Surfaced as
+    /// `es_signal_pair_table_full_total`.
+    public func esSignalPairTableFull() -> UInt64 {
+        Self.signalRateLimiter.pairTableFullTotal
+    }
+
     /// Per-event-type normalized Events offered to the collector-local stream.
     /// Whether an offer evicted an older buffered event remains accounted by the
     /// collector delivery telemetry and is deliberately not folded into this map.
@@ -2446,8 +2583,7 @@ public final class ESCollector: @unchecked Sendable {
         deliveryTelemetry: EventCollectorBufferTelemetry,
         tracker: ESSeqTracker,
         coalescer: ESRepeatCoalescer,
-        protectedLaneBudget: ProtectedFileLaneBudget,
-        protectedOpenLaneBudget: ProtectedFileLaneBudget,
+        laneBudgets: PerProcessLaneBudgets,
         logger: Logger
     ) {
         autoreleasepool {
@@ -2558,11 +2694,11 @@ public final class ESCollector: @unchecked Sendable {
 
             // An exec-granting SETMODE, a file event at a persistence location
             // or a credential / agent-content OPEN rides the priority lane
-            // while the budget lasts, out of reach of a file-lane flood, and the
-            // file lane past it (`EventPipelineLane.finalLane(for:)`).
+            // while its source process's budget lasts, out of reach of a
+            // file-lane flood, and the file lane past it
+            // (`EventPipelineLane.finalLane(for:)`).
             EventPipelineLane.stampProtectedLane(
-                &event, budget: protectedLaneBudget, openBudget: protectedOpenLaneBudget,
-                nowNanos: box.startNanos, refusals: tracker
+                &event, budgets: laneBudgets, nowNanos: box.startNanos, refusals: tracker
             )
 
             let result = continuation.yield(event)
@@ -2809,7 +2945,7 @@ public final class ESCollector: @unchecked Sendable {
                 execEvent.target, args: args, commandLine: commandLine
             )
 
-            return Event(
+            var exec = Event(
                 timestamp: timestamp,
                 eventCategory: .process,
                 eventType: .start,
@@ -2817,11 +2953,19 @@ public final class ESCollector: @unchecked Sendable {
                 process: enrichedTarget,
                 severity: .informational
             )
+            // The identity of the image the kernel ran. A digest hashed from
+            // the path later stands for this process only if the file still
+            // has it, so a binary renamed onto the path after exec cannot lend
+            // the process its hash.
+            if let image = esFileIdentity(execEvent.target.pointee.executable) {
+                exec.enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey] = image.serialized
+            }
+            return exec
 
         case ES_EVENT_TYPE_NOTIFY_FORK:
             let forkEvent = msg.event.fork
             let childInfo = processFromESProcess(forkEvent.child)
-            return Event(
+            var fork = Event(
                 timestamp: timestamp,
                 eventCategory: .process,
                 eventType: .start,
@@ -2829,6 +2973,10 @@ public final class ESCollector: @unchecked Sendable {
                 process: childInfo,
                 severity: .informational
             )
+            if let image = esFileIdentity(forkEvent.child.pointee.executable) {
+                fork.enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey] = image.serialized
+            }
+            return fork
 
         case ES_EVENT_TYPE_NOTIFY_EXIT:
             return Event(
@@ -3016,19 +3164,23 @@ public final class ESCollector: @unchecked Sendable {
         // -----------------------------------------------------------------
         // The subject (msg.process) is the ACTOR; the target is the process
         // being read/traced/injected. We carry the target via Sigma-named
-        // enrichment keys (TargetImage/TargetSignerType/TargetIsSelf/SameTeam)
-        // so RuleEngine resolves them through its enrichment passthrough with
-        // no model change, and rules get cheap FP gates (target-self = JIT/own
-        // process; same-team = legitimate intra-vendor IPC) without the
-        // unimplemented |fieldref modifier. Emitted as .process/.change ->
-        // logsource category "process_event".
+        // enrichment keys (TargetImage/TargetSignerType/TargetIsSelf/
+        // TargetTeamId) so RuleEngine resolves them through its enrichment
+        // passthrough with no model change, and rules get cheap FP gates
+        // (target-self = JIT/own process; same-team = legitimate intra-vendor
+        // IPC) without the unimplemented |fieldref modifier. Emitted as
+        // .process/.change -> logsource category "process_event".
         //
         // Notes: (a) we read ONLY `.target` (and the empty cs_invalidated),
         // which is version-agnostic — the version>=5 `.type` field is
         // deliberately not accessed, so no es_message version guard is needed.
-        // (b) SameTeam is derived from the kernel-attested team_id, so it is an
-        // FP-reduction heuristic an attacker cannot spoof without possessing
-        // the target team's signing identity — not a hard security boundary.
+        // (b) The kernel reports whatever team the actor's code directory
+        // names, and a self-signed chain can name any team, so the collector
+        // decides no SameTeam. A genuine target's team is real, and an
+        // attacker gains nothing from a fake target, so the target's team is
+        // carried; the rule engine answers SameTeam only for a team Security
+        // attested for the actor's running image, and the enricher sends an
+        // actor that claims its target's team to that verification first.
         // (c) these are ES-native; they are NOT carried by the non-root
         // eslogger/kdebug fallback, so these rules require the ES entitlement.
 
@@ -3538,6 +3690,9 @@ public final class ESMessageWorker: @unchecked Sendable {
     private struct Pending {
         let handle: Handle
         let enqueuedAt: UInt64
+        /// The source process of a protected OPEN holding a top-slice slot;
+        /// nil for every other message. Released when the message completes.
+        let protectedOpenProcessID: pid_t?
     }
 
     private let queue: DispatchQueue
@@ -3558,6 +3713,23 @@ public final class ESMessageWorker: @unchecked Sendable {
     private let lineageReserve: Int
     /// The part of `lineageReserve` that only top-tier messages may use.
     private let topReserve: Int
+    /// How many protected OPENs one source process may hold in the top slice
+    /// at once. The slice exists so a write flood cannot refuse a credential
+    /// or honeyfile OPEN, but an `open()` loop on a credential-named file is
+    /// as cheap as a write loop: unbounded, it would hold the whole budget and
+    /// refuse every persistence and honeyfile write instead. So the slice is
+    /// shared out per process, and a protected OPEN that finds no slot is
+    /// offered the ordinary OPEN tier instead, never the write family's.
+    /// While an OPEN flood holds that tier full it is refused there, and
+    /// counted only as an OPEN backpressure drop, not as a demotion.
+    private let protectedOpenPerProcessCap: Int
+    /// The tail of the slice (64 slots at the production cap) that only a
+    /// process holding no slot may take. Floods by processes that already
+    /// hold slots cannot reach it, so a process's first protected OPEN finds
+    /// a slot there above the writes unless 64 other first-time processes
+    /// each hold one at that moment; then it is offered the ordinary tier
+    /// like any demoted one, and refused there while an OPEN flood holds it.
+    private let protectedOpenNewcomerReserve: Int
 
     private let lock = NSLock()
     private var pending: [Pending?]
@@ -3582,6 +3754,15 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// v1.21.6 (audit DET-05): per-event-type breakdown of the same drops.
     /// Guarded by the same `lock` as the aggregate.
     private var backpressureDroppedByTypeCount: [UInt32: UInt64] = [:]
+    /// Protected OPENs currently holding a top-slice slot, in all and per
+    /// source process (entries removed at zero, so the map never holds more
+    /// than `topReserve` keys). Same lock.
+    private var protectedOpenInFlight = 0
+    private var protectedOpenInFlightByProcess: [pid_t: Int] = [:]
+    /// Protected OPENs that found no slice slot and were then admitted as
+    /// ordinary OPENs. One the ordinary tier refused instead is a capacity
+    /// drop and is counted only there.
+    private var protectedOpenSliceDemotedTotal: UInt64 = 0
 
     /// - Parameters:
     ///   - maxInFlight: in-flight cap (clamped to ≥1).
@@ -3627,6 +3808,12 @@ public final class ESMessageWorker: @unchecked Sendable {
         self.topReserve = reservesLineageSlots
             ? Swift.max(1, Swift.min(cap - 1, cap / 4) / 4)
             : 0
+        // An eighth of the top slice per process (32 of 256 at the production
+        // cap), and the last quarter of it (64) for processes holding no slot:
+        // six floods can hold the rest, a seventh gets one slot, and a process
+        // with none still finds one unless 64 other newcomers hold the tail.
+        self.protectedOpenPerProcessCap = Swift.max(1, self.topReserve / 8)
+        self.protectedOpenNewcomerReserve = Swift.max(1, self.topReserve / 4)
         self.queue = DispatchQueue(label: label, qos: .userInitiated)
         self.process = process
         self.free = free
@@ -3653,6 +3840,8 @@ public final class ESMessageWorker: @unchecked Sendable {
         _ handle: Handle,
         lineageCritical: Bool = true,
         writeFamily: Bool = false,
+        protectedOpen: Bool = false,
+        sourceProcessID: pid_t = 0,
         eventType: UInt32 = 0
     ) -> Bool {
         lock.lock()
@@ -3663,6 +3852,28 @@ public final class ESMessageWorker: @unchecked Sendable {
             free(handle)                       // drain path — free once
             return false
         }
+        // A protected OPEN given the top tier (the split file client) holds a
+        // top-slice slot while it is in flight: at most
+        // `protectedOpenPerProcessCap` per source process and `topReserve` in
+        // all, and the last `protectedOpenNewcomerReserve` slots only for a
+        // process holding none. Past those bounds it is offered the ordinary
+        // OPEN tier, where an OPEN flood can refuse it (counted only as an
+        // OPEN backpressure drop). It must not fall back to the write
+        // family's tier: an `open()` loop would then pin in-flight at that
+        // tier's cap and refuse every write behind it, which is exactly the
+        // inversion the slice exists to prevent.
+        var sliceHolder: pid_t?
+        var demoted = false
+        if protectedOpen && lineageCritical && topReserve > 0 {
+            let held = protectedOpenInFlightByProcess[sourceProcessID] ?? 0
+            let free = topReserve - protectedOpenInFlight
+            if held < protectedOpenPerProcessCap && free > 0
+                && (held == 0 || free > protectedOpenNewcomerReserve) {
+                sliceHolder = sourceProcessID
+            } else {
+                demoted = true
+            }
+        }
         // v1.21.5 PERF: priority-aware admission. Lineage-critical messages may
         // use the whole budget; everything else is refused `lineageReserve` slots
         // early, so a low-yield flood can never consume the last slots and evict
@@ -3671,8 +3882,8 @@ public final class ESMessageWorker: @unchecked Sendable {
         // would have refused. Defaulting to `true` keeps every existing caller
         // (and the worker's unit tests) on the previous full-budget behaviour.
         // The write family reaches into the reserve but never its top slice.
-        let admissionCap = lineageCritical ? maxInFlight
-            : writeFamily ? maxInFlight - topReserve
+        let admissionCap = (lineageCritical && !demoted) ? maxInFlight
+            : (writeFamily && !demoted) ? maxInFlight - topReserve
             : maxInFlight - lineageReserve
         if inFlight >= admissionCap {
             backpressureDroppedCount &+= 1
@@ -3694,9 +3905,16 @@ public final class ESMessageWorker: @unchecked Sendable {
         inFlight += 1
         acceptedTotal &+= 1
         inFlightHighWater = Swift.max(inFlightHighWater, inFlight)
+        if let pid = sliceHolder {
+            protectedOpenInFlight += 1
+            protectedOpenInFlightByProcess[pid, default: 0] += 1
+        } else if demoted {
+            protectedOpenSliceDemotedTotal &+= 1
+        }
         // The current processing item still occupies an in-flight slot, so a
         // successful admission always has room in this same-capacity ring.
-        pending[tail] = Pending(handle: handle, enqueuedAt: uptimeNanoseconds())
+        pending[tail] = Pending(handle: handle, enqueuedAt: uptimeNanoseconds(),
+                                protectedOpenProcessID: sliceHolder)
         tail = (tail + 1) % maxInFlight
         queued += 1
         if !drainScheduled {
@@ -3731,6 +3949,12 @@ public final class ESMessageWorker: @unchecked Sendable {
             let service = finishedAt &- startedAt
             lock.lock()
             inFlight -= 1
+            if let pid = item.protectedOpenProcessID {
+                protectedOpenInFlight -= 1
+                if let held = protectedOpenInFlightByProcess[pid] {
+                    protectedOpenInFlightByProcess[pid] = held > 1 ? held - 1 : nil
+                }
+            }
             completedTotal &+= 1
             queueWaitNanosecondsTotal &+= wait
             queueWaitNanosecondsMax = Swift.max(queueWaitNanosecondsMax, wait)
@@ -3799,5 +4023,20 @@ public final class ESMessageWorker: @unchecked Sendable {
     public func inFlightCount() -> Int {
         lock.lock(); defer { lock.unlock() }
         return inFlight
+    }
+
+    /// Protected OPENs that found their top-slice allowance full and were
+    /// admitted as ordinary OPENs instead. Surfaced as
+    /// `es_protected_open_slice_demoted_total`; a demotion, not a loss. One
+    /// the ordinary tier refused is counted only as an OPEN backpressure drop.
+    public func protectedOpenSliceDemoted() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return protectedOpenSliceDemotedTotal
+    }
+
+    /// Protected OPENs currently holding a top-slice slot; a test aid.
+    public func protectedOpenInFlightCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return protectedOpenInFlight
     }
 }

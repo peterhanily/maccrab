@@ -261,9 +261,16 @@ public enum NoiseFilter {
         // Autoupdate, Microsoft AutoUpdate, softwareupdated, brew.
         // Full ancestor walk so chains like Chrome → GoogleUpdater →
         // launcher → GoogleUpdater → profiles get caught regardless
-        // of nesting depth.
+        // of nesting depth. The markers name where the vendors install
+        // (see `isAutoUpdaterOrAncestor` for which of those locations an
+        // administrator or the Homebrew user can write), and as under
+        // Gates 3 and 8 a credential-theft match survives: an updater tree
+        // reading a keychain or a private key is the stealer pattern, not
+        // an update.
         if isAutoUpdaterOrAncestor(event: event) {
-            matches.removeAll { !Self.isMustFire($0, trustedSubject: trustedSubject) }
+            matches.removeAll {
+                !Self.isMustFire($0, trustedSubject: trustedSubject) && !isCredentialTheftMatch($0)
+            }
             if matches.isEmpty { return }
         }
 
@@ -381,9 +388,13 @@ public enum NoiseFilter {
     /// fire, so the gate sees it when those heuristics fire.
     public static func isTrustedSigner(event: Event) -> Bool {
         guard let sig = event.process.codeSignature else { return false }
-        // First-party (MacCrab) binaries are self-trusted by team id even when
-        // ad-hoc-signed (dev builds) — SelfDefense covers first-party tamper.
-        if sig.teamId == macCrabTeamId { return true }
+        // First-party (MacCrab) binaries are self-trusted by their attested
+        // team id — SelfDefense covers first-party tamper. An ad-hoc signature
+        // names whatever team its author chose and attests none.
+        if sig.attestedTeamId == macCrabTeamId,
+           sig.signerType == .devId || sig.signerType == .appStore {
+            return true
+        }
         // v1.19 (S1-T3): a third-party signer only earns trust-to-downgrade-a-
         // critical when it is a NOTARIZED Developer-ID binary that is NOT ad-hoc.
         // `isNotarized` is derived from SecStaticCodeCheckValidity against the
@@ -391,8 +402,9 @@ public enum NoiseFilter {
         // — so a REVOKED Developer-ID cert (the AMOS/Banshee post-takedown vector)
         // yields isNotarized == false and is NOT trusted here. (And the revoked-
         // cert event itself fires must-fire via developer_cert_revoked.) Bare
-        // valid-DevID-without-notarization no longer suffices.
-        if sig.signerType == .devId && sig.isNotarized && sig.isAdhocSigned != true {
+        // valid-DevID-without-notarization no longer suffices, and neither does
+        // a notarized claim on a code directory the kernel flags CS_ADHOC.
+        if sig.signerType == .devId && sig.isNotarized && !sig.isAdHocFlagged {
             return true
         }
         return false
@@ -413,7 +425,8 @@ public enum NoiseFilter {
     /// (app, sysext, legacy daemon, CLI, MCP server).
     ///
     /// Identity is MacCrab's code-signing team, which the kernel attests for
-    /// ES events. A name or path is forgeable: copying a payload to
+    /// ES events and which only a certificate chain carries: an ad-hoc code
+    /// directory naming the team is not it. A name or path is forgeable: copying a payload to
     /// `~/maccrabd`, or into a user-writable /Applications/MacCrab.app,
     /// silenced every rule for that process, because Gate 4a drops all
     /// severities. Development builds are ad-hoc signed without a team, so
@@ -423,7 +436,7 @@ public enum NoiseFilter {
         developmentEngine: Bool = engineIsDevelopmentBuild
     ) -> Bool {
         if let signature = event.process.codeSignature,
-           signature.teamId == macCrabTeamId,
+           signature.attestedTeamId == macCrabTeamId,
            signature.signerType == .devId || signature.signerType == .appStore {
             return true
         }
@@ -572,22 +585,44 @@ public enum NoiseFilter {
     }
 
     /// True when the event's subject process or any ancestor in its
-    /// lineage is a known auto-updater. Delegates to
-    /// `CampaignDetector.isAutoUpdater` (the narrow variant) — NOT
+    /// lineage is a known auto-updater, judged by
+    /// `CampaignDetector.isInstalledAutoUpdater` — NOT
     /// `isKnownBenignProcess`, which includes Apple system daemon paths
     /// that would sweep in Terminal, Finder, and every
     /// `/System/Applications/Utilities/` tool. Exposed publicly so the
     /// campaign and sequence engines can reuse the same definition.
+    ///
+    /// A subject also counts at a per-user Google updater location when it
+    /// carries Google's signature. An ancestor carries a path and no
+    /// signature, so it counts only at an installed location: `mkdir` under
+    /// `~/Library` otherwise silenced every suppressible rule for a payload's
+    /// whole tree. Two installed locations are not root's alone, the
+    /// /Applications bundles and the Homebrew prefix; see
+    /// `CampaignDetector.isInstalledAutoUpdater` for that accepted residual.
     public static func isAutoUpdaterOrAncestor(event: Event) -> Bool {
-        if CampaignDetector.isAutoUpdater(processPath: event.process.executable) {
+        if CampaignDetector.isInstalledAutoUpdater(processPath: event.process.executable)
+            || isVendorSignedUpdater(event: event) {
             return true
         }
-        for ancestor in event.process.ancestors {
-            if CampaignDetector.isAutoUpdater(processPath: ancestor.executable) {
-                return true
-            }
+        for ancestor in event.process.ancestors
+        where CampaignDetector.isInstalledAutoUpdater(processPath: ancestor.executable) {
+            return true
         }
         return false
+    }
+
+    /// True when the subject sits at a user-writable Google updater location
+    /// and carries Google's signature: a Developer ID or App Store signature
+    /// whose attested team is Google's. A copied platform tool, an unsigned
+    /// payload or an ad-hoc signature naming Google's team never qualifies.
+    /// Notarization is not asked for: the live Endpoint Security path never
+    /// populates it. The campaign detector reads the same answer from
+    /// `AlertSummary.isVendorSignedUpdater`.
+    public static func isVendorSignedUpdater(event: Event) -> Bool {
+        guard CampaignDetector.isUserAutoUpdater(processPath: event.process.executable),
+              let signature = event.process.codeSignature,
+              signature.signerType == .devId || signature.signerType == .appStore else { return false }
+        return signature.attestedTeamId == CredentialFence.googleTeamId
     }
 
     /// True when the path is a desktop terminal emulator bundle. Covers

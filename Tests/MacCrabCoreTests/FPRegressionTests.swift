@@ -819,6 +819,10 @@ struct InteractiveAdminGateTests {
 /// was the second GoogleUpdater, but its *name* basename was mangled by
 /// Sigma's |contains matching). The engine-level gate walks all
 /// ancestors and drops non-critical matches regardless of chain depth.
+/// An ancestor counts only from an installed location, two of which an
+/// administrator or the Homebrew user can write (see
+/// `CampaignDetector.isInstalledAutoUpdater`); a per-user Google install
+/// quiets only as a subject carrying Google's signature.
 @Suite("FP regression: auto-updater ancestor gate")
 struct AutoUpdaterAncestorGateTests {
 
@@ -875,66 +879,89 @@ struct AutoUpdaterAncestorGateTests {
                 "GoogleUpdater running as the subject process must suppress all non-critical rule matches")
     }
 
-    @Test("profiles under deep GoogleUpdater chain is suppressed")
+    @Test("profiles under a per-user GoogleUpdater chain is quieted as an Apple binary, not by the ancestor walk")
     func profilesUnderDeepUpdaterChainSuppressed() async throws {
         // Exact chain from user's test system: Chrome → GoogleUpdater →
-        // launcher → GoogleUpdater → profiles. Per-rule ParentImage
-        // filters only catch the immediate parent; Gate 6 must catch
-        // this regardless.
-        var matches = [
-            RuleMatch(ruleId: "d1a2b3c4-0255", ruleName: "MDM Enrollment Status Check",
-                      severity: .medium, description: "", mitreTechniques: [], tags: [])
-        ]
-        let event = execUnderAncestors(
-            processPath: "/usr/bin/profiles",
-            ancestors: [
-                // Immediate parent — second GoogleUpdater invocation.
-                ProcessAncestor(
-                    pid: 7003,
-                    executable: "/Users/terrance/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
-                    name: "GoogleUpdater"
-                ),
-                ProcessAncestor(
-                    pid: 7002,
-                    executable: "/Users/terrance/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/Helpers/launcher",
-                    name: "launcher"
-                ),
-                ProcessAncestor(
-                    pid: 7001,
-                    executable: "/Users/terrance/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
-                    name: "GoogleUpdater"
-                ),
+        // launcher → GoogleUpdater → profiles, installed in the user's own
+        // Library. Those ancestors carry paths any process of the user can
+        // write, so the walk does not honour them; `profiles` is an Apple
+        // platform binary, and Gate 7 drops its discovery noise.
+        func mdm() -> [RuleMatch] {
+            [RuleMatch(ruleId: "d1a2b3c4-0255", ruleName: "MDM Enrollment Status Check",
+                       severity: .medium, description: "", mitreTechniques: [], tags: [])]
+        }
+        func chain(_ root: String) -> [ProcessAncestor] {
+            let updater = root + "/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater"
+            let launcher = root + "/148.0.7730.0/GoogleUpdater.app/Contents/Helpers/launcher"
+            return [
+                ProcessAncestor(pid: 7003, executable: updater, name: "GoogleUpdater"),
+                ProcessAncestor(pid: 7002, executable: launcher, name: "launcher"),
+                ProcessAncestor(pid: 7001, executable: updater, name: "GoogleUpdater"),
                 ProcessAncestor(pid: 600, executable: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", name: "Google Chrome"),
-            ],
-            signerType: .apple  // profiles itself is Apple
-        )
-        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
-        #expect(matches.isEmpty,
-                "profiles spawned inside the GoogleUpdater subprocess tree must be suppressed by ancestor walk")
+            ]
+        }
+        let perUser = chain("/Users/terrance/Library/Application Support/Google/GoogleUpdater")
+        let systemWide = chain("/Library/Application Support/Google/GoogleUpdater")
+
+        var profiles = mdm()
+        let profilesEvent = execUnderAncestors(processPath: "/usr/bin/profiles", ancestors: perUser, signerType: .apple)
+        #expect(!NoiseFilter.isAutoUpdaterOrAncestor(event: profilesEvent))
+        NoiseFilter.apply(&profiles, event: profilesEvent, isWarmingUp: false)
+        #expect(profiles.isEmpty, "Gate 7 quiets an Apple subject's discovery noise")
+
+        // An unsigned child is judged by the walk alone.
+        var planted = mdm()
+        NoiseFilter.apply(&planted, event: execUnderAncestors(
+            processPath: "/private/tmp/helper", ancestors: perUser, signerType: nil), isWarmingUp: false)
+        #expect(planted.count == 1, "a per-user updater ancestor does not quiet an unsigned child")
+        var installed = mdm()
+        let installedEvent = execUnderAncestors(processPath: "/private/tmp/helper", ancestors: systemWide, signerType: nil)
+        #expect(NoiseFilter.isAutoUpdaterOrAncestor(event: installedEvent))
+        NoiseFilter.apply(&installed, event: installedEvent, isWarmingUp: false)
+        #expect(installed.isEmpty, "the system-wide install, which only an administrator writes, quiets its tree")
     }
 
-    @Test("Sparkle Autoupdate ancestor suppresses matches on child tools")
+    @Test("Sparkle's Autoupdate quiets child tools as an ancestor only from an installed app")
     func sparkleAutoupdateAncestorSuppressed() async throws {
-        var matches = [
-            RuleMatch(ruleId: "d1a2b3c4-0023", ruleName: "Hidden File Created in User Directory",
-                      severity: .low, description: "", mitreTechniques: [], tags: []),
-            RuleMatch(ruleId: "d1a2b3c4-0255", ruleName: "MDM Enrollment Status Check",
-                      severity: .medium, description: "", mitreTechniques: [], tags: [])
+        func noise() -> [RuleMatch] {
+            [RuleMatch(ruleId: "d1a2b3c4-0023", ruleName: "Hidden File Created in User Directory",
+                       severity: .low, description: "", mitreTechniques: [], tags: []),
+             RuleMatch(ruleId: "d1a2b3c4-0255", ruleName: "MDM Enrollment Status Check",
+                       severity: .medium, description: "", mitreTechniques: [], tags: [])]
+        }
+        // Sparkle stages Autoupdate in the user's own Caches: a path any
+        // process of the user can write, so as an ancestor it quiets nothing.
+        let staged = [
+            ProcessAncestor(
+                pid: 8100,
+                executable: "/Users/terrance/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/AbCd/EfGh/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+                name: "Autoupdate"
+            ),
+            ProcessAncestor(pid: 1, executable: "/sbin/launchd", name: "launchd"),
         ]
-        let event = execUnderAncestors(
-            processPath: "/usr/bin/xattr",
-            ancestors: [
-                ProcessAncestor(
-                    pid: 8100,
-                    executable: "/Users/terrance/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/AbCd/EfGh/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
-                    name: "Autoupdate"
-                ),
-                ProcessAncestor(pid: 1, executable: "/sbin/launchd", name: "launchd"),
-            ]
-        )
-        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
-        #expect(matches.isEmpty,
-                "Sparkle's Autoupdate binary as ancestor must suppress child-process rule matches")
+        let installed = [
+            ProcessAncestor(
+                pid: 8101,
+                executable: "/Applications/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+                name: "Autoupdate"
+            ),
+            ProcessAncestor(pid: 1, executable: "/sbin/launchd", name: "launchd"),
+        ]
+        // xattr is an Apple binary: Gate 7 quiets it under either.
+        var xattr = noise()
+        let xattrEvent = execUnderAncestors(processPath: "/usr/bin/xattr", ancestors: staged)
+        #expect(!NoiseFilter.isAutoUpdaterOrAncestor(event: xattrEvent))
+        NoiseFilter.apply(&xattr, event: xattrEvent, isWarmingUp: false)
+        #expect(xattr.isEmpty, "Gate 7 quiets an Apple subject's noise")
+        // An unsigned child is judged by the walk alone.
+        var underStaged = noise()
+        NoiseFilter.apply(&underStaged, event: execUnderAncestors(
+            processPath: "/private/tmp/helper", ancestors: staged, signerType: nil), isWarmingUp: false)
+        #expect(underStaged.count == 2, "a staged Autoupdate ancestor does not quiet an unsigned child")
+        var underInstalled = noise()
+        NoiseFilter.apply(&underInstalled, event: execUnderAncestors(
+            processPath: "/private/tmp/helper", ancestors: installed, signerType: nil), isWarmingUp: false)
+        #expect(underInstalled.isEmpty, "the Autoupdate inside an installed app quiets its tree")
     }
 
     @Test("Critical matches under GoogleUpdater still fire (counter-test)")

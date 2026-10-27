@@ -185,6 +185,24 @@ struct EsloggerCodeSigningTests {
         #expect(info.codeSignature?.signerType == .apple)
     }
 
+    @Test("CS_ADHOC with a team names no team: .adHoc with teamId nil")
+    func adHocWithTeamCarriesNoTeam() {
+        // CS_VALID | CS_ADHOC: an ad-hoc code directory names whatever team
+        // its author wrote into it; the event carries none.
+        let processDict: [String: Any] = [
+            "audit_token": ["pid": 13, "euid": 501],
+            "ppid": 1,
+            "executable": ["path": "/Users/u/maccrabd"],
+            "signing_id": "com.maccrab.agent",
+            "team_id": "79S425CW99",
+            "codesigning_flags": 3,
+            "is_platform_binary": false,
+        ]
+        let info = EsloggerParser.extractProcess(from: processDict)
+        #expect(info.codeSignature?.signerType == .adHoc)
+        #expect(info.codeSignature?.teamId == nil)
+    }
+
     @Test("Ad-hoc com.apple.* signing_id (empty team_id, not platform) is .adHoc, NOT .apple")
     func spoofedAppleSigningIdAdHocIsAdHoc() {
         // Same spoof via an ad-hoc signature (empty team_id, no platform

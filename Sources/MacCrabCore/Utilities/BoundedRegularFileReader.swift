@@ -41,7 +41,7 @@ public enum BoundedRegularFileReader {
             self.statusChangeSeconds = Int64(metadata.st_ctimespec.tv_sec)
             self.statusChangeNanoseconds = Int64(metadata.st_ctimespec.tv_nsec)
             self.ownerUID = metadata.st_uid
-            self.deviceID = UInt64(metadata.st_dev)
+            self.deviceID = HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: metadata.st_dev)
             self.inodeNumber = UInt64(metadata.st_ino)
             self.sizeBytes = metadata.st_size
         }

@@ -229,19 +229,28 @@ public struct CredentialFence: Sendable {
     /// by Apple but are not platform binaries.
     public static let appleDeveloperToolsTeamId = "59GAB85EFG"
 
+    /// Google's and Brave's Developer ID teams, which own their browsers'
+    /// keychain reads and, for Google, the per-user updater.
+    public static let googleTeamId = "EQHXZ8M8AV"
+    public static let braveTeamId = "KL8N8XSYF4"
+
     /// The accessing process's kernel-attested signing identity, from the
     /// Endpoint Security event. A copied or renamed platform binary keeps its
     /// own signing identifier (a copy of /bin/cp stays com.apple.cp), and an
-    /// ad-hoc binary has no team.
+    /// ad-hoc binary has no team a certificate attests, whatever its code
+    /// directory names.
     public struct AccessorIdentity: Sendable, Hashable {
         public let isPlatformBinary: Bool
         public let teamId: String?
         public let signingId: String?
+        /// CS_ADHOC: no certificate stands behind the team or identifier.
+        public let isAdHoc: Bool
 
-        public init(isPlatformBinary: Bool, teamId: String?, signingId: String?) {
+        public init(isPlatformBinary: Bool, teamId: String?, signingId: String?, isAdHoc: Bool = false) {
             self.isPlatformBinary = isPlatformBinary
             self.teamId = teamId
             self.signingId = signingId
+            self.isAdHoc = isAdHoc
         }
     }
 
@@ -252,15 +261,17 @@ public struct CredentialFence: Sendable {
     /// no identity to bind, so an ad-hoc helper is still taken by its name.
     private static func ownsKeychain(binary: String, identity: AccessorIdentity?) -> Bool {
         guard let identity, !identity.isPlatformBinary else { return false }
+        // A team owns a keychain only with a certificate chain behind it.
+        let attestedTeam = identity.isAdHoc ? nil : identity.teamId
         switch binary {
         case "git-credential-osxkeychain":
             return identity.teamId == nil
-                || (identity.teamId == appleDeveloperToolsTeamId
+                || (attestedTeam == appleDeveloperToolsTeamId
                     && identity.signingId == "com.apple.git-credential-osxkeychain")
         case "google chrome", "google chrome helper":
-            return identity.teamId == "EQHXZ8M8AV"
+            return attestedTeam == googleTeamId
         case "brave browser":
-            return identity.teamId == "KL8N8XSYF4"
+            return attestedTeam == braveTeamId
         default:
             return false
         }

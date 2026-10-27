@@ -70,4 +70,19 @@ struct ProcessHasherTests {
         #expect(stats.misses == 1)
         #expect(stats.hits == 1)
     }
+
+    @Test("the digest comes with the identity of the file it was read from")
+    func fileIdentityAccompaniesDigest() async throws {
+        let path = try makeTempFile(bytes: Data(repeating: 0x5a, count: 4096))
+        defer { cleanup(path) }
+        let hasher = ProcessHasher()
+        let result = await hasher.hash(pid: 999_999, executablePath: path)
+        #expect(result.sha256 != nil)
+        #expect(result.fileIdentity == HeavyEnrichmentFileIdentity.capture(path: path))
+        // A cache hit answers with the same identity.
+        let again = await hasher.hash(pid: 999_999, executablePath: path)
+        #expect(again.fileIdentity == result.fileIdentity)
+        let missing = await hasher.hash(pid: 999_999, executablePath: "/does/not/exist/\(UUID().uuidString)")
+        #expect(missing.sha256 == nil && missing.fileIdentity == nil)
+    }
 }

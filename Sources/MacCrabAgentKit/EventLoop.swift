@@ -308,7 +308,7 @@ enum EventLoop {
             guard let signature, let signingId = signature.signingId,
                   identifiers.contains(signingId) else { return false }
             return process.isPlatformBinary
-                || (signature.teamId == CredentialFence.appleDeveloperToolsTeamId && signature.signerType == .apple)
+                || (signature.attestedTeamId == CredentialFence.appleDeveloperToolsTeamId && signature.signerType == .apple)
         }
         if credentialFenceExemptMacCrabTools.contains(subject) {
             return NoiseFilter.isMacCrabProcess(event: event, developmentEngine: developmentEngine)
@@ -348,7 +348,8 @@ enum EventLoop {
                 CredentialFence.AccessorIdentity(
                     isPlatformBinary: process.isPlatformBinary,
                     teamId: $0.teamId,
-                    signingId: $0.signingId
+                    signingId: $0.signingId,
+                    isAdHoc: $0.isAdHocFlagged
                 )
             }
         )
@@ -2862,11 +2863,17 @@ enum EventLoop {
                         processPath: anchorProcPath,
                         processName: anchorProcName,
                         description: "Multi-entity graph rule fired against trace \(trace.id). Bindings: \(match.bindings.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))",
-                        mitreTactics: nil,
+                        mitreTactics: match.tactics.isEmpty ? nil : match.tactics.joined(separator: ","),
                         mitreTechniques: match.attack.isEmpty ? nil : match.attack.joined(separator: ",")
                     )
                     do {
-                        _ = try await alertSink.submit(alert: alert, event: anchorEvent)
+                        // Every graph rule is a curated multi-entity detection
+                        // with no suppressible variant; the sink never lowers
+                        // it for an agent or dev-tooling path. Its tactics can
+                        // equal a rule alert's on the same anchor event, so it
+                        // is reserved without the same-evidence dimension:
+                        // neither alert may absorb the other.
+                        _ = try await alertSink.submit(alert: alert, event: anchorEvent, mustFire: true, collapseSameEvidence: false)
                     } catch {
                         await StorageErrorTracker.shared.recordAlertError(error)
                     }
@@ -3000,6 +3007,9 @@ enum EventLoop {
             // Batch-collect alerts from rule matches, then insert as a single
             // transaction to reduce SQLite I/O from O(n) transactions to O(1).
             var batchAlerts: [Alert] = []
+            // Rules that declared `suppressible: false`; the sink never lowers
+            // their severity for a development-tooling path.
+            var batchMustFire: Set<String> = []
             var batchContexts: [String: EngineAlertCandidateContext] = [:]
             var batchFanOut: [String: (Alert) async -> Void] = [:]
 
@@ -3072,6 +3082,7 @@ enum EventLoop {
                     alert.severity = evidence.bumpedSeverity(from: alert.severity)
                 }
 
+                if !match.suppressible { batchMustFire.insert(match.ruleId) }
                 batchAlerts.append(alert)
                 batchContexts[alert.id] = EngineAlertCandidateContext(
                     match: match,
@@ -3152,7 +3163,8 @@ enum EventLoop {
                     mitreTechniques: Set(techniqueTags),
                     aiTool: event.enrichments["ai_tool"],
                     processTreeDepth: event.process.ancestors.count,
-                    isTrustedSubject: isTrustedSubject
+                    isTrustedSubject: isTrustedSubject,
+                    isVendorSignedUpdater: NoiseFilter.isVendorSignedUpdater(event: event)
                 )
                 let campaigns = await state.campaignDetector.processAlert(alertSummary)
                 for campaign in campaigns {
@@ -3402,7 +3414,8 @@ enum EventLoop {
                 do {
                     persistedAlerts = try await state.alertSink.insertEngineBatch(
                         alerts: batchAlerts,
-                        event: event
+                        event: event,
+                        mustFireRuleIds: batchMustFire
                     )
                 } catch let partial as AlertBatchInsertFailure {
                     // AlertStore uses reserve-bounded transactions, so a

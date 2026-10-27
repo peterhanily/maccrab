@@ -99,48 +99,103 @@ struct CampaignDetectorFPRegressionTests {
         #expect(!campaigns.filter { $0.type == .coordinatedAttack }.isEmpty)
     }
 
-    @Test("Sparkle Autoupdate path is allowlisted from coordinated attack")
-    func sparkleAutoupdateSilent() async {
+    @Test("Three CRITICAL alerts from a user-home updater path without the vendor flag mint a campaign")
+    func userHomeUpdaterPathIsNotTrustedByPathAlone() async {
         let detector = CampaignDetector()
+        let path = "/Users/x/Library/Application Support/Google/GoogleUpdater/148.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater"
+        func critical(_ ruleId: String, _ tactic: String) -> CampaignDetector.AlertSummary {
+            .init(ruleId: ruleId, ruleTitle: ruleId, severity: .critical, processPath: path, pid: 7100, tactics: [tactic])
+        }
+        var minted: [CampaignDetector.Campaign] = []
+        minted += await detector.processAlert(critical("cred.dump", "attack.credential_access"))
+        minted += await detector.processAlert(critical("c2.beacon", "attack.command_and_control"))
+        minted += await detector.processAlert(critical("persist.plist", "attack.persistence"))
+        #expect(!minted.isEmpty, "a path any user can write is no updater without its vendor's signature")
+        // The same three alerts from the vendor-signed updater mint nothing.
+        let signed = CampaignDetector()
+        func vendorCritical(_ ruleId: String, _ tactic: String) -> CampaignDetector.AlertSummary {
+            .init(ruleId: ruleId, ruleTitle: ruleId, severity: .critical, processPath: path, pid: 7100,
+                  tactics: [tactic], isVendorSignedUpdater: true)
+        }
+        var quiet: [CampaignDetector.Campaign] = []
+        quiet += await signed.processAlert(vendorCritical("cred.dump", "attack.credential_access"))
+        quiet += await signed.processAlert(vendorCritical("c2.beacon", "attack.command_and_control"))
+        quiet += await signed.processAlert(vendorCritical("persist.plist", "attack.persistence"))
+        #expect(quiet.isEmpty)
+    }
+
+    @Test("the lane records the vendor signature on the campaign summary")
+    func laneRecordsVendorSignature() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let eventLoop = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"), encoding: .utf8)
+        let start = try #require(eventLoop.range(of: "let alertSummary = CampaignDetector.AlertSummary("))
+        let end = try #require(eventLoop.range(
+            of: "await state.campaignDetector.processAlert(alertSummary)", range: start.upperBound..<eventLoop.endIndex))
+        #expect(eventLoop[start.upperBound..<end.lowerBound]
+            .contains("isVendorSignedUpdater: NoiseFilter.isVendorSignedUpdater(event: event)"))
+        #expect(eventLoop.components(separatedBy: "CampaignDetector.AlertSummary(").count == 2,
+                "the lane builds campaign summaries in one place")
+    }
+
+    @Test("Sparkle's Autoupdate inside an installed app is allowlisted from coordinated attack")
+    func sparkleAutoupdateSilent() async {
         // Even two distinct rules firing on Sparkle's Autoupdate binary
-        // should not produce a coordinated-attack — legitimate updater.
-        _ = await detector.processAlert(
-            .init(ruleId: "defense_evasion.code_sig_check", ruleTitle: "A",
-                  severity: .medium,
-                  processPath: "/Users/x/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/aB/cD/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
-                  pid: 8000,
-                  tactics: ["attack.defense_evasion"])
-        )
-        let campaigns = await detector.processAlert(
-            .init(ruleId: "persistence.plist_write", ruleTitle: "B",
-                  severity: .medium,
-                  processPath: "/Users/x/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/aB/cD/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
-                  pid: 8000,
-                  tactics: ["attack.persistence"])
-        )
-        let coordinated = campaigns.filter { $0.type == .coordinatedAttack }
-        #expect(coordinated.isEmpty)
+        // should not produce a coordinated-attack — legitimate updater. The
+        // exemption rests on the installed location. Sparkle's staging
+        // directory is its user's to write and earns none, even when the
+        // summary arrives flagged vendor-signed.
+        func campaigns(at path: String, pid: Int, vendorSigned: Bool) async -> [CampaignDetector.Campaign] {
+            let detector = CampaignDetector()
+            _ = await detector.processAlert(
+                .init(ruleId: "defense_evasion.code_sig_check", ruleTitle: "A",
+                      severity: .medium, processPath: path, pid: pid,
+                      tactics: ["attack.defense_evasion"], isVendorSignedUpdater: vendorSigned)
+            )
+            return await detector.processAlert(
+                .init(ruleId: "persistence.plist_write", ruleTitle: "B",
+                      severity: .medium, processPath: path, pid: pid,
+                      tactics: ["attack.persistence"], isVendorSignedUpdater: vendorSigned)
+            )
+        }
+        let installed = await campaigns(
+            at: "/Applications/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+            pid: 8000, vendorSigned: false)
+        #expect(installed.filter { $0.type == .coordinatedAttack }.isEmpty)
+        let staged = await campaigns(
+            at: "/Users/x/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/aB/cD/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+            pid: 8001, vendorSigned: true)
+        #expect(!staged.filter { $0.type == .coordinatedAttack }.isEmpty)
     }
 
     @Test("GoogleUpdater path is allowlisted from coordinated attack")
     func googleUpdaterSilent() async {
         let detector = CampaignDetector()
+        let path = "/Users/x/Library/Application Support/Google/GoogleUpdater/148.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater"
         _ = await detector.processAlert(
             .init(ruleId: "discovery.mdm_check", ruleTitle: "A",
-                  severity: .medium,
-                  processPath: "/Users/x/Library/Application Support/Google/GoogleUpdater/148.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
-                  pid: 7001,
-                  tactics: ["attack.discovery"])
+                  severity: .medium, processPath: path, pid: 7001,
+                  tactics: ["attack.discovery"], isVendorSignedUpdater: true)
         )
         let campaigns = await detector.processAlert(
             .init(ruleId: "defense_evasion.xattr", ruleTitle: "B",
-                  severity: .medium,
-                  processPath: "/Users/x/Library/Application Support/Google/GoogleUpdater/148.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
-                  pid: 7001,
-                  tactics: ["attack.defense_evasion"])
+                  severity: .medium, processPath: path, pid: 7001,
+                  tactics: ["attack.defense_evasion"], isVendorSignedUpdater: true)
         )
         let coordinated = campaigns.filter { $0.type == .coordinatedAttack }
         #expect(coordinated.isEmpty)
+        // Without the vendor's signature the same path is any user's binary.
+        let unsigned = CampaignDetector()
+        _ = await unsigned.processAlert(
+            .init(ruleId: "discovery.mdm_check", ruleTitle: "A",
+                  severity: .medium, processPath: path, pid: 7002, tactics: ["attack.discovery"])
+        )
+        let minted = await unsigned.processAlert(
+            .init(ruleId: "defense_evasion.xattr", ruleTitle: "B",
+                  severity: .medium, processPath: path, pid: 7002, tactics: ["attack.defense_evasion"])
+        )
+        #expect(!minted.filter { $0.type == .coordinatedAttack }.isEmpty)
     }
 
     @Test("Kill chain requires 4 tactics (raised from 3)")

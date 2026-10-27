@@ -4088,6 +4088,16 @@ enum DaemonTimers {
             let esCopyBackpressureDropped = state.collector?.esCopyBackpressureDropped() ?? 0
             // Protected events the priority-lane budget sent to the file lane.
             let esProtectedLaneRefused = state.collector?.esProtectedLaneRefused() ?? 0
+            // Protected OPENs admitted as ordinary OPENs with their slice full.
+            let esProtectedOpenSliceDemoted = state.collector?.esProtectedOpenSliceDemoted() ?? 0
+            // Fatal signals at MacCrab or a security tool refused by the target's
+            // repeat budget (the engine's, the tool binary's, or the decoys' one).
+            let esSignalAggregateRefused = state.collector?.esSignalAggregateRefused() ?? 0
+            // ...by their tracked pair's budget.
+            let esSignalPairRefused = state.collector?.esSignalPairRefused() ?? 0
+            // ...whose new pair a full pair table could not take (refused at a
+            // decoy, kept at the engine or a canonical tool while it had budget).
+            let esSignalPairTableFull = state.collector?.esSignalPairTableFull() ?? 0
             // v1.21.6 (audit DET-05): per-type attribution for the copy-stage
             // drops, name-keyed like `es_kernel_dropped_by_type`. On the field
             // host this stage discards ~22.6% of every delivered ES message, and
@@ -5298,6 +5308,10 @@ enum DaemonTimers {
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
                 "es_protected_lane_refused_total": esProtectedLaneRefused,
+                "es_protected_open_slice_demoted_total": esProtectedOpenSliceDemoted,
+                "es_signal_aggregate_refused_total": esSignalAggregateRefused,
+                "es_signal_pair_refused_total": esSignalPairRefused,
+                "es_signal_pair_table_full_total": esSignalPairTableFull,
                 // v1.21.6 (audit DET-05): rich-heartbeat only, like the other
                 // by-type maps. For one uninterrupted process epoch,
                 // drop/(drop+processed) is the callback→worker refusal fraction.
@@ -5590,6 +5604,10 @@ enum DaemonTimers {
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
                 "es_protected_lane_refused_total": esProtectedLaneRefused,
+                "es_protected_open_slice_demoted_total": esProtectedOpenSliceDemoted,
+                "es_signal_aggregate_refused_total": esSignalAggregateRefused,
+                "es_signal_pair_refused_total": esSignalPairRefused,
+                "es_signal_pair_table_full_total": esSignalPairTableFull,
                 "es_client_split_degraded": esClientSplitDegraded,
                 "events_per_sec_lifetime": uptime > 0 ? Double(events) / Double(uptime) : 0,
                 "resident_memory_mb": residentMB,

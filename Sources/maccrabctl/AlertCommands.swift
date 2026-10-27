@@ -203,7 +203,7 @@ extension MacCrabCtl {
         return requests.enumerated().map { ($1.id, $1.request, outcomes[$0] ?? .pending) }
     }
 
-    /// The lines `rules unsuppress` prints, and the failure it exits with
+    /// The lines the top-level `unsuppress` prints, and the failure it exits with
     /// after them: a rejection or a failed submission no longer hides the
     /// outcome of the other entries.
     static func unsuppressReport(_ outcomes: [(id: String, request: UUID, outcome: RemovalOutcome)],
@@ -245,7 +245,7 @@ extension MacCrabCtl {
         }
     }
 
-    /// What `rules unsuppress` did to the saved allowlist.
+    /// What the top-level `unsuppress` did to the saved allowlist.
     enum RuleSuppressionRemoval {
         /// A v1 store, which only an engine that has never loaded it leaves
         /// on disk, edited in place; the engine migrates it when it loads.

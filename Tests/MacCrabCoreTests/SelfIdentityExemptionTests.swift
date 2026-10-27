@@ -13,11 +13,13 @@ struct SelfIdentityExemptionTests {
         teamId: String? = nil,
         signingId: String? = nil,
         platform: Bool = false,
+        flags: UInt32 = 0,
+        notarized: Bool = false,
         file: String = "/Users/u/Library/Keychains/login.keychain-db"
     ) -> Event {
         let signature = signer.map {
             CodeSignatureInfo(signerType: $0, teamId: teamId, signingId: signingId,
-                              authorities: [], flags: 0, isNotarized: false)
+                              authorities: [], flags: flags, isNotarized: notarized)
         }
         let process = MacCrabCore.ProcessInfo(
             pid: 4242, ppid: 1, rpid: 1, name: (path as NSString).lastPathComponent,
@@ -27,6 +29,88 @@ struct SelfIdentityExemptionTests {
         return Event(eventCategory: .file, eventType: .change, eventAction: "write",
                      process: process,
                      file: FileInfo(path: file, action: .write))
+    }
+
+    @Test("An ad-hoc signature's team earns no first-party, signer or keychain trust")
+    func adHocTeamEarnsNoTrust() {
+        let team = NoiseFilter.macCrabTeamId
+        // CS_VALID | CS_ADHOC: the code directory names whatever team its
+        // author chose. The kernel reports it; it attests nothing.
+        #expect(SignerType.classify(codesigningFlags: 0x3, teamId: team, signingId: "com.maccrab.agent",
+                                    isPlatformBinary: false) == .adHoc)
+        #expect(SignerType.classify(codesigningFlags: 0x3, teamId: "ABCDE12345", signingId: "com.apple.security",
+                                    isPlatformBinary: false) == .adHoc)
+        #expect(SignerType.classify(codesigningFlags: 0x1, teamId: team, signingId: "com.maccrab.agent",
+                                    isPlatformBinary: false) == .devId)
+        func collected(flags: UInt32) -> CodeSignatureInfo? {
+            esProcessInfo(from: ESProcessFields(
+                pid: 4242, ppid: 1, rpid: 1, euid: 501, executablePath: "/Users/u/maccrabd",
+                signingId: "com.maccrab.agent", teamId: team, codesigningFlags: flags,
+                isPlatformBinary: false)).codeSignature
+        }
+        #expect(collected(flags: 0x3)?.signerType == .adHoc)
+        #expect(collected(flags: 0x3)?.teamId == nil)
+        #expect(collected(flags: 0x1)?.signerType == .devId)
+        #expect(collected(flags: 0x1)?.teamId == team)
+        // A signature that kept the claimed team and signer still earns nothing
+        // once its flags say ad-hoc.
+        let payload = event("/Users/u/maccrabd", signer: .devId, teamId: team,
+                            signingId: "com.maccrab.agent", flags: 0x3, notarized: true)
+        #expect(!NoiseFilter.isMacCrabProcess(event: payload, developmentEngine: false))
+        #expect(!NoiseFilter.isTrustedSigner(event: payload))
+        #expect(!AlertSink.isVerifiedMacCrabActor(processPath: "/Users/u/maccrabd", event: payload,
+                                                  developmentEngine: false))
+        var matches = [RuleMatch(ruleId: "r", ruleName: "n", severity: .high, description: "",
+                                 mitreTechniques: [], tags: [], suppressible: true)]
+        NoiseFilter.apply(&matches, event: payload, isWarmingUp: false)
+        #expect(matches.count == 1, "Gate 4a drops every match only for MacCrab's own processes")
+        let filter = EventInsertFilter(macCrabProcessNames: ["maccrabd"])
+        #expect(!filter.shouldDrop(event: payload))
+        let genuine = event("/Applications/MacCrab.app/Contents/Resources/bin/maccrabd", signer: .devId,
+                            teamId: team, signingId: "com.maccrab.maccrabd", flags: 0x1)
+        #expect(NoiseFilter.isMacCrabProcess(event: genuine, developmentEngine: false))
+        #expect(filter.shouldDrop(event: genuine))
+        // A browser's team on an ad-hoc signature does not own the login keychain.
+        let fence = CredentialFence()
+        let chrome = event("/tmp/x/Google Chrome", signer: .adHoc, teamId: "EQHXZ8M8AV",
+                           signingId: "com.google.Chrome", flags: 0x3)
+        #expect(EventLoop.credentialFenceFinding(
+            event: chrome, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+            developmentEngine: false) != nil)
+    }
+
+    @Test("attestedTeamId is the team a certificate carries; keychain ownership reads nothing else")
+    func attestedTeamNeedsCertificate() {
+        let team = NoiseFilter.macCrabTeamId
+        func signature(_ signer: SignerType, flags: UInt32, adHocVerdict: Bool? = nil) -> CodeSignatureInfo {
+            CodeSignatureInfo(signerType: signer, teamId: team, signingId: "com.maccrab.agent", authorities: [],
+                              flags: flags, isNotarized: false, isAdhocSigned: adHocVerdict)
+        }
+        #expect(signature(.devId, flags: 0x1).attestedTeamId == team)
+        #expect(signature(.devId, flags: 0x3).attestedTeamId == nil)
+        #expect(signature(.devId, flags: 0x1, adHocVerdict: true).attestedTeamId == nil)
+        #expect(signature(.adHoc, flags: 0x1).attestedTeamId == nil)
+        #expect(signature(.unsigned, flags: 0x0).attestedTeamId == nil)
+        #expect(signature(.devId, flags: 0x3).isAdHocFlagged)
+        #expect(!signature(.devId, flags: 0x1).isAdHocFlagged)
+        let fence = CredentialFence()
+        let keychain = "/Users/u/Library/Keychains/login.keychain-db"
+        func flagged(_ binary: String, _ identity: CredentialFence.AccessorIdentity) -> Bool {
+            fence.checkAccessDetailed(filePath: keychain, aiToolName: "Claude Code",
+                                      accessingBinary: binary, accessorIdentity: identity) != nil
+        }
+        let xcodeTeam = CredentialFence.appleDeveloperToolsTeamId
+        #expect(flagged("Google Chrome", .init(isPlatformBinary: false, teamId: "EQHXZ8M8AV",
+                                               signingId: "com.google.Chrome", isAdHoc: true)))
+        #expect(!flagged("Google Chrome", .init(isPlatformBinary: false, teamId: "EQHXZ8M8AV",
+                                                signingId: "com.google.Chrome")))
+        #expect(flagged("Brave Browser", .init(isPlatformBinary: false, teamId: "KL8N8XSYF4",
+                                               signingId: "com.brave.Browser", isAdHoc: true)))
+        #expect(flagged("git-credential-osxkeychain", .init(isPlatformBinary: false, teamId: xcodeTeam,
+                                                            signingId: "com.apple.git-credential-osxkeychain", isAdHoc: true)))
+        // Homebrew's helper is ad-hoc with no team at all, and keeps its name-keyed ownership.
+        #expect(!flagged("git-credential-osxkeychain", .init(isPlatformBinary: false, teamId: nil,
+                                                             signingId: "git-credential-osxkeychain-55554944ee8c", isAdHoc: true)))
     }
 
     @Test("AlertSink lowers severity only for a MacCrab actor it can verify")

@@ -145,6 +145,12 @@ public actor CampaignDetector {
         /// existing call sites that don't supply it keep their old behavior.
         public let isTrustedSubject: Bool
 
+        /// The subject sits at a user-writable auto-updater location and
+        /// carries that vendor's signature, as `NoiseFilter.isVendorSignedUpdater`
+        /// judges at the feed site. Without it such a path is any user's to
+        /// write and earns no updater exemption from tactic counting.
+        public let isVendorSignedUpdater: Bool
+
         public init(
             ruleId: String,
             ruleTitle: String,
@@ -157,7 +163,8 @@ public actor CampaignDetector {
             mitreTechniques: Set<String> = [],
             aiTool: String? = nil,
             processTreeDepth: Int? = nil,
-            isTrustedSubject: Bool = false
+            isTrustedSubject: Bool = false,
+            isVendorSignedUpdater: Bool = false
         ) {
             self.ruleId = ruleId
             self.ruleTitle = ruleTitle
@@ -171,6 +178,7 @@ public actor CampaignDetector {
             self.aiTool = aiTool
             self.processTreeDepth = processTreeDepth
             self.isTrustedSubject = isTrustedSubject
+            self.isVendorSignedUpdater = isVendorSignedUpdater
         }
     }
 
@@ -694,7 +702,8 @@ public actor CampaignDetector {
         latestAlert: AlertSummary,
         evaluatedAt: Date
     ) -> CandidatePlan? {
-        if Self.isKnownBenignProcess(processPath: latestAlert.processPath) { return nil }
+        if Self.isKnownBenignProcess(processPath: latestAlert.processPath,
+                                     vendorSignedUpdater: latestAlert.isVendorSignedUpdater) { return nil }
         if let path = latestAlert.processPath, NoiseFilter.isTrustedBrowserHelper(path: path) { return nil }
 
         let keychainSingleEventRuleIds: Set<String> = [
@@ -992,52 +1001,79 @@ public actor CampaignDetector {
             || path.hasPrefix("/System/Applications/Utilities/")
     }
 
-    /// Strict auto-updater allow-list. Narrower than
-    /// `isKnownBenignProcess` — does NOT include Apple system daemon
-    /// paths (those would sweep in Terminal, Finder, Safari, any
-    /// /System/Applications/Utilities/ tool). Use this helper when you
-    /// want the engine to drop non-critical matches based on subject-
-    /// or-ancestor path, because matching Terminal or Safari as
-    /// ancestor would silently disable detection for all Terminal-
-    /// launched activity.
+    /// Auto-updater locations as their vendors install them system-wide: the
+    /// system Library (Google's updater and Keystone, Microsoft AutoUpdate),
+    /// the SIP-protected software-update stack, the Sparkle framework inside
+    /// an app under /Applications, and the Homebrew prefix. Narrower than
+    /// `isKnownBenignProcess`: no Apple system daemon paths, which would
+    /// sweep in Terminal, Finder, Safari and every
+    /// /System/Applications/Utilities/ tool when matched as an ancestor. A
+    /// lineage carries paths, not signatures, so only these locations are
+    /// honoured as an ancestor.
     ///
-    /// Empirically-driven: every entry corresponds to a specific field
-    /// FP. Sparkle's `Autoupdate` binary lives at a deep path under
-    /// `~/Library/Caches/<bundle-id>/org.sparkle-project.Sparkle/
-    /// Installation/**/Autoupdate` — matching the `/Sparkle/`
-    /// substring is safer than the full path variant with per-run
-    /// nonces.
-    static func isAutoUpdater(processPath: String?) -> Bool {
-        guard let path = processPath else { return false }
-
+    /// Not every one of them is root's alone. /Applications is root:admin
+    /// 0775, so any administrator's process can place an app with a Sparkle
+    /// framework there, and on an Apple silicon host /opt/homebrew belongs to
+    /// the login user. A process at one of these paths quiets its tree's
+    /// suppressible non-credential matches, including suppressible CRITICAL
+    /// execution matches of Apple-binary descendants. That is an accepted
+    /// residual until each location is bound to its vendor's team.
+    static func isInstalledAutoUpdater(processPath path: String) -> Bool {
+        // Homebrew — `brew upgrade` legitimately touches many tactics.
+        if path == "/opt/homebrew/bin/brew" || path == "/usr/local/bin/brew" { return true }
+        for prefix in [
+            // Google's auto-updater (GoogleUpdater, ex-Keystone). Ships with
+            // Chrome, Drive, and various Google apps. Checks MDM state,
+            // watches install receipts, writes to its own cache.
+            "/Library/Application Support/Google/GoogleUpdater/",
+            "/Library/Google/GoogleSoftwareUpdate/",
+            // Microsoft auto-update
+            "/Library/Application Support/Microsoft/MAU2.0/",
+            "/opt/homebrew/Library/Homebrew/", "/usr/local/Homebrew/Library/Homebrew/",
+        ] where path.hasPrefix(prefix) {
+            return true
+        }
         // Sparkle auto-update framework — bundled into many third-party
         // Mac apps (including MacCrab itself). The Autoupdate binary
         // does signing checks, file writes, and plist modifications as
         // part of an update; every one of those is a legitimate tactic.
-        if path.contains("/Sparkle.framework/") { return true }
-        if path.contains(".sparkle-project.Sparkle/Installation/") { return true }
-        if path.hasSuffix("/Autoupdate") && path.contains("/Sparkle") { return true }
-
-        // Google's auto-updater (GoogleUpdater, ex-Keystone). Ships with
-        // Chrome, Drive, and various Google apps. Checks MDM state,
-        // watches install receipts, writes to its own cache.
-        if path.contains("/GoogleUpdater/") { return true }
-        if path.contains("/GoogleSoftwareUpdate/") { return true }
-        if path.contains("/Library/Caches/com.google.Keystone/") { return true }
-
-        // Microsoft auto-update
-        if path.contains("Microsoft AutoUpdate") { return true }
-
+        if path.hasPrefix("/Applications/"), path.contains(".app/Contents/Frameworks/Sparkle.framework/") {
+            return true
+        }
         // macOS native software-update stack
-        if path.hasSuffix("/softwareupdated") { return true }
-        if path.contains("SoftwareUpdateNotificationManager") { return true }
-
-        // Homebrew — `brew upgrade` legitimately touches many tactics.
-        if path.hasPrefix("/opt/homebrew/bin/brew") { return true }
-        if path.hasPrefix("/usr/local/bin/brew") { return true }
-        if path.contains("/Homebrew/Library/Homebrew/") { return true }
-
+        if path.hasPrefix("/System/Library/"),
+           path.hasSuffix("/softwareupdated") || path.contains("SoftwareUpdateNotificationManager") {
+            return true
+        }
         return false
+    }
+
+    /// Google's updater and Keystone where any user can write them: under a
+    /// user's own home, and Keystone's cache under world-writable
+    /// /Library/Caches. The path proves nothing there, so Gate 6 and campaign
+    /// tactic counting honour it only for a subject carrying Google's
+    /// signature, and never as an ancestor. Sparkle has no such case: nothing
+    /// about a binary in a staged update directory tells Sparkle's updater
+    /// from one planted there.
+    static func isUserAutoUpdater(processPath path: String) -> Bool {
+        if path.hasPrefix("/Library/Caches/com.google.Keystone/") { return true }
+        guard let relative = userHomeRelativePath(path) else { return false }
+        return [
+            "Library/Application Support/Google/GoogleUpdater/",
+            "Library/Google/GoogleSoftwareUpdate/",
+            "Library/Caches/com.google.Keystone/",
+        ].contains { relative.hasPrefix($0) }
+    }
+
+    /// For `/Users/<name>/<rest>` returns `<rest>`; nil for any other path,
+    /// /Users/Shared included, which every user writes.
+    private static func userHomeRelativePath(_ path: String) -> String? {
+        let prefix = "/Users/"
+        guard path.hasPrefix(prefix) else { return nil }
+        let remainder = path.dropFirst(prefix.count)
+        guard let slash = remainder.firstIndex(of: "/"), slash > remainder.startIndex,
+              remainder[..<slash] != "Shared" else { return nil }
+        return String(remainder[remainder.index(after: slash)...])
     }
 
     /// Broader allow-list for processes that legitimately span multiple
@@ -1047,11 +1083,14 @@ public actor CampaignDetector {
     /// process filter where "is this process an OS component or an
     /// updater?" is the right question. DO NOT use this helper in
     /// ancestor-walk filters — Terminal.app would sweep in every admin
-    /// invocation. See `isAutoUpdater` for the narrower check.
-    static func isKnownBenignProcess(processPath: String?) -> Bool {
+    /// invocation. See `isInstalledAutoUpdater` for the narrower check. A
+    /// Google updater at a user-writable location counts only with Google's
+    /// signature, which the feed site records on the summary.
+    static func isKnownBenignProcess(processPath: String?, vendorSignedUpdater: Bool) -> Bool {
         guard let path = processPath else { return false }
         if isAppleSystemDaemon(processPath: path) { return true }
-        return isAutoUpdater(processPath: path)
+        return isInstalledAutoUpdater(processPath: path)
+            || (isUserAutoUpdater(processPath: path) && vendorSignedUpdater)
     }
 
     /// v1.19.1 (HN-audit): developer-tooling / package-manager runtime paths
@@ -1101,11 +1140,12 @@ public actor CampaignDetector {
     /// Shared contributor predicate for kill-chain and coordinated indexes.
     /// Keeping this single predicate prevents the two campaign paths from
     /// drifting back into the false-positive asymmetry fixed in v1.19.
-    private func isTacticContributor(_ alert: AlertSummary) -> Bool {
+    func isTacticContributor(_ alert: AlertSummary) -> Bool {
         alert.severity >= .medium
             && !alert.ruleId.hasPrefix("maccrab.usb.")
             && !alert.ruleId.hasPrefix("maccrab.deep.crypto_token_extension")
-            && !Self.isKnownBenignProcess(processPath: alert.processPath)
+            && !Self.isKnownBenignProcess(processPath: alert.processPath,
+                                          vendorSignedUpdater: alert.isVendorSignedUpdater)
             && !isLowSignalTrustedOrAgent(alert)
             && !isSubCriticalDevTooling(alert)
     }
@@ -1133,7 +1173,8 @@ public actor CampaignDetector {
             // covers Sparkle/GoogleUpdater/brew/softwareupdated alongside
             // Apple system daemons. Auto-updaters routinely touch
             // multiple tactics during a single update cycle.
-            && !Self.isKnownBenignProcess(processPath: $0.processPath)
+            && !Self.isKnownBenignProcess(processPath: $0.processPath,
+                                          vendorSignedUpdater: $0.isVendorSignedUpdater)
             // v1.19 (S1-T4): exclude LOW/MEDIUM trusted-subject / agent-lineage
             // alerts from tactic-counting (HIGH/CRITICAL still feed). Stops the
             // FP kill-chains on swiftpm-testing-helper / Xcode helpers / agents.
@@ -1332,7 +1373,8 @@ public actor CampaignDetector {
         // them — 15+ FPs in user's 24h field window.
         // v1.6.4: broadened to isKnownBenignProcess which also covers Sparkle's
         // Autoupdate, GoogleUpdater, softwareupdated, brew, and MDM agents.
-        if Self.isKnownBenignProcess(processPath: latestAlert.processPath) {
+        if Self.isKnownBenignProcess(processPath: latestAlert.processPath,
+                                     vendorSignedUpdater: latestAlert.isVendorSignedUpdater) {
             return nil
         }
         // v1.4.9: trusted browser helpers (Google Chrome Helper, Safari
@@ -1372,7 +1414,8 @@ public actor CampaignDetector {
             && $0.severity >= .medium
             && !$0.ruleId.hasPrefix("maccrab.usb.")
             && !$0.ruleId.hasPrefix("maccrab.deep.crypto_token_extension")
-            && !Self.isKnownBenignProcess(processPath: $0.processPath)
+            && !Self.isKnownBenignProcess(processPath: $0.processPath,
+                                          vendorSignedUpdater: $0.isVendorSignedUpdater)
             && !isLowSignalTrustedOrAgent($0)
             // v1.19.1 (HN-audit): same dev-tooling carve-out as checkKillChain —
             // sub-CRITICAL alerts from node_modules / Xcode / homebrew / AI agents

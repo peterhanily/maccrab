@@ -157,7 +157,9 @@ struct MacCrabCtl {
             } else {
                 usageError("""
                 Usage: maccrabctl unsuppress <rule-id> [<process-path>]
-                  Removes a specific process path, or all suppressions for the rule (v1 store).
+                  Removes the rule's allowlist entry for that process path, or every entry
+                  scoped to the rule. The engine removes each entry and confirms it; only a
+                  legacy v1 store is edited in place. Run with sudo.
                 """)
             }
         case "suppression":

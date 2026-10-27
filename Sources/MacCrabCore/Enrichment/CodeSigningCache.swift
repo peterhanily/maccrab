@@ -19,11 +19,28 @@ import Darwin
 /// cache before falling back to the Security framework.
 public actor CodeSigningCache {
 
+    // MARK: Verdict
+
+    /// What Security found for a file, and which code it judged: the code
+    /// directory hashes the file carries, the best one (`kSecCodeInfoUnique`)
+    /// and every alternative digest's (`kSecCodeInfoCdHashes`), each as
+    /// `CodeSignatureInfo.kernelCdhash` writes the kernel's. The verdict
+    /// holds for a running process only when its kernel hash is among them.
+    public struct Verdict: Sendable, Equatable {
+        public let info: CodeSignatureInfo
+        public let cdhashes: Set<String>
+
+        public init(info: CodeSignatureInfo, cdhashes: Set<String>) {
+            self.info = info
+            self.cdhashes = cdhashes
+        }
+    }
+
     // MARK: Internal wrapper
 
     /// `NSCache` requires reference-type values, so we box the struct.
     private final class CachedEntry: NSObject {
-        let info: CodeSignatureInfo
+        let verdict: Verdict
         /// On-disk identity of the binary at cache-write time. A cached verdict
         /// is served only while the file's CURRENT identity still matches. An
         /// in-place replacement (an attacker swaps a trusted signed binary for a
@@ -32,8 +49,8 @@ public actor CodeSigningCache {
         /// (v1.21.4 audit MEDIUM). Mirrors the FileContentEnricher scan-cache
         /// fix (v1.12.0 RC4).
         let identity: FileIdentity?
-        init(_ info: CodeSignatureInfo, identity: FileIdentity?) {
-            self.info = info
+        init(_ verdict: Verdict, identity: FileIdentity?) {
+            self.verdict = verdict
             self.identity = identity
         }
     }
@@ -130,13 +147,28 @@ public actor CodeSigningCache {
         )
     }
 
+    /// Test seam: Security's verdict for a path comes from `evaluator`, for
+    /// code no signing identity on the test host can produce. The checks
+    /// around it, opening the path safely and binding the verdict to the
+    /// file's identity, are the real ones.
+    init(countLimit: Int = 8192, evaluatorForTesting: @escaping @Sendable (String) -> Verdict) {
+        self.init(
+            countLimit: countLimit,
+            securityEvaluation: .shared,
+            evaluationDeadline: BoundedSecurityEvaluation.codeSigningDeadline,
+            afterEvaluationForTesting: nil,
+            evaluatorForTesting: evaluatorForTesting
+        )
+    }
+
     /// Test seam: the bound on engine evaluations.
     init(
         countLimit: Int = 8192,
         securityEvaluation: BoundedSecurityEvaluation,
         evaluationDeadline: TimeInterval,
         evaluationSite: BoundedSecurityEvaluation.Site = .codeSigning,
-        afterEvaluationForTesting: (@Sendable (String) -> Void)?
+        afterEvaluationForTesting: (@Sendable (String) -> Void)?,
+        evaluatorForTesting: (@Sendable (String) -> Verdict)? = nil
     ) {
         self.cache = NSCache<NSString, CachedEntry>()
         self.cache.countLimit = countLimit
@@ -144,9 +176,11 @@ public actor CodeSigningCache {
         self.evaluationDeadline = evaluationDeadline
         self.evaluationSite = evaluationSite
         self.afterEvaluationForTesting = afterEvaluationForTesting
+        self.evaluatorForTesting = evaluatorForTesting
     }
 
     private let afterEvaluationForTesting: (@Sendable (String) -> Void)?
+    private let evaluatorForTesting: (@Sendable (String) -> Verdict)?
 
     // MARK: Direct access
 
@@ -156,6 +190,11 @@ public actor CodeSigningCache {
     /// - Returns: The cached `CodeSignatureInfo`, or `nil` on a cache miss
     ///   (including a stale entry whose on-disk file was replaced in place).
     public nonisolated func lookup(path: String) -> CodeSignatureInfo? {
+        lookupVerdict(path: path)?.info
+    }
+
+    /// `lookup(path:)` with the code directory hashes of the code judged.
+    public nonisolated func lookupVerdict(path: String) -> Verdict? {
         guard let entry = cache.object(forKey: path as NSString) else { return nil }
         // Serve the cached verdict only while the path still names the bytes
         // it was computed for. An in-place swap changes the identity.
@@ -171,7 +210,7 @@ public actor CodeSigningCache {
               current == entry.identity else {
             return nil
         }
-        return entry.info
+        return entry.verdict
     }
 
     /// Store a code-signing result in the cache.
@@ -180,10 +219,12 @@ public actor CodeSigningCache {
     ///   - path: Absolute path to the binary on disk.
     ///   - info: The signing information to cache.
     ///   The verdict must describe the bytes currently at `path`; a missing
-    ///   path stores nothing.
+    ///   path stores nothing. It names no code directory hash, so it holds
+    ///   for no running image.
     public func store(path: String, info: CodeSignatureInfo) {
         guard let identity = Self.currentIdentity(path: path) else { return }
-        cache.setObject(CachedEntry(info, identity: identity), forKey: path as NSString)
+        cache.setObject(CachedEntry(Verdict(info: info, cdhashes: []), identity: identity),
+                        forKey: path as NSString)
     }
 
     /// Stat the file to capture its current (dev, inode, size, mtime) identity.
@@ -215,7 +256,7 @@ public actor CodeSigningCache {
     ///   deadline would report a slow but valid bundle as unsigned.
     public func evaluate(path: String) async -> CodeSignatureInfo {
         switch await evaluate(path: path, expected: .regularFileOrDirectory, canonical: false, bounded: false) {
-        case .evaluated(let info): return info
+        case .evaluated(let verdict): return verdict.info
         case .notOpened, .unfinished: return CodeSignatureInfo(signerType: .unsigned)
         }
     }
@@ -225,7 +266,7 @@ public actor CodeSigningCache {
     /// with a FIFO inside never does) or too many evaluations are blocked.
     public func evaluateWithinDeadline(path: String) async -> CodeSignatureInfo? {
         switch await evaluate(path: path, expected: .regularFileOrDirectory, canonical: false, bounded: true) {
-        case .evaluated(let info): return info
+        case .evaluated(let verdict): return verdict.info
         case .notOpened: return CodeSignatureInfo(signerType: .unsigned)
         case .unfinished: return nil
         }
@@ -236,14 +277,20 @@ public actor CodeSigningCache {
     /// verdict, also when the path no longer opens as that file without
     /// following a symlink.
     public func evaluateExecutable(path: String) async -> CodeSignatureInfo? {
-        guard case .evaluated(let info) = await evaluate(
+        await evaluateExecutableVerdict(path: path)?.info
+    }
+
+    /// `evaluateExecutable(path:)` with the code directory hashes of the code
+    /// judged.
+    public func evaluateExecutableVerdict(path: String) async -> Verdict? {
+        guard case .evaluated(let verdict) = await evaluate(
             path: path, expected: .regularFile, canonical: true, bounded: true
         ) else { return nil }
-        return info
+        return verdict
     }
 
     private enum Evaluation {
-        case evaluated(CodeSignatureInfo)
+        case evaluated(Verdict)
         /// The path did not open safely as the expected kind.
         case notOpened
         /// Security.framework did not finish within the deadline.
@@ -257,7 +304,7 @@ public actor CodeSigningCache {
         bounded: Bool
     ) async -> Evaluation {
         // 1. Cache hit — fast path.
-        if let cached = lookup(path: path) {
+        if let cached = lookupVerdict(path: path) {
             cacheHits += 1
             return .evaluated(cached)
         }
@@ -266,41 +313,42 @@ public actor CodeSigningCache {
         cacheMisses += 1
         let before = Self.currentIdentity(path: path)
         let afterEvaluation = afterEvaluationForTesting
-        let work: @Sendable (BoundedSecurityEvaluation.Attempt) -> CodeSignatureInfo? = { [self] attempt in
+        let evaluator = evaluatorForTesting
+        let work: @Sendable (BoundedSecurityEvaluation.Attempt) -> Verdict? = { [self] attempt in
             // Security.framework opens the path itself, blocking on a FIFO and
             // without O_NOCTTY: hand it only what a safe open just found, and
             // only the file stat saw, when stat saw one.
             guard let opened = SecurityEvaluationPrecheck.metadata(
                 of: path, expected: expected, canonical: canonical
             ), before.map({ $0 == FileIdentity(opened) }) ?? true else { return nil }
-            let info = Self.performEvaluation(path: path, singleThreaded: bounded)
+            let verdict = evaluator?(path) ?? Self.performEvaluation(path: path, singleThreaded: bounded)
             afterEvaluation?(path)
             // An interrupted evaluation failed because a blocked call was
             // broken, not because of the code: keep it only when it reached a
             // class no interrupt can produce.
-            guard !attempt.wasInterrupted() || Self.survivesInterrupt(info) else { return nil }
+            guard !attempt.wasInterrupted() || Self.survivesInterrupt(verdict.info) else { return nil }
             // Bind the verdict only to bytes that stayed in place for the whole
             // evaluation. Capturing the identity afterwards let a binary renamed
             // into place mid-evaluation inherit the previous file's verdict.
             // Stored here, so a verdict that comes after its caller stopped
             // waiting still serves the next event.
             if let before, Self.currentIdentity(path: path) == before {
-                cache.setObject(CachedEntry(info, identity: before), forKey: path as NSString)
+                cache.setObject(CachedEntry(verdict, identity: before), forKey: path as NSString)
             }
-            return info
+            return verdict
         }
-        let info: CodeSignatureInfo?
+        let verdict: Verdict?
         if bounded {
             // The key follows the file, so a binary renamed over a stranded
             // one is evaluated afresh.
             let key = path + "\u{0}" + (before?.evaluationKey ?? "-")
             guard case .finished(let finished) = await securityEvaluation.run(
                 evaluationSite, key: key, deadline: evaluationDeadline,
-                isConclusive: { $0.map(Self.survivesInterrupt) ?? false }, work
+                isConclusive: { $0.map { Self.survivesInterrupt($0.info) } ?? false }, work
             ) else { return .unfinished }
-            info = finished
+            verdict = finished
         } else {
-            info = await BlockingWorkOffload.perform(
+            verdict = await BlockingWorkOffload.perform(
                 on: Self.evaluationQueue,
                 qos: BlockingWorkOffload.dispatchQoS(
                     waitedOnAt: Task.currentPriority,
@@ -309,7 +357,7 @@ public actor CodeSigningCache {
                 flags: .enforceQoS
             ) { work(.unbounded) }
         }
-        return info.map(Evaluation.evaluated) ?? .notOpened
+        return verdict.map(Evaluation.evaluated) ?? .notOpened
     }
 
     /// Whether `info` is a verdict an interrupted evaluation cannot have
@@ -331,7 +379,7 @@ public actor CodeSigningCache {
     /// validates on that thread alone: Security.framework otherwise opens
     /// nested code and sealed resources on its GCD workers, where a FIFO
     /// blocks out of the runner's reach.
-    private nonisolated static func performEvaluation(path: String, singleThreaded: Bool) -> CodeSignatureInfo {
+    private nonisolated static func performEvaluation(path: String, singleThreaded: Bool) -> Verdict {
         let url = URL(fileURLWithPath: path) as CFURL
         let validation = SecCSFlags(rawValue: singleThreaded ? kSecCSSingleThreaded : 0)
 
@@ -340,7 +388,7 @@ public actor CodeSigningCache {
         let createStatus = SecStaticCodeCreateWithPath(url, [], &staticCodeRef)
 
         guard createStatus == errSecSuccess, let staticCode = staticCodeRef else {
-            return CodeSignatureInfo(signerType: .unsigned)
+            return Verdict(info: CodeSignatureInfo(signerType: .unsigned), cdhashes: [])
         }
 
         // --- Check validity (don't fail hard; we still want partial info) ---
@@ -354,7 +402,7 @@ public actor CodeSigningCache {
         let copyStatus = SecCodeCopySigningInformation(staticCode, infoFlags, &infoDict)
 
         guard copyStatus == errSecSuccess, let dict = infoDict as? [String: Any] else {
-            return CodeSignatureInfo(signerType: isValid ? .adHoc : .unsigned)
+            return Verdict(info: CodeSignatureInfo(signerType: isValid ? .adHoc : .unsigned), cdhashes: [])
         }
 
         // --- Extract fields ---
@@ -398,7 +446,17 @@ public actor CodeSigningCache {
         // --- Check notarization (ticket stapled or notarization flag in flags) ---
         let isNotarized = checkNotarization(staticCode: staticCode, validation: validation)
 
-        return CodeSignatureInfo(
+        // --- Code directory hashes, as the kernel reports one: 20 bytes ---
+        var cdhashes = Set<String>()
+        if let unique = dict[kSecCodeInfoUnique as String] as? Data,
+           let hash = CodeSignatureInfo.kernelCdhash(bytes: unique.prefix(20)) {
+            cdhashes.insert(hash)
+        }
+        for case let digest as Data in dict[kSecCodeInfoCdHashes as String] as? [Any] ?? [] {
+            if let hash = CodeSignatureInfo.kernelCdhash(bytes: digest.prefix(20)) { cdhashes.insert(hash) }
+        }
+
+        let info = CodeSignatureInfo(
             signerType: signerType,
             teamId: teamId,
             signingId: signingId,
@@ -410,6 +468,7 @@ public actor CodeSigningCache {
             isAdhocSigned: isAdhocSigned,
             entitlements: nil  // Not extracted — opt-in via a future pass.
         )
+        return Verdict(info: info, cdhashes: cdhashes)
     }
 
     /// Determine the signer type by testing the code against known requirements.

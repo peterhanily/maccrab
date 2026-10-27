@@ -18,13 +18,15 @@ struct SignerSpoofReverifyTests {
         signerType: SignerType,
         signingId: String,
         teamId: String?,
-        isPlatformBinary: Bool
+        isPlatformBinary: Bool,
+        kernelCdhash: String? = nil
     ) -> MacCrabCore.ProcessInfo {
         let sig = CodeSignatureInfo(
             signerType: signerType,
             teamId: teamId,
             signingId: signingId,
-            flags: 0x1 /* CS_VALID */
+            flags: 0x1 /* CS_VALID */,
+            kernelCdhash: kernelCdhash
         )
         return MacCrabCore.ProcessInfo(
             pid: 999_001,
@@ -74,6 +76,22 @@ struct SignerSpoofReverifyTests {
         }
         _ = await enricher.shutdownHeavyEnrichment()
         return nil
+    }
+
+    /// The code directory hash the kernel reports for `path` running
+    /// natively, which is the one `codesign` prints.
+    private func kernelCdhash(of path: String) -> String? {
+        let codesign = Process()
+        codesign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        codesign.arguments = ["-dvvv", path]
+        let output = Pipe()
+        codesign.standardOutput = output
+        codesign.standardError = output
+        guard (try? codesign.run()) != nil else { return nil }
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        codesign.waitUntilExit()
+        guard let line = text.split(separator: "\n").first(where: { $0.hasPrefix("CDHash=") }) else { return nil }
+        return CodeSignatureInfo.kernelCdhash(hex: String(line.dropFirst("CDHash=".count)))
     }
 
     /// Create a real ad-hoc-signed Mach-O at a temp path whose code-signature
@@ -140,13 +158,15 @@ struct SignerSpoofReverifyTests {
     func realAppleBinaryStaysApple() async throws {
         // /usr/bin/codesign is Apple-signed and DOES satisfy `anchor apple`.
         // Marked non-platform here so the re-verification path runs; the crypto
-        // check confirms .apple, so it is preserved.
+        // check confirms .apple for the image the kernel reports, so it is
+        // preserved.
         let proc = process(
             executable: "/usr/bin/codesign",
             signerType: .apple,
             signingId: "com.apple.codesign",
             teamId: nil,
-            isPlatformBinary: false
+            isPlatformBinary: false,
+            kernelCdhash: try #require(kernelCdhash(of: "/usr/bin/codesign"))
         )
         let result = await enrich(proc)
         #expect(result == .apple,

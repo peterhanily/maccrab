@@ -127,7 +127,8 @@ enum MonitorTasks {
                         // AlertSink applies dedup + insert in one call.
                         let inserted: Bool
                         do {
-                            inserted = try await state.alertSink.submit(alert: alert, event: enriched)
+                            inserted = try await state.alertSink.submit(
+                                alert: alert, event: enriched, mustFire: !match.suppressible)
                         } catch {
                             await StorageErrorTracker.shared.recordAlertError(error)
                             continue

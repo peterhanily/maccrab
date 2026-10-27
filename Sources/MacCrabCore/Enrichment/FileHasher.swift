@@ -52,13 +52,44 @@ public actor FileHasher {
         let mtimeNanoseconds: Int
         let ctimeSeconds: Int
         let ctimeNanoseconds: Int
+
+        /// The key without its path: the file the digest is of.
+        var fileIdentity: HeavyEnrichmentFileIdentity {
+            HeavyEnrichmentFileIdentity(
+                deviceID: device, inodeNumber: inode, sizeBytes: size,
+                modificationSeconds: Int64(mtimeSeconds), modificationNanoseconds: Int64(mtimeNanoseconds),
+                statusChangeSeconds: Int64(ctimeSeconds), statusChangeNanoseconds: Int64(ctimeNanoseconds))
+        }
+    }
+
+    /// A digest with the identity of the file whose bytes it is.
+    public struct HashedFile: Sendable, Equatable {
+        public let sha256: String
+        public let identity: HeavyEnrichmentFileIdentity
+        /// Whether this digest may stand for an exec'd image whose identity is
+        /// `identity`: true only when the bytes were read from an APFS volume
+        /// the system mounted (`volumeBindsImage`) and, for a digest served
+        /// from the cache or from a read another call started, only while the
+        /// file is still on such a volume. A volume a user mounted, a disk
+        /// image or a removable drive, can be detached, edited offline and
+        /// attached again with every file's device, inode, size and times
+        /// intact; HFS+, FAT and exFAT keep times too coarse to tell a
+        /// same-size rewrite apart. Even then the identity is evidence, not
+        /// proof: a write through a shared mapping keeps it until flushed.
+        public let imageBindable: Bool
+    }
+
+    /// A cached digest, with whether its volume lets it stand for an image.
+    private struct CachedDigest: Sendable {
+        let sha256: String
+        let imageBindable: Bool
     }
 
     private let logger = Logger(subsystem: "com.maccrab.enrichment", category: "file-hasher")
     private let capacity: Int
     private let maxFileBytes: Int64
 
-    private var cache: [CacheKey: String] = [:]
+    private var cache: [CacheKey: CachedDigest] = [:]
     /// Front of the list is most recently used.
     private var lru: [CacheKey] = []
     /// The hash in flight for each (path, identity). The actor suspends
@@ -69,11 +100,21 @@ public actor FileHasher {
     /// The digest computation; a seam so tests can hold or fail the hash
     /// that concurrent misses share.
     private let computeDigest: @Sendable (String, CacheKey) -> Computed
+    /// Whether the file a key names is, now, on a volume that may bind a
+    /// digest to an image; asked before a cached or shared digest is handed
+    /// out as bindable. A seam so tests can stand in for a volume that was
+    /// detached and another attached on its device number.
+    private let currentVolumeBinds: @Sendable (String, CacheKey) -> Bool
+    /// Told when a call joins the read in flight, so a test can release the
+    /// read only once the join is waiting. Production callers never set it.
+    private let joinObserverForTesting: (@Sendable () -> Void)?
 
     /// What one miss's hash found.
     enum Computed: Equatable, Sendable {
-        /// The key's bytes, and whether the path still named them afterwards.
-        case digest(String, stillInPlace: Bool)
+        /// The key's bytes, whether the path still named them afterwards, and
+        /// whether the volume they were read from may bind them to an image
+        /// (see `volumeBindsImage`). Unknown is not bindable.
+        case digest(String, stillInPlace: Bool, imageBindable: Bool = false)
         /// On a network volume (NFS, SMB, AFP, WebDAV, FUSE): not hashed.
         case network
         /// Missing, swapped, rewritten while read, or an I/O error.
@@ -95,12 +136,18 @@ public actor FileHasher {
     init(
         capacity: Int,
         maxFileBytes: Int64,
+        currentVolumeBinds: @escaping @Sendable (String, CacheKey) -> Bool = {
+            FileHasher.currentVolumeBindsImage(path: $0, matching: $1)
+        },
+        joinObserverForTesting: (@Sendable () -> Void)? = nil,
         computeDigest: @escaping @Sendable (String, CacheKey) -> Computed
     ) {
         precondition(capacity > 0, "capacity must be > 0")
         precondition(maxFileBytes > 0, "maxFileBytes must be > 0")
         self.capacity = capacity
         self.maxFileBytes = maxFileBytes
+        self.currentVolumeBinds = currentVolumeBinds
+        self.joinObserverForTesting = joinObserverForTesting
         self.computeDigest = computeDigest
     }
 
@@ -109,6 +156,15 @@ public actor FileHasher {
     /// Returns the SHA-256 hex digest of `path`, or `nil` if the file is
     /// unavailable, too large, on a network mount, or errors during I/O.
     public func hash(path: String) async -> String? {
+        await hashWithIdentity(path: path)?.sha256
+    }
+
+    /// `hash(path:)` with the identity (device, inode, size, mtime, ctime) of
+    /// the file the digest is of: the one the probe found at `path`, whose
+    /// bytes the read verified before and after. A caller that must prove the
+    /// digest is of a particular image compares this identity, not a stat of
+    /// the path, which can name another file by the time it is taken.
+    public func hashWithIdentity(path: String) async -> HashedFile? {
         // Type, size and identity, off the actor: a probe that walks into a
         // stalled network volume must not hold every other hash.
         let key: CacheKey
@@ -129,14 +185,17 @@ public actor FileHasher {
         if let cached = cache[key] {
             statsStore.hits += 1
             touch(key)
-            return cached
+            return HashedFile(sha256: cached.sha256, identity: key.fileIdentity,
+                              imageBindable: await stillBindable(cached.imageBindable, path: path, key: key))
         }
 
         if let pending = inFlight[key] {
+            joinObserverForTesting?()
             switch await pending.value {
-            case .digest(let digest, _):
+            case .digest(let digest, _, let imageBindable):
                 statsStore.hits += 1
-                return digest
+                return HashedFile(sha256: digest, identity: key.fileIdentity,
+                                  imageBindable: await stillBindable(imageBindable, path: path, key: key))
             case .network:
                 statsStore.skippedNetwork += 1
                 return nil
@@ -162,11 +221,11 @@ public actor FileHasher {
         let computed = await task.value
         defer { inFlight.removeValue(forKey: key) }
         switch computed {
-        case .digest(let digest, let stillInPlace):
+        case .digest(let digest, let stillInPlace, let imageBindable):
             statsStore.misses += 1
             // Cache only a digest of bytes that stayed in place while hashing.
-            if stillInPlace { insert(key, digest: digest) }
-            return digest
+            if stillInPlace { insert(key, digest: digest, imageBindable: imageBindable) }
+            return HashedFile(sha256: digest, identity: key.fileIdentity, imageBindable: imageBindable)
         case .network:
             statsStore.skippedNetwork += 1
             return nil
@@ -196,7 +255,7 @@ public actor FileHasher {
               (st.st_mode & S_IFMT) == S_IFREG else { return .unavailable }
         return .file(CacheKey(
             path: path,
-            device: UInt64(st.st_dev),
+            device: HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: st.st_dev),
             inode: UInt64(st.st_ino),
             size: Int64(st.st_size),
             mtimeSeconds: st.st_mtimespec.tv_sec,
@@ -216,8 +275,56 @@ public actor FileHasher {
     /// still names them.
     nonisolated static func hashAndRecheck(path: String, matching key: CacheKey) -> Computed {
         let computed = hashFile(path: path, matching: key)
-        guard case .digest(let digest, _) = computed else { return computed }
-        return .digest(digest, stillInPlace: cacheKey(path: path) == key)
+        guard case .digest(let digest, _, let imageBindable) = computed else { return computed }
+        return .digest(digest, stillInPlace: cacheKey(path: path) == key, imageBindable: imageBindable)
+    }
+
+    /// The volume's file-system type name (`apfs`, `hfs`, `msdos`, `exfat`),
+    /// read only within its fixed-size field.
+    nonisolated static func fileSystemTypeName(of volume: statfs) -> String {
+        withUnsafeBytes(of: volume.f_fstypename) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }
+
+    /// Whether a digest read from a volume may be bound to an exec'd image:
+    /// only on APFS that the system mounted (owned by root), such as the
+    /// startup disk. A volume a user mounted, a disk image or a removable
+    /// drive, can be detached, edited offline and attached again on the same
+    /// device number with every file's inode, size and times intact. HFS+,
+    /// FAT and exFAT keep times too coarse to tell a same-size rewrite apart,
+    /// and App Translocation's nullfs is not APFS. A volume that could not be
+    /// asked (nil) is not bindable.
+    nonisolated static func volumeBindsImage(fileSystemTypeName: String?, owner: uid_t?) -> Bool {
+        fileSystemTypeName == "apfs" && owner == 0
+    }
+
+    /// Whether the file `key` names is, now, on a volume that may bind (see
+    /// `volumeBindsImage`). Asked of a descriptor opened as the hash opens
+    /// one and holding the key's identity, never of the path by name: a swap
+    /// between the probe and the question could answer for another volume.
+    /// Anything that cannot be asked is not bindable.
+    nonisolated static func currentVolumeBindsImage(path: String, matching key: CacheKey) -> Bool {
+        guard let resolved = BoundedRegularFileReader.normalizedAbsolutePath(path) else { return false }
+        let descriptor = open(resolved, O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC | O_NOCTTY)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0, identity(of: opened, matches: key) else { return false }
+        var volume = statfs()
+        guard fstatfs(descriptor, &volume) == 0 else { return false }
+        return volumeBindsImage(fileSystemTypeName: fileSystemTypeName(of: volume), owner: volume.f_owner)
+    }
+
+    /// A cached or shared digest keeps its binding only while the file its
+    /// key names is still on a volume that may bind: the volume it was read
+    /// from may since have been detached, and another one, or the same one
+    /// edited offline, attached on its device number. Asked off the actor,
+    /// like the probe, and only for a digest that was bindable.
+    private func stillBindable(_ bindable: Bool, path: String, key: CacheKey) async -> Bool {
+        guard bindable else { return false }
+        let check = currentVolumeBinds
+        return await HeavyEnrichmentBlockingWork.run({ check(path, key) })
     }
 
     /// Current observability counters (copy).
@@ -248,10 +355,10 @@ public actor FileHasher {
         lru.insert(key, at: 0)
     }
 
-    private func insert(_ key: CacheKey, digest: String) {
+    private func insert(_ key: CacheKey, digest: String, imageBindable: Bool) {
         // Idempotent: a duplicate key in `lru` would later evict the live
         // entry and leave the other copy dangling.
-        if cache.updateValue(digest, forKey: key) != nil {
+        if cache.updateValue(CachedDigest(sha256: digest, imageBindable: imageBindable), forKey: key) != nil {
             touch(key)
             return
         }
@@ -276,7 +383,7 @@ public actor FileHasher {
         matching key: CacheKey,
         afterIdentityCheckForTesting: ((Int32) -> Void)? = nil
     ) -> String? {
-        guard case .digest(let digest, _) = hashFile(
+        guard case .digest(let digest, _, _) = hashFile(
             path: path, matching: key, afterIdentityCheckForTesting: afterIdentityCheckForTesting
         ) else { return nil }
         return digest
@@ -302,9 +409,18 @@ public actor FileHasher {
         // Network volumes are skipped (NFS, SMB, AFP, WebDAV, FUSE). A volume
         // that cannot be asked counts as local, as before.
         var volume = statfs()
-        if fstatfs(descriptor, &volume) == 0, volume.f_flags & UInt32(MNT_LOCAL) == 0 {
+        let volumeKnown = fstatfs(descriptor, &volume) == 0
+        if volumeKnown, volume.f_flags & UInt32(MNT_LOCAL) == 0 {
             return .network
         }
+        // Asked of the descriptor the bytes come from: only a digest read from
+        // APFS the system mounted may be bound to an exec'd image (see
+        // `volumeBindsImage`). Its identity tells apart a rewrite made through
+        // the mounted file system, but proves no more: a write through a
+        // shared mapping keeps it until flushed. A volume that could not be
+        // asked is not bindable.
+        let imageBindable = volumeKnown
+            && Self.volumeBindsImage(fileSystemTypeName: Self.fileSystemTypeName(of: volume), owner: volume.f_owner)
         // Test seam: a fixture can change the file between the check and the
         // read. Production callers never supply it.
         afterIdentityCheckForTesting?(descriptor)
@@ -329,12 +445,13 @@ public actor FileHasher {
         }
         var after = stat()
         guard fstat(descriptor, &after) == 0, identity(of: after, matches: key) else { return .unavailable }
-        return .digest(hasher.finalize().map { String(format: "%02x", $0) }.joined(), stillInPlace: false)
+        return .digest(hasher.finalize().map { String(format: "%02x", $0) }.joined(), stillInPlace: false,
+                       imageBindable: imageBindable)
     }
 
     private nonisolated static func identity(of info: stat, matches key: CacheKey) -> Bool {
         (info.st_mode & S_IFMT) == S_IFREG
-            && UInt64(info.st_dev) == key.device
+            && HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: info.st_dev) == key.device
             && UInt64(info.st_ino) == key.inode
             && Int64(info.st_size) == key.size
             && info.st_mtimespec.tv_sec == key.mtimeSeconds

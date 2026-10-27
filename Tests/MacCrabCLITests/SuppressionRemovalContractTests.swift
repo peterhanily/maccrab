@@ -60,7 +60,7 @@ struct SuppressionRemovalContractTests {
         #expect(Set(saved.entries.map(\.id)) == [removedEntry.id, retained.id])
     }
 
-    @Test("rules unsuppress reaches the root-only inbox under sudo")
+    @Test("unsuppress reaches the root-only inbox under sudo")
     func unsuppressUsesTheRequestInbox() throws {
         let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
