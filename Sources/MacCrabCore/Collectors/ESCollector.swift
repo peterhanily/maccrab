@@ -3675,6 +3675,10 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// shared out per process, and a protected OPEN that finds no slot is
     /// admitted as an ordinary OPEN — never at the write family's tier.
     private let protectedOpenPerProcessCap: Int
+    /// The tail of the slice that only a process holding no slot may take,
+    /// so that however many floods share the slice, a process's first
+    /// protected OPEN still finds a slot above the writes.
+    private let protectedOpenNewcomerReserve: Int
 
     private let lock = NSLock()
     private var pending: [Pending?]
@@ -3704,8 +3708,9 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// than `topReserve` keys). Same lock.
     private var protectedOpenInFlight = 0
     private var protectedOpenInFlightByProcess: [pid_t: Int] = [:]
-    /// Protected OPENs admitted as ordinary OPENs because their slice was
-    /// full. A demotion, not a loss: the message was still offered a slot.
+    /// Protected OPENs that found no slice slot and were then admitted as
+    /// ordinary OPENs. One the ordinary tier refused instead is a capacity
+    /// drop and is counted only there.
     private var protectedOpenSliceDemotedTotal: UInt64 = 0
 
     /// - Parameters:
@@ -3752,9 +3757,12 @@ public final class ESMessageWorker: @unchecked Sendable {
         self.topReserve = reservesLineageSlots
             ? Swift.max(1, Swift.min(cap - 1, cap / 4) / 4)
             : 0
-        // An eighth of the top slice per process: 32 of 256 at the production
-        // cap, so eight floods from eight processes are needed to fill it.
+        // An eighth of the top slice per process (32 of 256 at the production
+        // cap), and the last quarter of it (64) for processes holding no slot:
+        // six floods can hold the rest, a seventh gets one slot, and a process
+        // with none still finds one.
         self.protectedOpenPerProcessCap = Swift.max(1, self.topReserve / 8)
+        self.protectedOpenNewcomerReserve = Swift.max(1, self.topReserve / 4)
         self.queue = DispatchQueue(label: label, qos: .userInitiated)
         self.process = process
         self.free = free
@@ -3796,19 +3804,22 @@ public final class ESMessageWorker: @unchecked Sendable {
         // A protected OPEN given the top tier (the split file client) holds a
         // top-slice slot while it is in flight: at most
         // `protectedOpenPerProcessCap` per source process and `topReserve` in
-        // all. Past either bound it is admitted as an ordinary OPEN. It must
-        // not fall back to the write family's tier: an `open()` loop would
-        // then pin in-flight at that tier's cap and refuse every write behind
-        // it, which is exactly the inversion the slice exists to prevent.
+        // all, and the last `protectedOpenNewcomerReserve` slots only for a
+        // process holding none. Past those bounds it is admitted as an
+        // ordinary OPEN. It must not fall back to the write family's tier: an
+        // `open()` loop would then pin in-flight at that tier's cap and refuse
+        // every write behind it, which is exactly the inversion the slice
+        // exists to prevent.
         var sliceHolder: pid_t?
         var demoted = false
         if protectedOpen && lineageCritical && topReserve > 0 {
             let held = protectedOpenInFlightByProcess[sourceProcessID] ?? 0
-            if protectedOpenInFlight < topReserve && held < protectedOpenPerProcessCap {
+            let free = topReserve - protectedOpenInFlight
+            if held < protectedOpenPerProcessCap && free > 0
+                && (held == 0 || free > protectedOpenNewcomerReserve) {
                 sliceHolder = sourceProcessID
             } else {
                 demoted = true
-                protectedOpenSliceDemotedTotal &+= 1
             }
         }
         // v1.21.5 PERF: priority-aware admission. Lineage-critical messages may
@@ -3845,6 +3856,8 @@ public final class ESMessageWorker: @unchecked Sendable {
         if let pid = sliceHolder {
             protectedOpenInFlight += 1
             protectedOpenInFlightByProcess[pid, default: 0] += 1
+        } else if demoted {
+            protectedOpenSliceDemotedTotal &+= 1
         }
         // The current processing item still occupies an in-flight slot, so a
         // successful admission always has room in this same-capacity ring.

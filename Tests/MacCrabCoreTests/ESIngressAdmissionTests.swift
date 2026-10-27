@@ -915,6 +915,8 @@ struct ProtectedFileLaneTests {
             "Sources/MacCrabAgentKit/DaemonTimers.swift"), encoding: .utf8)
         #expect(timers.components(separatedBy: "\"es_protected_lane_refused_total\": esProtectedLaneRefused").count == 3,
                 "both heartbeat payloads report the refusals")
+        #expect(timers.components(separatedBy: "\"es_protected_open_slice_demoted_total\": esProtectedOpenSliceDemoted").count == 3,
+                "both heartbeat payloads report the top-slice demotions")
     }
 
     @Test("only the worker's stamp moves a protected file event to the priority lane")

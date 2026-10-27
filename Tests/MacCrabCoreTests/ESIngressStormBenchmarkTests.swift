@@ -488,8 +488,62 @@ struct ESIngressStormBenchmarkTests {
         #expect(writeRefused == 256, "only the top slice is beyond the write family")
         #expect(victimAccepted, "another process's credential OPEN is admitted with the flood and the writes in flight")
         #expect(sliceInFlight == 33, "the flood holds its per-process allowance; the victim holds one slot")
-        #expect(demoted == UInt64(cap) - 32)
+        #expect(demoted == 3_040, "only demoted OPENs that were admitted count; a refused one is a capacity drop")
         #expect(dropped[Self.openType] == 1024, "the flood itself is what gets refused, and it is counted")
+        #expect(worker.protectedOpenInFlightCount() == 0, "completed slice holders release their slots")
+    }
+
+    @Test("file-client worker: eight flooding processes cannot fill the top slice against a ninth process's first credential OPEN")
+    func newcomerAlwaysFindsASliceSlot() {
+        let cap = 4096
+        let gate = DispatchSemaphore(value: 0)
+        let worker = ESMessageWorker(
+            maxInFlight: cap, label: "bench.file-client.eight-floods", reservesLineageSlots: true,
+            process: { _ in gate.wait() }, free: { _ in }
+        )
+        var token = 1
+        func handle() -> UnsafeRawPointer {
+            token += 1
+            return UnsafeRawPointer(bitPattern: token)!
+        }
+        let tier = Self.fileClientTiers.tier(eventType: Self.openType, protectedOpen: true)
+        func submitProtectedOpen(pid: pid_t) -> Bool {
+            worker.submit(
+                handle(), lineageCritical: tier.lineageCritical, writeFamily: tier.writeFamily,
+                protectedOpen: true, sourceProcessID: pid, eventType: Self.openType
+            )
+        }
+        var floodAccepted = 0
+        for pid: pid_t in 1...8 {
+            for _ in 0..<600 where submitProtectedOpen(pid: pid) { floodAccepted += 1 }
+        }
+        let sliceAfterFlood = worker.protectedOpenInFlightCount()
+        let ninthAccepted = submitProtectedOpen(pid: 9)
+        let sliceAfterNinth = worker.protectedOpenInFlightCount()
+        let writeTier = Self.fileClientTiers.tier(eventType: Self.writeType, protectedOpen: false)
+        var writeAccepted = 0
+        var writeRefused = 0
+        for _ in 0..<(cap / 4) {
+            if worker.submit(handle(), lineageCritical: writeTier.lineageCritical,
+                             writeFamily: writeTier.writeFamily, eventType: Self.writeType) {
+                writeAccepted += 1
+            } else {
+                writeRefused += 1
+            }
+        }
+        let demoted = worker.protectedOpenSliceDemoted()
+        let dropped = worker.backpressureDroppedByEventType()
+        print("BENCH worker_eight_floods flood_accepted=\(floodAccepted) slice_after_flood=\(sliceAfterFlood) ninth=\(ninthAccepted) slice_after_ninth=\(sliceAfterNinth) write_accepted=\(writeAccepted) write_refused=\(writeRefused) demoted=\(demoted) dropped_by_type=\(dropped)")
+        for _ in 0..<(cap + 2048) { gate.signal() }
+        worker.shutdownAndDrain()
+        #expect(sliceAfterFlood == 194, "six floods fill the slice down to its newcomer reserve; the seventh and eighth get one slot each")
+        #expect(ninthAccepted, "a process holding no slot always finds one for its first protected OPEN")
+        #expect(sliceAfterNinth == 195)
+        #expect(floodAccepted == 3_074)
+        #expect(writeAccepted == 765, "the write family keeps every slot above the ordinary tier and the slice holders")
+        #expect(writeRefused == 259)
+        #expect(demoted == 2_880, "only demoted OPENs that were admitted count")
+        #expect(dropped[Self.openType] == 1_726)
         #expect(worker.protectedOpenInFlightCount() == 0, "completed slice holders release their slots")
     }
 

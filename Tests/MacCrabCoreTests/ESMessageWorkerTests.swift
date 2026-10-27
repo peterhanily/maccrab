@@ -615,7 +615,7 @@ extension ESMessageWorkerTopReserveTests {
         #expect(writes == 11, "the write family keeps its tier above the ordinary OPENs")
         #expect(submitProtected(pid: 3), "a third process still finds a slice slot above the writes")
         #expect(worker.protectedOpenInFlightCount() == 3)
-        #expect(worker.protectedOpenSliceDemoted() == 64)
+        #expect(worker.protectedOpenSliceDemoted() == 47, "the 47 demoted OPENs the ordinary tier admitted; the refused ones are capacity drops")
         for _ in 0..<80 { gate.signal() }
         worker.shutdownAndDrain()
         #expect(worker.protectedOpenInFlightCount() == 0, "completion releases every slice slot")
