@@ -1,0 +1,144 @@
+import Foundation
+import Testing
+@testable import MacCrabAgentKit
+@testable import MacCrabCore
+
+/// A Developer ID claim naming a team that buys an exemption is re-anchored
+/// by Security before the engine believes the team. A chain rooted anywhere
+/// but Apple is carried as ad-hoc and attests nothing; a genuine Developer
+/// ID chain keeps its team.
+@Suite("Exemption-team claims are re-verified", .serialized)
+struct ExemptionTeamReverifyTests {
+    private func process(_ executable: String, signer: SignerType, teamId: String?, signingId: String,
+                         signature: CodeSignatureInfo? = nil) -> MacCrabCore.ProcessInfo {
+        MacCrabCore.ProcessInfo(
+            pid: 999_101, ppid: 1, rpid: 1, name: (executable as NSString).lastPathComponent,
+            executable: executable, commandLine: executable, args: [executable], workingDirectory: "/tmp",
+            userId: UInt32(getuid()), userName: "tester", groupId: 20, startTime: Date(),
+            codeSignature: signature ?? CodeSignatureInfo(signerType: signer, teamId: teamId, signingId: signingId, flags: 0x1),
+            isPlatformBinary: false)
+    }
+
+    private func event(_ process: MacCrabCore.ProcessInfo, file: String? = nil) -> Event {
+        Event(eventCategory: file == nil ? .process : .file, eventType: file == nil ? .start : .change,
+              eventAction: file == nil ? "exec" : "open", process: process,
+              file: file.map { FileInfo(path: $0, action: .open) })
+    }
+
+    /// Enrich and wait for the deferred signature verdict, as the lane does.
+    private func enriched(_ process: MacCrabCore.ProcessInfo) async -> CodeSignatureInfo? {
+        let enricher = EventEnricher(heavyEnrichmentPlane: HeavyEnrichmentPlane(
+            configuration: .init(operationTimeoutSeconds: 30),
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()))
+        let first = await enricher.enrich(event(process))
+        if let signature = first.process.codeSignature {
+            _ = await enricher.shutdownHeavyEnrichment()
+            return signature
+        }
+        let deadline = DispatchTime.now().uptimeNanoseconds + 30_000_000_000
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if let patch = await enricher.drainDeferredEnrichments(limit: 16).first(where: { $0.component == .codeSignature }),
+               let applied = patch.applying(to: first) {
+                _ = await enricher.shutdownHeavyEnrichment()
+                return applied.process.codeSignature
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        _ = await enricher.shutdownHeavyEnrichment()
+        return nil
+    }
+
+    /// A real ad-hoc-signed Mach-O named `name`, or nil when codesign is unavailable.
+    private func adHocBinary(named name: String, identifier: String, in directory: String) -> String? {
+        let path = directory + "/" + name
+        try? FileManager.default.removeItem(atPath: path)
+        guard (try? FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: path)) != nil else { return nil }
+        let codesign = Process()
+        codesign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        codesign.arguments = ["-f", "-s", "-", "-i", identifier, path]
+        codesign.standardOutput = FileHandle.nullDevice
+        codesign.standardError = FileHandle.nullDevice
+        guard (try? codesign.run()) != nil else { return nil }
+        codesign.waitUntilExit()
+        return codesign.terminationStatus == 0 ? path : nil
+    }
+
+    @Test("only a claim that would buy trust is re-anchored")
+    func reverificationScope() {
+        func claim(_ signer: SignerType, team: String?) -> CodeSignatureInfo {
+            CodeSignatureInfo(signerType: signer, teamId: team, signingId: "x", flags: 0x1)
+        }
+        for team in [NoiseFilter.macCrabTeamId, CredentialFence.appleDeveloperToolsTeamId,
+                     CredentialFence.googleTeamId, CredentialFence.braveTeamId] {
+            #expect(EventEnricher.needsCryptographicVerification(claim(.devId, team: team), isPlatformBinary: false), "\(team)")
+            #expect(EventEnricher.needsCryptographicVerification(claim(.appStore, team: team), isPlatformBinary: false), "\(team)")
+        }
+        #expect(!EventEnricher.needsCryptographicVerification(claim(.devId, team: "ABCDE12345"), isPlatformBinary: false))
+        #expect(!EventEnricher.needsCryptographicVerification(claim(.devId, team: nil), isPlatformBinary: false))
+        #expect(!EventEnricher.needsCryptographicVerification(claim(.adHoc, team: NoiseFilter.macCrabTeamId), isPlatformBinary: false))
+        #expect(!EventEnricher.needsCryptographicVerification(claim(.unsigned, team: NoiseFilter.macCrabTeamId), isPlatformBinary: false))
+        #expect(EventEnricher.needsCryptographicVerification(claim(.apple, team: nil), isPlatformBinary: false))
+        #expect(!EventEnricher.needsCryptographicVerification(claim(.apple, team: nil), isPlatformBinary: true))
+        #expect(!EventEnricher.needsCryptographicVerification(nil, isPlatformBinary: false))
+    }
+
+    @Test("a self-signed chain naming MacCrab's or a browser's team is carried as ad-hoc and trusts nothing")
+    func selfSignedExemptionTeamIsDowngraded() async {
+        let directory = NSTemporaryDirectory() + "maccrab-reverify-\(getpid())"
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        guard let daemon = adHocBinary(named: "maccrabd", identifier: "com.maccrab.agent", in: directory),
+              let chrome = adHocBinary(named: "Google Chrome", identifier: "com.google.Chrome", in: directory) else {
+            return  // codesign unavailable: skip rather than fail
+        }
+        // The collector saw CS_VALID without CS_ADHOC and the team the code
+        // directory names, as a self-signed certificate chain presents.
+        let claim = process(daemon, signer: .devId, teamId: NoiseFilter.macCrabTeamId, signingId: "com.maccrab.agent")
+        let verdict = await enriched(claim)
+        #expect(verdict?.signerType == .adHoc)
+        #expect(verdict?.attestedTeamId == nil)
+        if let verdict {
+            let judged = event(process(daemon, signer: .adHoc, teamId: nil, signingId: "", signature: verdict))
+            #expect(!NoiseFilter.isMacCrabProcess(event: judged, developmentEngine: false))
+            #expect(!NoiseFilter.isTrustedSigner(event: judged))
+            #expect(!AlertSink.isVerifiedMacCrabActor(processPath: daemon, event: judged, developmentEngine: false))
+            #expect(EventInsertFilter(macCrabProcessNames: ["maccrabd"]).shouldDrop(event: judged) == false)
+        }
+        let browserClaim = process(chrome, signer: .devId, teamId: "EQHXZ8M8AV", signingId: "com.google.Chrome")
+        let browserVerdict = await enriched(browserClaim)
+        #expect(browserVerdict?.signerType == .adHoc)
+        if let browserVerdict {
+            let read = event(process(chrome, signer: .adHoc, teamId: nil, signingId: "", signature: browserVerdict),
+                             file: "/Users/u/Library/Keychains/login.keychain-db")
+            #expect(EventLoop.credentialFenceFinding(
+                event: read, fence: CredentialFence(), toolName: "Claude Code", toolType: .claudeCode,
+                developmentEngine: false) != nil)
+        }
+    }
+
+    @Test("a Developer ID chain naming MacCrab's team keeps it")
+    func developerIDChainKeepsTeam() async {
+        let app = "/Applications/MacCrab.app/Contents/MacOS/MacCrab"
+        guard FileManager.default.isExecutableFile(atPath: app) else { return }
+        let codesign = Process()
+        codesign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        codesign.arguments = ["-dv", "--verbose=2", app]
+        let output = Pipe()
+        codesign.standardOutput = output
+        codesign.standardError = output
+        guard (try? codesign.run()) != nil else { return }
+        codesign.waitUntilExit()
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        guard text.contains("Developer ID Application"), text.contains("TeamIdentifier=" + NoiseFilter.macCrabTeamId) else {
+            return  // not the Developer ID build this test needs
+        }
+        let claim = process(app, signer: .devId, teamId: NoiseFilter.macCrabTeamId, signingId: "com.maccrab.app")
+        let verdict = await enriched(claim)
+        #expect(verdict?.signerType == .devId)
+        #expect(verdict?.attestedTeamId == NoiseFilter.macCrabTeamId)
+        if let verdict {
+            let judged = event(process(app, signer: .devId, teamId: nil, signingId: "", signature: verdict))
+            #expect(NoiseFilter.isMacCrabProcess(event: judged, developmentEngine: false))
+        }
+    }
+}

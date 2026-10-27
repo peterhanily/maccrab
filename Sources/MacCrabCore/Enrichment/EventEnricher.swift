@@ -343,17 +343,44 @@ public actor EventEnricher {
 
     // MARK: Heavy evidence resolution
 
+    /// Teams whose attested identity buys an exemption somewhere in the
+    /// engine: MacCrab's own, Apple's developer tools, Google's and Brave's.
+    static let exemptionTeamIds: Set<String> = [
+        NoiseFilter.macCrabTeamId, CredentialFence.appleDeveloperToolsTeamId,
+        CredentialFence.googleTeamId, CredentialFence.braveTeamId,
+    ]
+
+    /// Whether a collector classification must be re-anchored by Security
+    /// before it is believed. The kernel reports the team a code directory
+    /// names; a `com.apple.*` identifier can claim `.apple` without the
+    /// platform flag, and a chain rooted anywhere can claim Developer ID with
+    /// any team. Only a claim that would buy trust is re-checked: `.apple`
+    /// off a platform binary, and a Developer ID or App Store claim naming an
+    /// exemption team. Security classifies a chain not rooted at Apple as
+    /// `.adHoc`, and the merge carries that signer, so the team then attests
+    /// nothing downstream. The cost is one cold-cache evaluation per path.
+    static func needsCryptographicVerification(_ signature: CodeSignatureInfo?, isPlatformBinary: Bool) -> Bool {
+        guard let signature else { return false }
+        if signature.signerType == .apple { return !isPlatformBinary }
+        if signature.signerType == .devId || signature.signerType == .appStore,
+           let team = signature.teamId, exemptionTeamIds.contains(team) {
+            return true
+        }
+        return false
+    }
+
     private func resolveCodeSignature(
         for event: Event,
         binding: HeavyEnrichmentBinding
     ) async -> HeavyFieldResolution<CodeSignatureInfo> {
         let process = event.process
         let collectorSignature = process.codeSignature
-        let needsCryptographicVerification = collectorSignature?.signerType == .apple
-            && !process.isPlatformBinary
+        let needsCryptographicVerification = Self.needsCryptographicVerification(
+            collectorSignature, isPlatformBinary: process.isPlatformBinary)
 
-        // Kernel-derived ordinary classifications are complete.  The one
-        // spoofable `.apple && !platform` classification must be re-anchored.
+        // Kernel-derived ordinary classifications are complete. A spoofable
+        // `.apple && !platform` claim, or a Developer ID claim naming an
+        // exemption team, must be re-anchored first.
         if let collectorSignature, !needsCryptographicVerification {
             return .complete(collectorSignature)
         }
