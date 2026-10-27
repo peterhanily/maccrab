@@ -655,8 +655,16 @@ struct AlertSinkRecalibrationTests {
             mitreTactics: "attack.execution,attack.command_and_control"
         )
         #expect(try await storedSeverity(after: a, mustFire: true) == .high)
-        // The same alert from a rule that is suppressible is still quieted.
-        #expect(try await storedSeverity(after: a) == .low)
+        // A medium match of a class the rewrite does lower keeps its severity
+        // when its rule is must-fire, and is quieted when the rule is not.
+        let medium = alert(
+            ruleId: "d1a2b3c4-0101", ruleTitle: "Environment Variable Enumeration",
+            severity: .medium,
+            processPath: "/Users/x/proj/node_modules/.bin/postinstall",
+            mitreTactics: "attack.discovery"
+        )
+        #expect(try await storedSeverity(after: medium, mustFire: true) == .medium)
+        #expect(try await storedSeverity(after: medium) == .low)
     }
 
     @Test("the engine batch keeps must-fire alerts at full severity beside quieted ones")
@@ -671,8 +679,8 @@ struct AlertSinkRecalibrationTests {
         let event = makeEvent(processName: "esbuild", processPath: path, commandLine: path, pid: 4242)
         let mustFire = alert(ruleId: "must.fire", ruleTitle: "Must fire", severity: .high,
                              processPath: path, mitreTactics: "attack.execution")
-        let quiet = alert(ruleId: "quiet.rule", ruleTitle: "Curl Fetch Then Exec", severity: .high,
-                          processPath: path, mitreTactics: "attack.command_and_control")
+        let quiet = alert(ruleId: "quiet.rule", ruleTitle: "Environment Variable Enumeration", severity: .medium,
+                          processPath: path, mitreTactics: "attack.discovery")
         let inserted = try await sink.insertEngineBatch(
             alerts: [mustFire, quiet], event: event, mustFireRuleIds: ["must.fire"])
         let severities = Dictionary(uniqueKeysWithValues: inserted.map { ($0.ruleId, $0.severity) })
@@ -806,8 +814,10 @@ struct AlertSinkRecalibrationTests {
                       suppressible: false),
             RuleMatch(ruleId: "must.medium", ruleName: "Must fire medium", severity: .medium, description: "",
                       mitreTechniques: [], tags: ["attack.discovery"], suppressible: false),
+            // A distinct tactic, so same-evidence dedup does not fold it into
+            // the must-fire medium above.
             RuleMatch(ruleId: "quiet.medium", ruleName: "Suppressible medium", severity: .medium, description: "",
-                      mitreTechniques: [], tags: ["attack.discovery"], suppressible: true),
+                      mitreTechniques: [], tags: ["attack.collection"], suppressible: true),
         ]
         // The same transformation the lane applies to a reviewed match.
         let alerts = matches.map { match in
@@ -915,12 +925,12 @@ struct AlertSinkRecalibrationTests {
         }
     }
 
-    @Test("dev-tooling lineage via PARENT executable down-weights")
+    @Test("dev-tooling lineage via PARENT executable down-weights a medium")
     func parentLineageDevToolingDownweighted() async throws {
         let a = alert(
-            ruleTitle: "Curl Fetch Then Exec", severity: .high,
-            processPath: "/usr/bin/curl",
-            mitreTactics: "attack.command_and_control",
+            ruleTitle: "Environment Variable Enumeration", severity: .medium,
+            processPath: "/usr/bin/env",
+            mitreTactics: "attack.discovery",
             parentExecutable: "/Users/x/proj/node_modules/.bin/esbuild"
         )
         #expect(try await storedSeverity(after: a) == .low)
@@ -1028,9 +1038,9 @@ struct AlertSinkRecalibrationTests {
     // MARK: - Parent lineage lifted from the EVENT (production reorder fix)
 
     /// Proves the recalibration-after-enrichment reorder: the alert's own path is
-    /// benign (/usr/bin/curl), the dev-tool lineage lives ONLY on the triggering
+    /// benign (/usr/bin/env), the dev-tool lineage lives ONLY on the triggering
     /// event's parent. Pre-reorder, parentExecutable was nil at recalibration and
-    /// this would have stayed high.
+    /// this would have stayed medium.
     @Test("dev-tooling parent from the triggering event down-weights")
     func parentFromEventDownweights() async throws {
         let tempDir = FileManager.default.temporaryDirectory
@@ -1040,12 +1050,12 @@ struct AlertSinkRecalibrationTests {
         let store = try AlertStore(directory: tempDir.path)
         let sink = AlertSink(alertStore: store, deduplicator: AlertDeduplicator(suppressionWindow: 60))
         let a = alert(
-            ruleTitle: "Curl Fetch Then Exec", severity: .high,
-            processPath: "/usr/bin/curl",
-            mitreTactics: "attack.command_and_control"
+            ruleTitle: "Environment Variable Enumeration", severity: .medium,
+            processPath: "/usr/bin/env",
+            mitreTactics: "attack.discovery"
         )
-        let ev = makeEvent(processName: "curl", processPath: "/usr/bin/curl",
-                           commandLine: "curl http://x",
+        let ev = makeEvent(processName: "env", processPath: "/usr/bin/env",
+                           commandLine: "env",
                            parentPath: "/Users/x/proj/node_modules/.bin/esbuild")
         _ = try await sink.submit(alert: a, event: ev)
         let stored = try await store.alerts(forEventId: a.eventId)
