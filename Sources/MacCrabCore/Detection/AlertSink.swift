@@ -825,13 +825,13 @@ public actor AlertSink {
     /// the new schema v5 columns without changes, and no second
     /// insertion path is introduced (preserves Pass 2 of
     /// pre-release-audit.sh: only one place writes to alerts.db).
-    @discardableResult
     ///
     /// `collapseSameEvidence` false reserves the alert without the
     /// same-evidence dimension (its event and tactics). A detection that is
     /// not a variant of the per-event rules, such as a multi-entity graph
     /// rule anchored on an event, then neither absorbs a rule alert on that
     /// event nor is absorbed by one; its per-rule window still applies.
+    @discardableResult
     public func submit(
         alert: Alert,
         event: Event,
