@@ -3699,9 +3699,12 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// shared out per process, and a protected OPEN that finds no slot is
     /// admitted as an ordinary OPEN — never at the write family's tier.
     private let protectedOpenPerProcessCap: Int
-    /// The tail of the slice that only a process holding no slot may take,
-    /// so that however many floods share the slice, a process's first
-    /// protected OPEN still finds a slot above the writes.
+    /// The tail of the slice (64 slots at the production cap) that only a
+    /// process holding no slot may take. Floods by processes that already
+    /// hold slots cannot reach it, so a process's first protected OPEN finds
+    /// a slot there above the writes unless 64 other first-time processes
+    /// each hold one at that moment; then it is admitted as an ordinary OPEN,
+    /// like any demoted one.
     private let protectedOpenNewcomerReserve: Int
 
     private let lock = NSLock()
@@ -3784,7 +3787,7 @@ public final class ESMessageWorker: @unchecked Sendable {
         // An eighth of the top slice per process (32 of 256 at the production
         // cap), and the last quarter of it (64) for processes holding no slot:
         // six floods can hold the rest, a seventh gets one slot, and a process
-        // with none still finds one.
+        // with none still finds one unless 64 other newcomers hold the tail.
         self.protectedOpenPerProcessCap = Swift.max(1, self.topReserve / 8)
         self.protectedOpenNewcomerReserve = Swift.max(1, self.topReserve / 4)
         self.queue = DispatchQueue(label: label, qos: .userInitiated)

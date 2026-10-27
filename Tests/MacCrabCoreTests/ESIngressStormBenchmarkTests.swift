@@ -560,15 +560,15 @@ struct ESIngressStormBenchmarkTests {
             token += 1
             return UnsafeRawPointer(bitPattern: token)!
         }
-        func submitOpen(_ path: String) -> Bool {
-            // Exactly the handler's decision: reserve-eligible iff the raw path
-            // is on the static credential / agent-content allowlists.
-            worker.submit(
-                handle(),
-                lineageCritical: ESCollector.usesWorkerReserve(
-                    eventType: Self.openType, protectedOpen: ESCollector.isProtectedOpenPath(path)
-                ),
-                eventType: Self.openType
+        func submitOpen(_ path: String, pid: pid_t = 43) -> Bool {
+            // Exactly the handler's hand-off: the raw path is classified on the
+            // callback, the file client's tier policy picks the tier, and a
+            // protected OPEN carries its source process for the slice.
+            let protected = ESCollector.isProtectedOpenPath(path)
+            let tier = Self.fileClientTiers.tier(eventType: Self.openType, protectedOpen: protected)
+            return worker.submit(
+                handle(), lineageCritical: tier.lineageCritical, writeFamily: tier.writeFamily,
+                protectedOpen: protected, sourceProcessID: pid, eventType: Self.openType
             )
         }
         var ordinaryAccepted = 0
@@ -580,7 +580,8 @@ struct ESIngressStormBenchmarkTests {
         let decoyAccepted = submitOpen("/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt")
         let ordinaryRefused = !submitOpen("/Users/x/project/README.md")
         let refusedByType = worker.backpressureDroppedByEventType()
-        print("BENCH worker_protected_open ordinary_accepted=\(ordinaryAccepted)/\(cap) ssh=\(sshAccepted) agent_config=\(agentConfigAccepted) decoy=\(decoyAccepted) ordinary_refused_after=\(ordinaryRefused) dropped_by_type=\(refusedByType)")
+        let sliceInFlight = worker.protectedOpenInFlightCount()
+        print("BENCH worker_protected_open ordinary_accepted=\(ordinaryAccepted)/\(cap) ssh=\(sshAccepted) agent_config=\(agentConfigAccepted) decoy=\(decoyAccepted) ordinary_refused_after=\(ordinaryRefused) slice_in_flight=\(sliceInFlight) dropped_by_type=\(refusedByType)")
         for _ in 0..<cap { gate.signal() }
         worker.shutdownAndDrain()
         #expect(ordinaryAccepted == 3072, "ordinary OPENs stop at the non-reserved budget")
@@ -589,6 +590,8 @@ struct ESIngressStormBenchmarkTests {
         #expect(decoyAccepted, "a honeyfile OPEN must never be shed behind the OPEN flood")
         #expect(ordinaryRefused, "the flood itself is what gets refused, and it is counted")
         #expect(refusedByType[Self.openType] == 1025)
+        #expect(sliceInFlight == 3, "each protected OPEN held a top-slice slot, as the collector's hand-off gives it")
+        #expect(worker.protectedOpenSliceDemoted() == 0)
     }
 
     // MARK: 4. Coalesced repeat cost on the worker
