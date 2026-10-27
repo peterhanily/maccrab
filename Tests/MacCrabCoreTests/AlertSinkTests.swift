@@ -600,14 +600,14 @@ struct AlertSinkTests {
 @Suite("AlertSink FP recalibration")
 struct AlertSinkRecalibrationTests {
 
-    private func storedSeverity(after alert: Alert) async throws -> Severity {
+    private func storedSeverity(after alert: Alert, mustFire: Bool = false) async throws -> Severity {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-recal-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let store = try AlertStore(directory: tempDir.path)
         let sink = AlertSink(alertStore: store, deduplicator: AlertDeduplicator(suppressionWindow: 60))
-        _ = try await sink.submit(alert: alert)
+        _ = try await sink.submit(alert: alert, mustFire: mustFire)
         let stored = try await store.alerts(forEventId: alert.eventId)
         return stored.first?.severity ?? alert.severity
     }
@@ -627,6 +627,60 @@ struct AlertSinkRecalibrationTests {
             description: "d", mitreTactics: mitreTactics, mitreTechniques: nil,
             suppressed: false, parentExecutable: parentExecutable
         )
+    }
+
+    @Test("a must-fire rule under a dev-tooling path keeps its severity")
+    func mustFirePreservedOnDevToolingPath() async throws {
+        let a = alert(
+            ruleId: "d1a2b3c4-0042-4000-a000-000000000042", ruleTitle: "Reverse Shell Command Detected",
+            severity: .high,
+            processPath: "/Users/x/proj/node_modules/.bin/postinstall",
+            mitreTactics: "attack.execution,attack.command_and_control"
+        )
+        #expect(try await storedSeverity(after: a, mustFire: true) == .high)
+        // The same alert from a rule that is suppressible is still quieted.
+        #expect(try await storedSeverity(after: a) == .low)
+    }
+
+    @Test("the engine batch keeps must-fire alerts at full severity beside quieted ones")
+    func batchKeepsMustFire() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-recal-batch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try AlertStore(directory: tempDir.path)
+        let sink = AlertSink(alertStore: store, deduplicator: AlertDeduplicator(suppressionWindow: 60))
+        let path = "/Users/x/proj/node_modules/.bin/esbuild"
+        let event = makeEvent(processName: "esbuild", processPath: path, commandLine: path, pid: 4242)
+        let mustFire = alert(ruleId: "must.fire", ruleTitle: "Must fire", severity: .high,
+                             processPath: path, mitreTactics: "attack.execution")
+        let quiet = alert(ruleId: "quiet.rule", ruleTitle: "Curl Fetch Then Exec", severity: .high,
+                          processPath: path, mitreTactics: "attack.command_and_control")
+        let inserted = try await sink.insertEngineBatch(
+            alerts: [mustFire, quiet], event: event, mustFireRuleIds: ["must.fire"])
+        let severities = Dictionary(uniqueKeysWithValues: inserted.map { ($0.ruleId, $0.severity) })
+        #expect(severities["must.fire"] == .high)
+        #expect(severities["quiet.rule"] == .low)
+    }
+
+    @Test("a critical under a dev-tooling path is never lowered")
+    func criticalPreservedOnDevToolingPath() async throws {
+        // A reverse shell from a package's postinstall, run by node from the
+        // user's version manager: the supply-chain scenario itself.
+        let a = alert(
+            ruleId: "d1a2b3c4-0042-4000-a000-000000000042", ruleTitle: "Reverse Shell Command Detected",
+            severity: .critical,
+            processPath: "/Users/x/proj/node_modules/left-pad/postinstall.sh",
+            mitreTactics: "attack.execution,attack.command_and_control",
+            parentExecutable: "/Users/x/.nvm/versions/node/v20.0.0/bin/node"
+        )
+        #expect(try await storedSeverity(after: a) == .critical)
+        // Stored at that severity it still clears the default notification floor.
+        var gate = NotificationGate()
+        guard case .deliver = gate.evaluate(alert: a) else {
+            Issue.record("a critical reverse shell must notify at the default floor")
+            return
+        }
     }
 
     @Test("dev-tooling attack-chain high → low (visible, not hidden)")

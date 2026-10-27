@@ -3001,6 +3001,9 @@ enum EventLoop {
             // Batch-collect alerts from rule matches, then insert as a single
             // transaction to reduce SQLite I/O from O(n) transactions to O(1).
             var batchAlerts: [Alert] = []
+            // Rules that declared `suppressible: false`; the sink never lowers
+            // their severity for a development-tooling path.
+            var batchMustFire: Set<String> = []
             var batchContexts: [String: EngineAlertCandidateContext] = [:]
             var batchFanOut: [String: (Alert) async -> Void] = [:]
 
@@ -3073,6 +3076,7 @@ enum EventLoop {
                     alert.severity = evidence.bumpedSeverity(from: alert.severity)
                 }
 
+                if !match.suppressible { batchMustFire.insert(match.ruleId) }
                 batchAlerts.append(alert)
                 batchContexts[alert.id] = EngineAlertCandidateContext(
                     match: match,
@@ -3403,7 +3407,8 @@ enum EventLoop {
                 do {
                     persistedAlerts = try await state.alertSink.insertEngineBatch(
                         alerts: batchAlerts,
-                        event: event
+                        event: event,
+                        mustFireRuleIds: batchMustFire
                     )
                 } catch let partial as AlertBatchInsertFailure {
                     // AlertStore uses reserve-bounded transactions, so a

@@ -279,7 +279,8 @@ public actor AlertSink {
     ///      (self-tamper is covered by SelfDefense, not behavioral alerts).
     ///   2. Trusted development-tooling lineage — routine bundler/runtime
     ///      behavior (esbuild/workerd/node fetch+exec, etc.).
-    /// PRESERVED at full severity (must-fire) on dev paths: credential-access,
+    /// PRESERVED at full severity (must-fire) on dev paths: every critical,
+    /// every rule that declared `suppressible: false`, credential-access,
     /// keychain, honeyfile, and the catastrophic-if-real classes a malicious
     /// package is a primary delivery vector for — impact (ransomware / disk
     /// wipe), defense-evasion (SIP / Gatekeeper disable), persistence (launchd),
@@ -294,7 +295,8 @@ public actor AlertSink {
     private func recalibrateDevToolingSeverity(
         _ alert: Alert,
         event: Event? = nil,
-        filePath: String? = nil
+        filePath: String? = nil,
+        mustFire: Bool = false
     ) -> Alert {
         func downweighted(_ note: String) -> Alert {
             var copy = alert
@@ -339,8 +341,14 @@ public actor AlertSink {
             }
         }
 
-        // (4) Development-tooling lineage — high/critical only.
-        guard alert.severity >= .high else { return alert }
+        // (4) Development-tooling lineage — HIGH only. A critical keeps its
+        // severity: a dev path is where a malicious package runs, not a
+        // signature, and the engine treats an untrusted critical as must-fire
+        // everywhere else. So does a rule that declared itself
+        // `suppressible: false`, whatever its severity. Both were stored LOW
+        // here, under the default notification floor, for a reverse shell
+        // spawned from node_modules.
+        guard alert.severity == .high, !mustFire else { return alert }
         guard CampaignDetector.isDevelopmentToolingPath(alert.processPath)
             || CampaignDetector.isDevelopmentToolingPath(alert.parentExecutable) else { return alert }
         let tac = (alert.mitreTactics ?? "").lowercased()
@@ -816,7 +824,8 @@ public actor AlertSink {
         alert: Alert,
         event: Event,
         dedupProcessPath: String? = nil,
-        journalAdmission: EventJournalAdmission? = nil
+        journalAdmission: EventJournalAdmission? = nil,
+        mustFire: Bool = false
     ) async throws -> Bool {
         guard beginAlertAdmission(offers: 1) else { return false }
         defer { finishAlertAdmission() }
@@ -846,7 +855,8 @@ public actor AlertSink {
                 precomputedSnapshot: preparedTrigger.snapshotJSON
             ),
             event: event,
-            filePath: event.file?.path
+            filePath: event.file?.path,
+            mustFire: mustFire
         )
         let reservation: AlertDeduplicator.EmissionReservation
         switch await deduplicator.reserveEmission(
@@ -916,7 +926,7 @@ public actor AlertSink {
     /// alert row carries the originating machine — useful for fleet
     /// dashboards consolidating multiple hosts' alerts.
     @discardableResult
-    public func submit(alert: Alert) async throws -> Bool {
+    public func submit(alert: Alert, mustFire: Bool = false) async throws -> Bool {
         guard beginAlertAdmission(offers: 1) else { return false }
         defer { finishAlertAdmission() }
         // v1.18: built-in maccrab.* rule mute / severity override.
@@ -924,7 +934,7 @@ public actor AlertSink {
         let dedupKey = settled.processPath ?? settled.ruleId
         // v1.19.3 FP recalibration (no event context — parent comes from the
         // alert as-supplied by the caller, if any).
-        let enriched = recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: settled))
+        let enriched = recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: settled), mustFire: mustFire)
         let reservation: AlertDeduplicator.EmissionReservation
         switch await deduplicator.reserveEmission(
             ruleId: enriched.ruleId,
@@ -976,12 +986,15 @@ public actor AlertSink {
     /// triggering Event once and have every alert enriched. Callers that
     /// already pre-populated attribution on the alert (or have no Event
     /// context, like test harnesses) pass nil and the alerts go through
-    /// unchanged.
+    /// unchanged. `mustFireRuleIds` names the rules whose matches declared
+    /// `suppressible: false`; their alerts keep their severity through the
+    /// dev-tooling recalibration.
     @discardableResult
     public func insertEngineBatch(
         alerts: [Alert],
         event: Event? = nil,
-        journalAdmission: EventJournalAdmission? = nil
+        journalAdmission: EventJournalAdmission? = nil,
+        mustFireRuleIds: Set<String> = []
     ) async throws -> [Alert] {
         guard !alerts.isEmpty else { return [] }
         guard beginAlertAdmission(offers: alerts.count) else { return [] }
@@ -1008,7 +1021,7 @@ public actor AlertSink {
                     alert: $0,
                     event: event,
                     precomputedSnapshot: trigger.snapshotJSON
-                ), event: event, filePath: event.file?.path)
+                ), event: event, filePath: event.file?.path, mustFire: mustFireRuleIds.contains($0.ruleId))
             }
             // Reserve both dedup dimensions before writing, but do not commit
             // their windows yet. A failed batch rolls every reservation back.
@@ -1033,7 +1046,10 @@ public actor AlertSink {
             toInsert = kept
         } else {
             preparedTrigger = nil
-            toInsert = alerts.map { recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: $0)) }
+            toInsert = alerts.map {
+                recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: $0),
+                                              mustFire: mustFireRuleIds.contains($0.ruleId))
+            }
         }
         // The whole batch can collapse into an already-emitted direct alert on
         // the same evidence; don't hand an empty array to the store.

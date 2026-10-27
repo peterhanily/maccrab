@@ -248,7 +248,8 @@ enum SignalHandlers {
                                 // retroactive scan's earlier manual dedup folded in.
                                 let inserted: Bool
                                 do {
-                                    inserted = try await state.alertSink.submit(alert: alert, event: event)
+                                    inserted = try await state.alertSink.submit(
+                                        alert: alert, event: event, mustFire: !match.suppressible)
                                 } catch {
                                     await StorageErrorTracker.shared.recordAlertError(error)
                                     continue
