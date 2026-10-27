@@ -110,28 +110,36 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
         return isPersistenceLocation(path)
     }
 
-    /// Spends one budget token on a protected event and stamps its lane: nil
-    /// for an event that is not a candidate, true when it was admitted to the
-    /// priority lane, false when the budget refused it, which `refusals`
-    /// counts. A refused OPEN is stamped for the file lane; any other refused
-    /// event already rides it. OPENs spend their own budget: an `open()` loop
-    /// on the caller's own `.env` must not use up the tokens a real
-    /// LaunchAgent write needs.
+    /// Spends one of the source process's budget tokens on a protected event
+    /// and stamps its lane: nil for an event that is not a candidate, true
+    /// when it was admitted to the priority lane, false when the budget
+    /// refused it, which `refusals` counts. A refused OPEN is stamped for the
+    /// file lane; any other refused event already rides it. The budgets are
+    /// per process and per class (`PerProcessLaneBudgets`): an `open()` loop
+    /// on the caller's own `.env` spends only that process's OPEN tokens, so
+    /// it can take neither another process's credential read nor its own
+    /// LaunchAgent write off the priority lane, and a decoy, keychain or
+    /// wallet read spends a class of its own that the loop cannot reach.
     @discardableResult
     static func stampProtectedLane(
         _ event: inout Event,
-        budget: ProtectedFileLaneBudget,
-        openBudget: ProtectedFileLaneBudget,
+        budgets: PerProcessLaneBudgets,
         nowNanos: UInt64,
         refusals: ESSeqTracker
     ) -> Bool? {
         guard isProtectedFileCandidate(event) else { return nil }
-        let isOpen = event.eventAction == "open"
-        if (isOpen ? openBudget : budget).admit(nowNanos: nowNanos) {
+        let kind: PerProcessLaneBudgets.Kind
+        if event.eventAction == "open" {
+            kind = ESCollector.highValueOpenPathMarkers.matches(event.file?.path ?? "") ? .highValueOpen : .open
+        } else {
+            kind = .write
+        }
+        let pid = pid_t(truncatingIfNeeded: event.process.pid)
+        if budgets.admit(kind, pid: pid, nowNanos: nowNanos) {
             event.enrichments[protectedFileLaneEnrichmentKey] = protectedFileLanePriority
             return true
         }
-        if isOpen {
+        if kind != .write {
             event.enrichments[protectedFileLaneEnrichmentKey] = protectedFileLaneFile
         }
         refusals.recordProtectedLaneRefused()
@@ -167,21 +175,15 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
 }
 
 /// How many protected events (`EventPipelineLane.isProtectedFileCandidate`)
-/// one ES worker may put on the priority lane: a token bucket of `capacity`
-/// refilled at `refillPerSecond`. The priority lane is a drop-oldest buffer
-/// that also carries exec/fork/exit, and a `chmod 755` loop, a write loop on
-/// the caller's own `~/.zshrc` or an `open()` loop on its own `.env` costs
-/// nothing to run, so an unbounded class would let it evict lineage. Past the
-/// budget an event rides the file lane. Owned by one serial `ESMessageWorker`
-/// queue, so it needs no lock.
+/// one source process may put on the priority lane through one ES worker: a
+/// token bucket of `capacity` refilled at `refillPerSecond`
+/// (`PerProcessLaneBudgets` holds one per process and class). The priority
+/// lane is a drop-oldest buffer that also carries exec/fork/exit, and a
+/// `chmod 755` loop, a write loop on the caller's own `~/.zshrc` or an
+/// `open()` loop on its own `.env` costs nothing to run, so an unbounded
+/// class would let it evict lineage. Past the budget an event rides the file
+/// lane. Owned by one serial `ESMessageWorker` queue, so it needs no lock.
 final class ProtectedFileLaneBudget {
-    /// The OPEN budget: credential and agent-content reads come in bursts
-    /// (every `git` reads `~/.gitconfig`), and even this rate is a small
-    /// fraction of what the priority lane drains.
-    static func forProtectedOpens() -> ProtectedFileLaneBudget {
-        ProtectedFileLaneBudget(capacity: 256, refillPerSecond: 64)
-    }
-
     private let capacity: Double
     private let refillPerNanosecond: Double
     private var tokens: Double
@@ -258,6 +260,58 @@ final class BoundedBudgetTable<Key: Hashable> {
         if budgets.count >= capacity, let key = oldestKey {
             budgets[key] = nil
         }
+    }
+}
+
+/// One ES worker's protected-lane budgets, keyed by the source process and
+/// split by class: the write family and SETMODE (64 burst, 16 a second), the
+/// static credential / agent-content OPENs (256 and 64: every `git` reads
+/// `~/.gitconfig`), and the high-value OPENs — a deployed decoy or honeyfile,
+/// a keychain, a wallet — which get their own tokens so that a process which
+/// drained its OPEN budget on its own `.gitconfig` cannot then read a decoy
+/// or the login keychain off the priority lane, while a loop on a decoy is
+/// still bounded. A process never seen before starts with full buckets; the
+/// tables hold `trackedProcesses` pids each and evict idle ones first.
+/// Owned by one serial `ESMessageWorker` queue, so it needs no lock.
+final class PerProcessLaneBudgets {
+    enum Kind {
+        case write
+        case open
+        case highValueOpen
+    }
+
+    typealias Shape = (capacity: Int, refillPerSecond: Double)
+
+    private let write: BoundedBudgetTable<pid_t>
+    private let open: BoundedBudgetTable<pid_t>
+    private let highValueOpen: BoundedBudgetTable<pid_t>
+
+    init(trackedProcesses: Int = 512,
+         write: Shape = (capacity: 64, refillPerSecond: 16),
+         open: Shape = (capacity: 256, refillPerSecond: 64),
+         highValueOpen: Shape = (capacity: 64, refillPerSecond: 16)) {
+        func table(_ shape: Shape) -> BoundedBudgetTable<pid_t> {
+            BoundedBudgetTable(capacity: trackedProcesses) {
+                ProtectedFileLaneBudget(capacity: shape.capacity, refillPerSecond: shape.refillPerSecond)
+            }
+        }
+        self.write = table(write)
+        self.open = table(open)
+        self.highValueOpen = table(highValueOpen)
+    }
+
+    /// Spends one of `pid`'s tokens of `kind` at `nowNanos` (monotonic).
+    func admit(_ kind: Kind, pid: pid_t, nowNanos: UInt64) -> Bool {
+        switch kind {
+        case .write: return write.admit(key: pid, nowNanos: nowNanos)
+        case .open: return open.admit(key: pid, nowNanos: nowNanos)
+        case .highValueOpen: return highValueOpen.admit(key: pid, nowNanos: nowNanos)
+        }
+    }
+
+    /// The most processes any one class tracks; a test aid.
+    var trackedProcessCount: Int {
+        Swift.max(write.count, open.count, highValueOpen.count)
     }
 }
 

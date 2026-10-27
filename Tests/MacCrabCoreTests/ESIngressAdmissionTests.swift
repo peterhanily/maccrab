@@ -532,10 +532,11 @@ struct ESIngressAdmissionTests {
 @Suite("Protected file events ride the priority lane within a budget")
 struct ProtectedFileLaneTests {
     private func fileEvent(
-        _ action: String, _ path: String, stamped: Bool = false, enrichments: [String: String] = [:]
+        _ action: String, _ path: String, pid: Int32 = 77, stamped: Bool = false,
+        enrichments: [String: String] = [:]
     ) -> Event {
         let process = MacCrabCore.ProcessInfo(
-            pid: 77, ppid: 1, rpid: 1, name: "node", executable: "/usr/local/bin/node",
+            pid: pid, ppid: 1, rpid: 1, name: "node", executable: "/usr/local/bin/node",
             commandLine: "node", args: [], workingDirectory: "/", userId: 501, userName: "u",
             groupId: 20, startTime: Date())
         return Event(eventCategory: .file, eventType: .change, eventAction: action,
@@ -587,12 +588,12 @@ struct ProtectedFileLaneTests {
 
     @Test("the worker's stamp admits a protected event within the budget and sends it to the file lane past it")
     func stampAdmitsThenRefuses() {
-        let budget = ProtectedFileLaneBudget(capacity: 2, refillPerSecond: 0)
-        let openBudget = ProtectedFileLaneBudget(capacity: 1, refillPerSecond: 0)
+        let budgets = PerProcessLaneBudgets(
+            write: (capacity: 2, refillPerSecond: 0), open: (capacity: 1, refillPerSecond: 0),
+            highValueOpen: (capacity: 1, refillPerSecond: 0))
         let tracker = ESSeqTracker()
         func stamp(_ event: inout Event, at nanos: UInt64) -> Bool? {
-            EventPipelineLane.stampProtectedLane(
-                &event, budget: budget, openBudget: openBudget, nowNanos: nanos, refusals: tracker)
+            EventPipelineLane.stampProtectedLane(&event, budgets: budgets, nowNanos: nanos, refusals: tracker)
         }
         let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
         var first = fileEvent("write", plist), second = fileEvent("write", plist), third = fileEvent("write", plist)
@@ -626,46 +627,152 @@ struct ProtectedFileLaneTests {
         let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
         // An OPEN flood spends only the OPEN budget...
         do {
-            let budget = ProtectedFileLaneBudget(capacity: 64, refillPerSecond: 16)
-            let openBudget = ProtectedFileLaneBudget.forProtectedOpens()
+            let budgets = PerProcessLaneBudgets()
             let tracker = ESSeqTracker()
             var refused = 0
             for i in 0..<10_000 {
                 var open = fileEvent("open", "/tmp/x/.env")
                 if EventPipelineLane.stampProtectedLane(
-                    &open, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i), refusals: tracker
+                    &open, budgets: budgets, nowNanos: 1_000 + UInt64(i), refusals: tracker
                 ) == false { refused += 1 }
             }
             #expect(refused == 10_000 - 256, "an OPEN burst gets the OPEN burst capacity")
             #expect(tracker.protectedLaneRefusedTotal() == UInt64(refused))
             var write = fileEvent("write", plist)
             #expect(EventPipelineLane.stampProtectedLane(
-                &write, budget: budget, openBudget: openBudget, nowNanos: 11_001, refusals: tracker) == true)
+                &write, budgets: budgets, nowNanos: 11_001, refusals: tracker) == true)
         }
         // ...and a write flood spends only the write budget.
         do {
-            let budget = ProtectedFileLaneBudget(capacity: 64, refillPerSecond: 16)
-            let openBudget = ProtectedFileLaneBudget.forProtectedOpens()
+            let budgets = PerProcessLaneBudgets()
             let tracker = ESSeqTracker()
             for i in 0..<1_000 {
                 var write = fileEvent("write", plist)
                 EventPipelineLane.stampProtectedLane(
-                    &write, budget: budget, openBudget: openBudget, nowNanos: 1_000 + UInt64(i), refusals: tracker)
+                    &write, budgets: budgets, nowNanos: 1_000 + UInt64(i), refusals: tracker)
             }
             var credential = fileEvent("open", "/Users/x/.ssh/id_ed25519")
             #expect(EventPipelineLane.stampProtectedLane(
-                &credential, budget: budget, openBudget: openBudget, nowNanos: 2_001, refusals: tracker) == true)
+                &credential, budgets: budgets, nowNanos: 2_001, refusals: tracker) == true)
         }
+    }
+
+    @Test("budgets are keyed by the source process: one process's open() loop cannot take another's credential read off the priority lane")
+    func budgetsAreKeyedPerProcess() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var admitted = 0
+        for i in 0..<300 {
+            var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 77)
+            if EventPipelineLane.stampProtectedLane(
+                &open, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker) == true {
+                admitted += 1
+            }
+        }
+        #expect(admitted == 256, "the loop spends only its own process's OPEN budget")
+        var victim = fileEvent("open", "/Users/x/.aws/credentials", pid: 78)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &victim, budgets: budgets, nowNanos: t0 + 300, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: victim) == .priority,
+                "another process's credential read keeps the priority lane")
+        var own = fileEvent("open", "/Users/x/.aws/credentials", pid: 77)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &own, budgets: budgets, nowNanos: t0 + 301, refusals: tracker) == false)
+        #expect(EventPipelineLane.finalLane(for: own) == .file,
+                "the looping process's own further ordinary reads ride the file lane until its budget refills")
+        var later = fileEvent("open", "/Users/x/.aws/credentials", pid: 77)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &later, budgets: budgets, nowNanos: t0 + 1_000_000_301, refusals: tracker) == true,
+                "64 tokens a second refill")
+        #expect(tracker.protectedLaneRefusedTotal() == 45)
+    }
+
+    @Test("a decoy, keychain or wallet read has a budget of its own, so an exhausted OPEN budget cannot demote it, and a loop on a decoy is still bounded")
+    func highValueOpensHaveTheirOwnBudget() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        for i in 0..<300 {
+            var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 77)
+            EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker)
+        }
+        for path in ["/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt",
+                     "/Users/x/Library/Keychains/login.keychain-db",
+                     "/Users/x/Library/Application Support/Electrum/wallets/default_wallet",
+                     "/Users/x/Documents/passwords_backup.csv"] {
+            var read = fileEvent("open", path, pid: 77)
+            #expect(EventPipelineLane.stampProtectedLane(
+                &read, budgets: budgets, nowNanos: t0 + 400, refusals: tracker) == true, "\(path)")
+            #expect(EventPipelineLane.finalLane(for: read) == .priority, "\(path)")
+        }
+        var decoyAdmitted = 0
+        for i in 0..<100 {
+            var read = fileEvent("open", "/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt", pid: 77)
+            if EventPipelineLane.stampProtectedLane(
+                &read, budgets: budgets, nowNanos: t0 + 500 + UInt64(i), refusals: tracker) == true {
+                decoyAdmitted += 1
+            }
+        }
+        #expect(decoyAdmitted == 60, "the high-value class is a budget too: 64 reads, four already spent")
+    }
+
+    @Test("every high-value marker is one of the protected OPEN markers, so the class is a subset and cannot drift")
+    func highValueMarkersAreProtectedMarkers() {
+        #expect(!ESCollector.highValueReadPathSubstrings.isEmpty)
+        for marker in ESCollector.highValueReadPathSubstrings {
+            #expect(ESCollector.credentialReadPathSubstrings.contains(marker), "\(marker) is not a credential-read marker")
+            let path = "/Users/x" + (marker.hasPrefix("/") ? "" : "/") + marker + "tail"
+            #expect(ESCollector.isProtectedOpenPath(path))
+            #expect(ESCollector.highValueOpenPathMarkers.matches(path))
+        }
+        for path in ["/Users/x/.ssh/id_ed25519", "/Users/x/.aws/credentials",
+                     "/Users/x/.claude/settings.json", "/Users/x/project/.env"] {
+            #expect(!ESCollector.highValueOpenPathMarkers.matches(path), "\(path) is an ordinary protected OPEN")
+        }
+    }
+
+    @Test("the write-family budget is per process too, and the tables are bounded")
+    func writeBudgetIsPerProcessAndBounded() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
+        var admitted = 0
+        for i in 0..<100 {
+            var write = fileEvent("write", plist, pid: 77)
+            if EventPipelineLane.stampProtectedLane(
+                &write, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker) == true {
+                admitted += 1
+            }
+        }
+        #expect(admitted == 64)
+        var other = fileEvent("write", plist, pid: 78)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &other, budgets: budgets, nowNanos: t0 + 100, refusals: tracker) == true,
+                "another process's persistence write is not behind the loop's budget")
+        for pid in 1_000..<2_000 {
+            var write = fileEvent("write", plist, pid: Int32(pid))
+            EventPipelineLane.stampProtectedLane(
+                &write, budgets: budgets, nowNanos: t0 + 200 + UInt64(pid), refusals: tracker)
+        }
+        #expect(budgets.trackedProcessCount <= 512, "a fork bomb cannot grow the tables")
+        var fresh = fileEvent("write", plist, pid: 3_000)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &fresh, budgets: budgets, nowNanos: t0 + 5_000, refusals: tracker) == true,
+                "a process never seen before starts with a full budget")
     }
 
     @Test("the worker stamps through the budget and counts its refusals")
     func workerStampsAndCountsRefusals() throws {
         let tracker = ESSeqTracker()
-        let budget = ProtectedFileLaneBudget(capacity: 0, refillPerSecond: 0)
+        let budgets = PerProcessLaneBudgets(
+            write: (capacity: 0, refillPerSecond: 0), open: (capacity: 0, refillPerSecond: 0),
+            highValueOpen: (capacity: 0, refillPerSecond: 0))
         for _ in 0..<2 {
             var write = fileEvent("write", "/Users/x/Library/LaunchAgents/com.evil.plist")
             #expect(EventPipelineLane.stampProtectedLane(
-                &write, budget: budget, openBudget: budget, nowNanos: 1, refusals: tracker) == false)
+                &write, budgets: budgets, nowNanos: 1, refusals: tracker) == false)
         }
         #expect(tracker.protectedLaneRefusedTotal() == 2)
         tracker.reset()
@@ -679,7 +786,7 @@ struct ProtectedFileLaneTests {
         let body = collector[start.upperBound..<end.lowerBound]
         #expect(body.contains("EventPipelineLane.stampProtectedLane("))
         #expect(body.contains("refusals: tracker"))
-        #expect(!body.contains("protectedLaneBudget.admit("), "the budget is spent only through the stamp")
+        #expect(!body.contains("laneBudgets.admit("), "the budget is spent only through the stamp")
         let timers = try String(contentsOf: root.appendingPathComponent(
             "Sources/MacCrabAgentKit/DaemonTimers.swift"), encoding: .utf8)
         #expect(timers.components(separatedBy: "\"es_protected_lane_refused_total\": esProtectedLaneRefused").count == 3,

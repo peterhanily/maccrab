@@ -1594,6 +1594,46 @@ public final class ESCollector: @unchecked Sendable {
         protectedOpenPathMarkers.matches(path)
     }
 
+    /// The protected OPENs that are a finding in themselves rather than a
+    /// step: a read of a deployed decoy or honeyfile, of a keychain, or of a
+    /// wallet. The worker budgets these separately from the other credential
+    /// and agent-content reads (`PerProcessLaneBudgets`), so a process that
+    /// spent its OPEN budget on its own `.gitconfig` still has its decoy and
+    /// keychain reads delivered on the priority lane. Every entry is one of
+    /// `credentialReadPathSubstrings`; a test pins the subset.
+    static let highValueReadPathSubstrings: [String] = [
+        "Application Support/MacCrab/decoys/",
+        "/Library/Application Support/Passwords.backup",
+        "/Documents/passwords_backup.csv",
+        "/.gcp-service-account.json.bak",
+        "/.gitconfig.bak",
+        "/Library/Keychains/",
+        "/MetaMask/", "/Phantom/", "/Coinbase Wallet/",
+        "/1Password/", "/Bitwarden/", ".kdbx",
+        "Application Support/Electrum/wallets/",
+        "Application Support/Exodus/exodus.wallet/",
+        "Application Support/Atomic/Local Storage/",
+        "Application Support/Coinomi/",
+        "Application Support/Daedalus/",
+        "Application Support/monero-project/",
+        "Application Support/Trezor Suite/",
+        "Application Support/Ledger Live/",
+        "Library/Containers/io.trezor.TrezorSuite/",
+        "/.ethereum/keystore/",
+        "/Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn",
+        "/Local Extension Settings/bfnaelmomeimhlpmgjnjophhpkkoljpa",
+        "/Local Extension Settings/hnfanknocfeofbddgcijnmhnfnkdnaad",
+        "/Local Extension Settings/fhbohimaelbohpjbbldcngcnapndodjp",
+        "/Local Extension Settings/egjidjbpglichdcondbcbdnbeeppgdph",
+        "/Local Extension Settings/lmenefjjbnabbnchedhpaichpfphndbg",
+        "/Local Extension Settings/efbglgofoippbgcjepnhiblaibcnclgk",
+    ]
+
+    /// `highValueReadPathSubstrings` as a byte matcher, for the worker's lane stamp.
+    static let highValueOpenPathMarkers = ESPathMarkerSet(
+        substrings: highValueReadPathSubstrings, suffixes: []
+    )
+
     /// Whether a retained message may use the slots the worker holds in
     /// reserve: lineage and the write family by type, plus a protected OPEN.
     /// Ordinary OPENs (and SIGNAL) never can — they are the flood sources.
@@ -1748,8 +1788,7 @@ public final class ESCollector: @unchecked Sendable {
         // the locked tracker for the heartbeat.
         let coalescer = ESRepeatCoalescer()
         // Same ownership as the coalescer: this worker's serial queue only.
-        let protectedLaneBudget = ProtectedFileLaneBudget()
-        let protectedOpenLaneBudget = ProtectedFileLaneBudget.forProtectedOpens()
+        let laneBudgets = PerProcessLaneBudgets()
         let worker = ESMessageWorker(
             maxInFlight: maxInFlight,
             label: "com.maccrab.es.message-worker.\(label)",
@@ -1765,8 +1804,7 @@ public final class ESCollector: @unchecked Sendable {
                     deliveryTelemetry: deliveryTelemetry,
                     tracker: tracker,
                     coalescer: coalescer,
-                    protectedLaneBudget: protectedLaneBudget,
-                    protectedOpenLaneBudget: protectedOpenLaneBudget,
+                    laneBudgets: laneBudgets,
                     logger: logger
                 )
             },
@@ -2489,8 +2527,7 @@ public final class ESCollector: @unchecked Sendable {
         deliveryTelemetry: EventCollectorBufferTelemetry,
         tracker: ESSeqTracker,
         coalescer: ESRepeatCoalescer,
-        protectedLaneBudget: ProtectedFileLaneBudget,
-        protectedOpenLaneBudget: ProtectedFileLaneBudget,
+        laneBudgets: PerProcessLaneBudgets,
         logger: Logger
     ) {
         autoreleasepool {
@@ -2601,11 +2638,11 @@ public final class ESCollector: @unchecked Sendable {
 
             // An exec-granting SETMODE, a file event at a persistence location
             // or a credential / agent-content OPEN rides the priority lane
-            // while the budget lasts, out of reach of a file-lane flood, and the
-            // file lane past it (`EventPipelineLane.finalLane(for:)`).
+            // while its source process's budget lasts, out of reach of a
+            // file-lane flood, and the file lane past it
+            // (`EventPipelineLane.finalLane(for:)`).
             EventPipelineLane.stampProtectedLane(
-                &event, budget: protectedLaneBudget, openBudget: protectedOpenLaneBudget,
-                nowNanos: box.startNanos, refusals: tracker
+                &event, budgets: laneBudgets, nowNanos: box.startNanos, refusals: tracker
             )
 
             let result = continuation.yield(event)
