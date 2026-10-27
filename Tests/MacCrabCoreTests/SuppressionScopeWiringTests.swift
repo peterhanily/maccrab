@@ -444,30 +444,132 @@ struct SuppressionScopeWiringTests {
 
     @Test("a binding rebuilt from the returned event equals the one its patch carries")
     func bindingEqualityIgnoresImage() throws {
-        let (directory, path, image) = try imageFixture()
-        defer { try? FileManager.default.removeItem(atPath: directory) }
-        let started = Date(timeIntervalSince1970: 1_750_000_000)
-        let raw = execEvent(path: path, pid: 999_993, started: started, image: image)
-        var returned = raw
-        returned.enrichments.removeValue(forKey: HeavyEnrichmentFileIdentity.execImageEnrichmentKey)
-        let carried = HeavyEnrichmentBinding(event: raw)
-        let rebuilt = HeavyEnrichmentBinding(event: returned)
-        #expect(carried.execImageIdentity == image)
+        /// One event's binding fields; a copy with one field changed names
+        /// another event.
+        struct Fields {
+            var id = UUID()
+            var pid: Int32 = 999_993
+            var started = Date(timeIntervalSince1970: 1_750_000_000)
+            var executable = "/usr/local/bin/tool"
+            var uid: UInt32 = 501
+            var filePath: String? = "/private/tmp/out"
+            var fileSize: UInt64? = 64
+            var image: HeavyEnrichmentFileIdentity? = HeavyEnrichmentFileIdentity(
+                deviceID: 1, inodeNumber: 2, sizeBytes: 3, modificationSeconds: 4,
+                modificationNanoseconds: 5, statusChangeSeconds: 6, statusChangeNanoseconds: 7)
+
+            var event: Event {
+                let process = MacCrabCore.ProcessInfo(
+                    pid: pid, ppid: 1, rpid: pid, name: "tool", executable: executable,
+                    commandLine: executable, args: [executable], workingDirectory: "/",
+                    userId: uid, userName: "u", groupId: 20, startTime: started)
+                var enrichments: [String: String] = [:]
+                if let image {
+                    enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey] = image.serialized
+                }
+                return Event(id: id, timestamp: started, eventCategory: .file, eventType: .change,
+                             eventAction: "write", process: process,
+                             file: filePath.map { FileInfo(path: $0, size: fileSize, action: .write) },
+                             enrichments: enrichments)
+            }
+            var binding: HeavyEnrichmentBinding { HeavyEnrichmentBinding(event: event) }
+        }
+        let base = Fields()
+        func changing(_ change: (inout Fields) -> Void) -> HeavyEnrichmentBinding {
+            var fields = base
+            change(&fields)
+            return fields.binding
+        }
+
+        let carried = base.binding
+        var stripped = base
+        stripped.image = nil
+        let rebuilt = stripped.binding
+        #expect(carried.execImageIdentity == base.image)
         #expect(rebuilt.execImageIdentity == nil)
         // The deferred buffer compares these two for an event it retained only
         // as a rejected identity; the image routes work and is not identity.
         #expect(carried == rebuilt)
         #expect(carried.hashValue == rebuilt.hashValue)
-        #expect(carried.matches(returned))
-        // Every field that names the event still counts.
-        #expect(carried != HeavyEnrichmentBinding(event: execEvent(path: path, pid: 999_994, started: started, image: image)))
-        #expect(carried != HeavyEnrichmentBinding(event: execEvent(path: path, pid: 999_993, started: started, image: image)),
-                "another event of the same process")
-        // A new stored field must join the hand-written equality as well.
-        #expect(Mirror(reflecting: carried).children.compactMap(\.label) == [
-            "eventID", "processID", "processStartTime", "executablePath", "userID",
-            "filePath", "eventFileSize", "execImageIdentity",
-        ])
+        #expect(carried.matches(stripped.event))
+
+        // Each field that names the event, changed alone, makes another
+        // binding for equality and for hashing alike, so leaving it out of
+        // the hand-written == or hash(into:) fails here.
+        let changed: [String: HeavyEnrichmentBinding] = [
+            "eventID": changing { $0.id = UUID() },
+            "processID": changing { $0.pid += 1 },
+            "processStartTime": changing { $0.started.addTimeInterval(1) },
+            "executablePath": changing { $0.executable += "-other" },
+            "userID": changing { $0.uid += 1 },
+            "filePath": changing { $0.filePath = "/private/tmp/other" },
+            "eventFileSize": changing { $0.fileSize = 65 },
+        ]
+        for (field, binding) in changed {
+            #expect(binding != carried, "\(field) is left out of ==")
+            #expect(binding.hashValue != carried.hashValue, "\(field) is left out of hash(into:)")
+        }
+        // The table names every stored field but the image, so a new field
+        // has to join it, and the hand-written equality, as well.
+        let stored = Mirror(reflecting: carried).children.compactMap(\.label)
+        #expect(stored.last == "execImageIdentity")
+        #expect(Set(changed.keys) == Set(stored.dropLast()))
+        #expect(stored.count == changed.count + 1)
+    }
+
+    @Test("the collector records the image, and only the engine's decision hands the manager a digest")
+    func imageAndDigestSourcePins() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let collector = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Collectors/ESCollector.swift"), encoding: .utf8)
+        for line in ["if let image = esFileIdentity(execEvent.target.pointee.executable) {",
+                     "exec.enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey] = image.serialized",
+                     "if let image = esFileIdentity(forkEvent.child.pointee.executable) {",
+                     "fork.enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey] = image.serialized"] {
+            #expect(collector.contains(line), "\(line)")
+        }
+        // Every call, outside the manager itself, whose arguments give the
+        // suppression manager a digest.
+        var callers: [String] = []
+        let sources = root.appendingPathComponent("Sources")
+        let files = try #require(FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil))
+        for case let url as URL in files
+        where url.pathExtension == "swift" && url.lastPathComponent != "SuppressionManager.swift" {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            for name in ["isSuppressed(", "matchingSuppression("] {
+                var from = text.startIndex
+                while let call = text.range(of: name, range: from..<text.endIndex) {
+                    let arguments = Self.arguments(in: text, from: call.upperBound)
+                    if arguments.contains("processSHA256:") {
+                        callers.append(url.lastPathComponent + ": " + arguments)
+                    }
+                    from = call.upperBound
+                }
+            }
+        }
+        #expect(callers.count == 1, "\(callers)")
+        #expect(callers.first?.hasPrefix("DaemonState.swift: ") == true, "\(callers)")
+        #expect(callers.first?.contains("processSHA256: SuppressionManager.imageBoundSHA256(event.process.hashes)") == true)
+        let state = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/DaemonState.swift"), encoding: .utf8)
+        let decision = try #require(state.range(of: "static func isSuppressed(_ match: RuleMatch, event: Event, manager: SuppressionManager) async -> Bool {"))
+        #expect(state[decision.upperBound...].prefix(400).contains("processSHA256: SuppressionManager.imageBoundSHA256(event.process.hashes),"))
+    }
+
+    /// The text between a call's opening parenthesis and its matching close.
+    private static func arguments(in text: String, from start: String.Index) -> Substring {
+        var depth = 1
+        var index = start
+        while index < text.endIndex {
+            switch text[index] {
+            case "(": depth += 1
+            case ")":
+                depth -= 1
+                if depth == 0 { return text[start..<index] }
+            default: break
+            }
+            index = text.index(after: index)
+        }
+        return text[start...]
     }
 
     @Test("an image identity survives its enrichment round trip and rejects damage")
