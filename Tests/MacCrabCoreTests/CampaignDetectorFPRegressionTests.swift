@@ -124,6 +124,21 @@ struct CampaignDetectorFPRegressionTests {
         #expect(quiet.isEmpty)
     }
 
+    @Test("the lane records the vendor signature on the campaign summary")
+    func laneRecordsVendorSignature() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let eventLoop = try String(
+            contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"), encoding: .utf8)
+        let start = try #require(eventLoop.range(of: "let alertSummary = CampaignDetector.AlertSummary("))
+        let end = try #require(eventLoop.range(
+            of: "await state.campaignDetector.processAlert(alertSummary)", range: start.upperBound..<eventLoop.endIndex))
+        #expect(eventLoop[start.upperBound..<end.lowerBound]
+            .contains("isVendorSignedUpdater: NoiseFilter.isVendorSignedUpdater(event: event)"))
+        #expect(eventLoop.components(separatedBy: "CampaignDetector.AlertSummary(").count == 2,
+                "the lane builds campaign summaries in one place")
+    }
+
     @Test("Sparkle Autoupdate path is allowlisted from coordinated attack")
     func sparkleAutoupdateSilent() async {
         let detector = CampaignDetector()
