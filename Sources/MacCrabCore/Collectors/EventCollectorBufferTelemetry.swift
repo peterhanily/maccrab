@@ -176,26 +176,26 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
 
 /// A token bucket of `capacity` refilled at `refillPerSecond`, the unit of
 /// every protected-lane budget (`PerProcessLaneBudgets` holds one per source
-/// process and class, and one per class for the whole worker). The priority
-/// lane is a drop-oldest buffer that also carries exec/fork/exit, and a
-/// `chmod 755` loop, a write loop on the caller's own `~/.zshrc` or an
-/// `open()` loop on its own `.env` costs nothing to run, so an unbounded
-/// class would let it evict lineage; a fork-and-open storm is as cheap, so
-/// the per-process buckets alone would not bound the lane either. Past a
-/// budget an event rides the file lane. Owned by one serial
-/// `ESMessageWorker` queue, so it needs no lock.
+/// process and class with an allowance beside it, and a shared bucket and a
+/// newcomer allowance per class for the whole worker) and of the signal
+/// budgets (`SignalRateLimiter`). The priority lane is a drop-oldest buffer
+/// that also carries exec/fork/exit, and a `chmod 755` loop, a write loop on
+/// the caller's own `~/.zshrc` or an `open()` loop on its own `.env` costs
+/// nothing to run, so an unbounded class would let it evict lineage; a
+/// fork-and-open storm is as cheap, so the per-process buckets alone would
+/// not bound the lane either. Past a budget an event rides the file lane.
+/// Unlocked: its owner serializes access (one serial `ESMessageWorker`
+/// queue, or `SignalRateLimiter`'s lock).
 final class ProtectedFileLaneBudget: BoundedTableEntry {
     private let capacity: Double
     private let refillPerNanosecond: Double
     private var tokens: Double
     private var lastNanos: UInt64?
 
-    /// `initialTokens` defaults to a full bucket; a table inserting a key over
-    /// a live one hands it a single token instead.
-    init(capacity: Int = 64, refillPerSecond: Double = 16, initialTokens: Int? = nil) {
+    init(capacity: Int = 64, refillPerSecond: Double = 16) {
         self.capacity = Double(capacity)
         self.refillPerNanosecond = refillPerSecond / 1_000_000_000
-        self.tokens = Double(Swift.min(capacity, initialTokens ?? capacity))
+        self.tokens = Double(capacity)
     }
 
     /// Spends one token if one is available at `nowNanos` (monotonic).
@@ -231,23 +231,26 @@ protocol BoundedTableEntry: AnyObject {
 }
 
 /// A fixed number of keyed entries, so a budget drained by one source cannot
-/// refuse another's. Once `capacity` keys are held, a new key first makes
-/// room by dropping every key idle for `idleEvictionNanos`; that full scan
-/// runs at most once per quarter idle window, so a table held full costs a
-/// new key a hash probe, not a scan. If no room is made, the policy decides.
-/// A lane table frees an eighth of itself in one pass, least recently seen
-/// first, and each key that then takes a slot a live entry left is marked
-/// `churned`: it is no first sighting, and its entry is built as the maker
-/// sees fit for a key that arrived under churn (one token, no allowance). A
-/// signal table refuses the key outright. Either way, cycling through fresh
-/// keys cannot buy a fresh bucket each time. Churn is forgotten once an idle
-/// window passes with no live eviction, so a storm that has stopped does not
-/// mark later newcomers. Unlocked — the owner serializes access (the ES
-/// worker's queue, or `SignalRateLimiter`'s lock).
+/// refuse another's. A new key takes a clean free slot if there is one (never
+/// held, or left by an idle key). When there is none, it first makes room by
+/// dropping every key idle for `idleEvictionNanos`; that full scan runs at
+/// most once per quarter idle window, so a table held full costs a new key a
+/// hash probe, not a scan. If the table is still full, the policy decides. A
+/// lane table frees an eighth of itself in one pass, idle keys first and then
+/// the most recently inserted live ones, so a storm of new keys recycles its
+/// own slots and never an established key's. A key that takes a slot a live
+/// entry left is `churned`: it is no first sighting, and its entry is built
+/// as the maker sees fit for a key that arrived under churn. A signal table
+/// refuses the key outright. Either way, cycling through fresh keys cannot
+/// buy a first sighting each time. Churn is forgotten once an idle window
+/// passes with no live entry recycled (`churnIsForgotten`), and the slots
+/// live entries left are clean again. Unlocked — the owner serializes access
+/// (the ES worker's queue, or `SignalRateLimiter`'s lock).
 final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
     enum OverflowPolicy {
-        /// Recycle the least recently seen live entries; newcomers in their slots are `churned`.
-        case evictLeastRecentlyUsed
+        /// Recycle a batch, idle entries first and then the most recently
+        /// inserted live ones; newcomers in the slots live entries left are `churned`.
+        case evictNewestFirst
         /// Fail closed: refuse the newcomer until a key has gone idle.
         case refuseWhenFull
     }
@@ -261,21 +264,30 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
         let churned: Bool
     }
 
+    private struct Slot {
+        let entry: Entry
+        /// Insertion order: a batch recycles the newest live slots first.
+        let inserted: UInt64
+    }
+
     private let capacity: Int
     private let idleEvictionNanos: UInt64
     private let policy: OverflowPolicy
     private let make: (_ churned: Bool) -> Entry
-    private var entries: [Key: Entry] = [:]
-    /// Live entries recycled but not yet replaced; the inserts that take
-    /// their slots are the churned ones.
+    private var slots: [Key: Slot] = [:]
+    private var insertions: UInt64 = 0
+    /// Free slots live entries left that no newcomer has taken yet; never
+    /// more than the free slots. A newcomer takes a clean free slot first, so
+    /// these mark it only once every free slot is one of them.
     private var liveEvictionCredits = 0
-    private var lastLiveEvictionNanos: UInt64 = 0
+    /// When a batch last recycled a live entry; nil if none ever has.
+    private var lastLiveEvictionNanos: UInt64?
     private var lastSweepNanos: UInt64?
     /// Full scans for idle keys run so far; a test aid.
     private(set) var sweepCount = 0
 
     init(capacity: Int, idleEvictionNanos: UInt64 = 60_000_000_000,
-         policy: OverflowPolicy = .evictLeastRecentlyUsed,
+         policy: OverflowPolicy = .evictNewestFirst,
          make: @escaping (_ churned: Bool) -> Entry) {
         self.capacity = Swift.max(1, capacity)
         self.idleEvictionNanos = idleEvictionNanos
@@ -285,45 +297,53 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
 
     /// The key's entry, inserting it if absent as the policy allows.
     func lookup(key: Key, nowNanos: UInt64) -> Lookup {
-        if let entry = entries[key] {
-            return Lookup(entry: entry, firstSighting: false, churned: false)
+        if let slot = slots[key] {
+            return Lookup(entry: slot.entry, firstSighting: false, churned: false)
         }
-        if liveEvictionCredits > 0, nowNanos > lastLiveEvictionNanos,
-           nowNanos - lastLiveEvictionNanos >= idleEvictionNanos {
+        if churnIsForgotten(nowNanos: nowNanos) {
             liveEvictionCredits = 0
         }
-        if entries.count >= capacity {
-            if sweepIsDue(nowNanos: nowNanos) {
-                evictIdle(nowNanos: nowNanos)
-            }
-            if entries.count >= capacity {
-                switch policy {
-                case .refuseWhenFull:
-                    return Lookup(entry: nil, firstSighting: false, churned: false)
-                case .evictLeastRecentlyUsed:
-                    liveEvictionCredits += evictLeastRecentlySeenBatch(nowNanos: nowNanos)
-                    lastLiveEvictionNanos = nowNanos
-                }
+        if cleanFreeSlots == 0, sweepIsDue(nowNanos: nowNanos) {
+            evictIdle(nowNanos: nowNanos)
+        }
+        if slots.count >= capacity {
+            switch policy {
+            case .refuseWhenFull:
+                return Lookup(entry: nil, firstSighting: false, churned: false)
+            case .evictNewestFirst:
+                evictBatch(nowNanos: nowNanos)
             }
         }
-        let churned = liveEvictionCredits > 0
+        let churned = cleanFreeSlots == 0
         if churned { liveEvictionCredits -= 1 }
         let entry = make(churned)
-        entries[key] = entry
+        insertions &+= 1
+        slots[key] = Slot(entry: entry, inserted: insertions)
         return Lookup(entry: entry, firstSighting: !churned, churned: churned)
+    }
+
+    /// Whether no batch has recycled a live entry for an idle window, or
+    /// ever: the table is not churning, so a key that arrived while it was
+    /// need no longer be treated as a churned one.
+    func churnIsForgotten(nowNanos: UInt64) -> Bool {
+        guard let last = lastLiveEvictionNanos else { return true }
+        return nowNanos >= last && nowNanos - last >= idleEvictionNanos
     }
 
     /// The key's entry if it is tracked, never inserting it.
     func existing(key: Key) -> Entry? {
-        entries[key]
+        slots[key]?.entry
     }
 
     /// Whether `key` is tracked, without inserting it.
     func contains(key: Key) -> Bool {
-        entries[key] != nil
+        slots[key] != nil
     }
 
-    var count: Int { entries.count }
+    var count: Int { slots.count }
+
+    /// Free slots no live entry left.
+    private var cleanFreeSlots: Int { capacity - slots.count - liveEvictionCredits }
 
     private func isIdle(_ seen: UInt64?, nowNanos: UInt64) -> Bool {
         let seen = seen ?? 0
@@ -340,37 +360,43 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
     private func evictIdle(nowNanos: UInt64) {
         lastSweepNanos = nowNanos
         sweepCount += 1
-        let idle = entries.compactMap { isIdle($0.value.lastSeenNanos, nowNanos: nowNanos) ? $0.key : nil }
-        for key in idle { entries[key] = nil }
+        let idle = slots.compactMap { isIdle($0.value.entry.lastSeenNanos, nowNanos: nowNanos) ? $0.key : nil }
+        for key in idle { slots[key] = nil }
     }
 
-    /// Frees an eighth of the table in one pass, least recently seen first,
-    /// so the next inserts find room without scanning; returns how many of
-    /// the entries it dropped were live.
-    private func evictLeastRecentlySeenBatch(nowNanos: UInt64) -> Int {
+    /// Frees an eighth of the table in one pass, idle entries first and then
+    /// the most recently inserted live ones, so the next inserts find room
+    /// without scanning. Each live entry it drops is a credit, and only a
+    /// batch that dropped one restarts the churn window.
+    private func evictBatch(nowNanos: UInt64) {
         let batch = Swift.max(1, capacity / 8)
-        let oldest = entries.map { (key: $0.key, seen: $0.value.lastSeenNanos) }
-            .sorted { ($0.seen ?? 0) < ($1.seen ?? 0) }
+        let chosen = slots
+            .map { (key: $0.key, idle: isIdle($0.value.entry.lastSeenNanos, nowNanos: nowNanos), inserted: $0.value.inserted) }
+            .sorted { $0.idle != $1.idle ? $0.idle : $0.inserted > $1.inserted }
             .prefix(batch)
         var live = 0
-        for item in oldest {
-            entries[item.key] = nil
-            if !isIdle(item.seen, nowNanos: nowNanos) { live += 1 }
+        for item in chosen {
+            slots[item.key] = nil
+            if !item.idle { live += 1 }
         }
-        return live
+        if live > 0 {
+            liveEvictionCredits += live
+            lastLiveEvictionNanos = nowNanos
+        }
     }
 }
 
 /// One process's standing in one class of `PerProcessLaneBudgets`: its own
-/// bucket, and — unless it entered the table over a live entry — the small
-/// allowance it may spend without touching the worker's shared bucket.
+/// bucket, and the small allowance it may spend without touching the
+/// worker's shared bucket. A process that arrived under churn has no
+/// allowance until the table's churn is forgotten.
 final class ProcessLaneBudget: BoundedTableEntry {
     let bucket: ProtectedFileLaneBudget
-    let exempt: ProtectedFileLaneBudget?
+    var allowance: ProtectedFileLaneBudget?
 
-    init(bucket: ProtectedFileLaneBudget, exempt: ProtectedFileLaneBudget?) {
+    init(bucket: ProtectedFileLaneBudget, allowance: ProtectedFileLaneBudget?) {
         self.bucket = bucket
-        self.exempt = exempt
+        self.allowance = allowance
     }
 
     var lastSeenNanos: UInt64? { bucket.lastSeenNanos }
@@ -383,37 +409,61 @@ final class ProcessLaneBudget: BoundedTableEntry {
 /// process which drained its OPEN budget on its own `.gitconfig` cannot then
 /// read a decoy or the login keychain off the priority lane.
 ///
-/// Three bounds hold in every class, and the guarantee they give is this: a
-/// process's protected event is admitted to the priority lane if its own
-/// bucket has a token and either its allowance or the worker's shared bucket
-/// has one.
+/// In every class a process's protected event is admitted to the priority
+/// lane when its own bucket has a token and a payer has one.
 ///
-/// 1. A bucket per source process (write 64 then 16 a second, OPEN 256 then
-///    64, high-value 64 then 16): a loop spends only its own tokens, so it
-///    can take neither another process's credential read nor its own
-///    LaunchAgent write off the lane. Peeked, not spent, until the event is
-///    admitted, so a shared-bucket refusal costs the process nothing.
-/// 2. A bucket per worker (write 256 then 64, OPEN 1,024 then 256,
-///    high-value 256 then 64), spent only after a process's own bucket had a
-///    token, bounds what any number of processes can put on the lane in all.
-/// 3. An allowance per process that the shared bucket never sees: its first
-///    event, then four more refilling at one every four seconds. The shared
-///    bucket refills at four processes' worth, so four or five long-lived
-///    loopers on their own alert-free files hold it at zero for as long as
-///    they run; the allowance is what still carries an uninvolved process's
-///    credential read, or that of an IDE or shell tracked for an hour, past
-///    them. A process that entered the table over a live entry (the table
-///    was full of live processes) gets no allowance and one token, so the
-///    allowance cannot be multiplied by rotating pids.
+/// 1. Its own bucket (write 64 then 16 a second, OPEN 256 then 64,
+///    high-value 64 then 16): a loop spends only its own tokens, so it can
+///    take neither another process's credential read nor its own LaunchAgent
+///    write off the lane. Peeked, not spent, until a payer pays, so a refusal
+///    costs the process nothing.
+/// 2. The payer. A process seen for the first time pays nothing for its
+///    first event. A tracked process pays from its allowance (four events,
+///    refilling one every four seconds, that nothing else can spend) and then
+///    from the worker's shared bucket (write 256 then 64 a second, OPEN 1,024
+///    then 256, high-value 256 then 64). The shared bucket refills at four
+///    processes' worth, so four or five long-lived loopers on their own
+///    alert-free files hold it at zero for as long as they run; the
+///    allowance is what still carries the credential read of an uninvolved
+///    process, or of an IDE or shell tracked for an hour, past them.
+/// 3. Churn. When the table is full of live processes, a batch recycles the
+///    most recently inserted ones (`BoundedTable`), so a storm of fresh pids
+///    recycles its own slots, never an established process's. A process that
+///    takes such a slot is a newcomer under churn. Its first event is paid by
+///    the newcomer allowance (128, refilling 32 a second), which no tracked
+///    process can spend, and its later events by the shared bucket. It gets
+///    its own allowance once the table's churn is forgotten (an idle window,
+///    60 s, with no live process recycled). Rotating pids therefore
+///    multiplies neither the allowance nor the free first event.
 ///
-/// Hence a storm of fresh processes puts at most (live processes, at most
-/// `trackedProcesses`) times the allowance of five, plus the shared bucket's
-/// burst and refill, on the lane; the rest rides the file lane, counted as
-/// refused. The residual: a process seen for the first time while more than
-/// `trackedProcesses` live processes are storming is one of the churned
-/// ones, and is bounded by the shared bucket like the storm. The tables
-/// evict idle processes first. Owned by one serial `ESMessageWorker` queue,
-/// so it needs no lock.
+/// Per class and per worker, over any T seconds:
+///
+///     admitted ≤ B + R × T
+///     B = P × (1 + A) + S + N
+///     R = s + n + P × a + P × (1 + A) / W
+///
+/// where P is the tracked processes (512), A the allowance (4) and a its
+/// refill (0.25/s), S the shared capacity and s its refill, N the newcomer
+/// allowance (128) and n its refill (32/s), and W the idle window (60 s). The
+/// last term is the turnover: a slot can take a newly allowanced process at
+/// most once per idle window. That is B = 3,712 and R ≈ 459/s for OPEN, and
+/// B = 2,944 and R ≈ 267/s for write and for high-value. The rest rides the
+/// file lane, counted as refused.
+///
+/// What remains:
+/// - A process's first event of a class is refused only while the class's
+///   table is churning (it recycled a live process within the last idle
+///   window, which takes P distinct processes with an event of the class in
+///   the idle window before that) and new processes have been arriving
+///   faster than n for longer than N / (rate − n) seconds.
+/// - A live process loses its standing only if at least P − P/8 (448) live
+///   processes were inserted before it.
+/// - A newcomer under churn depends on the shared bucket for its later events
+///   until churn is forgotten.
+/// - A process with no event of a class for an idle window may be forgotten
+///   and is a newcomer again.
+///
+/// Owned by one serial `ESMessageWorker` queue, so it needs no lock.
 final class PerProcessLaneBudgets {
     enum Kind {
         case write
@@ -423,12 +473,18 @@ final class PerProcessLaneBudgets {
 
     typealias Shape = (capacity: Int, refillPerSecond: Double)
 
-    private let write: BoundedTable<pid_t, ProcessLaneBudget>
-    private let open: BoundedTable<pid_t, ProcessLaneBudget>
-    private let highValueOpen: BoundedTable<pid_t, ProcessLaneBudget>
-    private let writeAggregate: ProtectedFileLaneBudget
-    private let openAggregate: ProtectedFileLaneBudget
-    private let highValueOpenAggregate: ProtectedFileLaneBudget
+    /// One class: its per-process table, the worker's shared bucket, and the
+    /// newcomer allowance that only a churned newcomer's first event spends.
+    private struct Lane {
+        let processes: BoundedTable<pid_t, ProcessLaneBudget>
+        let shared: ProtectedFileLaneBudget
+        let newcomers: ProtectedFileLaneBudget
+    }
+
+    private let write: Lane
+    private let open: Lane
+    private let highValueOpen: Lane
+    private let allowance: Shape
 
     init(trackedProcesses: Int = 512,
          write: Shape = (capacity: 64, refillPerSecond: 16),
@@ -437,49 +493,57 @@ final class PerProcessLaneBudgets {
          writeAggregate: Shape = (capacity: 256, refillPerSecond: 64),
          openAggregate: Shape = (capacity: 1_024, refillPerSecond: 256),
          highValueOpenAggregate: Shape = (capacity: 256, refillPerSecond: 64),
-         allowance: Shape = (capacity: 4, refillPerSecond: 0.25)) {
-        func table(_ shape: Shape) -> BoundedTable<pid_t, ProcessLaneBudget> {
-            BoundedTable(capacity: trackedProcesses, policy: .evictLeastRecentlyUsed) { churned in
-                ProcessLaneBudget(
-                    bucket: ProtectedFileLaneBudget(capacity: shape.capacity, refillPerSecond: shape.refillPerSecond,
-                                                    initialTokens: churned ? 1 : nil),
-                    exempt: churned ? nil : ProtectedFileLaneBudget(
-                        capacity: allowance.capacity, refillPerSecond: allowance.refillPerSecond))
-            }
-        }
+         allowance: Shape = (capacity: 4, refillPerSecond: 0.25),
+         newcomers: Shape = (capacity: 128, refillPerSecond: 32)) {
         func bucket(_ shape: Shape) -> ProtectedFileLaneBudget {
             ProtectedFileLaneBudget(capacity: shape.capacity, refillPerSecond: shape.refillPerSecond)
         }
-        self.write = table(write)
-        self.open = table(open)
-        self.highValueOpen = table(highValueOpen)
-        self.writeAggregate = bucket(writeAggregate)
-        self.openAggregate = bucket(openAggregate)
-        self.highValueOpenAggregate = bucket(highValueOpenAggregate)
+        func lane(_ own: Shape, _ shared: Shape) -> Lane {
+            Lane(processes: BoundedTable(capacity: trackedProcesses, policy: .evictNewestFirst) { churned in
+                     ProcessLaneBudget(bucket: bucket(own), allowance: churned ? nil : bucket(allowance))
+                 },
+                 shared: bucket(shared),
+                 newcomers: bucket(newcomers))
+        }
+        self.write = lane(write, writeAggregate)
+        self.open = lane(open, openAggregate)
+        self.highValueOpen = lane(highValueOpen, highValueOpenAggregate)
+        self.allowance = allowance
     }
 
     /// Whether `pid`'s event of `kind` at `nowNanos` (monotonic) rides the
-    /// priority lane: its own bucket must have a token, and then its
-    /// allowance or the worker's shared bucket pays. The own token is spent
-    /// only on admission.
+    /// priority lane: its own bucket must have a token, and then a first
+    /// sighting is free, a churned newcomer's first event is paid by the
+    /// newcomer allowance, and anything else by the process's allowance; the
+    /// shared bucket pays whatever those cannot. The own token is spent only
+    /// on admission.
     func admit(_ kind: Kind, pid: pid_t, nowNanos: UInt64) -> Bool {
-        let own: BoundedTable<pid_t, ProcessLaneBudget>
-        let shared: ProtectedFileLaneBudget
+        let lane: Lane
         switch kind {
-        case .write: (own, shared) = (write, writeAggregate)
-        case .open: (own, shared) = (open, openAggregate)
-        case .highValueOpen: (own, shared) = (highValueOpen, highValueOpenAggregate)
+        case .write: lane = write
+        case .open: lane = open
+        case .highValueOpen: lane = highValueOpen
         }
-        let lookup = own.lookup(key: pid, nowNanos: nowNanos)
+        let lookup = lane.processes.lookup(key: pid, nowNanos: nowNanos)
         guard let process = lookup.entry, process.bucket.hasToken(nowNanos: nowNanos) else { return false }
-        let exempt = lookup.firstSighting || process.exempt?.admit(nowNanos: nowNanos) == true
-        guard exempt || shared.admit(nowNanos: nowNanos) else { return false }
-        return process.bucket.admit(nowNanos: nowNanos)
+        if process.allowance == nil, lane.processes.churnIsForgotten(nowNanos: nowNanos) {
+            process.allowance = ProtectedFileLaneBudget(
+                capacity: allowance.capacity, refillPerSecond: allowance.refillPerSecond)
+        }
+        let paid: Bool
+        if lookup.firstSighting {
+            paid = true
+        } else if lookup.churned {
+            paid = lane.newcomers.admit(nowNanos: nowNanos) || lane.shared.admit(nowNanos: nowNanos)
+        } else {
+            paid = process.allowance?.admit(nowNanos: nowNanos) == true || lane.shared.admit(nowNanos: nowNanos)
+        }
+        return paid && process.bucket.admit(nowNanos: nowNanos)
     }
 
     /// The most processes any one class tracks; a test aid.
     var trackedProcessCount: Int {
-        Swift.max(write.count, open.count, highValueOpen.count)
+        Swift.max(write.processes.count, open.processes.count, highValueOpen.processes.count)
     }
 }
 
