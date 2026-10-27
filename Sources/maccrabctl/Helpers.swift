@@ -184,8 +184,8 @@ extension MacCrabCtl {
 
         Response:
           suppress <rule> <path>  Allowlist a process for a rule (v1 API)
-          unsuppress <rule> [path]  Remove a suppression (all paths if no path given)
-          suppression list        Show all configured suppressions
+          unsuppress <rule> [path]  Remove the rule's entries, for one path or all (sudo)
+          suppression list        List a legacy v1 store (otherwise see allow list)
           allow <sub>             Allowlist v2 — TTL, scope, audit
                                   (add / list / remove / stats)
           actions list            Show default + per-rule response actions
