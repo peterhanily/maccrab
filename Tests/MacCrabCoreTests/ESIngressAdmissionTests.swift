@@ -757,10 +757,72 @@ struct ProtectedFileLaneTests {
                 &write, budgets: budgets, nowNanos: t0 + 200 + UInt64(pid), refusals: tracker)
         }
         #expect(budgets.trackedProcessCount <= 512, "a fork bomb cannot grow the tables")
+        // Ten seconds on, the worker's write aggregate has refilled and a
+        // process never seen before starts with a full budget of its own.
         var fresh = fileEvent("write", plist, pid: 3_000)
         #expect(EventPipelineLane.stampProtectedLane(
-            &fresh, budgets: budgets, nowNanos: t0 + 5_000, refusals: tracker) == true,
+            &fresh, budgets: budgets, nowNanos: t0 + 10_000_000_000, refusals: tracker) == true,
                 "a process never seen before starts with a full budget")
+    }
+
+    @Test("the worker's aggregate bounds what many fresh processes can put on the priority lane: a fork-and-open storm gets the aggregate burst and no more")
+    func aggregateBoundsAForkAndOpenStorm() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var admitted = 0
+        var offered = 0
+        for pid in 10_000..<10_600 {
+            for i in 0..<256 {
+                var open = fileEvent("open", "/tmp/x/.gitconfig", pid: Int32(pid))
+                offered += 1
+                if EventPipelineLane.stampProtectedLane(
+                    &open, budgets: budgets, nowNanos: t0 + UInt64(offered), refusals: tracker) == true {
+                    admitted += 1
+                }
+            }
+        }
+        #expect(offered == 153_600)
+        #expect(admitted == 1_024, "600 fresh processes each within their own budget still get only the worker's OPEN aggregate")
+        #expect(tracker.protectedLaneRefusedTotal() == UInt64(offered - admitted), "every refusal is counted")
+        // The aggregate is spent only after a process's own bucket admits, so
+        // a looping process cannot drain it for the others.
+        var loopAdmitted = 0
+        for i in 0..<2_000 {
+            var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 20_000)
+            if EventPipelineLane.stampProtectedLane(
+                &open, budgets: budgets, nowNanos: t0 + 1_000_000_000 + UInt64(i), refusals: tracker) == true {
+                loopAdmitted += 1
+            }
+        }
+        #expect(loopAdmitted == 256, "a second later the aggregate has 256 tokens back and one process can take at most its own 256")
+        var other = fileEvent("open", "/Users/x/.aws/credentials", pid: 20_001)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &other, budgets: budgets, nowNanos: t0 + 2_000_000_000, refusals: tracker) == true,
+                "another process's credential read is admitted from the refilled aggregate")
+    }
+
+    @Test("the worker's write aggregate bounds a fork-and-write storm at persistence locations")
+    func aggregateBoundsAForkAndWriteStorm() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let plist = "/Users/x/Library/LaunchAgents/com.evil.plist"
+        var admitted = 0
+        var offered = 0
+        for pid in 30_000..<31_000 {
+            for _ in 0..<64 {
+                var write = fileEvent("write", plist, pid: Int32(pid))
+                offered += 1
+                if EventPipelineLane.stampProtectedLane(
+                    &write, budgets: budgets, nowNanos: t0 + UInt64(offered), refusals: tracker) == true {
+                    admitted += 1
+                }
+            }
+        }
+        #expect(offered == 64_000)
+        #expect(admitted == 256, "1,000 fresh processes each within their own budget still get only the worker's write aggregate")
+        #expect(tracker.protectedLaneRefusedTotal() == UInt64(offered - admitted))
     }
 
     @Test("the worker stamps through the budget and counts its refusals")

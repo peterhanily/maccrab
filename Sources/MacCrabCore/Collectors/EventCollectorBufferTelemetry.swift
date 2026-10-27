@@ -174,15 +174,16 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
     }
 }
 
-/// How many protected events (`EventPipelineLane.isProtectedFileCandidate`)
-/// one source process may put on the priority lane through one ES worker: a
-/// token bucket of `capacity` refilled at `refillPerSecond`
-/// (`PerProcessLaneBudgets` holds one per process and class). The priority
+/// A token bucket of `capacity` refilled at `refillPerSecond`, the unit of
+/// every protected-lane budget (`PerProcessLaneBudgets` holds one per source
+/// process and class, and one per class for the whole worker). The priority
 /// lane is a drop-oldest buffer that also carries exec/fork/exit, and a
 /// `chmod 755` loop, a write loop on the caller's own `~/.zshrc` or an
 /// `open()` loop on its own `.env` costs nothing to run, so an unbounded
-/// class would let it evict lineage. Past the budget an event rides the file
-/// lane. Owned by one serial `ESMessageWorker` queue, so it needs no lock.
+/// class would let it evict lineage; a fork-and-open storm is as cheap, so
+/// the per-process buckets alone would not bound the lane either. Past a
+/// budget an event rides the file lane. Owned by one serial
+/// `ESMessageWorker` queue, so it needs no lock.
 final class ProtectedFileLaneBudget {
     private let capacity: Double
     private let refillPerNanosecond: Double
@@ -263,16 +264,26 @@ final class BoundedBudgetTable<Key: Hashable> {
     }
 }
 
-/// One ES worker's protected-lane budgets, keyed by the source process and
-/// split by class: the write family and SETMODE (64 burst, 16 a second), the
-/// static credential / agent-content OPENs (256 and 64: every `git` reads
-/// `~/.gitconfig`), and the high-value OPENs — a deployed decoy or honeyfile,
-/// a keychain, a wallet — which get their own tokens so that a process which
-/// drained its OPEN budget on its own `.gitconfig` cannot then read a decoy
-/// or the login keychain off the priority lane, while a loop on a decoy is
-/// still bounded. A process never seen before starts with full buckets; the
-/// tables hold `trackedProcesses` pids each and evict idle ones first.
-/// Owned by one serial `ESMessageWorker` queue, so it needs no lock.
+/// One ES worker's protected-lane budgets, split by class: the write family
+/// and SETMODE, the static credential / agent-content OPENs (every `git`
+/// reads `~/.gitconfig`), and the high-value OPENs — a deployed decoy or
+/// honeyfile, a keychain, a wallet — which get tokens of their own so that a
+/// process which drained its OPEN budget on its own `.gitconfig` cannot then
+/// read a decoy or the login keychain off the priority lane.
+///
+/// Each class is bounded twice. A bucket per source process (write 64 then
+/// 16 a second, OPEN 256 then 64, high-value 64 then 16) means a loop spends
+/// only its own tokens: it can take neither another process's credential
+/// read nor its own LaunchAgent write off the priority lane. One bucket per
+/// worker (write 256 then 64, OPEN 1,024 then 256, high-value 256 then 64),
+/// spent only after a process's own bucket admitted, bounds what a storm of
+/// fresh processes — a fork each doing its own 256 opens — can put on the
+/// lane in all; being several times a single bucket, one looping process
+/// cannot drain it for the others. Past either bound an event rides the
+/// file lane and is counted as refused. A process never seen before starts
+/// with full buckets; the tables hold `trackedProcesses` pids each and evict
+/// idle ones first. Owned by one serial `ESMessageWorker` queue, so it
+/// needs no lock.
 final class PerProcessLaneBudgets {
     enum Kind {
         case write
@@ -285,28 +296,46 @@ final class PerProcessLaneBudgets {
     private let write: BoundedBudgetTable<pid_t>
     private let open: BoundedBudgetTable<pid_t>
     private let highValueOpen: BoundedBudgetTable<pid_t>
+    private let writeAggregate: ProtectedFileLaneBudget
+    private let openAggregate: ProtectedFileLaneBudget
+    private let highValueOpenAggregate: ProtectedFileLaneBudget
 
     init(trackedProcesses: Int = 512,
          write: Shape = (capacity: 64, refillPerSecond: 16),
          open: Shape = (capacity: 256, refillPerSecond: 64),
-         highValueOpen: Shape = (capacity: 64, refillPerSecond: 16)) {
+         highValueOpen: Shape = (capacity: 64, refillPerSecond: 16),
+         writeAggregate: Shape = (capacity: 256, refillPerSecond: 64),
+         openAggregate: Shape = (capacity: 1_024, refillPerSecond: 256),
+         highValueOpenAggregate: Shape = (capacity: 256, refillPerSecond: 64)) {
         func table(_ shape: Shape) -> BoundedBudgetTable<pid_t> {
             BoundedBudgetTable(capacity: trackedProcesses) {
                 ProtectedFileLaneBudget(capacity: shape.capacity, refillPerSecond: shape.refillPerSecond)
             }
         }
+        func bucket(_ shape: Shape) -> ProtectedFileLaneBudget {
+            ProtectedFileLaneBudget(capacity: shape.capacity, refillPerSecond: shape.refillPerSecond)
+        }
         self.write = table(write)
         self.open = table(open)
         self.highValueOpen = table(highValueOpen)
+        self.writeAggregate = bucket(writeAggregate)
+        self.openAggregate = bucket(openAggregate)
+        self.highValueOpenAggregate = bucket(highValueOpenAggregate)
     }
 
-    /// Spends one of `pid`'s tokens of `kind` at `nowNanos` (monotonic).
+    /// Spends one of `pid`'s tokens of `kind` at `nowNanos` (monotonic), and
+    /// then one of the worker's for that class. A process's own bucket is
+    /// consulted first, so a refused loop never reaches the shared one.
     func admit(_ kind: Kind, pid: pid_t, nowNanos: UInt64) -> Bool {
+        let own: BoundedBudgetTable<pid_t>
+        let shared: ProtectedFileLaneBudget
         switch kind {
-        case .write: return write.admit(key: pid, nowNanos: nowNanos)
-        case .open: return open.admit(key: pid, nowNanos: nowNanos)
-        case .highValueOpen: return highValueOpen.admit(key: pid, nowNanos: nowNanos)
+        case .write: (own, shared) = (write, writeAggregate)
+        case .open: (own, shared) = (open, openAggregate)
+        case .highValueOpen: (own, shared) = (highValueOpen, highValueOpenAggregate)
         }
+        guard own.admit(key: pid, nowNanos: nowNanos) else { return false }
+        return shared.admit(nowNanos: nowNanos)
     }
 
     /// The most processes any one class tracks; a test aid.
