@@ -211,9 +211,17 @@ public struct HeavyEnrichmentFileIdentity: Codable, Sendable, Hashable {
     /// has exactly this identity; other producers leave the key absent.
     public static let execImageEnrichmentKey = "exec_image_identity"
 
+    /// The one conversion of a stat device number into an identity: its bit
+    /// pattern, which never traps on a negative `dev_t`. Every producer of an
+    /// identity that is compared with another (the kernel's exec image, the
+    /// file hasher's key) uses it, so the two agree on every value.
+    public static func deviceID(fromStatDevice device: dev_t) -> UInt64 {
+        UInt64(bitPattern: Int64(device))
+    }
+
     public init(metadata: stat) {
         self.init(
-            deviceID: UInt64(bitPattern: Int64(metadata.st_dev)),
+            deviceID: Self.deviceID(fromStatDevice: metadata.st_dev),
             inodeNumber: UInt64(metadata.st_ino),
             sizeBytes: metadata.st_size,
             modificationSeconds: Int64(metadata.st_mtimespec.tv_sec),

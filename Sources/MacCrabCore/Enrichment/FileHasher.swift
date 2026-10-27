@@ -219,7 +219,7 @@ public actor FileHasher {
               (st.st_mode & S_IFMT) == S_IFREG else { return .unavailable }
         return .file(CacheKey(
             path: path,
-            device: UInt64(st.st_dev),
+            device: HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: st.st_dev),
             inode: UInt64(st.st_ino),
             size: Int64(st.st_size),
             mtimeSeconds: st.st_mtimespec.tv_sec,
@@ -357,7 +357,7 @@ public actor FileHasher {
 
     private nonisolated static func identity(of info: stat, matches key: CacheKey) -> Bool {
         (info.st_mode & S_IFMT) == S_IFREG
-            && UInt64(info.st_dev) == key.device
+            && HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: info.st_dev) == key.device
             && UInt64(info.st_ino) == key.inode
             && Int64(info.st_size) == key.size
             && info.st_mtimespec.tv_sec == key.mtimeSeconds

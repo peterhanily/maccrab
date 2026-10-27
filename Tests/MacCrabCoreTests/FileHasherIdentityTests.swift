@@ -394,6 +394,22 @@ struct FileHasherIdentityTests {
         var value: Int { lock.lock(); defer { lock.unlock() }; return count }
     }
 
+    @Test("a stat device number converts one way, without trapping on the sign bit")
+    func deviceNumberConversion() throws {
+        #expect(HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: 16_777_231) == 16_777_231)
+        #expect(HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: 0) == 0)
+        #expect(HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: -1) == UInt64.max)
+        #expect(HeavyEnrichmentFileIdentity.deviceID(fromStatDevice: dev_t.min)
+            == UInt64(bitPattern: Int64(dev_t.min)))
+        // The hasher's key and the image identity agree for a real file.
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/tool"
+        try Data(repeating: 0x41, count: 512).write(to: URL(fileURLWithPath: path))
+        let key = try #require(FileHasher.cacheKey(path: path))
+        #expect(key.fileIdentity == HeavyEnrichmentFileIdentity.capture(path: path))
+    }
+
     @Test("a digest is returned with the identity of the file it hashed")
     func digestCarriesIdentity() async throws {
         let base = try directory()
