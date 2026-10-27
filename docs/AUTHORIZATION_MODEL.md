@@ -149,7 +149,7 @@ line. The mutating verbs:
 | `suppress-alert-*` | Marks an alert suppressed | `{ "id": "<uuid>" }` |
 | `unsuppress-alert-*` | Un-suppresses an alert | |
 | `delete-alert-*` | Deletes an alert row | |
-| `remove-suppression-*` | Removes one allowlist entry | Used by the dashboard, `maccrabctl allow remove` and `maccrabctl rules unsuppress`; the engine reloads the saved allowlist first and writes a receipt |
+| `remove-suppression-*` | Removes one allowlist entry | Used by the dashboard, `maccrabctl allow remove` and `sudo maccrabctl unsuppress`; the engine reloads the saved allowlist first and writes a receipt |
 | `suppress-campaign-*` | Suppresses a campaign **and fans out** to every contributing alert | Can suppress thousands of alerts in one request |
 | `unsuppress-campaign-*` | Restores a suppressed campaign | Used by the dashboard's campaign restore |
 | `refresh-intel-*` | Forces a threat-intel feed refresh | |
