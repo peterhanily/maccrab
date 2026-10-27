@@ -161,9 +161,11 @@ public actor FileHasher {
 
     /// `hash(path:)` with the identity (device, inode, size, mtime, ctime) of
     /// the file the digest is of: the one the probe found at `path`, whose
-    /// bytes the read verified before and after. A caller that must prove the
-    /// digest is of a particular image compares this identity, not a stat of
-    /// the path, which can name another file by the time it is taken.
+    /// identity the read checked before and after. A digest stands for a
+    /// particular image only when that image's identity equals this one and
+    /// `imageBindable` is true, and even then the identity is evidence, not
+    /// proof. Compare this identity, not a stat of the path, which can name
+    /// another file by the time it is taken.
     public func hashWithIdentity(path: String) async -> HashedFile? {
         // Type, size and identity, off the actor: a probe that walks into a
         // stalled network volume must not hold every other hash.
@@ -245,7 +247,9 @@ public actor FileHasher {
     /// Type, size and identity from one `fstatat` that refuses a symlink in
     /// any component: a swapped parent fails here at once instead of walking
     /// into a tty, an automount trigger or another volume. Nothing is opened,
-    /// so a cache hit costs one call; network-ness comes from the hash's own
+    /// so an unbindable cache hit costs this one call; a bindable hit or join
+    /// also opens the file once more to ask its volume again
+    /// (`stillBindable`). Network-ness comes from the hash's own
     /// descriptor, and only local digests are cached. Exec paths are
     /// canonical; /var and /tmp are rewritten to /private first.
     nonisolated static func probe(path: String) -> Probe {

@@ -5,7 +5,7 @@ import Testing
 /// A lane-inline notarization miss is assessed on the bounded follow-up
 /// plane; that plane's sheds are visible in the heartbeat and count as a
 /// protection gap; a rule+hash suppression uses only the event's image-bound
-/// digest, the one the enricher proved was read from the exec'd image.
+/// digest, the one the enricher bound to the exec'd image.
 @Suite("Notarization follow-up wiring and visibility")
 struct NotarizationFollowUpWiringTests {
     private func source(_ path: String) throws -> String {

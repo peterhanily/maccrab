@@ -217,8 +217,9 @@ struct FileHasherIdentityTests {
         #expect(source.contains("FileHasher.currentVolumeBindsImage(path: $0, matching: $1)"))
         #expect(!source.contains("lstat("), "a path probe that follows a parent symlink")
         #expect(!source.contains("resourceValues("), "a path-based volume lookup on the actor")
-        // The key, which every call takes and a cache hit needs nothing more
-        // than, comes from one fstatat that refuses symlinks; nothing opens.
+        // The key, which every call takes, comes from one fstatat that
+        // refuses symlinks, and the probe opens nothing; only a bindable hit
+        // or join opens the file again, to ask its volume.
         let probe = try #require(source.range(of: "nonisolated static func probe(path: String) -> Probe {"))
         let probeEnd = try #require(source.range(of: "nonisolated static func cacheKey(path: String)"))
         let body = source[probe.upperBound..<probeEnd.lowerBound]
