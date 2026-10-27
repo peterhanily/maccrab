@@ -38,6 +38,15 @@ func esFileToPath(_ file: UnsafePointer<es_file_t>) -> String {
     return esStringToSwift(file.pointee.path)
 }
 
+/// The kernel's `stat` of an ES file, as the identity a later path-based hash
+/// of the image must match before it may stand for the process. Nil unless
+/// the file is a regular file.
+func esFileIdentity(_ file: UnsafePointer<es_file_t>) -> HeavyEnrichmentFileIdentity? {
+    let metadata = file.pointee.stat
+    guard (metadata.st_mode & S_IFMT) == S_IFREG else { return nil }
+    return HeavyEnrichmentFileIdentity(metadata: metadata)
+}
+
 // MARK: - Process Conversion
 
 /// Build a `ProcessInfo` from an `es_process_t` pointer.

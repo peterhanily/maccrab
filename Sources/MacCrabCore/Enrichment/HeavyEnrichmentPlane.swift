@@ -205,6 +205,24 @@ public struct HeavyEnrichmentFileIdentity: Codable, Sendable, Hashable {
         self.statusChangeNanoseconds = statusChangeNanoseconds
     }
 
+    /// The identity the kernel reported for an exec'd or forked image, recorded
+    /// by the ES collector under this enrichment key. A hash computed later
+    /// from the path is bound to the process only when the hashed file still
+    /// has exactly this identity; other producers leave the key absent.
+    public static let execImageEnrichmentKey = "exec_image_identity"
+
+    public init(metadata: stat) {
+        self.init(
+            deviceID: UInt64(bitPattern: Int64(metadata.st_dev)),
+            inodeNumber: UInt64(metadata.st_ino),
+            sizeBytes: metadata.st_size,
+            modificationSeconds: Int64(metadata.st_mtimespec.tv_sec),
+            modificationNanoseconds: Int64(metadata.st_mtimespec.tv_nsec),
+            statusChangeSeconds: Int64(metadata.st_ctimespec.tv_sec),
+            statusChangeNanoseconds: Int64(metadata.st_ctimespec.tv_nsec)
+        )
+    }
+
     /// Path metadata is captured only inside a heavyweight worker.  Callers
     /// must compare a before/after pair around path-based Security/hash work;
     /// one observation alone is not a stable snapshot.
@@ -212,14 +230,39 @@ public struct HeavyEnrichmentFileIdentity: Codable, Sendable, Hashable {
         var metadata = stat()
         guard path.withCString({ stat($0, &metadata) }) == 0,
               (metadata.st_mode & S_IFMT) == S_IFREG else { return nil }
-        return HeavyEnrichmentFileIdentity(
-            deviceID: UInt64(metadata.st_dev),
-            inodeNumber: UInt64(metadata.st_ino),
-            sizeBytes: metadata.st_size,
-            modificationSeconds: Int64(metadata.st_mtimespec.tv_sec),
-            modificationNanoseconds: Int64(metadata.st_mtimespec.tv_nsec),
-            statusChangeSeconds: Int64(metadata.st_ctimespec.tv_sec),
-            statusChangeNanoseconds: Int64(metadata.st_ctimespec.tv_nsec)
+        return HeavyEnrichmentFileIdentity(metadata: metadata)
+    }
+
+    /// Compact form for the enrichment dictionary:
+    /// `device:inode:size:mtime.ns:ctime.ns`.
+    public var serialized: String {
+        "\(deviceID):\(inodeNumber):\(sizeBytes):"
+            + "\(modificationSeconds).\(modificationNanoseconds):"
+            + "\(statusChangeSeconds).\(statusChangeNanoseconds)"
+    }
+
+    /// Parses `serialized`; anything else is nil, so a damaged or foreign
+    /// value can never equal a captured identity.
+    public init?(serialized: String) {
+        let fields = serialized.split(separator: ":", omittingEmptySubsequences: false)
+        guard fields.count == 5,
+              let device = UInt64(fields[0]), let inode = UInt64(fields[1]),
+              let size = Int64(fields[2]) else { return nil }
+        let modification = fields[3].split(separator: ".", omittingEmptySubsequences: false)
+        let change = fields[4].split(separator: ".", omittingEmptySubsequences: false)
+        guard modification.count == 2, change.count == 2,
+              let modificationSeconds = Int64(modification[0]),
+              let modificationNanoseconds = Int64(modification[1]),
+              let changeSeconds = Int64(change[0]),
+              let changeNanoseconds = Int64(change[1]) else { return nil }
+        self.init(
+            deviceID: device,
+            inodeNumber: inode,
+            sizeBytes: size,
+            modificationSeconds: modificationSeconds,
+            modificationNanoseconds: modificationNanoseconds,
+            statusChangeSeconds: changeSeconds,
+            statusChangeNanoseconds: changeNanoseconds
         )
     }
 

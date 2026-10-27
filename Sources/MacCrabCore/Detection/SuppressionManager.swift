@@ -347,6 +347,15 @@ public actor SuppressionManager {
         return true
     }
 
+    /// The only digest a `.ruleHash` entry may be matched against: one the
+    /// enricher proved was read from the exec'd image itself. A collector
+    /// digest, or one hashed from the path alone, can be of an allow-listed
+    /// binary renamed onto the path after exec, so it never reaches the scope.
+    public static func imageBoundSHA256(_ hashes: ProcessHashes?) -> String? {
+        guard let hashes, hashes.imageBound == true else { return nil }
+        return hashes.sha256
+    }
+
     /// Richer check that considers every scope type. Returns the matching
     /// entry so callers can log WHY an alert was silenced.
     public func matchingSuppression(

@@ -164,11 +164,18 @@ public struct ProcessHashes: Codable, Sendable, Hashable {
     public let sha256: String?
     public let cdhash: String?
     public let md5: String?
+    /// True only when `sha256` was computed from the very file identity
+    /// (device, inode, size, mtime, ctime) the kernel reported for the exec'd
+    /// image. Any other digest is of whatever the path held when it was
+    /// hashed: it identifies bytes for reputation lookups, but it must never
+    /// authorize a suppression or any other trust decision.
+    public let imageBound: Bool?
 
-    public init(sha256: String? = nil, cdhash: String? = nil, md5: String? = nil) {
+    public init(sha256: String? = nil, cdhash: String? = nil, md5: String? = nil, imageBound: Bool? = nil) {
         self.sha256 = sha256
         self.cdhash = cdhash
         self.md5 = md5
+        self.imageBound = imageBound
     }
 }
 

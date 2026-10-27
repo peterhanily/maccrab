@@ -441,6 +441,11 @@ public actor EventEnricher {
 
         let path = event.process.executable
         let pid = event.process.pid
+        // The kernel's identity of the exec'd image, when the collector saw
+        // it. The digest below is of whatever the path holds at hashing time;
+        // it stands for the process only if that file is the image itself.
+        let image = event.enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey]
+            .flatMap(HeavyEnrichmentFileIdentity.init(serialized:))
         let offer = await heavyEnrichmentPlane.offer(
             component: .processHashes,
             binding: binding,
@@ -459,7 +464,8 @@ public actor EventEnricher {
                 value: ProcessHashes(
                     sha256: computed.sha256,
                     cdhash: computed.cdhash,
-                    md5: nil
+                    md5: nil,
+                    imageBound: image != nil && image == stable
                 ),
                 fileIdentity: stable
             ))

@@ -2809,7 +2809,7 @@ public final class ESCollector: @unchecked Sendable {
                 execEvent.target, args: args, commandLine: commandLine
             )
 
-            return Event(
+            var exec = Event(
                 timestamp: timestamp,
                 eventCategory: .process,
                 eventType: .start,
@@ -2817,11 +2817,19 @@ public final class ESCollector: @unchecked Sendable {
                 process: enrichedTarget,
                 severity: .informational
             )
+            // The identity of the image the kernel ran. A digest hashed from
+            // the path later stands for this process only if the file still
+            // has it, so a binary renamed onto the path after exec cannot lend
+            // the process its hash.
+            if let image = esFileIdentity(execEvent.target.pointee.executable) {
+                exec.enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey] = image.serialized
+            }
+            return exec
 
         case ES_EVENT_TYPE_NOTIFY_FORK:
             let forkEvent = msg.event.fork
             let childInfo = processFromESProcess(forkEvent.child)
-            return Event(
+            var fork = Event(
                 timestamp: timestamp,
                 eventCategory: .process,
                 eventType: .start,
@@ -2829,6 +2837,10 @@ public final class ESCollector: @unchecked Sendable {
                 process: childInfo,
                 severity: .informational
             )
+            if let image = esFileIdentity(forkEvent.child.pointee.executable) {
+                fork.enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey] = image.serialized
+            }
+            return fork
 
         case ES_EVENT_TYPE_NOTIFY_EXIT:
             return Event(
