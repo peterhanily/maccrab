@@ -76,6 +76,12 @@ struct ESProcessFields {
     /// audit_token) simply carry nil. The live ES path always supplies it so
     /// agent-trace correlation can match the TraceRegistry binding.
     var auditIdentity: AuditIdentity? = nil
+    /// The kernel's code directory hash for the running image, from
+    /// `es_process_t.cdhash`, as `CodeSignatureInfo.kernelCdhash` writes it.
+    /// It arrives with every message, so it is atomic with the event.
+    /// Defaulted nil so test constructors stay source-compatible; the live ES
+    /// path always supplies what the kernel reported.
+    var cdhash: String? = nil
 }
 
 /// Pure, unit-testable mapping from decoded ES fields to `ProcessInfo`. Mirrors
@@ -115,7 +121,8 @@ func esProcessInfo(from f: ESProcessFields, args: [String] = [], commandLine: St
     )
 
     // v1.18 NOTE (file-event-codesig-fields-partial): only signerType /
-    // teamId / signingId / flags are populated from the raw ES event.
+    // teamId / signingId / flags, and the kernel's cdhash for the running
+    // image, are populated from the raw ES event.
     // isNotarized / isAdhocSigned / issuerChain / certHashes are left nil
     // here — EventEnricher's NotarizationChecker backfills them via a cached
     // Security query. SignerType (populated here) is the reliable trust gate.
@@ -125,7 +132,8 @@ func esProcessInfo(from f: ESProcessFields, args: [String] = [], commandLine: St
         signerType: signerType,
         teamId: f.teamId.isEmpty || signerType == .adHoc ? nil : f.teamId,
         signingId: f.signingId.isEmpty ? nil : f.signingId,
-        flags: f.codesigningFlags
+        flags: f.codesigningFlags,
+        kernelCdhash: f.cdhash
     )
 
     // ppid recorded as a minimal ancestor; name/path are filled by enrichment.
@@ -196,7 +204,8 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>, args: [String] = 
         // v1.21.4 (P6 fix): the real audit identity (pidversion/asid/uids) so
         // agent-trace correlation reconstructs the SAME ProcessIdentity the
         // TraceRegistry binding was keyed on.
-        auditIdentity: AuditIdentity(from: p.audit_token)
+        auditIdentity: AuditIdentity(from: p.audit_token),
+        cdhash: withUnsafeBytes(of: p.cdhash) { CodeSignatureInfo.kernelCdhash(bytes: $0) }
     ), args: args, commandLine: commandLine)
 }
 

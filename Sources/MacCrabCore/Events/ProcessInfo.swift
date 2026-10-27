@@ -273,6 +273,21 @@ public struct CodeSignatureInfo: Codable, Sendable, Hashable {
     /// Declared entitlements (opt-in capture — may leak paths).
     public let entitlements: [String]?
 
+    /// The code directory hash of the image the process runs, as the kernel
+    /// reports it with the event: lowercase hex of its 20 bytes, nil when the
+    /// producer had none. The enricher believes a Security verdict about the
+    /// file at the process's path only when this hash is among that file's
+    /// code directory hashes. Transport only: it is not encoded and takes no
+    /// part in equality or hashing, so a signature persists and compares the
+    /// same with or without it.
+    public private(set) var kernelCdhash: String? = nil
+
+    /// Every field but `kernelCdhash`.
+    private enum CodingKeys: String, CodingKey {
+        case signerType, teamId, signingId, authorities, flags, isNotarized
+        case issuerChain, certHashes, isAdhocSigned, entitlements
+    }
+
     public init(
         signerType: SignerType,
         teamId: String? = nil,
@@ -283,7 +298,8 @@ public struct CodeSignatureInfo: Codable, Sendable, Hashable {
         issuerChain: [String]? = nil,
         certHashes: [String]? = nil,
         isAdhocSigned: Bool? = nil,
-        entitlements: [String]? = nil
+        entitlements: [String]? = nil,
+        kernelCdhash: String? = nil
     ) {
         self.signerType = signerType
         self.teamId = teamId
@@ -295,6 +311,54 @@ public struct CodeSignatureInfo: Codable, Sendable, Hashable {
         self.certHashes = certHashes
         self.isAdhocSigned = isAdhocSigned
         self.entitlements = entitlements
+        self.kernelCdhash = kernelCdhash
+    }
+
+    public static func == (lhs: CodeSignatureInfo, rhs: CodeSignatureInfo) -> Bool {
+        lhs.signerType == rhs.signerType && lhs.teamId == rhs.teamId
+            && lhs.signingId == rhs.signingId && lhs.authorities == rhs.authorities
+            && lhs.flags == rhs.flags && lhs.isNotarized == rhs.isNotarized
+            && lhs.issuerChain == rhs.issuerChain && lhs.certHashes == rhs.certHashes
+            && lhs.isAdhocSigned == rhs.isAdhocSigned && lhs.entitlements == rhs.entitlements
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(signerType)
+        hasher.combine(teamId)
+        hasher.combine(signingId)
+        hasher.combine(authorities)
+        hasher.combine(flags)
+        hasher.combine(isNotarized)
+        hasher.combine(issuerChain)
+        hasher.combine(certHashes)
+        hasher.combine(isAdhocSigned)
+        hasher.combine(entitlements)
+    }
+
+    /// Lowercase hex of a code directory hash of the length the kernel
+    /// reports, 20 bytes (a longer digest truncated); nil for any other
+    /// length and for the all-zero hash the kernel reports for code without
+    /// one.
+    public static func kernelCdhash<Bytes: Collection>(bytes: Bytes) -> String? where Bytes.Element == UInt8 {
+        guard bytes.count == 20, bytes.contains(where: { $0 != 0 }) else { return nil }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// `kernelCdhash(bytes:)` for a hash written as 40 hex digits, as
+    /// eslogger writes it.
+    public static func kernelCdhash(hex: String) -> String? {
+        let digits = hex.utf8
+        guard digits.count == 40,
+              digits.allSatisfy({ (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }),
+              digits.contains(where: { $0 != 48 }) else { return nil }
+        return hex.lowercased()
+    }
+
+    /// A copy carrying `cdhash` as the running image's code directory hash.
+    func withKernelCdhash(_ cdhash: String?) -> CodeSignatureInfo {
+        var copy = self
+        copy.kernelCdhash = cdhash
+        return copy
     }
 
     /// True when the signature attests nothing about who signed it: CS_ADHOC
@@ -329,7 +393,8 @@ public struct CodeSignatureInfo: Codable, Sendable, Hashable {
             issuerChain: issuerChain,
             certHashes: certHashes,
             isAdhocSigned: isAdhocSigned,
-            entitlements: entitlements
+            entitlements: entitlements,
+            kernelCdhash: kernelCdhash
         )
     }
 }

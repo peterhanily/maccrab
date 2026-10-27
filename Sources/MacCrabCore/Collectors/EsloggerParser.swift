@@ -165,14 +165,16 @@ public enum EsloggerParser {
             isPlatformBinary: isPlatformBinary
         )
 
-        // CDHash — enables threat intel binary hash matching
+        // CDHash — the kernel's hash of the running image, which the
+        // enricher binds Security's verdict to.
         let cdhash = str(processDict, "cdhash")
 
         let codeSignature = CodeSignatureInfo(
             signerType: signerType,
             teamId: teamId.isEmpty || signerType == .adHoc ? nil : teamId,
             signingId: signingId.isEmpty ? nil : signingId,
-            flags: flags
+            flags: flags,
+            kernelCdhash: CodeSignatureInfo.kernelCdhash(hex: cdhash)
         )
 
         // Responsible PID (macOS-specific attribution)
@@ -220,9 +222,8 @@ public enum EsloggerParser {
             isPlatformBinary: isPlatformBinary
         )
 
-        // Store cdhash and session_id as enrichments won't fit in ProcessInfo struct
-        // They'll be accessible via the Event.enrichments dict when set by the caller
-        _ = cdhash  // Used by parseExec to set enrichments
+        // session_id won't fit in ProcessInfo; the caller sets it as an
+        // enrichment on the Event.
         _ = sessionId
 
         return process

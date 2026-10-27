@@ -357,8 +357,12 @@ public actor EventEnricher {
     /// any team. Only a claim that would buy trust is re-checked: `.apple`
     /// off a platform binary, and a Developer ID or App Store claim naming an
     /// exemption team. Security classifies a chain not rooted at Apple as
-    /// `.adHoc`, and the merge carries that signer, so the team then attests
-    /// nothing downstream. The cost is one cold-cache evaluation per path.
+    /// `.adHoc`, and the published signature carries that signer, so the
+    /// team then attests nothing downstream. Each such file costs one
+    /// Security evaluation while its identity holds: the verdict is cached
+    /// against that identity until the file changes or the cache evicts it,
+    /// and an evaluation that has not finished leaves nothing cached, so the
+    /// next event for the path offers it again.
     static func needsCryptographicVerification(_ signature: CodeSignatureInfo?, isPlatformBinary: Bool) -> Bool {
         guard let signature else { return false }
         if signature.signerType == .apple { return !isPlatformBinary }
@@ -369,34 +373,96 @@ public actor EventEnricher {
         return false
     }
 
+    /// The signature an event publishes once Security has judged the file
+    /// at its process's path. A verdict that grants trust (Apple, App Store,
+    /// Developer ID) describes that file, not the process: it is believed
+    /// only when the file's code directory hashes include the one the kernel
+    /// reports for the image the process runs, and is then taken whole, its
+    /// class, team, identifier, flags and notarization all Security's. An
+    /// Apple verdict confirms only an Apple claim. A Developer ID or App
+    /// Store verdict on an Apple claim is the downgrade Security found and is
+    /// published as found: Xcode from the App Store names itself com.apple.*
+    /// and is App Store signed. Any other trusted verdict leaves the claim
+    /// unverified, carried as the collector carries an ad-hoc signature: no
+    /// team, its identifier and the kernel's flags. A producer that reported
+    /// no signature keeps none while the running image is unknown, and reads
+    /// as ad-hoc when the image is known and is not the file's. A verdict
+    /// that grants nothing (ad-hoc, unsigned) needs no binding, and an event
+    /// without a process has no image to bind to. A process that Rosetta
+    /// translates runs the x86_64 slice, whose hash the native-slice
+    /// evaluation lacks, so its trusted claim stays unverified.
+    static func publishedSignature(
+        claim: CodeSignatureInfo?,
+        verdict: CodeSigningCache.Verdict,
+        kernelCdhash: String?,
+        hasProcess: Bool = true
+    ) -> CodeSignatureInfo? {
+        let found = verdict.info.withKernelCdhash(kernelCdhash)
+        switch found.signerType {
+        case .adHoc, .unsigned:
+            return found
+        case .apple, .appStore, .devId:
+            break
+        }
+        guard hasProcess else { return found }
+        let bound = kernelCdhash.map { verdict.cdhashes.contains($0) } ?? false
+        let raisesClaim = found.signerType == .apple && claim.map { $0.signerType != .apple } == true
+        if bound, !raisesClaim { return found }
+        if let claim {
+            return CodeSignatureInfo(
+                signerType: .adHoc, signingId: claim.signingId, flags: claim.flags, kernelCdhash: kernelCdhash)
+        }
+        return kernelCdhash.map { CodeSignatureInfo(signerType: .adHoc, kernelCdhash: $0) }
+    }
+
+    /// Reads the kernel's code directory hash for a live process, for a
+    /// producer whose event carries no signature to take it from.
+    private let kernelCdhashReader = CDHashExtractor()
+
     private func resolveCodeSignature(
         for event: Event,
         binding: HeavyEnrichmentBinding
     ) async -> HeavyFieldResolution<CodeSignatureInfo> {
         let process = event.process
-        let collectorSignature = process.codeSignature
-        let needsCryptographicVerification = Self.needsCryptographicVerification(
-            collectorSignature, isPlatformBinary: process.isPlatformBinary)
+        let claim = process.codeSignature
+        let hasProcess = process.pid > 0
 
-        // Kernel-derived ordinary classifications are complete. A spoofable
-        // `.apple && !platform` claim, or a Developer ID claim naming an
-        // exemption team, must be re-anchored first.
-        if let collectorSignature, !needsCryptographicVerification {
-            return .complete(collectorSignature)
+        if let claim {
+            // A kernel classification that buys nothing is complete as
+            // reported. One that would buy trust is believed only after
+            // Security has judged the image the process runs.
+            let needsVerification = Self.needsCryptographicVerification(
+                claim, isPlatformBinary: process.isPlatformBinary)
+            // An event without a process, a TCC record about a client
+            // binary, carries its collector's own Security verdict on that
+            // file; there is no running image to bind it to.
+            if !needsVerification || !hasProcess {
+                return .complete(claim)
+            }
         }
 
-        // A validated CodeSigningCache hit is intentionally same-event.  The
-        // cache re-stats the path and rejects a same-path replacement before
-        // returning a verdict.
-        if let cached = codeSigningCache.lookup(path: process.executable) {
-            if let collectorSignature {
-                return .complete(
-                    cached.signerType == .apple
-                        ? collectorSignature
-                        : collectorSignature.withSignerType(cached.signerType)
-                )
+        // The running image's code directory hash: the kernel's, carried by
+        // an Endpoint Security claim, or read by pid for a producer that
+        // reported no signature. Unknown leaves no trusted verdict to publish.
+        let kernelCdhash: String?
+        if let claim {
+            kernelCdhash = claim.kernelCdhash
+        } else if hasProcess {
+            kernelCdhash = await kernelCdhashReader.extractCDHash(pid: process.pid)
+        } else {
+            kernelCdhash = nil
+        }
+
+        // A cached verdict is served only while the path still holds the
+        // bytes it judged (the cache re-stats it), and believed only for the
+        // image this process runs.
+        if let cached = codeSigningCache.lookupVerdict(path: process.executable) {
+            guard let published = Self.publishedSignature(
+                claim: claim, verdict: cached, kernelCdhash: kernelCdhash, hasProcess: hasProcess
+            ) else {
+                return .degraded(.unavailable)
             }
-            return .complete(cached)
+            return .complete(published)
         }
 
         let path = process.executable
@@ -410,31 +476,27 @@ public actor EventEnricher {
             // Nothing to bind a verdict to, or nothing Security.framework may
             // open: the path is missing, or no longer a regular file.
             guard before != nil,
-                  let verified = await cache.evaluateExecutable(path: path) else {
+                  let verdict = await cache.evaluateExecutableVerdict(path: path) else {
                 return .codeSignature(HeavyCodeSignatureEvidence(
                     value: nil,
                     fileIdentity: nil
                 ))
             }
             let after = HeavyEnrichmentFileIdentity.capture(path: path)
-            guard let stable = after, before == stable else {
+            guard let stable = after, before == stable,
+                  let published = Self.publishedSignature(
+                    claim: claim, verdict: verdict, kernelCdhash: kernelCdhash, hasProcess: hasProcess
+                  ) else {
                 // Never publish a trusted verdict when the path was absent or
-                // changed while Security.framework evaluated it.
+                // changed while Security.framework evaluated it, or when it
+                // binds to no known running image.
                 return .codeSignature(HeavyCodeSignatureEvidence(
                     value: nil,
                     fileIdentity: nil
                 ))
             }
-            let final: CodeSignatureInfo
-            if let collectorSignature {
-                final = verified.signerType == .apple
-                    ? collectorSignature
-                    : collectorSignature.withSignerType(verified.signerType)
-            } else {
-                final = verified
-            }
             return .codeSignature(HeavyCodeSignatureEvidence(
-                value: final,
+                value: published,
                 fileIdentity: stable
             ))
         }
