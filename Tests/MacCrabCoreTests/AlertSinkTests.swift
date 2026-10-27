@@ -612,6 +612,23 @@ struct AlertSinkRecalibrationTests {
         return stored.first?.severity ?? alert.severity
     }
 
+    /// The row the sink stored, with the severity it recalibrated.
+    private func storedAlert(after alert: Alert, mustFire: Bool = false) async throws -> Alert? {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-recal-row-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try AlertStore(directory: tempDir.path)
+        let sink = AlertSink(alertStore: store, deduplicator: AlertDeduplicator(suppressionWindow: 60))
+        _ = try await sink.submit(alert: alert, mustFire: mustFire)
+        return try await store.alerts(forEventId: alert.eventId).first
+    }
+
+    private var repositoryRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    }
+
     private func alert(
         ruleId: String = "test.rule",
         ruleTitle: String = "Test rule",
@@ -674,24 +691,144 @@ struct AlertSinkRecalibrationTests {
             mitreTactics: "attack.execution,attack.command_and_control",
             parentExecutable: "/Users/x/.nvm/versions/node/v20.0.0/bin/node"
         )
-        #expect(try await storedSeverity(after: a) == .critical)
-        // Stored at that severity it still clears the default notification floor.
+        let stored = try #require(try await storedAlert(after: a))
+        #expect(stored.severity == .critical)
+        // The stored row, not the input, clears the default notification floor.
         var gate = NotificationGate()
-        guard case .deliver = gate.evaluate(alert: a) else {
+        guard case .deliver = gate.evaluate(alert: stored) else {
             Issue.record("a critical reverse shell must notify at the default floor")
             return
         }
+        // And it counts toward a campaign: only sub-critical dev-tooling
+        // alerts are kept out of tactic counting.
+        let detector = CampaignDetector()
+        let summary = CampaignDetector.AlertSummary(
+            ruleId: stored.ruleId, ruleTitle: stored.ruleTitle, severity: stored.severity,
+            processPath: stored.processPath, pid: 4242,
+            tactics: ["attack.execution", "attack.command_and_control"])
+        #expect(await detector.isTacticContributor(summary))
     }
 
-    @Test("dev-tooling attack-chain high → low (visible, not hidden)")
-    func devToolingHighDownweighted() async throws {
+    @Test("a graph rule's techniques name its tactics")
+    func graphRuleTactics() {
+        func match(_ attack: [String]) -> GraphRuleMatch {
+            GraphRuleMatch(ruleId: "r", ruleTitle: "r", severity: "high", attack: attack, bindings: [:], matchedEdgeIds: [])
+        }
+        #expect(match(["T1543.001", "T1547"]).tactics == ["attack.persistence"])
+        #expect(match(["T1059", "T1555", "T1041"]).tactics == ["attack.execution", "attack.credential_access", "attack.exfiltration"])
+        #expect(match(["T1195.001", "T1555", "T1567", "T1098"]).tactics ==
+                ["attack.initial_access", "attack.credential_access", "attack.exfiltration", "attack.persistence"])
+        #expect(match(["T9999"]).tactics.isEmpty)
+        #expect(match([]).tactics.isEmpty)
+    }
+
+    @Test("dev-tooling medium → low (visible, not hidden)")
+    func devToolingMediumDownweighted() async throws {
         let a = alert(
-            ruleId: "d1a2b3c4-0506", ruleTitle: "Curl Fetch Then Exec",
-            severity: .high,
+            ruleId: "d1a2b3c4-0101", ruleTitle: "Environment Variable Enumeration",
+            severity: .medium,
             processPath: "/Users/x/proj/node_modules/.bin/esbuild",
-            mitreTactics: "attack.command_and_control"
+            mitreTactics: "attack.discovery"
         )
         #expect(try await storedSeverity(after: a) == .low)
+    }
+
+    @Test("a HIGH suppressible alert is never lowered on a dev-tooling path")
+    func devToolingHighIsNeverLowered() async throws {
+        let a = alert(
+            ruleId: "keylogger_event_tap_active", ruleTitle: "Keylogger Event Tap Active",
+            severity: .high,
+            processPath: "/opt/homebrew/Cellar/tool/1.0/bin/tool",
+            mitreTactics: "attack.collection"
+        )
+        #expect(try await storedSeverity(after: a) == .high)
+    }
+
+    @Test("a command-and-control match keeps its severity on a dev-tooling path")
+    func devToolingCommandAndControlPreserved() async throws {
+        let high = alert(
+            ruleId: "package_manager_downloads_and_executes", ruleTitle: "Package Manager Downloads And Executes",
+            severity: .high,
+            processPath: "/Users/x/proj/node_modules/.bin/postinstall",
+            mitreTactics: "attack.execution,attack.command_and_control",
+            parentExecutable: "/Users/x/.nvm/versions/node/v20.0.0/bin/node"
+        )
+        #expect(try await storedSeverity(after: high) == .high)
+        let medium = alert(
+            ruleId: "osascript_download_execute", ruleTitle: "osascript Download Execute",
+            severity: .medium,
+            processPath: "/Users/x/proj/node_modules/.bin/postinstall",
+            mitreTactics: "attack.execution,attack.command_and_control",
+            parentExecutable: "/Users/x/.nvm/versions/node/v20.0.0/bin/node"
+        )
+        #expect(try await storedSeverity(after: medium) == .medium)
+    }
+
+    @Test("a graph rule's alert keeps its severity under an agent or dev-tooling path")
+    func graphAlertKeepsSeverityUnderAgentPath() async throws {
+        let path = "/Users/x/.claude/tools/run.sh"
+        let node = "/Users/x/.nvm/versions/node/v20.0.0/bin/node"
+        let persistence = alert(
+            ruleId: "maccrab_agent_associated_shell_writes_to_login_item",
+            ruleTitle: "AI-associated shell wrote to a login item", severity: .high,
+            processPath: path, mitreTactics: "attack.persistence", parentExecutable: node
+        )
+        #expect(try await storedSeverity(after: persistence, mustFire: true) == .high)
+        // A graph rule is never suppressible, so even a medium one that
+        // belongs to no preserved class keeps its severity.
+        let execution = alert(
+            ruleId: "maccrab_graph_fixture", ruleTitle: "Graph fixture", severity: .medium,
+            processPath: path, mitreTactics: "attack.execution", parentExecutable: node
+        )
+        #expect(try await storedSeverity(after: execution, mustFire: true) == .medium)
+        #expect(try await storedSeverity(after: execution) == .low)
+        // The lane submits every graph alert that way, with its tactics.
+        let eventLoop = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"),
+            encoding: .utf8)
+        #expect(eventLoop.contains("_ = try await alertSink.submit(alert: alert, event: anchorEvent, mustFire: true)"))
+        #expect(eventLoop.contains("mitreTactics: match.tactics.isEmpty ? nil : match.tactics.joined(separator: \",\")"))
+    }
+
+    @Test("a must-fire rule match keeps its severity through the engine batch, a suppressible one does not")
+    func mustFireMatchSurvivesTheEngineBatch() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-recal-pipeline-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try AlertStore(directory: tempDir.path)
+        let sink = AlertSink(alertStore: store, deduplicator: AlertDeduplicator(suppressionWindow: 60))
+        let path = "/Users/x/proj/node_modules/.bin/esbuild"
+        let event = makeEvent(processName: "esbuild", processPath: path, commandLine: path, pid: 4243)
+        let matches = [
+            RuleMatch(ruleId: "must.high", ruleName: "Must fire high", severity: .high, description: "",
+                      mitreTechniques: ["attack.t1059.004"], tags: ["attack.execution", "attack.t1059.004"],
+                      suppressible: false),
+            RuleMatch(ruleId: "must.medium", ruleName: "Must fire medium", severity: .medium, description: "",
+                      mitreTechniques: [], tags: ["attack.discovery"], suppressible: false),
+            RuleMatch(ruleId: "quiet.medium", ruleName: "Suppressible medium", severity: .medium, description: "",
+                      mitreTechniques: [], tags: ["attack.discovery"], suppressible: true),
+        ]
+        // The same transformation the lane applies to a reviewed match.
+        let alerts = matches.map { match in
+            Alert(ruleId: match.ruleId, ruleTitle: match.ruleName, severity: match.severity,
+                  eventId: event.id.uuidString, processPath: path, processName: "esbuild",
+                  description: match.description,
+                  mitreTactics: match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }.joined(separator: ","),
+                  mitreTechniques: match.tags.filter { $0.contains("t1") }.joined(separator: ","))
+        }
+        let inserted = try await sink.insertEngineBatch(
+            alerts: alerts, event: event,
+            mustFireRuleIds: Set(matches.filter { !$0.suppressible }.map(\.ruleId)))
+        let severities = Dictionary(uniqueKeysWithValues: inserted.map { ($0.ruleId, $0.severity) })
+        #expect(severities["must.high"] == .high)
+        #expect(severities["must.medium"] == .medium)
+        #expect(severities["quiet.medium"] == .low)
+        let eventLoop = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"),
+            encoding: .utf8)
+        #expect(eventLoop.contains("if !match.suppressible { batchMustFire.insert(match.ruleId) }"))
+        #expect(eventLoop.contains("mustFireRuleIds: batchMustFire"))
     }
 
     @Test("dev-tooling critical credential-access PRESERVED (must-fire)")
@@ -718,7 +855,7 @@ struct AlertSinkRecalibrationTests {
     @Test("gh reading its own GitHub token → down-weighted (self-credential tool)")
     func ghGitHubTokenDownweighted() async throws {
         let a = alert(
-            ruleTitle: "🦀 AI Tool Accessed GitHub Token", severity: .high,
+            ruleTitle: "🦀 AI Tool Accessed GitHub Token", severity: .medium,
             processPath: "/opt/homebrew/Cellar/gh/2.86.0/bin/gh",
             mitreTactics: "attack.credential_access"
         )

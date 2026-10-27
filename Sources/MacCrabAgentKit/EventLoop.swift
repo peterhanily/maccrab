@@ -2863,11 +2863,14 @@ enum EventLoop {
                         processPath: anchorProcPath,
                         processName: anchorProcName,
                         description: "Multi-entity graph rule fired against trace \(trace.id). Bindings: \(match.bindings.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))",
-                        mitreTactics: nil,
+                        mitreTactics: match.tactics.isEmpty ? nil : match.tactics.joined(separator: ","),
                         mitreTechniques: match.attack.isEmpty ? nil : match.attack.joined(separator: ",")
                     )
                     do {
-                        _ = try await alertSink.submit(alert: alert, event: anchorEvent)
+                        // Every graph rule is a curated multi-entity detection
+                        // with no suppressible variant; the sink never lowers
+                        // it for an agent or dev-tooling path.
+                        _ = try await alertSink.submit(alert: alert, event: anchorEvent, mustFire: true)
                     } catch {
                         await StorageErrorTracker.shared.recordAlertError(error)
                     }

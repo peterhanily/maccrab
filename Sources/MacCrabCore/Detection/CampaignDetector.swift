@@ -1172,7 +1172,7 @@ public actor CampaignDetector {
     /// Shared contributor predicate for kill-chain and coordinated indexes.
     /// Keeping this single predicate prevents the two campaign paths from
     /// drifting back into the false-positive asymmetry fixed in v1.19.
-    private func isTacticContributor(_ alert: AlertSummary) -> Bool {
+    func isTacticContributor(_ alert: AlertSummary) -> Bool {
         alert.severity >= .medium
             && !alert.ruleId.hasPrefix("maccrab.usb.")
             && !alert.ruleId.hasPrefix("maccrab.deep.crypto_token_extension")

@@ -279,12 +279,13 @@ public actor AlertSink {
     ///      (self-tamper is covered by SelfDefense, not behavioral alerts).
     ///   2. Trusted development-tooling lineage — routine bundler/runtime
     ///      behavior (esbuild/workerd/node fetch+exec, etc.).
-    /// PRESERVED at full severity (must-fire) on dev paths: every critical,
-    /// every rule that declared `suppressible: false`, credential-access,
+    /// Only a MEDIUM alert is lowered, to LOW. PRESERVED at full severity on
+    /// dev paths: every HIGH and CRITICAL, every rule that declared
+    /// `suppressible: false`, and among MEDIUM matches credential-access,
     /// keychain, honeyfile, and the catastrophic-if-real classes a malicious
     /// package is a primary delivery vector for — impact (ransomware / disk
     /// wipe), defense-evasion (SIP / Gatekeeper disable), persistence (launchd),
-    /// and exfiltration. The ONLY credential exception is a self-credential tool
+    /// command-and-control and exfiltration. The ONLY credential exception is a self-credential tool
     /// reading its OWN credential (the GitHub CLI `gh` reading the GitHub token
     /// is its job, not theft; a real token thief is a different process).
     /// Campaign meta-alerts are skipped entirely — their severity is correlation-
@@ -341,14 +342,15 @@ public actor AlertSink {
             }
         }
 
-        // (4) Development-tooling lineage — HIGH only. A critical keeps its
-        // severity: a dev path is where a malicious package runs, not a
-        // signature, and the engine treats an untrusted critical as must-fire
-        // everywhere else. So does a rule that declared itself
-        // `suppressible: false`, whatever its severity. Both were stored LOW
-        // here, under the default notification floor, for a reverse shell
-        // spawned from node_modules.
-        guard alert.severity == .high, !mustFire else { return alert }
+        // (4) Development-tooling lineage — MEDIUM only. A HIGH or CRITICAL
+        // alert keeps its severity: a dev path is where a malicious package
+        // runs, not a signature, the engine treats an untrusted critical as
+        // must-fire everywhere else, and integrations read HIGH as actionable.
+        // So does a rule that declared itself `suppressible: false`, whatever
+        // its severity. A MEDIUM match of the routine bundler and runtime
+        // classes is lowered to LOW, under the outputs' default medium floor,
+        // and surfaces for review rather than escalation.
+        guard alert.severity == .medium, !mustFire else { return alert }
         guard CampaignDetector.isDevelopmentToolingPath(alert.processPath)
             || CampaignDetector.isDevelopmentToolingPath(alert.parentExecutable) else { return alert }
         let tac = (alert.mitreTactics ?? "").lowercased()
@@ -366,6 +368,7 @@ public actor AlertSink {
         // vector for exactly these, so they must keep escalating on dev paths.
         let isCatastrophic = tac.contains("impact") || tac.contains("defense_evasion")
             || tac.contains("persistence") || tac.contains("exfiltration")
+            || tac.contains("command_and_control")
         if (isCredentialClass || isHoneyfile || isCatastrophic) && !isSelfCredentialTool {
             return alert  // preserve must-fire / high-signal classes at full severity
         }

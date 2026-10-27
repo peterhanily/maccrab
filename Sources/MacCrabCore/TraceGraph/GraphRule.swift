@@ -166,6 +166,36 @@ public struct GraphRuleMatch: Sendable, Equatable {
     public let ruleTitle: String
     public let severity: String
     public let attack: [String]
+
+    /// The ATT&CK tactics of `attack`, in the engine's `attack.<tactic>`
+    /// form, for the techniques the graph corpus uses. A technique without
+    /// an entry contributes nothing rather than a guess.
+    public var tactics: [String] { Self.tactics(for: attack) }
+
+    static func tactics(for techniques: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for technique in techniques {
+            let base = String(technique.uppercased().split(separator: ".").first ?? Substring(technique))
+            guard let tactic = tacticByTechnique[base], seen.insert(tactic).inserted else { continue }
+            result.append(tactic)
+        }
+        return result
+    }
+
+    /// Each technique's tactic in the ATT&CK matrix; where a technique sits
+    /// under two, the one the graph rules detect it for.
+    private static let tacticByTechnique: [String: String] = [
+        "T1195": "attack.initial_access",       // Supply Chain Compromise
+        "T1059": "attack.execution",            // Command and Scripting Interpreter
+        "T1543": "attack.persistence",          // Create or Modify System Process
+        "T1547": "attack.persistence",          // Boot or Logon Autostart Execution
+        "T1098": "attack.persistence",          // Account Manipulation
+        "T1555": "attack.credential_access",    // Credentials from Password Stores
+        "T1105": "attack.command_and_control",  // Ingress Tool Transfer
+        "T1041": "attack.exfiltration",         // Exfiltration Over C2 Channel
+        "T1567": "attack.exfiltration",         // Exfiltration Over Web Service
+    ]
     public let bindings: [String: String]  // node binding name → entity id
     public let matchedEdgeIds: [String]
 
