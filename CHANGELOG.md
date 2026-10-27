@@ -129,28 +129,32 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   LuLu, BlockBlock, OverSight or Santa. Dropped signals are counted under
   `es_intentionally_filtered_before_worker_by_type`. The fatal signals that
   are kept are budgeted. The first signal of each sender and target pair is
-  kept while fewer than 1,024 pairs are tracked. Repeats get 8 plus 2 a
-  second per pair and 64 plus 16 a second from a target budget: one for the
-  engine, one for each tool executable that is root-owned and singly linked
-  in a system location, and one decoy budget shared by every other target.
+  kept while fewer than 1,024 pairs are tracked. Each pair keeps 8 signals,
+  its first included, plus 2 a second, and each repeat also needs a token
+  from a target budget of 64 plus 16 a second: one for the engine, one for
+  each tool executable that is root-owned and singly linked in a system
+  location, and one decoy budget shared by every other target.
   MacCrab's app, `maccrabctl` and `maccrab-mcp` use the decoy budget when the
   installing user owns them, as a Homebrew or drag-to-Applications install
   does. At a full pair table a new pair aimed at a decoy-budget target is
-  refused. Refusals are counted under `es_signal_pair_refused_total`,
-  `es_signal_pair_table_full_total` and `es_signal_aggregate_refused_total`.
+  refused. Refusals are counted under `es_signal_pair_refused_total` and
+  `es_signal_aggregate_refused_total`, and signals whose pair a full table
+  could not track, kept or not, under `es_signal_pair_table_full_total`.
 - **Repeated writes and reads of the same file by the same process are
   coalesced.** Repeated WRITE and OPEN callbacks from one process on one path
   within a 2-second window, anchored at the first one, are folded into it.
   The first always passes unchanged, so a continuous writer is observed once
   per window. The modified CLOSE carries `coalesced_write_count`, and the
-  heartbeat reports `es_coalesced_on_worker_by_type`. Credential, honeyfile,
-  persistence and agent-config paths are never coalesced. A modified close,
+  heartbeat reports `es_coalesced_on_worker_by_type`. Credential and
+  agent-config paths, launch agent, launch daemon, startup item and login item
+  folders, and `.zshrc`, `.zprofile`, `.bashrc` and `.bash_profile` are never
+  coalesced. A modified close,
   rename or unlink of a path by any process ends every reader's window on it,
   so a re-read after a third-party modification is observed again.
 - **The file-client ES worker reserves a quarter of its budget for the write
   family and for protected opens.** An OPEN flood can no longer shed
-  persistence writes at the hand-off, nor a credential read within its
-  process's share of the reserve.
+  persistence writes at the hand-off, nor a credential read that holds one
+  of the reserved slots.
 - **The detection lanes no longer wait on TraceGraph.** Enriched events are
   handed to a bounded ingest queue of 8,192 entries, newest kept, drained by a
   dedicated service task. A slow or recovering causal-graph store cannot stall
@@ -187,6 +191,44 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   being judged, and a held tick with no loss says so.
 
 ### Fixed
+- **A signing identity counts only for the code that is running.** An
+  identity that grants an exemption (MacCrab's own, Apple's developer tools,
+  Google's or Brave's) is accepted only once Security has verified the running
+  program, matched by the code-directory hash the kernel reports; Apple's
+  platform binaries keep the kernel's verdict. A verdict for another image, an
+  ad-hoc signature and a self-signed certificate naming an exempted team grant
+  no team-based exemption; git's credential helper and Sparkle's release tools
+  are still recognized by name when they carry no team. A notarized Developer
+  ID program that names itself com.apple.* is not trusted as notarized. A
+  program whose file is replaced while it runs stays unverified until it
+  restarts, and one that runs the Intel half of a universal binary under
+  Rosetta stays unverified.
+- **Same-team exemptions need a verified team.** The memory-read,
+  debugger-attach and thread-injection rules skip access between processes of
+  one team only when Security attested the acting process's team for the code
+  it runs.
+- **Updater quieting is narrower.** A Google updater in a home folder is
+  quieted only when Google signed it, and Sparkle's staging folder is no
+  longer an updater location. Homebrew's own folders and the Sparkle framework
+  inside apps in /Applications are still trusted by location, along with
+  everything they start. Must-fire matches and credential-theft techniques
+  (T1555, T1003, T1552, T1539) survive the updater gate.
+- **Developer-tool paths lower only medium alerts.** High and critical
+  execution and command-and-control alerts from processes under node_modules,
+  Homebrew, nvm, Cargo and similar locations are no longer stored as low, and
+  must-fire, command-and-control and TraceGraph alerts are never lowered
+  there.
+- **Allowlist entries scoped to a file hash or to this host now apply.**
+  Earlier versions stored them without applying them. A host entry that
+  names this Mac silences the single-event rule, sequence rule and baseline
+  anomaly alerts raised as events arrive, except critical command-execution,
+  command-and-control and credential-theft detections; alerts a rule reload
+  raises retroactively for the previous six hours are not checked against the
+  allowlist. A hash entry, combined with a rule, matches
+  only a digest bound to the launched image and read from an APFS volume the
+  system mounted, and a cached digest is checked against the file's current
+  volume again before it is reused. Volumes a user mounted and non-APFS
+  volumes never match by hash.
 - **Opening Settings no longer publishes saved display values as engine
   storage policy.** Only an explicit control edit writes an override, preserving
   inherited values and unrelated settings. Invalid or unreadable override
@@ -261,10 +303,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   does not offer it, and the Update button no longer appears for it. An
   entry without a status counts as not offered instead of being assumed
   official.
-- **A build storm can no longer make the kernel drop Endpoint Security
-  messages.** The ES callback used to decode paths and run the OPEN admission
-  policy on the kernel dequeue thread. Every path-dependent drop decision now
-  runs on the per-client worker before any allocation. Measured on the same
+- **A build storm is far less likely to make the kernel drop Endpoint
+  Security messages.** The ES callback used to decode paths and run the OPEN
+  admission policy on the kernel dequeue thread. Every path-dependent drop
+  decision except a fatal signal's target check now runs on the per-client
+  worker before any allocation. Measured on the same
   100k-message storm, the policy the handler used to run inline decided about
   26k messages a second; the new callback, which does field gates plus a
   byte-level credential and agent-content classification of each OPEN, runs
@@ -274,7 +317,7 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   the priority detection lane.** An `open` admitted only by the dynamic-AI
   demand policy is stamped `open_admission=dynamic_ai` and rides the file
   lane. Credential, honeyfile and agent-content opens keep the priority lane
-  and the priority storage path, in order with their exec, within a budget
+  and the priority storage path, alongside their exec, within a budget
   for each process and a ceiling for each sensor worker, so the
   credential-read rules, the wall-clock sequence windows and the
   injection-evidence weld keep their inputs. Reads of exact deployed-decoy
@@ -283,10 +326,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - **A credential, honeyfile or agent-content read holds reserved slots at
   the ES worker hand-off, up to a share per process.** The callback classifies
   the raw path bytes. Each process may hold up to 32 of a worker's 256
-  reserved slots, and the last 64 are kept for processes holding none. Beyond
-  its share a process's reads are offered the ordinary OPEN tier, where an
-  OPEN flood can shed them; such a loss is counted under
-  `es_copy_backpressure_dropped_by_type` (NOTIFY_OPEN), and the demotion under
+  reserved slots, and the last 64 are kept for processes holding none. A read
+  that finds no slot it may take is offered the ordinary OPEN tier, where an
+  OPEN flood can shed it. A shed read is counted only as an OPEN backpressure
+  drop, in `es_copy_backpressure_dropped_total` and under NOTIFY_OPEN in
+  `es_copy_backpressure_dropped_by_type`; one still admitted is counted under
   `es_protected_open_slice_demoted_total`.
 - **`storage_errors.json` is no longer rewritten on every failed insert.** It
   was rewritten inline and non-atomically, about 52 times a second during a

@@ -410,8 +410,9 @@ extension MacCrabCtl {
             --hash <sha256>    Combined with --rule, matches the launched
                                executable's SHA-256, only on APFS volumes the
                                system mounts (such as the startup disk); never
-                               on disk images, removable drives or other
-                               volumes a user mounted, nor on non-APFS volumes
+                               on volumes a user mounted, such as disk images
+                               and removable drives a user attaches, nor on
+                               non-APFS volumes
             --ttl <DUR>        Expire after e.g. 7d / 24h / 30m / 2w
                                (optional — omit for permanent)
             --reason "<text>"  Required — why this allow exists

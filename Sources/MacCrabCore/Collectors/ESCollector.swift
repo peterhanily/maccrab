@@ -1100,15 +1100,18 @@ public final class ESCollector: @unchecked Sendable {
     // dynamic-AI OPEN and 27k mixed decisions/s — and in the attempt4 capture
     // the kernel dropped 37,318 messages in the 30 s window where 47,931 OPENs
     // were admitted, with copy-backpressure at zero (the worker was never
-    // full; the handler was the bottleneck). Everything below is an integer
-    // or bool read on the borrowed message; the path-dependent policy runs on
-    // the retained-message worker (`processRetained` → `admitOnWorker`). The
-    // one path the callback still looks at is a NOTIFY_OPEN's, and only as
-    // raw bytes through `protectedOpenPathMarkers` (no decode, no lock) so a
-    // credential / agent-content OPEN can claim the worker reserve. A
-    // relevant fatal NOTIFY_SIGNAL is the exception that takes a lock: the
-    // signal rate limiter takes its lock up to three times, and its idle
-    // sweep runs at most once every 2.5 seconds.
+    // full; the handler was the bottleneck). Most of what follows is an
+    // integer or bool read on the borrowed message; the file events'
+    // path-dependent drop policy runs on the retained-message worker
+    // (`processRetained` → `admitOnWorker`). A NOTIFY_OPEN's path is looked
+    // at only as raw bytes through `protectedOpenPathMarkers` (no decode, no
+    // lock) so a credential / agent-content OPEN can claim the worker
+    // reserve. Two exceptions take locks: an EXEC or FORK consults the
+    // dynamic-AI registry, and an EXEC decodes its own path to do so; a fatal
+    // NOTIFY_SIGNAL takes the rate limiter's lock once, up to three times
+    // when its target is relevant, and decodes the target's path unless its
+    // tracked pair is out of tokens or it targets the engine. Each limiter
+    // table sweeps idle keys at most once every 2.5 seconds.
 
     /// The field-only callback policy. Pure so tests can pin it without an
     /// `es_message_t`. `signalTargetExecutable` is an autoclosure: the token is

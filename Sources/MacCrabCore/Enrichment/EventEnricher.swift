@@ -404,9 +404,9 @@ public actor EventEnricher {
     /// no signature keeps none while the running image is unknown, and reads
     /// as ad-hoc when the image is known and is not the file's. A verdict
     /// that grants nothing (ad-hoc, unsigned) needs no binding, and an event
-    /// without a process has no image to bind to. A process that Rosetta
-    /// translates runs the x86_64 slice, whose hash the native-slice
-    /// evaluation lacks, so its trusted claim stays unverified.
+    /// without a process has no image to bind to. A universal binary that
+    /// Rosetta translates runs its x86_64 slice, whose hash the evaluation of
+    /// Security's default slice lacks, so its trusted claim stays unverified.
     static func publishedSignature(
         claim: CodeSignatureInfo?,
         verdict: CodeSigningCache.Verdict,

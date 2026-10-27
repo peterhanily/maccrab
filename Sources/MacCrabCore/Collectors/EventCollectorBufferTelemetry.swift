@@ -89,8 +89,9 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
     /// junk beside the decoys) is not, so on a host where every default
     /// decoy is deployed no loop on files a process can create spends this
     /// class's budget; reading the deployed files themselves is the finding.
-    /// A default path that was never deployed (deception set up before
-    /// v1.12.0 and not redeployed) can be created and looped on.
+    /// A default path that was never deployed there (another user's home, or
+    /// a host where deception was set up before v1.12.0 or never) can be
+    /// created and looped on.
     static func isHoneyfileOrDecoyPath(_ path: String) -> Bool {
         guard !path.hasPrefix("/Users/Shared/"), let inHome = homeRelativePath(path) else { return false }
         return deployedDecoys.contains(String(inHome))
@@ -266,8 +267,8 @@ protocol BoundedTableEntry: AnyObject {
 /// hash probe, not a scan. If the table is still full, the policy decides. A
 /// lane table frees an eighth of itself in one pass, idle keys first and then
 /// the most recently inserted live ones, so a storm of new keys recycles its
-/// own slots first; an established key is recycled only once at least 448
-/// live keys were inserted after it. A key that takes a slot a live
+/// own slots first: a live key is recycled only when at least 448 live keys
+/// were inserted before it. A key that takes a slot a live
 /// entry left is `churned`: it is no first sighting, and its entry is built
 /// as the maker sees fit for a key that arrived under churn. A signal table
 /// refuses the key outright. Either way, cycling through fresh keys cannot
@@ -460,8 +461,8 @@ final class ProcessLaneBudget: BoundedTableEntry {
 ///    process, or of an IDE or shell tracked for an hour, past them.
 /// 3. Churn. When the table is full of live processes, a batch recycles the
 ///    most recently inserted ones (`BoundedTable`), so a storm of fresh pids
-///    recycles its own slots first; an established process is recycled only
-///    once at least 448 live processes were inserted after it. A process that
+///    recycles its own slots first: a live process is recycled only when at
+///    least 448 live processes were inserted before it. A process that
 ///    takes such a slot is a newcomer under churn. Its first event is paid by
 ///    the newcomer allowance (128, refilling 32 a second), which no tracked
 ///    process can spend, and its later events by the shared bucket. It gets
