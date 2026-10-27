@@ -19,11 +19,17 @@ struct DetectionPlaneInlineContextTests {
         let lifecycle = DaemonTimerLifecycle(maximumInFlightHandlers: 1)
         let flag = Flag()
         let gate = AsyncStream<Void>.makeStream()
-        // Occupy the plane's only slot.
+        let started = AsyncStream<Void>.makeStream()
+        // Occupy the plane's only slot. The slot is taken at submission, but
+        // the handler records only once it runs; shutdown cancels work that
+        // has not started, so wait for it before anything else happens.
         #expect(await lifecycle.submitOrRunInlineOnOverload(label: "occupant") {
             flag.record(DaemonWorkInlineContext.isRunningOnLane)
+            started.continuation.yield()
+            started.continuation.finish()
             for await _ in gate.stream { break }
         } == .accepted)
+        for await _ in started.stream { break }
         #expect(await lifecycle.submitOrRunInlineOnOverload(label: "derived") {
             flag.record(DaemonWorkInlineContext.isRunningOnLane)
         } == .ranInlineOnOverload)
