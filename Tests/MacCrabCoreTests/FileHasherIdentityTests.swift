@@ -393,4 +393,28 @@ struct FileHasherIdentityTests {
         func increment() { lock.lock(); count += 1; lock.unlock() }
         var value: Int { lock.lock(); defer { lock.unlock() }; return count }
     }
+
+    @Test("a digest is returned with the identity of the file it hashed")
+    func digestCarriesIdentity() async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/tool"
+        try Data(repeating: 0x41, count: 70_000).write(to: URL(fileURLWithPath: path))
+        let hasher = FileHasher()
+        let hashed = try #require(await hasher.hashWithIdentity(path: path))
+        #expect(hashed.sha256 == FileHasher.computeSHA256(path: path))
+        #expect(hashed.identity == HeavyEnrichmentFileIdentity.capture(path: path))
+        #expect(await hasher.hash(path: path) == hashed.sha256)
+        // Served from the cache now, with the same identity.
+        #expect(await hasher.hashWithIdentity(path: path) == hashed)
+        #expect(await hasher.stats().hits == 2)
+        // Replacing the file gives a new identity with the new digest.
+        let replacement = base + "/replacement"
+        try Data(repeating: 0x42, count: 70_000).write(to: URL(fileURLWithPath: replacement))
+        #expect(rename(replacement, path) == 0)
+        let replaced = try #require(await hasher.hashWithIdentity(path: path))
+        #expect(replaced.sha256 != hashed.sha256)
+        #expect(replaced.identity != hashed.identity)
+        #expect(replaced.identity == HeavyEnrichmentFileIdentity.capture(path: path))
+    }
 }

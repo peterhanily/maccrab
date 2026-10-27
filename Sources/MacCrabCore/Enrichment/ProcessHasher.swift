@@ -22,10 +22,14 @@ public actor ProcessHasher {
     public struct ProcessHash: Sendable, Equatable {
         public let sha256: String?
         public let cdhash: String?
+        /// The file `sha256` was read from, as the hasher identified it. Nil
+        /// whenever `sha256` is.
+        public let fileIdentity: HeavyEnrichmentFileIdentity?
 
-        public init(sha256: String?, cdhash: String?) {
+        public init(sha256: String?, cdhash: String?, fileIdentity: HeavyEnrichmentFileIdentity? = nil) {
             self.sha256 = sha256
             self.cdhash = cdhash
+            self.fileIdentity = fileIdentity
         }
 
         /// True iff at least one hash was produced.
@@ -60,9 +64,10 @@ public actor ProcessHasher {
     /// These are independent observations of the supplied path and the current
     /// PID; they do not establish an atomic process identity across an exec.
     public func hash(pid: Int32, executablePath: String) async -> ProcessHash {
-        async let sha256 = fileHasher.hash(path: executablePath)
+        async let hashed = fileHasher.hashWithIdentity(path: executablePath)
         async let cdhash = cdHashExtractor.extractCDHash(pid: pid)
-        return ProcessHash(sha256: await sha256, cdhash: await cdhash)
+        let file = await hashed
+        return ProcessHash(sha256: file?.sha256, cdhash: await cdhash, fileIdentity: file?.identity)
     }
 
     /// Fingerprint an executable on disk only (no running process required).

@@ -426,6 +426,19 @@ public actor EventEnricher {
         }
     }
 
+    /// Whether a digest stands for the exec'd image: only when the file the
+    /// hasher read had exactly the identity the kernel reported at exec. The
+    /// stat bracket around the hash cannot decide this, because the path can
+    /// name another file between the bracket's reads and the hasher's own
+    /// probe, and the hasher may answer from its cache for the file it found.
+    static func digestIsImageBound(
+        hashed: HeavyEnrichmentFileIdentity?,
+        image: HeavyEnrichmentFileIdentity?
+    ) -> Bool {
+        guard let image, let hashed else { return false }
+        return hashed == image
+    }
+
     /// Preserves collector hashes immediately; a launch-event miss is hashed
     /// on the heavy plane and bound to one stable executable identity.
     private func resolveHashes(
@@ -465,7 +478,7 @@ public actor EventEnricher {
                     sha256: computed.sha256,
                     cdhash: computed.cdhash,
                     md5: nil,
-                    imageBound: image != nil && image == stable
+                    imageBound: Self.digestIsImageBound(hashed: computed.fileIdentity, image: image)
                 ),
                 fileIdentity: stable
             ))

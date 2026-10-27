@@ -52,6 +52,20 @@ public actor FileHasher {
         let mtimeNanoseconds: Int
         let ctimeSeconds: Int
         let ctimeNanoseconds: Int
+
+        /// The key without its path: the file the digest is of.
+        var fileIdentity: HeavyEnrichmentFileIdentity {
+            HeavyEnrichmentFileIdentity(
+                deviceID: device, inodeNumber: inode, sizeBytes: size,
+                modificationSeconds: Int64(mtimeSeconds), modificationNanoseconds: Int64(mtimeNanoseconds),
+                statusChangeSeconds: Int64(ctimeSeconds), statusChangeNanoseconds: Int64(ctimeNanoseconds))
+        }
+    }
+
+    /// A digest with the identity of the file whose bytes it is.
+    public struct HashedFile: Sendable, Equatable {
+        public let sha256: String
+        public let identity: HeavyEnrichmentFileIdentity
     }
 
     private let logger = Logger(subsystem: "com.maccrab.enrichment", category: "file-hasher")
@@ -109,6 +123,15 @@ public actor FileHasher {
     /// Returns the SHA-256 hex digest of `path`, or `nil` if the file is
     /// unavailable, too large, on a network mount, or errors during I/O.
     public func hash(path: String) async -> String? {
+        await hashWithIdentity(path: path)?.sha256
+    }
+
+    /// `hash(path:)` with the identity (device, inode, size, mtime, ctime) of
+    /// the file the digest is of: the one the probe found at `path`, whose
+    /// bytes the read verified before and after. A caller that must prove the
+    /// digest is of a particular image compares this identity, not a stat of
+    /// the path, which can name another file by the time it is taken.
+    public func hashWithIdentity(path: String) async -> HashedFile? {
         // Type, size and identity, off the actor: a probe that walks into a
         // stalled network volume must not hold every other hash.
         let key: CacheKey
@@ -129,14 +152,14 @@ public actor FileHasher {
         if let cached = cache[key] {
             statsStore.hits += 1
             touch(key)
-            return cached
+            return HashedFile(sha256: cached, identity: key.fileIdentity)
         }
 
         if let pending = inFlight[key] {
             switch await pending.value {
             case .digest(let digest, _):
                 statsStore.hits += 1
-                return digest
+                return HashedFile(sha256: digest, identity: key.fileIdentity)
             case .network:
                 statsStore.skippedNetwork += 1
                 return nil
@@ -166,7 +189,7 @@ public actor FileHasher {
             statsStore.misses += 1
             // Cache only a digest of bytes that stayed in place while hashing.
             if stillInPlace { insert(key, digest: digest) }
-            return digest
+            return HashedFile(sha256: digest, identity: key.fileIdentity)
         case .network:
             statsStore.skippedNetwork += 1
             return nil
