@@ -697,6 +697,15 @@ struct ProtectedFileLaneTests {
             var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 77)
             EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker)
         }
+        // Every default honeyfile is a high-value read, whatever its name.
+        let honeyfiles = HoneyfileManager.defaultHoneyfileSet(homeDir: "/Users/x").map(\.path)
+        #expect(honeyfiles.count == 13)
+        for path in honeyfiles {
+            var read = fileEvent("open", path, pid: 77)
+            #expect(EventPipelineLane.stampProtectedLane(
+                &read, budgets: budgets, nowNanos: t0 + 350, refusals: tracker) == true, "\(path)")
+            #expect(EventPipelineLane.finalLane(for: read) == .priority, "\(path)")
+        }
         for path in ["/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt",
                      "/Users/x/Library/Keychains/login.keychain-db",
                      "/Users/x/Library/Application Support/Electrum/wallets/default_wallet",
@@ -714,7 +723,7 @@ struct ProtectedFileLaneTests {
                 decoyAdmitted += 1
             }
         }
-        #expect(decoyAdmitted == 60, "the high-value class is a budget too: 64 reads, four already spent")
+        #expect(decoyAdmitted == 47, "the high-value class is a budget too: 64 reads, seventeen already spent")
     }
 
     @Test("every high-value marker is one of the protected OPEN markers, so the class is a subset and cannot drift")

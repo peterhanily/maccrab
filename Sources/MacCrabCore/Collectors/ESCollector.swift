@@ -668,6 +668,13 @@ public final class ESCollector: @unchecked Sendable {
         "/Documents/passwords_backup.csv",
         "/.gcp-service-account.json.bak",
         "/.gitconfig.bak",
+        // The other default honeyfiles (HoneyfileManager.defaultHoneyfileSet).
+        // Each already matches a broader marker above; they are named exactly
+        // so `highValueReadPathSubstrings` can list every default honeyfile
+        // and remain a subset of this list.
+        "/.aws/credentials.bak", "/.ssh/id_rsa.old", "/.kube/config.backup",
+        "/.netrc.backup", "/.docker/config.json.bak", "/.npmrc.bak", "/.pypirc.bak",
+        "/.config/gh/hosts.yml.bak", "/.cargo/credentials.toml.bak",
         "/Library/Keychains/",
         // v1.18 read-detection: the credential-read rules (safari/notes/password-
         // manager/shadow-hash) target these, so ES must emit NOTIFY_OPEN for them.
@@ -1603,10 +1610,14 @@ public final class ESCollector: @unchecked Sendable {
     /// `credentialReadPathSubstrings`; a test pins the subset.
     static let highValueReadPathSubstrings: [String] = [
         "Application Support/MacCrab/decoys/",
+        // Every default honeyfile (HoneyfileManager.defaultHoneyfileSet).
         "/Library/Application Support/Passwords.backup",
         "/Documents/passwords_backup.csv",
         "/.gcp-service-account.json.bak",
         "/.gitconfig.bak",
+        "/.aws/credentials.bak", "/.ssh/id_rsa.old", "/.kube/config.backup",
+        "/.netrc.backup", "/.docker/config.json.bak", "/.npmrc.bak", "/.pypirc.bak",
+        "/.config/gh/hosts.yml.bak", "/.cargo/credentials.toml.bak",
         "/Library/Keychains/",
         "/MetaMask/", "/Phantom/", "/Coinbase Wallet/",
         "/1Password/", "/Bitwarden/", ".kdbx",
