@@ -957,7 +957,8 @@ struct ProtectedFileLaneTests {
             }
         }
         #expect(offered == 153_600)
-        #expect(admitted == 1_024, "600 fresh processes each within their own budget still get only the worker's OPEN aggregate")
+        #expect(admitted == 512 * 5 + 1_024,
+                "the 512 tracked processes get their allowance of five each; everything else is the worker's OPEN aggregate")
         #expect(tracker.protectedLaneRefusedTotal() == UInt64(offered - admitted), "every refusal is counted")
         // Right after the storm the table is still full of live processes, so
         // a newcomer is inserted over one of them with a single token: rotating
@@ -1008,8 +1009,143 @@ struct ProtectedFileLaneTests {
             }
         }
         #expect(offered == 64_000)
-        #expect(admitted == 256, "1,000 fresh processes each within their own budget still get only the worker's write aggregate")
+        #expect(admitted == 512 * 5 + 256,
+                "the 512 tracked processes get their allowance of five each; everything else is the worker's write aggregate")
         #expect(tracker.protectedLaneRefusedTotal() == UInt64(offered - admitted))
+    }
+
+    @Test("a fork-and-decoy-read storm pins the high-value aggregate within the same bound, and an uninvolved process's first decoy read still stamps priority")
+    func aggregateBoundsADecoyReadStorm() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let decoy = "/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt"
+        var admitted = 0
+        var offered = 0
+        for pid in 40_000..<40_300 {
+            for _ in 0..<8 {
+                var read = fileEvent("open", decoy, pid: Int32(pid))
+                offered += 1
+                if EventPipelineLane.stampProtectedLane(
+                    &read, budgets: budgets, nowNanos: t0 + UInt64(offered), refusals: tracker) == true {
+                    admitted += 1
+                }
+            }
+        }
+        #expect(admitted == 300 * 5 + 256, "300 processes' allowance of five each plus the high-value aggregate")
+        #expect(tracker.protectedLaneRefusedTotal() == UInt64(offered - admitted))
+        var victim = fileEvent("open", decoy, pid: 50_000)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &victim, budgets: budgets, nowNanos: t0 + 10_000, refusals: tracker) == true,
+                "a process seen for the first time keeps its first decoy read on the priority lane")
+    }
+
+    /// Five processes each burst their own OPEN bucket, then keep opening their
+    /// own alert-free `.env` at 64 a second: 320 a second against an aggregate
+    /// that refills 256, so it stays pinned near zero.
+    /// Five processes each burst their own bucket, then, straight after, keep
+    /// opening their own alert-free file at `perSecond` a second for three
+    /// seconds: five times that is more than the class's shared bucket
+    /// refills, so it stays pinned near zero throughout. Returns the
+    /// admissions in the last second and the time of the last attempt.
+    private func pinTheAggregate(
+        _ budgets: PerProcessLaneBudgets, _ tracker: ESSeqTracker, from t0: UInt64,
+        path: (Int32) -> String, burst: Int, perSecond: Int
+    ) -> (admittedInLastSecond: Int, lastAttempt: UInt64) {
+        for pid: Int32 in 1...5 {
+            for k in 0..<burst {
+                var open = fileEvent("open", path(pid), pid: pid)
+                EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(k) * 1_000, refusals: tracker)
+            }
+        }
+        let steady = t0 + 1_000_000
+        let spacing = UInt64(1_000_000_000 / perSecond)
+        var admittedInLastSecond = 0
+        var lastAttempt = steady
+        for second: UInt64 in 0..<3 {
+            for k in 0..<perSecond {
+                for pid: Int32 in 1...5 {
+                    var open = fileEvent("open", path(pid), pid: pid)
+                    lastAttempt = steady + second * 1_000_000_000 + UInt64(k) * spacing + UInt64(pid) * 1_000
+                    if EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: lastAttempt, refusals: tracker) == true,
+                       second == 2 {
+                        admittedInLastSecond += 1
+                    }
+                }
+            }
+        }
+        return (admittedInLastSecond, lastAttempt)
+    }
+
+    @Test("long-lived loopers on their own alert-free .env pin the OPEN aggregate, and an uninvolved process's credential read still stamps priority")
+    func loopersCannotDemoteAnUninvolvedProcess() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let storm = pinTheAggregate(budgets, tracker, from: t0, path: { "/tmp/\($0)/.env" }, burst: 256, perSecond: 64)
+        #expect(storm.admittedInLastSecond <= 262, "the loopers hold the aggregate at its refill plus their trickle of allowance: \(storm.admittedInLastSecond) of 320")
+        #expect(storm.admittedInLastSecond >= 200, "the storm shape really is admitted at the refill rate")
+        var victim = fileEvent("open", "/Users/x/.aws/credentials", pid: 6)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &victim, budgets: budgets, nowNanos: storm.lastAttempt + 1_000_000, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: victim) == .priority,
+                "a process the loopers never touched keeps its credential read on the priority lane")
+    }
+
+    @Test("a process tracked for half a minute before the loopers started keeps its allowance, so its credential read stamps priority too")
+    func trackedProcessKeepsItsAllowanceUnderLoopers() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var early = fileEvent("open", "/Users/x/.gitconfig", pid: 7)
+        #expect(EventPipelineLane.stampProtectedLane(&early, budgets: budgets, nowNanos: t0, refusals: tracker) == true)
+        let storm = pinTheAggregate(budgets, tracker, from: t0 + 30_000_000_000, path: { "/tmp/\($0)/.env" }, burst: 256, perSecond: 64)
+        var later = fileEvent("open", "/Users/x/.aws/credentials", pid: 7)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &later, budgets: budgets, nowNanos: storm.lastAttempt + 1_000_000, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: later) == .priority,
+                "an IDE or shell that read a credential half a minute ago is not coupled to the loopers")
+    }
+
+    @Test("loopers on their own keychain junk pin the high-value aggregate, and an uninvolved process's decoy read still stamps priority")
+    func highValueLoopersCannotDemoteAnUninvolvedProcess() {
+        let budgets = PerProcessLaneBudgets()
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        let storm = pinTheAggregate(budgets, tracker, from: t0, path: { "/Users/x/Library/Keychains/junk\($0)" }, burst: 64, perSecond: 16)
+        #expect(storm.admittedInLastSecond <= 70, "the loopers hold the high-value aggregate at its refill plus their trickle of allowance: \(storm.admittedInLastSecond) of 80")
+        var victim = fileEvent("open", "/Users/x/Documents/passwords_backup.csv", pid: 6)
+        #expect(EventPipelineLane.stampProtectedLane(
+            &victim, budgets: budgets, nowNanos: storm.lastAttempt + 1_000_000, refusals: tracker) == true)
+        #expect(EventPipelineLane.finalLane(for: victim) == .priority)
+    }
+
+    @Test("an aggregate refusal does not spend the process's own token: the bucket is peeked, and debited only on admission")
+    func aggregateRefusalRefundsTheProcessBucket() {
+        let budgets = PerProcessLaneBudgets(
+            open: (capacity: 256, refillPerSecond: 0),
+            openAggregate: (capacity: 10, refillPerSecond: 1_000))
+        let tracker = ESSeqTracker()
+        let t0: UInt64 = 1_000_000_000
+        var first = 0
+        for i in 0..<300 {
+            var open = fileEvent("open", "/Users/x/.gitconfig", pid: 77)
+            if EventPipelineLane.stampProtectedLane(&open, budgets: budgets, nowNanos: t0 + UInt64(i), refusals: tracker) == true {
+                first += 1
+            }
+        }
+        #expect(first == 15, "the allowance of five plus the aggregate's ten")
+        // A second later, one attempt a millisecond: the aggregate refills a
+        // token between attempts, so only the process's own bucket can limit.
+        var second = 0
+        for i in 0..<300 {
+            var open = fileEvent("open", "/Users/x/.gitconfig", pid: 77)
+            if EventPipelineLane.stampProtectedLane(
+                &open, budgets: budgets, nowNanos: t0 + 1_000_000_000 + UInt64(i) * 1_000_000, refusals: tracker) == true {
+                second += 1
+            }
+        }
+        #expect(second == 241, "the 241 tokens the earlier refusals left untouched are all admitted")
     }
 
     @Test("the worker stamps through the budget and counts its refusals")

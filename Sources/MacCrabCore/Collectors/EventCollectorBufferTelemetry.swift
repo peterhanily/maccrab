@@ -331,6 +331,21 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
     }
 }
 
+/// One process's standing in one class of `PerProcessLaneBudgets`: its own
+/// bucket, and — unless it entered the table over a live entry — the small
+/// allowance it may spend without touching the worker's shared bucket.
+final class ProcessLaneBudget: BoundedTableEntry {
+    let bucket: ProtectedFileLaneBudget
+    let exempt: ProtectedFileLaneBudget?
+
+    init(bucket: ProtectedFileLaneBudget, exempt: ProtectedFileLaneBudget?) {
+        self.bucket = bucket
+        self.exempt = exempt
+    }
+
+    var lastSeenNanos: UInt64? { bucket.lastSeenNanos }
+}
+
 /// One ES worker's protected-lane budgets, split by class: the write family
 /// and SETMODE, the static credential / agent-content OPENs (every `git`
 /// reads `~/.gitconfig`), and the high-value OPENs — a deployed decoy or
@@ -338,19 +353,37 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
 /// process which drained its OPEN budget on its own `.gitconfig` cannot then
 /// read a decoy or the login keychain off the priority lane.
 ///
-/// Each class is bounded twice. A bucket per source process (write 64 then
-/// 16 a second, OPEN 256 then 64, high-value 64 then 16) means a loop spends
-/// only its own tokens: it can take neither another process's credential
-/// read nor its own LaunchAgent write off the priority lane. One bucket per
-/// worker (write 256 then 64, OPEN 1,024 then 256, high-value 256 then 64),
-/// spent only after a process's own bucket admitted, bounds what a storm of
-/// fresh processes — a fork each doing its own 256 opens — can put on the
-/// lane in all; being several times a single bucket, one looping process
-/// cannot drain it for the others. Past either bound an event rides the
-/// file lane and is counted as refused. A process never seen before starts
-/// with full buckets; the tables hold `trackedProcesses` pids each and evict
-/// idle ones first. Owned by one serial `ESMessageWorker` queue, so it
-/// needs no lock.
+/// Three bounds hold in every class, and the guarantee they give is this: a
+/// process's protected event is admitted to the priority lane if its own
+/// bucket has a token and either its allowance or the worker's shared bucket
+/// has one.
+///
+/// 1. A bucket per source process (write 64 then 16 a second, OPEN 256 then
+///    64, high-value 64 then 16): a loop spends only its own tokens, so it
+///    can take neither another process's credential read nor its own
+///    LaunchAgent write off the lane. Peeked, not spent, until the event is
+///    admitted, so a shared-bucket refusal costs the process nothing.
+/// 2. A bucket per worker (write 256 then 64, OPEN 1,024 then 256,
+///    high-value 256 then 64), spent only after a process's own bucket had a
+///    token, bounds what any number of processes can put on the lane in all.
+/// 3. An allowance per process that the shared bucket never sees: its first
+///    event, then four more refilling at one every four seconds. The shared
+///    bucket refills at four processes' worth, so four or five long-lived
+///    loopers on their own alert-free files hold it at zero for as long as
+///    they run; the allowance is what still carries an uninvolved process's
+///    credential read, or that of an IDE or shell tracked for an hour, past
+///    them. A process that entered the table over a live entry (the table
+///    was full of live processes) gets no allowance and one token, so the
+///    allowance cannot be multiplied by rotating pids.
+///
+/// Hence a storm of fresh processes puts at most (live processes, at most
+/// `trackedProcesses`) times the allowance of five, plus the shared bucket's
+/// burst and refill, on the lane; the rest rides the file lane, counted as
+/// refused. The residual: a process seen for the first time while more than
+/// `trackedProcesses` live processes are storming is one of the churned
+/// ones, and is bounded by the shared bucket like the storm. The tables
+/// evict idle processes first. Owned by one serial `ESMessageWorker` queue,
+/// so it needs no lock.
 final class PerProcessLaneBudgets {
     enum Kind {
         case write
@@ -360,9 +393,9 @@ final class PerProcessLaneBudgets {
 
     typealias Shape = (capacity: Int, refillPerSecond: Double)
 
-    private let write: BoundedTable<pid_t, ProtectedFileLaneBudget>
-    private let open: BoundedTable<pid_t, ProtectedFileLaneBudget>
-    private let highValueOpen: BoundedTable<pid_t, ProtectedFileLaneBudget>
+    private let write: BoundedTable<pid_t, ProcessLaneBudget>
+    private let open: BoundedTable<pid_t, ProcessLaneBudget>
+    private let highValueOpen: BoundedTable<pid_t, ProcessLaneBudget>
     private let writeAggregate: ProtectedFileLaneBudget
     private let openAggregate: ProtectedFileLaneBudget
     private let highValueOpenAggregate: ProtectedFileLaneBudget
@@ -373,11 +406,15 @@ final class PerProcessLaneBudgets {
          highValueOpen: Shape = (capacity: 64, refillPerSecond: 16),
          writeAggregate: Shape = (capacity: 256, refillPerSecond: 64),
          openAggregate: Shape = (capacity: 1_024, refillPerSecond: 256),
-         highValueOpenAggregate: Shape = (capacity: 256, refillPerSecond: 64)) {
-        func table(_ shape: Shape) -> BoundedTable<pid_t, ProtectedFileLaneBudget> {
+         highValueOpenAggregate: Shape = (capacity: 256, refillPerSecond: 64),
+         allowance: Shape = (capacity: 4, refillPerSecond: 0.25)) {
+        func table(_ shape: Shape) -> BoundedTable<pid_t, ProcessLaneBudget> {
             BoundedTable(capacity: trackedProcesses, policy: .evictLeastRecentlyUsed) { churned in
-                ProtectedFileLaneBudget(capacity: shape.capacity, refillPerSecond: shape.refillPerSecond,
-                                        initialTokens: churned ? 1 : nil)
+                ProcessLaneBudget(
+                    bucket: ProtectedFileLaneBudget(capacity: shape.capacity, refillPerSecond: shape.refillPerSecond,
+                                                    initialTokens: churned ? 1 : nil),
+                    exempt: churned ? nil : ProtectedFileLaneBudget(
+                        capacity: allowance.capacity, refillPerSecond: allowance.refillPerSecond))
             }
         }
         func bucket(_ shape: Shape) -> ProtectedFileLaneBudget {
@@ -391,20 +428,23 @@ final class PerProcessLaneBudgets {
         self.highValueOpenAggregate = bucket(highValueOpenAggregate)
     }
 
-    /// Spends one of `pid`'s tokens of `kind` at `nowNanos` (monotonic), and
-    /// then one of the worker's for that class. A process's own bucket is
-    /// consulted first, so a refused loop never reaches the shared one.
+    /// Whether `pid`'s event of `kind` at `nowNanos` (monotonic) rides the
+    /// priority lane: its own bucket must have a token, and then its
+    /// allowance or the worker's shared bucket pays. The own token is spent
+    /// only on admission.
     func admit(_ kind: Kind, pid: pid_t, nowNanos: UInt64) -> Bool {
-        let own: BoundedTable<pid_t, ProtectedFileLaneBudget>
+        let own: BoundedTable<pid_t, ProcessLaneBudget>
         let shared: ProtectedFileLaneBudget
         switch kind {
         case .write: (own, shared) = (write, writeAggregate)
         case .open: (own, shared) = (open, openAggregate)
         case .highValueOpen: (own, shared) = (highValueOpen, highValueOpenAggregate)
         }
-        guard let bucket = own.lookup(key: pid, nowNanos: nowNanos).entry,
-              bucket.admit(nowNanos: nowNanos) else { return false }
-        return shared.admit(nowNanos: nowNanos)
+        let lookup = own.lookup(key: pid, nowNanos: nowNanos)
+        guard let process = lookup.entry, process.bucket.hasToken(nowNanos: nowNanos) else { return false }
+        let exempt = lookup.firstSighting || process.exempt?.admit(nowNanos: nowNanos) == true
+        guard exempt || shared.admit(nowNanos: nowNanos) else { return false }
+        return process.bucket.admit(nowNanos: nowNanos)
     }
 
     /// The most processes any one class tracks; a test aid.
