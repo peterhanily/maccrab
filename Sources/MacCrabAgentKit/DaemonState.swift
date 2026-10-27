@@ -1664,11 +1664,12 @@ extension DaemonState {
 
     /// The decision behind `isSuppressed(_:event:)`, against any manager. A
     /// rule+hash entry is offered only a digest the enricher bound to the
-    /// exec'd image (the hasher read a file with the device, inode, size and
-    /// times the kernel reported at exec). A digest looked up by path alone
-    /// is of whatever file is there now: a payload could rename an
-    /// allow-listed binary onto its own path right after exec and have its
-    /// events suppressed as that binary, so such a digest is never offered.
+    /// exec'd image: read from an APFS volume, from a file with the device,
+    /// inode, size and times the kernel reported at exec. A digest looked up
+    /// by path alone is of whatever file is there now, and on HFS+, FAT or
+    /// exFAT a same-size rewrite within one second keeps the old identity: a
+    /// payload could take an allow-listed binary's place and have its events
+    /// suppressed as that binary, so such a digest is never offered.
     static func isSuppressed(_ match: RuleMatch, event: Event, manager: SuppressionManager) async -> Bool {
         await manager.isSuppressed(
             match: match,

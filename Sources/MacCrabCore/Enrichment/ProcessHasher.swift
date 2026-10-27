@@ -25,11 +25,16 @@ public actor ProcessHasher {
         /// The file `sha256` was read from, as the hasher identified it. Nil
         /// whenever `sha256` is.
         public let fileIdentity: HeavyEnrichmentFileIdentity?
+        /// Whether `sha256` was read from an APFS volume, where the file
+        /// identity changes with every write. False whenever `sha256` is nil.
+        public let imageBindable: Bool
 
-        public init(sha256: String?, cdhash: String?, fileIdentity: HeavyEnrichmentFileIdentity? = nil) {
+        public init(sha256: String?, cdhash: String?, fileIdentity: HeavyEnrichmentFileIdentity? = nil,
+                    imageBindable: Bool = false) {
             self.sha256 = sha256
             self.cdhash = cdhash
             self.fileIdentity = fileIdentity
+            self.imageBindable = imageBindable
         }
 
         /// True iff at least one hash was produced.
@@ -67,7 +72,8 @@ public actor ProcessHasher {
         async let hashed = fileHasher.hashWithIdentity(path: executablePath)
         async let cdhash = cdHashExtractor.extractCDHash(pid: pid)
         let file = await hashed
-        return ProcessHash(sha256: file?.sha256, cdhash: await cdhash, fileIdentity: file?.identity)
+        return ProcessHash(sha256: file?.sha256, cdhash: await cdhash, fileIdentity: file?.identity,
+                           imageBindable: file?.imageBindable ?? false)
     }
 
     /// Fingerprint an executable on disk only (no running process required).

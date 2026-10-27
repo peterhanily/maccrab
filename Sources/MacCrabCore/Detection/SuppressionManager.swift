@@ -348,9 +348,11 @@ public actor SuppressionManager {
     }
 
     /// The only digest a `.ruleHash` entry may be matched against: one the
-    /// enricher proved was read from the exec'd image itself. A collector
-    /// digest, or one hashed from the path alone, can be of an allow-listed
-    /// binary renamed onto the path after exec, so it never reaches the scope.
+    /// enricher proved was read from the exec'd image itself, on an APFS
+    /// volume. A collector digest, one hashed from the path alone, or one read
+    /// on HFS+, FAT or exFAT, whose coarse times let a same-size rewrite keep
+    /// the old identity, can be of an allow-listed binary's bytes rather than
+    /// the payload the process runs, so it never reaches the scope.
     public static func imageBoundSHA256(_ hashes: ProcessHashes?) -> String? {
         guard let hashes, hashes.imageBound == true else { return nil }
         return hashes.sha256

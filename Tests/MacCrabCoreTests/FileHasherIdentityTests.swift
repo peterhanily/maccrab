@@ -206,7 +206,10 @@ struct FileHasherIdentityTests {
             contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/FileHasher.swift"),
             encoding: .utf8)
         #expect(source.contains("switch await HeavyEnrichmentBlockingWork.run({ Self.probe(path: path) }) {"))
-        #expect(source.contains("if fstatfs(descriptor, &volume) == 0, volume.f_flags & UInt32(MNT_LOCAL) == 0 {"))
+        #expect(source.contains("let volumeKnown = fstatfs(descriptor, &volume) == 0"))
+        #expect(source.contains("if volumeKnown, volume.f_flags & UInt32(MNT_LOCAL) == 0 {"))
+        // Bindability is asked of the same descriptor, and an unknown volume is not bindable.
+        #expect(source.contains("let imageBindable = volumeKnown && Self.fileSystemTypeName(of: volume) == \"apfs\""))
         #expect(!source.contains("lstat("), "a path probe that follows a parent symlink")
         #expect(!source.contains("resourceValues("), "a path-based volume lookup on the actor")
         // The key, which every call takes and a cache hit needs nothing more
@@ -218,10 +221,10 @@ struct FileHasherIdentityTests {
         #expect(!body.contains("open(") && !body.contains("fstatfs("))
         // The path recheck runs inside the compute's hop, and a digest is
         // cached before its in-flight entry ends: no window for a second read.
-        #expect(source.contains("return .digest(digest, stillInPlace: cacheKey(path: path) == key)"))
+        #expect(source.contains("return .digest(digest, stillInPlace: cacheKey(path: path) == key, imageBindable: imageBindable)"))
         #expect(!source.contains("HeavyEnrichmentBlockingWork.run({ Self.cacheKey(path: path) == key })"))
         let ending = try #require(source.range(of: "defer { inFlight.removeValue(forKey: key) }"))
-        let insert = try #require(source.range(of: "if stillInPlace { insert(key, digest: digest) }"))
+        let insert = try #require(source.range(of: "if stillInPlace { insert(key, digest: digest, imageBindable: imageBindable) }"))
         #expect(ending.upperBound < insert.lowerBound, "the digest must be cached in the same actor turn the in-flight entry ends")
     }
 
@@ -327,7 +330,7 @@ struct FileHasherIdentityTests {
         let path = base + "/bin"
         #expect(FileManager.default.createFile(atPath: path, contents: Data("payload".utf8)))
         let key = try #require(FileHasher.cacheKey(path: path))
-        guard case .digest(_, let stillInPlace) = FileHasher.hashAndRecheck(path: path, matching: key) else {
+        guard case .digest(_, let stillInPlace, _) = FileHasher.hashAndRecheck(path: path, matching: key) else {
             Issue.record("a local file was not hashed")
             return
         }
@@ -344,7 +347,8 @@ struct FileHasherIdentityTests {
         let body = try #require(source.range(of: "nonisolated static func hashFile("))
         let tail = source[body.upperBound...]
         let check = try #require(tail.range(of: """
-                    if fstatfs(descriptor, &volume) == 0, volume.f_flags & UInt32(MNT_LOCAL) == 0 {
+                    let volumeKnown = fstatfs(descriptor, &volume) == 0
+                    if volumeKnown, volume.f_flags & UInt32(MNT_LOCAL) == 0 {
                         return .network
                     }
             """))
@@ -392,6 +396,94 @@ struct FileHasherIdentityTests {
         private var count = 0
         func increment() { lock.lock(); count += 1; lock.unlock() }
         var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+
+    /// A hasher that does the real identity-bound read but reports the volume
+    /// as APFS or not, optionally holding the read until `gate` is signalled.
+    /// With `cacheResults` false a later miss can only join the read in
+    /// flight or read again, never hit the cache.
+    private func volumeSeam(apfs: Bool, cacheResults: Bool = true,
+                            gate: DispatchSemaphore? = nil, calls: Counter? = nil) -> FileHasher {
+        FileHasher(capacity: 16, maxFileBytes: 1 << 20) { path, key in
+            calls?.increment()
+            if let gate { _ = gate.wait(timeout: .now() + 10) }
+            guard case .digest(let digest, let inPlace, _) = FileHasher.hashAndRecheck(path: path, matching: key) else {
+                return .unavailable
+            }
+            return .digest(digest, stillInPlace: cacheResults && inPlace, imageBindable: apfs)
+        }
+    }
+
+    @Test("the volume the bytes came from decides bindability, on a miss, a cache hit and a join",
+          .timeLimit(.minutes(1)), arguments: [false, true])
+    func volumeDecidesBindability(apfs: Bool) async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/tool"
+        try Data(repeating: 0x41, count: 4096).write(to: URL(fileURLWithPath: path))
+        let digest = try #require(FileHasher.computeSHA256(path: path))
+
+        let hasher = volumeSeam(apfs: apfs)
+        let miss = try #require(await hasher.hashWithIdentity(path: path))
+        #expect(miss.sha256 == digest)
+        #expect(miss.imageBindable == apfs)
+        let hit = try #require(await hasher.hashWithIdentity(path: path))
+        #expect(await hasher.stats().hits == 1)
+        #expect(hit.sha256 == digest)
+        #expect(hit.imageBindable == apfs, "the cache keeps the volume's verdict")
+
+        let gate = DispatchSemaphore(value: 0)
+        let calls = Counter()
+        let held = volumeSeam(apfs: apfs, cacheResults: false, gate: gate, calls: calls)
+        async let first = held.hashWithIdentity(path: path)
+        async let second = held.hashWithIdentity(path: path)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        gate.signal()
+        let joined = await [first, second]
+        #expect(calls.value == 1, "the second miss joined the read in flight")
+        for result in joined {
+            #expect(result?.sha256 == digest)
+            #expect(result?.imageBindable == apfs, "a join keeps the volume's verdict")
+        }
+    }
+
+    @Test("a real read reports whether its own descriptor's volume is APFS")
+    func realReadReportsItsVolume() async throws {
+        let base = try directory()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let path = base + "/tool"
+        try Data(repeating: 0x41, count: 512).write(to: URL(fileURLWithPath: path))
+        var volume = statfs()
+        #expect(statfs(base, &volume) == 0)
+        let onAPFS = FileHasher.fileSystemTypeName(of: volume) == "apfs"
+        #expect(onAPFS, "the temporary directory is on APFS here, so the bindable path is exercised")
+        let key = try #require(FileHasher.cacheKey(path: path))
+        guard case .digest(_, _, let bindable) = FileHasher.hashFile(path: path, matching: key) else {
+            Issue.record("a local file was not hashed")
+            return
+        }
+        #expect(bindable == onAPFS)
+        #expect(await FileHasher().hashWithIdentity(path: path)?.imageBindable == onAPFS)
+    }
+
+    @Test("a volume's type name is read within its fixed field")
+    func fileSystemTypeNames() {
+        func volume(named name: String) -> statfs {
+            var volume = statfs()
+            withUnsafeMutableBytes(of: &volume.f_fstypename) { raw in
+                for (index, byte) in name.utf8.prefix(raw.count).enumerated() { raw[index] = byte }
+            }
+            return volume
+        }
+        for name in ["apfs", "hfs", "msdos", "exfat"] {
+            #expect(FileHasher.fileSystemTypeName(of: volume(named: name)) == name)
+        }
+        // A full field without a terminator is read to its end, not past it.
+        let width = MemoryLayout.size(ofValue: statfs().f_fstypename)
+        let full = String(repeating: "x", count: width)
+        #expect(FileHasher.fileSystemTypeName(of: volume(named: full)) == full)
+        #expect(FileHasher.fileSystemTypeName(of: statfs()).isEmpty)
+        #expect(FileHasher.fileSystemTypeName(of: volume(named: "apfsx")) != "apfs")
     }
 
     @Test("a stat device number converts one way, without trapping on the sign bit")

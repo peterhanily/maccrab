@@ -430,16 +430,21 @@ public actor EventEnricher {
         }
     }
 
-    /// Whether a digest stands for the exec'd image: only when the file the
-    /// hasher read had exactly the identity the kernel reported at exec. The
-    /// stat bracket around the hash cannot decide this, because the path can
-    /// name another file between the bracket's reads and the hasher's own
-    /// probe, and the hasher may answer from its cache for the file it found.
+    /// Whether a digest stands for the exec'd image: only when the hasher read
+    /// it from an APFS volume (`bindable`) and the file it read had exactly
+    /// the identity the kernel reported at exec. HFS+, FAT and exFAT keep
+    /// whole-second or coarser times, so there a same-size rewrite within one
+    /// second keeps the identity, and a cached digest of the old bytes would
+    /// match; a digest read on those volumes never binds. The stat bracket
+    /// around the hash cannot decide this either, because the path can name
+    /// another file between the bracket's reads and the hasher's own probe,
+    /// and the hasher may answer from its cache for the file it found.
     static func digestIsImageBound(
         hashed: HeavyEnrichmentFileIdentity?,
-        image: HeavyEnrichmentFileIdentity?
+        image: HeavyEnrichmentFileIdentity?,
+        bindable: Bool
     ) -> Bool {
-        guard let image, let hashed else { return false }
+        guard bindable, let image, let hashed else { return false }
         return hashed == image
     }
 
@@ -483,7 +488,8 @@ public actor EventEnricher {
                     sha256: computed.sha256,
                     cdhash: computed.cdhash,
                     md5: nil,
-                    imageBound: Self.digestIsImageBound(hashed: computed.fileIdentity, image: image)
+                    imageBound: Self.digestIsImageBound(hashed: computed.fileIdentity, image: image,
+                                                        bindable: computed.imageBindable)
                 ),
                 fileIdentity: stable
             ))
