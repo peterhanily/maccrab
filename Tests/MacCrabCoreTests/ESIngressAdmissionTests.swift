@@ -371,6 +371,118 @@ struct ESIngressAdmissionTests {
         #expect(engineRepeats == 7, "the pair's seven remaining tokens, every one admitted by the engine's untouched budget")
     }
 
+    @Test("a bounded table evicts idle keys before live ones, refuses or recycles under churn by policy, and a key inserted over a live one is no first sighting and starts with one token")
+    func boundedTableChurnSemantics() {
+        let t0: UInt64 = 1_000_000_000
+        func make(_ churned: Bool) -> ProtectedFileLaneBudget {
+            ProtectedFileLaneBudget(capacity: 3, refillPerSecond: 0, initialTokens: churned ? 1 : nil)
+        }
+        // The signal tables fail closed.
+        let refusing = BoundedTable<Int, ProtectedFileLaneBudget>(
+            capacity: 2, idleEvictionNanos: 1_000_000_000, policy: .refuseWhenFull, make: make)
+        let a = refusing.lookup(key: 1, nowNanos: t0)
+        #expect(a.entry?.admit(nowNanos: t0) == true && a.firstSighting && !a.churned)
+        let b = refusing.lookup(key: 2, nowNanos: t0 + 1)
+        #expect(b.entry?.admit(nowNanos: t0 + 1) == true && b.firstSighting)
+        let c = refusing.lookup(key: 3, nowNanos: t0 + 2)
+        #expect(c.entry == nil && !c.firstSighting && !c.churned, "full of live keys, a new key is refused rather than given a bucket")
+        #expect(refusing.count == 2)
+        _ = refusing.lookup(key: 2, nowNanos: t0 + 900_000_000).entry?.admit(nowNanos: t0 + 900_000_000)
+        let d = refusing.lookup(key: 3, nowNanos: t0 + 1_100_000_000)
+        #expect(d.entry != nil && d.firstSighting && !d.churned, "once key 1 has idled out, key 3 takes its place as a genuine first sighting")
+        #expect(refusing.count == 2 && !refusing.contains(key: 1) && refusing.contains(key: 2),
+                "the idle key went, not the recently seen one")
+        // The lane tables recycle, and say so.
+        let recycling = BoundedTable<Int, ProtectedFileLaneBudget>(
+            capacity: 2, idleEvictionNanos: 1_000_000_000, policy: .evictLeastRecentlyUsed, make: make)
+        _ = recycling.lookup(key: 1, nowNanos: t0).entry?.admit(nowNanos: t0)
+        _ = recycling.lookup(key: 2, nowNanos: t0 + 1).entry?.admit(nowNanos: t0 + 1)
+        let e = recycling.lookup(key: 3, nowNanos: t0 + 2)
+        #expect(e.entry != nil && !e.firstSighting && e.churned, "inserted over the live least recently seen key 1")
+        #expect(e.entry?.admit(nowNanos: t0 + 2) == true)
+        #expect(e.entry?.admit(nowNanos: t0 + 3) == false, "a key inserted over a live one starts with one token, not a full bucket")
+        #expect(!recycling.contains(key: 1) && recycling.contains(key: 2))
+        let f = recycling.lookup(key: 1, nowNanos: t0 + 4)
+        #expect(!f.firstSighting && f.churned, "re-entry over a live key is no first sighting either")
+        let g = recycling.lookup(key: 1, nowNanos: t0 + 5)
+        #expect(g.entry != nil && !g.firstSighting && !g.churned, "a tracked key is neither")
+    }
+
+    @Test("cycling fresh pairs at one decoy cannot buy fresh budgets: kept signals are bounded by the pair table plus the decoy burst")
+    func pairChurnAtOneDecoyIsBounded() {
+        let limiter = SignalRateLimiter(rootOwnedCanonical: { _ in false })
+        let t0: UInt64 = 1_000_000_000
+        var kept = 0
+        for round in 0..<2 {
+            for source in 0..<1_100 where ESCollector.shouldKeepSignal(
+                sig: SIGKILL, sourcePID: Int32(60_000 + source), targetPID: 777, ownPID: 1,
+                nowNanos: t0 + UInt64(round * 2_000 + source), limiter: limiter, targetExecutable: "/tmp/x/santad"
+            ) {
+                kept += 1
+            }
+        }
+        #expect(kept <= 1_024 + 64, "at most the pair table's first sightings plus the shared decoy burst: \(kept)")
+        #expect(kept == 1_024 + 64)
+        #expect(limiter.aggregateRefusedTotal > 0, "repeats past the decoy burst are counted")
+        #expect(limiter.trackedPairCount <= 1_024)
+        #expect(limiter.pairRefusedTotal >= 76, "the pairs the full table refused are counted too")
+    }
+
+    @Test("cycling sources across many decoys, or one source across a thousand decoys, is bounded by the same constant")
+    func pairChurnAcrossDecoysIsBounded() {
+        let t0: UInt64 = 1_000_000_000
+        do {
+            let limiter = SignalRateLimiter(rootOwnedCanonical: { _ in false })
+            var kept = 0
+            var offered = 0
+            for _ in 0..<4 {
+                for source in 0..<34 {
+                    for target in 0..<34 {
+                        offered += 1
+                        if ESCollector.shouldKeepSignal(
+                            sig: SIGKILL, sourcePID: Int32(70_000 + source), targetPID: Int32(80_000 + target), ownPID: 1,
+                            nowNanos: t0 + UInt64(offered), limiter: limiter, targetExecutable: "/tmp/x/\(target)/santad"
+                        ) {
+                            kept += 1
+                        }
+                    }
+                }
+            }
+            #expect(kept <= 1_024 + 64, "34 x 34 pairs cycled four times: \(kept)")
+            #expect(limiter.trackedPairCount <= 1_024)
+        }
+        do {
+            let limiter = SignalRateLimiter(rootOwnedCanonical: { _ in false })
+            var kept = 0
+            for round in 0..<2 {
+                for target in 0..<1_100 where ESCollector.shouldKeepSignal(
+                    sig: SIGKILL, sourcePID: 90_000, targetPID: Int32(100_000 + target), ownPID: 1,
+                    nowNanos: t0 + UInt64(round * 2_000 + target), limiter: limiter, targetExecutable: "/tmp/x/\(target)/santad"
+                ) {
+                    kept += 1
+                }
+            }
+            #expect(kept <= 1_024 + 64, "one source across 1,100 decoys: \(kept)")
+            #expect(limiter.trackedPairCount <= 1_024)
+        }
+    }
+
+    @Test("fatal signals at ordinary targets never enter the pair table, so a kill round-robin over the build cannot fill it")
+    func ordinaryTargetsAreNotTracked() {
+        let limiter = SignalRateLimiter(rootOwnedCanonical: { _ in false })
+        let t0: UInt64 = 1_000_000_000
+        for i in 0..<3_000 {
+            _ = ESCollector.shouldKeepSignal(
+                sig: SIGSTOP, sourcePID: 500, targetPID: Int32(110_000 + i), ownPID: 1,
+                nowNanos: t0 + UInt64(i), limiter: limiter, targetExecutable: "/usr/local/bin/node")
+        }
+        #expect(limiter.trackedPairCount == 0, "relevance is decided before an untracked pair is inserted")
+        #expect(limiter.pairRefusedTotal == 0)
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 501, targetPID: 1, ownPID: 1, nowNanos: t0 + 5_000, limiter: limiter, targetExecutable: "/x"),
+                "the engine's first signal from a new source is kept after the round-robin")
+    }
+
     @Test("the callback consults the limiter with the kernel-attested source and target pids, and an over-budget drop is intentional filtering")
     func callbackWiresTheSignalLimiter() throws {
         let limiter = SignalRateLimiter()
@@ -847,20 +959,33 @@ struct ProtectedFileLaneTests {
         #expect(offered == 153_600)
         #expect(admitted == 1_024, "600 fresh processes each within their own budget still get only the worker's OPEN aggregate")
         #expect(tracker.protectedLaneRefusedTotal() == UInt64(offered - admitted), "every refusal is counted")
-        // The aggregate is spent only after a process's own bucket admits, so
-        // a looping process cannot drain it for the others.
-        var loopAdmitted = 0
+        // Right after the storm the table is still full of live processes, so
+        // a newcomer is inserted over one of them with a single token: rotating
+        // pids cannot buy fresh full buckets.
+        var churnedAdmitted = 0
         for i in 0..<2_000 {
             var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 20_000)
             if EventPipelineLane.stampProtectedLane(
                 &open, budgets: budgets, nowNanos: t0 + 1_000_000_000 + UInt64(i), refusals: tracker) == true {
+                churnedAdmitted += 1
+            }
+        }
+        #expect(churnedAdmitted == 1, "a process inserted over a live one starts with one token")
+        // Once the storm's processes have idled out, a new process starts with
+        // a full bucket, and the aggregate (spent only after a process's own
+        // bucket admits, so no loop drains it for the others) has refilled.
+        var loopAdmitted = 0
+        for i in 0..<2_000 {
+            var open = fileEvent("open", "/tmp/x/.gitconfig", pid: 20_001)
+            if EventPipelineLane.stampProtectedLane(
+                &open, budgets: budgets, nowNanos: t0 + 61_000_000_000 + UInt64(i), refusals: tracker) == true {
                 loopAdmitted += 1
             }
         }
-        #expect(loopAdmitted == 256, "a second later the aggregate has 256 tokens back and one process can take at most its own 256")
-        var other = fileEvent("open", "/Users/x/.aws/credentials", pid: 20_001)
+        #expect(loopAdmitted == 256, "a minute later one process can take at most its own 256 from the refilled aggregate")
+        var other = fileEvent("open", "/Users/x/.aws/credentials", pid: 20_002)
         #expect(EventPipelineLane.stampProtectedLane(
-            &other, budgets: budgets, nowNanos: t0 + 2_000_000_000, refusals: tracker) == true,
+            &other, budgets: budgets, nowNanos: t0 + 62_000_000_000, refusals: tracker) == true,
                 "another process's credential read is admitted from the refilled aggregate")
     }
 

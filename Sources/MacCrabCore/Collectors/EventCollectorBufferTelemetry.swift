@@ -184,88 +184,149 @@ public enum EventPipelineLane: Int, CaseIterable, Sendable, Hashable {
 /// the per-process buckets alone would not bound the lane either. Past a
 /// budget an event rides the file lane. Owned by one serial
 /// `ESMessageWorker` queue, so it needs no lock.
-final class ProtectedFileLaneBudget {
+final class ProtectedFileLaneBudget: BoundedTableEntry {
     private let capacity: Double
     private let refillPerNanosecond: Double
     private var tokens: Double
     private var lastNanos: UInt64?
 
-    init(capacity: Int = 64, refillPerSecond: Double = 16) {
+    /// `initialTokens` defaults to a full bucket; a table inserting a key over
+    /// a live one hands it a single token instead.
+    init(capacity: Int = 64, refillPerSecond: Double = 16, initialTokens: Int? = nil) {
         self.capacity = Double(capacity)
         self.refillPerNanosecond = refillPerSecond / 1_000_000_000
-        self.tokens = Double(capacity)
+        self.tokens = Double(Swift.min(capacity, initialTokens ?? capacity))
     }
 
     /// Spends one token if one is available at `nowNanos` (monotonic).
     func admit(nowNanos: UInt64) -> Bool {
-        if let last = lastNanos, nowNanos > last {
-            tokens = Swift.min(capacity, tokens + Double(nowNanos - last) * refillPerNanosecond)
-        }
-        lastNanos = Swift.max(lastNanos ?? nowNanos, nowNanos)
+        refill(nowNanos: nowNanos)
         guard tokens >= 1 else { return false }
         tokens -= 1
         return true
     }
 
-    /// The last clock reading this bucket saw; nil until its first `admit`.
-    /// `BoundedBudgetTable` evicts by it.
+    /// Whether `admit` would succeed at `nowNanos`, without spending.
+    func hasToken(nowNanos: UInt64) -> Bool {
+        refill(nowNanos: nowNanos)
+        return tokens >= 1
+    }
+
+    private func refill(nowNanos: UInt64) {
+        if let last = lastNanos, nowNanos > last {
+            tokens = Swift.min(capacity, tokens + Double(nowNanos - last) * refillPerNanosecond)
+        }
+        lastNanos = Swift.max(lastNanos ?? nowNanos, nowNanos)
+    }
+
+    /// The last clock reading this bucket saw; nil until its first use.
+    /// `BoundedTable` evicts by it.
     var lastSeenNanos: UInt64? { lastNanos }
 }
 
-/// One `ProtectedFileLaneBudget` per key, so a budget drained by one source
-/// cannot refuse another's. Bounded: once `capacity` keys are held, an insert
-/// first drops every key idle for `idleEvictionNanos`, and if none is, the
-/// least recently seen one. Unlocked — the owner serializes access (the ES
+/// What a `BoundedTable` remembers per key: anything that can say when it was
+/// last used, so idle and least-recently-used eviction can read it.
+protocol BoundedTableEntry: AnyObject {
+    var lastSeenNanos: UInt64? { get }
+}
+
+/// A fixed number of keyed entries, so a budget drained by one source cannot
+/// refuse another's. Once `capacity` keys are held, a new key first makes
+/// room by dropping every key idle for `idleEvictionNanos`. If none is idle,
+/// the policy decides: a lane table recycles the least recently seen live
+/// entry, and the key it then inserts is marked `churned` — it is no first
+/// sighting, and its entry is built as the maker sees fit for a key that
+/// arrived under churn (one token, no allowance) — while a signal table
+/// refuses the key outright, so cycling through fresh keys cannot buy a
+/// fresh bucket each time. Unlocked — the owner serializes access (the ES
 /// worker's queue, or `SignalRateLimiter`'s lock).
-final class BoundedBudgetTable<Key: Hashable> {
+final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
+    enum OverflowPolicy {
+        /// Recycle the least recently seen live entry; the newcomer is `churned`.
+        case evictLeastRecentlyUsed
+        /// Fail closed: refuse the newcomer until a key has gone idle.
+        case refuseWhenFull
+    }
+
+    struct Lookup {
+        /// The key's entry, or nil when a full fail-closed table refused it.
+        let entry: Entry?
+        /// The key entered the table without displacing a live one.
+        let firstSighting: Bool
+        /// The key entered the table over a live one just recycled.
+        let churned: Bool
+    }
+
     private let capacity: Int
     private let idleEvictionNanos: UInt64
-    private let makeBudget: () -> ProtectedFileLaneBudget
-    private var budgets: [Key: ProtectedFileLaneBudget] = [:]
+    private let policy: OverflowPolicy
+    private let make: (_ churned: Bool) -> Entry
+    private var entries: [Key: Entry] = [:]
+    /// Live entries recycled but not yet replaced; the inserts that take
+    /// their slots are the churned ones.
+    private var liveEvictionCredits = 0
 
     init(capacity: Int, idleEvictionNanos: UInt64 = 60_000_000_000,
-         makeBudget: @escaping () -> ProtectedFileLaneBudget) {
+         policy: OverflowPolicy = .evictLeastRecentlyUsed,
+         make: @escaping (_ churned: Bool) -> Entry) {
         self.capacity = Swift.max(1, capacity)
         self.idleEvictionNanos = idleEvictionNanos
-        self.makeBudget = makeBudget
+        self.policy = policy
+        self.make = make
     }
 
-    /// Spends one of `key`'s tokens at `nowNanos`; a key never seen before
-    /// starts with a full bucket.
-    func admit(key: Key, nowNanos: UInt64) -> Bool {
-        admitReportingFirstSighting(key: key, nowNanos: nowNanos).admitted
-    }
-
-    /// `admit`, also saying whether this is the key's first token since it
-    /// entered the table (or re-entered it after eviction).
-    func admitReportingFirstSighting(key: Key, nowNanos: UInt64) -> (admitted: Bool, firstSighting: Bool) {
-        if let budget = budgets[key] {
-            return (budget.admit(nowNanos: nowNanos), false)
+    /// The key's entry, inserting it if absent as the policy allows.
+    func lookup(key: Key, nowNanos: UInt64) -> Lookup {
+        if let entry = entries[key] {
+            return Lookup(entry: entry, firstSighting: false, churned: false)
         }
-        if budgets.count >= capacity {
-            evict(nowNanos: nowNanos)
+        if entries.count >= capacity {
+            evictIdle(nowNanos: nowNanos)
+            if entries.count >= capacity {
+                switch policy {
+                case .refuseWhenFull:
+                    return Lookup(entry: nil, firstSighting: false, churned: false)
+                case .evictLeastRecentlyUsed:
+                    evictLeastRecentlySeen()
+                    liveEvictionCredits += 1
+                }
+            }
         }
-        let budget = makeBudget()
-        budgets[key] = budget
-        return (budget.admit(nowNanos: nowNanos), true)
+        let churned = liveEvictionCredits > 0
+        if churned { liveEvictionCredits -= 1 }
+        let entry = make(churned)
+        entries[key] = entry
+        return Lookup(entry: entry, firstSighting: !churned, churned: churned)
     }
 
-    var count: Int { budgets.count }
+    /// Whether `key` is tracked, without inserting it.
+    func contains(key: Key) -> Bool {
+        entries[key] != nil
+    }
 
-    private func evict(nowNanos: UInt64) {
+    var count: Int { entries.count }
+
+    private func evictIdle(nowNanos: UInt64) {
+        for (key, entry) in entries {
+            let seen = entry.lastSeenNanos ?? 0
+            if nowNanos > seen, nowNanos - seen >= idleEvictionNanos {
+                entries[key] = nil
+            }
+        }
+    }
+
+    private func evictLeastRecentlySeen() {
         var oldestKey: Key?
         var oldestSeen = UInt64.max
-        for (key, budget) in budgets {
-            let seen = budget.lastSeenNanos ?? 0
-            if nowNanos > seen, nowNanos - seen >= idleEvictionNanos {
-                budgets[key] = nil
-            } else if seen < oldestSeen {
+        for (key, entry) in entries {
+            let seen = entry.lastSeenNanos ?? 0
+            if seen < oldestSeen {
                 oldestSeen = seen
                 oldestKey = key
             }
         }
-        if budgets.count >= capacity, let key = oldestKey {
-            budgets[key] = nil
+        if let key = oldestKey {
+            entries[key] = nil
         }
     }
 }
@@ -299,9 +360,9 @@ final class PerProcessLaneBudgets {
 
     typealias Shape = (capacity: Int, refillPerSecond: Double)
 
-    private let write: BoundedBudgetTable<pid_t>
-    private let open: BoundedBudgetTable<pid_t>
-    private let highValueOpen: BoundedBudgetTable<pid_t>
+    private let write: BoundedTable<pid_t, ProtectedFileLaneBudget>
+    private let open: BoundedTable<pid_t, ProtectedFileLaneBudget>
+    private let highValueOpen: BoundedTable<pid_t, ProtectedFileLaneBudget>
     private let writeAggregate: ProtectedFileLaneBudget
     private let openAggregate: ProtectedFileLaneBudget
     private let highValueOpenAggregate: ProtectedFileLaneBudget
@@ -313,9 +374,10 @@ final class PerProcessLaneBudgets {
          writeAggregate: Shape = (capacity: 256, refillPerSecond: 64),
          openAggregate: Shape = (capacity: 1_024, refillPerSecond: 256),
          highValueOpenAggregate: Shape = (capacity: 256, refillPerSecond: 64)) {
-        func table(_ shape: Shape) -> BoundedBudgetTable<pid_t> {
-            BoundedBudgetTable(capacity: trackedProcesses) {
-                ProtectedFileLaneBudget(capacity: shape.capacity, refillPerSecond: shape.refillPerSecond)
+        func table(_ shape: Shape) -> BoundedTable<pid_t, ProtectedFileLaneBudget> {
+            BoundedTable(capacity: trackedProcesses, policy: .evictLeastRecentlyUsed) { churned in
+                ProtectedFileLaneBudget(capacity: shape.capacity, refillPerSecond: shape.refillPerSecond,
+                                        initialTokens: churned ? 1 : nil)
             }
         }
         func bucket(_ shape: Shape) -> ProtectedFileLaneBudget {
@@ -333,14 +395,15 @@ final class PerProcessLaneBudgets {
     /// then one of the worker's for that class. A process's own bucket is
     /// consulted first, so a refused loop never reaches the shared one.
     func admit(_ kind: Kind, pid: pid_t, nowNanos: UInt64) -> Bool {
-        let own: BoundedBudgetTable<pid_t>
+        let own: BoundedTable<pid_t, ProtectedFileLaneBudget>
         let shared: ProtectedFileLaneBudget
         switch kind {
         case .write: (own, shared) = (write, writeAggregate)
         case .open: (own, shared) = (open, openAggregate)
         case .highValueOpen: (own, shared) = (highValueOpen, highValueOpenAggregate)
         }
-        guard own.admit(key: pid, nowNanos: nowNanos) else { return false }
+        guard let bucket = own.lookup(key: pid, nowNanos: nowNanos).entry,
+              bucket.admit(nowNanos: nowNanos) else { return false }
         return shared.admit(nowNanos: nowNanos)
     }
 
@@ -370,35 +433,78 @@ final class SignalRateLimiter: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private let pairs: BoundedBudgetTable<Pair>
-    private let targets: BoundedBudgetTable<pid_t>
+    private let pairs: BoundedTable<Pair, ProtectedFileLaneBudget>
+    private let targets: BoundedTable<pid_t, ProtectedFileLaneBudget>
+    /// The one repeat budget every target outside a root-owned canonical
+    /// location shares: a binary the attacker named after a tool, wherever
+    /// and however many, draws on this and never on the engine's or a real
+    /// tool's own bucket.
+    private let decoyRepeats: ProtectedFileLaneBudget
+    private let rootOwnedCanonical: (String) -> Bool
 
     init(pairCapacity: Int = 8, pairRefillPerSecond: Double = 2,
          targetCapacity: Int = 64, targetRefillPerSecond: Double = 16,
-         trackedPairs: Int = 1024, trackedTargets: Int = 1024) {
-        pairs = BoundedBudgetTable(capacity: trackedPairs, idleEvictionNanos: 10_000_000_000) {
+         trackedPairs: Int = 1024, trackedTargets: Int = 1024,
+         rootOwnedCanonical: @escaping (String) -> Bool = SignalRateLimiter.isRootOwnedCanonicalExecutable) {
+        pairs = BoundedTable(capacity: trackedPairs, idleEvictionNanos: 10_000_000_000, policy: .refuseWhenFull) { _ in
             ProtectedFileLaneBudget(capacity: pairCapacity, refillPerSecond: pairRefillPerSecond)
         }
-        targets = BoundedBudgetTable(capacity: trackedTargets, idleEvictionNanos: 10_000_000_000) {
+        targets = BoundedTable(capacity: trackedTargets, idleEvictionNanos: 10_000_000_000, policy: .refuseWhenFull) { _ in
             ProtectedFileLaneBudget(capacity: targetCapacity, refillPerSecond: targetRefillPerSecond)
         }
+        decoyRepeats = ProtectedFileLaneBudget(capacity: targetCapacity, refillPerSecond: targetRefillPerSecond)
+        self.rootOwnedCanonical = rootOwnedCanonical
+    }
+
+    /// Whether an executable lives where only root writes: the SIP-protected
+    /// system trees by prefix, and under /Library or /Applications only when
+    /// the file itself is root-owned, since an admin can create directories
+    /// there. Anything else — /tmp, a home, /opt/homebrew, a mounted volume —
+    /// is where a decoy named after a tool would live.
+    static func isRootOwnedCanonicalExecutable(_ path: String) -> Bool {
+        for prefix in ["/System/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/bin/", "/sbin/"]
+        where path.hasPrefix(prefix) {
+            return true
+        }
+        guard path.hasPrefix("/Library/") || path.hasPrefix("/Applications/") else { return false }
+        var info = stat()
+        return lstat(path, &info) == 0 && info.st_uid == 0
+    }
+
+    /// Whether this pair is already tracked; an untracked pair is inserted
+    /// only once its target proved relevant (`admitPair`).
+    func isTracked(source: pid_t, target: pid_t) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pairs.contains(key: Pair(source: source, target: target))
     }
 
     /// Whether this pair may still have a signal kept, and whether this is
-    /// the pair's first; spent before the target's executable is decoded, so
-    /// a flood at one target costs the callback an integer probe per message,
-    /// not a path decode.
+    /// the pair's first. For a tracked pair this is an integer probe before
+    /// any path decode; a pair the table is too full to take is refused.
     func admitPair(source: pid_t, target: pid_t, nowNanos: UInt64) -> (admitted: Bool, firstSighting: Bool) {
         lock.lock(); defer { lock.unlock() }
-        let result = pairs.admitReportingFirstSighting(key: Pair(source: source, target: target), nowNanos: nowNanos)
-        if !result.admitted { pairRefusedCount &+= 1 }
-        return result
+        let lookup = pairs.lookup(key: Pair(source: source, target: target), nowNanos: nowNanos)
+        guard let bucket = lookup.entry, bucket.admit(nowNanos: nowNanos) else {
+            pairRefusedCount &+= 1
+            return (false, false)
+        }
+        return (true, lookup.firstSighting)
     }
 
-    /// Whether one more repeat signal at this relevant target may be kept.
-    func admitKept(target: pid_t, nowNanos: UInt64) -> Bool {
+    /// Whether one more repeat signal at this relevant target may be kept:
+    /// from the target's own bucket for the engine (`executable` nil) and
+    /// for a tool at a root-owned canonical path, from the shared decoy
+    /// bucket for every other target.
+    func admitKept(target: pid_t, executable: String?, nowNanos: UInt64) -> Bool {
+        // Classify outside the lock: the canonical check may stat the file.
+        let ownBucket = executable.map(rootOwnedCanonical) ?? true
         lock.lock(); defer { lock.unlock() }
-        let admitted = targets.admit(key: target, nowNanos: nowNanos)
+        let admitted: Bool
+        if ownBucket {
+            admitted = targets.lookup(key: target, nowNanos: nowNanos).entry?.admit(nowNanos: nowNanos) ?? false
+        } else {
+            admitted = decoyRepeats.admit(nowNanos: nowNanos)
+        }
         if !admitted { aggregateRefusedCount &+= 1 }
         return admitted
     }

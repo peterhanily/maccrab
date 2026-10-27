@@ -1504,24 +1504,32 @@ public final class ESCollector: @unchecked Sendable {
         targetExecutable: @autoclosure () -> String
     ) -> Bool {
         guard fatalSignals.contains(sig) else { return false }
+        // A tracked pair is probed first and decoded only when admitted; an
+        // untracked pair is decoded first and enters the table only if its
+        // target is relevant, so the build's kill round-robin never fills it.
+        let tracked = limiter?.isTracked(source: sourcePID, target: targetPID) ?? false
         var firstFromThisPair = true
-        if let limiter {
+        if tracked, let limiter {
             let pair = limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos)
             guard pair.admitted else { return false }
             firstFromThisPair = pair.firstSighting
         }
-        let relevant: Bool
-        if targetPID == ownPID {
-            relevant = true
-        } else {
-            let executable = targetExecutable()
-            let basename = executable.split(separator: "/").last.map(String.init) ?? executable
-            relevant = securityToolProcessNames.contains(basename)
+        var executable: String?
+        if targetPID != ownPID {
+            let path = targetExecutable()
+            let basename = path.split(separator: "/").last.map(String.init) ?? path
+            guard securityToolProcessNames.contains(basename) else { return false }
+            executable = path
         }
-        guard relevant else { return false }
+        if !tracked, let limiter {
+            let pair = limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos)
+            guard pair.admitted else { return false }
+            firstFromThisPair = pair.firstSighting
+        }
         // A pair's first signal is kept whatever the target's shared budget
         // holds, so every distinct source keeps its first; the repeats share it.
-        if !firstFromThisPair, let limiter, !limiter.admitKept(target: targetPID, nowNanos: nowNanos) {
+        if !firstFromThisPair, let limiter,
+           !limiter.admitKept(target: targetPID, executable: executable, nowNanos: nowNanos) {
             return false
         }
         return true
