@@ -1482,9 +1482,10 @@ public final class ESCollector: @unchecked Sendable {
     static let ownProcessID: Int32 = getpid()
 
     /// The kept-signal rate limit shared by every client's callback: 8 per
-    /// (source, target) pair with 2 more a second, 64 kept in all with 16
-    /// more a second. A `kill()` loop at the engine, or at a decoy named after
-    /// a security tool, used to put every message on the priority lane.
+    /// (source, target) pair with 2 more a second, and per relevant target 64
+    /// repeats with 16 more a second, a pair's first signal exempt. A `kill()`
+    /// loop at the engine, or at a decoy named after a security tool, used to
+    /// put every message on the priority lane.
     static let signalRateLimiter = SignalRateLimiter()
 
     /// Keep a NOTIFY_SIGNAL only when it is fatal AND aimed at MacCrab itself or
@@ -1503,8 +1504,11 @@ public final class ESCollector: @unchecked Sendable {
         targetExecutable: @autoclosure () -> String
     ) -> Bool {
         guard fatalSignals.contains(sig) else { return false }
-        if let limiter, !limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos) {
-            return false
+        var firstFromThisPair = true
+        if let limiter {
+            let pair = limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos)
+            guard pair.admitted else { return false }
+            firstFromThisPair = pair.firstSighting
         }
         let relevant: Bool
         if targetPID == ownPID {
@@ -1515,7 +1519,9 @@ public final class ESCollector: @unchecked Sendable {
             relevant = securityToolProcessNames.contains(basename)
         }
         guard relevant else { return false }
-        if let limiter, !limiter.admitKept(nowNanos: nowNanos) {
+        // A pair's first signal is kept whatever the target's shared budget
+        // holds, so every distinct source keeps its first; the repeats share it.
+        if !firstFromThisPair, let limiter, !limiter.admitKept(target: targetPID, nowNanos: nowNanos) {
             return false
         }
         return true
@@ -2396,6 +2402,15 @@ public final class ESCollector: @unchecked Sendable {
     /// as `es_protected_open_slice_demoted_total`.
     public func esProtectedOpenSliceDemoted() -> UInt64 {
         contexts.reduce(UInt64(0)) { $0 &+ $1.worker.protectedOpenSliceDemoted() }
+    }
+
+    /// Fatal signals at MacCrab or a security tool that the target's shared
+    /// signal budget refused at the callback (`SignalRateLimiter`). Also
+    /// inside the intentional-filter count; surfaced apart as
+    /// `es_signal_aggregate_refused_total` so a kill loop at a tool is not
+    /// read as ordinary filtering.
+    public func esSignalAggregateRefused() -> UInt64 {
+        Self.signalRateLimiter.aggregateRefusedTotal
     }
 
     /// Per-event-type normalized Events offered to the collector-local stream.

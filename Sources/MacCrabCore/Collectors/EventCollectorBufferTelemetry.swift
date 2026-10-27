@@ -233,15 +233,21 @@ final class BoundedBudgetTable<Key: Hashable> {
     /// Spends one of `key`'s tokens at `nowNanos`; a key never seen before
     /// starts with a full bucket.
     func admit(key: Key, nowNanos: UInt64) -> Bool {
+        admitReportingFirstSighting(key: key, nowNanos: nowNanos).admitted
+    }
+
+    /// `admit`, also saying whether this is the key's first token since it
+    /// entered the table (or re-entered it after eviction).
+    func admitReportingFirstSighting(key: Key, nowNanos: UInt64) -> (admitted: Bool, firstSighting: Bool) {
         if let budget = budgets[key] {
-            return budget.admit(nowNanos: nowNanos)
+            return (budget.admit(nowNanos: nowNanos), false)
         }
         if budgets.count >= capacity {
             evict(nowNanos: nowNanos)
         }
         let budget = makeBudget()
         budgets[key] = budget
-        return budget.admit(nowNanos: nowNanos)
+        return (budget.admit(nowNanos: nowNanos), true)
     }
 
     var count: Int { budgets.count }
@@ -348,10 +354,15 @@ final class PerProcessLaneBudgets {
 /// keeps only a fatal signal aimed at MacCrab or at a security tool, but one
 /// process can send that signal in a loop, or name a decoy after a security
 /// tool and signal it, and every kept message rides the lane that carries
-/// exec/fork/exit. Each (source pid, target pid) pair gets a small bucket,
-/// checked before any path is decoded, and the kept total is bounded by one
-/// aggregate bucket that only relevant targets spend. Locked: the ES callback
-/// may run on more than one thread across clients.
+/// exec/fork/exit. Two bounds. Each (source pid, target pid) pair gets a
+/// small bucket, checked before any path is decoded. Each relevant target
+/// then gets a shared bucket that every source's repeats draw on, so a kill
+/// loop at a decoy spends the decoy's budget and never the engine's or a
+/// real tool's; a pair's first signal bypasses it, so every distinct source
+/// keeps its first signal at a target whatever the others did. Ordinary
+/// targets never reach the shared bucket, so the build-storm SIGTERMs cannot
+/// spend it. Locked: the ES callback may run on more than one thread across
+/// clients.
 final class SignalRateLimiter: @unchecked Sendable {
     struct Pair: Hashable {
         let source: pid_t
@@ -360,37 +371,58 @@ final class SignalRateLimiter: @unchecked Sendable {
 
     private let lock = NSLock()
     private let pairs: BoundedBudgetTable<Pair>
-    private let aggregate: ProtectedFileLaneBudget
+    private let targets: BoundedBudgetTable<pid_t>
 
     init(pairCapacity: Int = 8, pairRefillPerSecond: Double = 2,
-         aggregateCapacity: Int = 64, aggregateRefillPerSecond: Double = 16,
-         trackedPairs: Int = 1024) {
+         targetCapacity: Int = 64, targetRefillPerSecond: Double = 16,
+         trackedPairs: Int = 1024, trackedTargets: Int = 1024) {
         pairs = BoundedBudgetTable(capacity: trackedPairs, idleEvictionNanos: 10_000_000_000) {
             ProtectedFileLaneBudget(capacity: pairCapacity, refillPerSecond: pairRefillPerSecond)
         }
-        aggregate = ProtectedFileLaneBudget(capacity: aggregateCapacity, refillPerSecond: aggregateRefillPerSecond)
+        targets = BoundedBudgetTable(capacity: trackedTargets, idleEvictionNanos: 10_000_000_000) {
+            ProtectedFileLaneBudget(capacity: targetCapacity, refillPerSecond: targetRefillPerSecond)
+        }
     }
 
-    /// Whether this pair may still have a signal kept; spent before the
-    /// target's executable is decoded, so a flood at one target costs the
-    /// callback an integer probe per message, not a path decode.
-    func admitPair(source: pid_t, target: pid_t, nowNanos: UInt64) -> Bool {
+    /// Whether this pair may still have a signal kept, and whether this is
+    /// the pair's first; spent before the target's executable is decoded, so
+    /// a flood at one target costs the callback an integer probe per message,
+    /// not a path decode.
+    func admitPair(source: pid_t, target: pid_t, nowNanos: UInt64) -> (admitted: Bool, firstSighting: Bool) {
         lock.lock(); defer { lock.unlock() }
-        return pairs.admit(key: Pair(source: source, target: target), nowNanos: nowNanos)
+        let result = pairs.admitReportingFirstSighting(key: Pair(source: source, target: target), nowNanos: nowNanos)
+        if !result.admitted { pairRefusedCount &+= 1 }
+        return result
     }
 
-    /// Whether the client may keep one more signal at a relevant target. Only
-    /// relevant targets spend this, so the build-storm SIGTERMs at ordinary
-    /// processes never use up the budget a real signal at the engine needs.
-    func admitKept(nowNanos: UInt64) -> Bool {
+    /// Whether one more repeat signal at this relevant target may be kept.
+    func admitKept(target: pid_t, nowNanos: UInt64) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return aggregate.admit(nowNanos: nowNanos)
+        let admitted = targets.admit(key: target, nowNanos: nowNanos)
+        if !admitted { aggregateRefusedCount &+= 1 }
+        return admitted
     }
 
     /// Pairs currently tracked; a test aid.
     var trackedPairCount: Int {
         lock.lock(); defer { lock.unlock() }
         return pairs.count
+    }
+
+    private var pairRefusedCount: UInt64 = 0
+    private var aggregateRefusedCount: UInt64 = 0
+
+    /// Fatal signals whose (source, target) pair had no token left.
+    var pairRefusedTotal: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return pairRefusedCount
+    }
+
+    /// Fatal signals at a relevant target refused by the target's shared
+    /// budget. Surfaced as `es_signal_aggregate_refused_total`.
+    var aggregateRefusedTotal: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return aggregateRefusedCount
     }
 }
 

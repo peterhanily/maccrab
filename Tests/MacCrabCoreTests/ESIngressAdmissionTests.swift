@@ -288,7 +288,7 @@ struct ESIngressAdmissionTests {
         #expect(refilled == 2, "a pair refills two tokens a second")
     }
 
-    @Test("distinct sources each keep their first signals inside one aggregate budget that only relevant targets spend")
+    @Test("each distinct source keeps its first signal at the engine; repeats share the target's budget, which only relevant targets spend")
     func signalKeepTotalIsBounded() {
         let limiter = SignalRateLimiter()
         let t0: UInt64 = 1_000_000_000
@@ -310,16 +310,65 @@ struct ESIngressAdmissionTests {
         ) {
             kept += 1
         }
-        #expect(kept == 64, "a fork bomb aimed at the engine keeps the aggregate burst and no more")
-        // A second later sixteen more are kept, two per pair at most.
+        #expect(kept == 200, "every distinct source keeps its first signal at the engine")
+        #expect(limiter.aggregateRefusedTotal == 0)
+        // Their repeats share the engine's own budget: 64, then 16 a second.
+        var repeats = 0
+        for source in 0..<200 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(10_000 + source), targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 20_000, limiter: limiter, targetExecutable: "/x"
+        ) {
+            repeats += 1
+        }
+        #expect(repeats == 64, "a fork bomb's repeats at the engine keep the target's burst and no more")
+        #expect(limiter.aggregateRefusedTotal == 136, "the shared-budget refusals are counted apart")
         var later = 0
         for source in 0..<200 where ESCollector.shouldKeepSignal(
             sig: SIGKILL, sourcePID: Int32(10_000 + source), targetPID: 1, ownPID: 1,
-            nowNanos: t0 + 1_000_010_000, limiter: limiter, targetExecutable: "/x"
+            nowNanos: t0 + 1_000_020_000, limiter: limiter, targetExecutable: "/x"
         ) {
             later += 1
         }
-        #expect(later == 16)
+        #expect(later == 16, "a second later the engine's budget has sixteen tokens back")
+    }
+
+    @Test("a kill loop at a decoy named after a security tool spends only that target's budget: the engine and a real tool keep theirs")
+    func decoyFloodDoesNotDrainTheEngineBudget() {
+        let limiter = SignalRateLimiter()
+        let t0: UInt64 = 1_000_000_000
+        var kept = 0
+        for source in 0..<100 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(40_000 + source), targetPID: 777, ownPID: 1,
+            nowNanos: t0 + UInt64(source), limiter: limiter, targetExecutable: "/tmp/x/santad"
+        ) {
+            kept += 1
+        }
+        #expect(kept == 100, "each source's first signal at the decoy is kept")
+        var repeats = 0
+        for source in 0..<100 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: Int32(40_000 + source), targetPID: 777, ownPID: 1,
+            nowNanos: t0 + 1_000, limiter: limiter, targetExecutable: "/tmp/x/santad"
+        ) {
+            repeats += 1
+        }
+        #expect(repeats == 64, "repeats at the decoy keep its own budget and no more")
+        #expect(limiter.aggregateRefusedTotal == 36)
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 50_000, targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 2_000, limiter: limiter, targetExecutable: "/x"),
+                "a genuine fatal signal at the engine is still kept")
+        #expect(ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 50_001, targetPID: 778, ownPID: 1, nowNanos: t0 + 2_001, limiter: limiter,
+            targetExecutable: "/Applications/Santa.app/Contents/MacOS/santad"),
+                "and so is one at a real tool, whose target pid has a budget of its own")
+        var engineRepeats = 0
+        for i in 0..<10 where ESCollector.shouldKeepSignal(
+            sig: SIGKILL, sourcePID: 50_000, targetPID: 1, ownPID: 1,
+            nowNanos: t0 + 3_000 + UInt64(i), limiter: limiter, targetExecutable: "/x"
+        ) {
+            engineRepeats += 1
+        }
+        #expect(engineRepeats == 7, "the pair's seven remaining tokens, every one admitted by the engine's untouched budget")
     }
 
     @Test("the callback consults the limiter with the kernel-attested source and target pids, and an over-budget drop is intentional filtering")
@@ -340,6 +389,10 @@ struct ESIngressAdmissionTests {
             "Sources/MacCrabCore/Collectors/ESCollector.swift"), encoding: .utf8)
         #expect(collector.contains("signalSourcePID: audit_token_to_pid(msg.process.pointee.audit_token)"))
         #expect(collector.contains("signalLimiter: signalRateLimiter,"))
+        let timers = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabAgentKit/DaemonTimers.swift"), encoding: .utf8)
+        #expect(timers.components(separatedBy: "\"es_signal_aggregate_refused_total\": esSignalAggregateRefused").count == 3,
+                "both heartbeat payloads report the shared-budget refusals")
     }
 
     // MARK: Repeat coalescing
