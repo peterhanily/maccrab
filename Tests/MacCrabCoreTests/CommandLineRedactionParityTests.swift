@@ -463,6 +463,21 @@ struct CommandLineRedactionParityTests {
         }
     }
 
+    @Test("a URL password with an empty username is redacted")
+    func emptyUsernameURLPassword() throws {
+        let token = "Tok3nValueWithoutAUser"
+        let url = "https://:\(token)@git.example.invalid/repo.git"
+        #expect(CommandSanitizer.sanitize("git clone " + url)
+            == "git clone https://:[REDACTED]@git.example.invalid/repo.git")
+        let process = try stored(["/usr/bin/git", "clone", url])
+        #expect(!process.args.contains { $0.contains(token) }, "\(process.args)")
+        #expect(!process.commandLine.contains(token), "\(process.commandLine)")
+        // A user name is still kept, and an empty pair is not a credential.
+        #expect(CommandSanitizer.sanitize("git clone https://alice:\(token)@h/r.git")
+            == "git clone https://alice:[REDACTED]@h/r.git")
+        #expect(CommandSanitizer.sanitize("open https://:@h/r") == "open https://:@h/r")
+    }
+
     @Test("a URL password that itself contains :// is the documented exception and is left alone")
     func urlPasswordContainingSchemeSeparator() {
         // The password span stops at the next `://` so adversarial `://u:p`

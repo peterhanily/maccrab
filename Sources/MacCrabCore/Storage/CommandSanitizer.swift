@@ -77,19 +77,20 @@ enum CommandSanitizer {
         options: []
     )
 
-    /// URLs with embedded credentials: `://user:pass@host`. The spans are
-    /// possessive, and the password span stops at the next `://`, so a token
-    /// made of repeated `://u:p` prefixes costs each `://` only the distance
-    /// to the next one instead of a rescan to the token's end. The password
-    /// itself is unbounded: a 300-byte OAuth token or a JWT in userinfo is
-    /// redacted whole. A raw `/` in the password (`u:p/q@host`) is still
-    /// redacted, as it was before. The trade-off: a password that itself
+    /// URLs with embedded credentials: `://user:pass@host`, including an
+    /// empty user (`://:token@host`, as token-only remotes take it). The
+    /// spans are possessive, and the password span stops at the next `://`,
+    /// so a token made of repeated `://u:p` prefixes costs each `://` only the
+    /// distance to the next one instead of a rescan to the token's end. The
+    /// password itself is unbounded: a 300-byte OAuth token or a JWT in
+    /// userinfo is redacted whole. A raw `/` in the password (`u:p/q@host`) is
+    /// still redacted, as it was before. The trade-off: a password that itself
     /// contains `://` is not redacted at all, because the span stops there and
     /// finds no `@`. RFC 3986 forbids an unencoded `/` in userinfo, so such a
     /// password is already malformed as a URL and does not occur in the tools
     /// this redactor covers; the linear bound matters on every event.
     private static let urlCredentials = try! NSRegularExpression(
-        pattern: #"(://[^:@/\s]++:)((?:(?!://)[^@\s])++)(@)"#,
+        pattern: #"(://[^:@/\s]*+:)((?:(?!://)[^@\s])++)(@)"#,
         options: []
     )
 
