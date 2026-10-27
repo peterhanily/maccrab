@@ -25,8 +25,10 @@ public actor ProcessHasher {
         /// The file `sha256` was read from, as the hasher identified it. Nil
         /// whenever `sha256` is.
         public let fileIdentity: HeavyEnrichmentFileIdentity?
-        /// Whether `sha256` was read from an APFS volume, where the file
-        /// identity changes with every write. False whenever `sha256` is nil.
+        /// Whether `sha256` may stand for an exec'd image whose identity is
+        /// `fileIdentity` (see `FileHasher.HashedFile.imageBindable`): read
+        /// from APFS the system mounted, and for a cached or shared digest
+        /// still on such a volume. False whenever `sha256` is nil.
         public let imageBindable: Bool
 
         public init(sha256: String?, cdhash: String?, fileIdentity: HeavyEnrichmentFileIdentity? = nil,

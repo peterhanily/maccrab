@@ -164,13 +164,16 @@ public struct ProcessHashes: Codable, Sendable, Hashable {
     public let sha256: String?
     public let cdhash: String?
     public let md5: String?
-    /// True only when `sha256` was read from an APFS volume, from the very
-    /// file identity (device, inode, size, mtime, ctime) the kernel reported
-    /// for the exec'd image. On HFS+, FAT or exFAT a same-size rewrite within
-    /// one second keeps that identity, so no digest read there is bound. Any
-    /// other digest is of whatever the path held when it was hashed: it
-    /// identifies bytes for reputation lookups, but it must never authorize a
-    /// suppression or any other trust decision.
+    /// True only when `sha256` was read from APFS the system mounted (such as
+    /// the startup disk), from the very file identity (device, inode, size,
+    /// mtime, ctime) the kernel reported for the exec'd image. A volume a
+    /// user mounted can be detached, edited offline and attached again with
+    /// that identity intact, and HFS+, FAT and exFAT keep times too coarse to
+    /// tell a same-size rewrite apart, so no digest read there is bound. The
+    /// identity is evidence, not proof: a write through a shared mapping
+    /// keeps it until flushed. Any other digest is of whatever the path held
+    /// when it was hashed: it identifies bytes for reputation lookups, but it
+    /// must never authorize a suppression or any other trust decision.
     public let imageBound: Bool?
 
     public init(sha256: String? = nil, cdhash: String? = nil, md5: String? = nil, imageBound: Bool? = nil) {

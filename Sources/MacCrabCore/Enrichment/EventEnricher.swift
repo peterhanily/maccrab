@@ -430,15 +430,19 @@ public actor EventEnricher {
         }
     }
 
-    /// Whether a digest stands for the exec'd image: only when the hasher read
-    /// it from an APFS volume (`bindable`) and the file it read had exactly
-    /// the identity the kernel reported at exec. HFS+, FAT and exFAT keep
-    /// whole-second or coarser times, so there a same-size rewrite within one
-    /// second keeps the identity, and a cached digest of the old bytes would
-    /// match; a digest read on those volumes never binds. The stat bracket
-    /// around the hash cannot decide this either, because the path can name
-    /// another file between the bracket's reads and the hasher's own probe,
-    /// and the hasher may answer from its cache for the file it found.
+    /// Whether a digest stands for the exec'd image: only when the hasher may
+    /// bind it (`bindable`: read from APFS the system mounted, and for a
+    /// cached or shared digest still on such a volume; see
+    /// `FileHasher.volumeBindsImage`) and the file it read had exactly the
+    /// identity the kernel reported at exec. A volume a user mounted can be
+    /// detached, edited offline and attached again with that identity
+    /// intact, and HFS+, FAT and exFAT keep times too coarse to tell a
+    /// same-size rewrite apart, so a digest read there never binds. Even a
+    /// bound identity is evidence, not proof: a write through a shared
+    /// mapping keeps it until flushed. The stat bracket around the hash
+    /// cannot decide this either, because the path can name another file
+    /// between the bracket's reads and the hasher's own probe, and the hasher
+    /// may answer from its cache for the file it found.
     static func digestIsImageBound(
         hashed: HeavyEnrichmentFileIdentity?,
         image: HeavyEnrichmentFileIdentity?,

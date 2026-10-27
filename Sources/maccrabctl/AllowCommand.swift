@@ -407,7 +407,11 @@ extension MacCrabCtl {
             --rule <id>        Suppress this rule (+--path or +--hash narrows)
             --path <p>         Suppress all alerts from process path
             --host <h>         Suppress alerts from a hostname
-            --hash <sha256>    Combined with --rule, matches by process SHA-256
+            --hash <sha256>    Combined with --rule, matches the launched
+                               executable's SHA-256, only on APFS volumes the
+                               system mounts (such as the startup disk); never
+                               on disk images, removable drives or non-APFS
+                               volumes
             --ttl <DUR>        Expire after e.g. 7d / 24h / 30m / 2w
                                (optional — omit for permanent)
             --reason "<text>"  Required — why this allow exists
