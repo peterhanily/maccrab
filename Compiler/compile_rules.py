@@ -120,9 +120,10 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     "NotarizationStatus", "Architecture",
     # v1.18 introspection (actor->target) enrichment fields, set by ESCollector
     # for get_task_read / trace / remote_thread_create events and resolved via
-    # RuleEngine's enrichment passthrough.
+    # RuleEngine's enrichment passthrough. SameTeam is derived by RuleEngine
+    # from TargetTeamId and the actor's verified signature.
     "TargetImage", "TargetProcessName", "TargetSignerType", "TargetPid",
-    "TargetIsSelf", "SameTeam",
+    "TargetIsSelf", "TargetTeamId", "SameTeam",
     # v1.21.4 BTM / SMAppService launch-item enrichment fields, set by
     # ESCollector.btmEnrichments for NOTIFY_BTM_LAUNCH_ITEM_ADD events and
     # resolved via RuleEngine's enrichment passthrough (the item + attributed-app

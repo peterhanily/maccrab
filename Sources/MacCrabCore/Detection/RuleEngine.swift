@@ -1876,11 +1876,29 @@ public actor RuleEngine {
         case "event.action":
             return event.eventAction
 
+        // --- Introspection target ---
+        case "SameTeam":
+            return Self.sameTeam(event)
+
         // --- Enrichment fallback ---
         default:
             // Try the enrichments dictionary for fields added by plugins.
             return event.enrichments[path]
         }
+    }
+
+    /// `SameTeam` for an actor-to-target introspection event: "true" only
+    /// when the target's kernel-reported team is the team Security attested
+    /// for the actor's running image. The actor's collector team is a claim
+    /// any self-signed code directory can make. Only the enricher's verdict
+    /// bound to the running image carries a certificate chain, so a claim,
+    /// an ad-hoc signature or a verification still pending reads "false".
+    /// Nil when the event names no target.
+    static func sameTeam(_ event: Event) -> String? {
+        guard let targetTeam = event.enrichments["TargetTeamId"] else { return nil }
+        guard !targetTeam.isEmpty, let actor = event.process.codeSignature,
+              !actor.authorities.isEmpty, actor.attestedTeamId == targetTeam else { return "false" }
+        return "true"
     }
 
     // MARK: - Category Mapping

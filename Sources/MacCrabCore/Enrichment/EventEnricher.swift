@@ -373,6 +373,16 @@ public actor EventEnricher {
         return false
     }
 
+    /// Whether the event introspects a process whose kernel-reported team the
+    /// actor's own claim names. `SameTeam` turns that into an exemption for
+    /// the actor once believed, so it is believed only after Security has
+    /// judged the actor's running image, whatever the team.
+    static func claimsTargetTeam(_ event: Event) -> Bool {
+        guard let targetTeam = event.enrichments["TargetTeamId"], !targetTeam.isEmpty,
+              let team = event.process.codeSignature?.attestedTeamId else { return false }
+        return team == targetTeam
+    }
+
     /// The signature an event publishes once Security has judged the file
     /// at its process's path. A verdict that grants trust (Apple, App Store,
     /// Developer ID) describes that file, not the process: it is believed
@@ -429,10 +439,11 @@ public actor EventEnricher {
 
         if let claim {
             // A kernel classification that buys nothing is complete as
-            // reported. One that would buy trust is believed only after
-            // Security has judged the image the process runs.
+            // reported. One that would buy trust, an exemption or the
+            // same-team gate, is believed only after Security has judged the
+            // image the process runs.
             let needsVerification = Self.needsCryptographicVerification(
-                claim, isPlatformBinary: process.isPlatformBinary)
+                claim, isPlatformBinary: process.isPlatformBinary) || Self.claimsTargetTeam(event)
             // An event without a process, a TCC record about a client
             // binary, carries its collector's own Security verdict on that
             // file; there is no running image to bind it to.

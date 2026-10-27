@@ -15,9 +15,9 @@
 //   1. esProcessInfo(from: ESProcessFields)   — the field parse: decoded ES
 //      process fields → ProcessInfo (incl. SignerType classification).
 //   2. ESCollector.introspectionEnrichments(actor:target:)  — the dispatch-time
-//      enrichment builder that attaches the Sigma TargetImage/…/SameTeam fields
-//      to the emitted introspection Event (get_task_read / ptrace / remote-
-//      thread-create).
+//      enrichment builder that attaches the Sigma TargetImage/…/TargetTeamId
+//      fields to the emitted introspection Event (get_task_read / ptrace /
+//      remote-thread-create). The rule engine derives SameTeam from them.
 //
 // The introspection DETECTION rules are already exercised in
 // IntrospectionDetectionTests, but those hand-build the enrichment dictionary.
@@ -64,7 +64,7 @@ struct ESCollectorDispatchTests {
     // RuleEngine enrichment passthrough. A silent rename here = dead rules.
     private static let expectedKeys: Set<String> = [
         "TargetImage", "TargetProcessName", "TargetSignerType",
-        "TargetPid", "TargetIsSelf", "SameTeam",
+        "TargetPid", "TargetIsSelf", "TargetTeamId",
     ]
 
     @Test("emits exactly the Sigma field keys the introspection rules resolve")
@@ -98,24 +98,36 @@ struct ESCollectorDispatchTests {
         #expect(crossEnr["TargetIsSelf"] == "false")
     }
 
-    @Test("SameTeam gate: equal non-empty teams → true; different teams → false")
+    private func introspection(_ actor: MacCrabCore.ProcessInfo, _ enrichments: [String: String]) -> Event {
+        Event(eventCategory: .process, eventType: .change, eventAction: "get_task_read",
+              process: actor, enrichments: enrichments)
+    }
+
+    @Test("TargetTeamId carries the target's team; the actor's claimed team alone is no SameTeam")
     func sameTeamGate() {
         let a = esProc(pid: 10, exe: "/Applications/A.app/A", teamId: "TEAMX", signingId: "com.a")
         let sameTeamTarget = esProc(pid: 11, exe: "/Applications/B.app/B", teamId: "TEAMX", signingId: "com.b")
         let diffTeamTarget = esProc(pid: 12, exe: "/Applications/C.app/C", teamId: "TEAMY", signingId: "com.c")
 
-        #expect(ESCollector.introspectionEnrichments(actor: a, target: sameTeamTarget)["SameTeam"] == "true")
-        #expect(ESCollector.introspectionEnrichments(actor: a, target: diffTeamTarget)["SameTeam"] == "false")
+        let same = ESCollector.introspectionEnrichments(actor: a, target: sameTeamTarget)
+        #expect(same["TargetTeamId"] == "TEAMX")
+        #expect(same["SameTeam"] == nil, "the collector decides no SameTeam")
+        #expect(RuleEngine.resolveField("SameTeam", from: introspection(a, same)) == "false",
+                "a team the kernel reports for the actor is a claim until Security attests it")
+        let diff = ESCollector.introspectionEnrichments(actor: a, target: diffTeamTarget)
+        #expect(diff["TargetTeamId"] == "TEAMY")
+        #expect(RuleEngine.resolveField("SameTeam", from: introspection(a, diff)) == "false")
     }
 
-    @Test("SameTeam never fires when the actor team is empty (ad-hoc/unsigned)")
+    @Test("SameTeam never fires when the target names no team (ad-hoc/unsigned)")
     func sameTeamEmptyActorNeverMatches() {
         // Both ad-hoc (empty team) — must NOT be treated as same-team, or every
         // unsigned-on-unsigned introspection would be FP-suppressed.
         let adhocActor = esProc(pid: 20, exe: "/tmp/x", signed: false)
         let adhocTarget = esProc(pid: 21, exe: "/tmp/y", signed: false)
         let e = ESCollector.introspectionEnrichments(actor: adhocActor, target: adhocTarget)
-        #expect(e["SameTeam"] == "false")
+        #expect(e["TargetTeamId"] == "")
+        #expect(RuleEngine.resolveField("SameTeam", from: introspection(adhocActor, e)) == "false")
         #expect(e["TargetSignerType"] == "unsigned")
     }
 

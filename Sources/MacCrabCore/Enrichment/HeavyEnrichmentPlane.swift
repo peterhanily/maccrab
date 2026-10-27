@@ -88,7 +88,8 @@ public extension HeavyEnrichmentComponent {
              "process.code_signature.issuer", "SigningCertIssuer",
              "process.code_signature.cert_hash", "SigningCertHash",
              "process.code_signature.is_adhoc", "IsAdhocSigned",
-             "process.is_notarized", "IsNotarized", "NotarizationStatus":
+             "process.is_notarized", "IsNotarized", "NotarizationStatus",
+             "SameTeam":
             return .codeSignature
 
         case "process.hashes.sha256", "ProcessSHA256",

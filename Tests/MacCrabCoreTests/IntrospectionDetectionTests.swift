@@ -2,8 +2,9 @@
 // v1.18 ES introspection family (get_task_read / trace / remote_thread_create /
 // cs_invalidated). End-to-end through the REAL RuleEngine: a synthetic Event
 // carrying the eventAction + Target* enrichments the ESCollector emits must
-// dispatch under the process_event category, resolve TargetIsSelf/SameTeam via
-// enrichment passthrough, and the revived rules must fire on the malicious
+// dispatch under the process_event category, resolve TargetIsSelf via
+// enrichment passthrough and SameTeam from TargetTeamId and the actor's
+// verified signature, and the revived rules must fire on the malicious
 // shape while every FP filter (apple / debugger / JIT / self / same-team)
 // correctly suppresses the benign shapes.
 
@@ -21,16 +22,27 @@ struct IntrospectionDetectionTests {
         return engine
     }
 
+    private static let team = "TEAMX12345"
+
+    /// The actor's signature as the enricher publishes it once Security has
+    /// anchored its chain for the running image.
+    private static let verifiedTeamActor = CodeSignatureInfo(
+        signerType: .devId, teamId: team, signingId: "com.example.helper",
+        authorities: ["Developer ID Application: Example (TEAMX12345)",
+                      "Developer ID Certification Authority", "Apple Root CA"],
+        flags: 0x1_0001, isNotarized: true)
+
     private func introspection(
         action: String,
         actorName: String,
         actorPath: String,
         actorSigner: SignerType? = .unsigned,
+        actorSignature: CodeSignatureInfo? = nil,
         targetIsSelf: Bool = false,
-        sameTeam: Bool = false,
+        targetTeamId: String = "",
         targetImage: String = "/usr/bin/ssh-agent"
     ) -> Event {
-        let codeSig: CodeSignatureInfo? = actorSigner.map {
+        let codeSig: CodeSignatureInfo? = actorSignature ?? actorSigner.map {
             CodeSignatureInfo(signerType: $0, teamId: nil, signingId: nil, authorities: [], flags: 0, isNotarized: false)
         }
         let process = ProcessInfo(
@@ -45,7 +57,7 @@ struct IntrospectionDetectionTests {
             ? ["TargetIsSelf": "true"]
             : [
                 "TargetIsSelf": targetIsSelf ? "true" : "false",
-                "SameTeam": sameTeam ? "true" : "false",
+                "TargetTeamId": targetTeamId,
                 "TargetImage": targetImage,
                 "TargetProcessName": (targetImage as NSString).lastPathComponent,
                 "TargetSignerType": "unsigned",
@@ -74,7 +86,7 @@ struct IntrospectionDetectionTests {
         let engine = try await loadRules()
         let apple = await engine.evaluate(introspection(action: "remote_thread_create", actorName: "helper", actorPath: "/usr/libexec/helper", actorSigner: .apple))
         let selfT = await engine.evaluate(introspection(action: "remote_thread_create", actorName: "x", actorPath: "/tmp/x", targetIsSelf: true))
-        let team  = await engine.evaluate(introspection(action: "remote_thread_create", actorName: "x", actorPath: "/tmp/x", sameTeam: true))
+        let team  = await engine.evaluate(introspection(action: "remote_thread_create", actorName: "x", actorPath: "/tmp/x", actorSignature: Self.verifiedTeamActor, targetTeamId: Self.team))
         let dbg   = await engine.evaluate(introspection(action: "remote_thread_create", actorName: "debugserver", actorPath: "/usr/bin/debugserver", actorSigner: nil))
         #expect(!fires(apple, "Remote Thread"), "apple subject should be filtered")
         #expect(!fires(selfT, "Remote Thread"), "target-self should be filtered")
@@ -128,6 +140,33 @@ struct IntrospectionDetectionTests {
         let appl = await engine.evaluate(introspection(action: "get_task_read", actorName: "x", actorPath: "/usr/libexec/x", actorSigner: .apple, targetImage: "/usr/libexec/securityd"))
         #expect(fires(mal, "High-Value"), "expected high-value escalation, got: \(mal.map(\.ruleName))")
         #expect(!fires(appl, "High-Value"), "apple actor should be filtered")
+    }
+
+    // MARK: - Same-team gate needs a verified actor
+
+    @Test("an actor claiming its target's team is no same-team exemption until Security attests the team")
+    func claimedTeamDoesNotSilenceMustFire() async throws {
+        let engine = try await loadRules()
+        let target = "/Applications/1Password.app/Contents/MacOS/1Password"
+        // As the collector reports a self-signed chain naming the target's
+        // team, and as the enricher publishes it once Security finds no
+        // Apple-rooted chain or another image.
+        let claimed = CodeSignatureInfo(signerType: .devId, teamId: Self.team, signingId: "com.example.helper", flags: 0x1)
+        let unverified = CodeSignatureInfo(signerType: .adHoc, signingId: "com.example.helper", flags: 0x1)
+        for signature in [claimed, unverified] {
+            let event = introspection(action: "get_task_read", actorName: "helper", actorPath: "/tmp/helper",
+                                      actorSignature: signature, targetTeamId: Self.team, targetImage: target)
+            #expect(RuleEngine.resolveField("SameTeam", from: event) == "false")
+            let matches = await engine.evaluate(event)
+            #expect(fires(matches, "High-Value"), "the must-fire read of a credential process fires, got: \(matches.map(\.ruleName))")
+        }
+        let verified = introspection(action: "get_task_read", actorName: "helper", actorPath: "/tmp/helper",
+                                     actorSignature: Self.verifiedTeamActor, targetTeamId: Self.team, targetImage: target)
+        #expect(RuleEngine.resolveField("SameTeam", from: verified) == "true")
+        let verifiedMatches = await engine.evaluate(verified)
+        #expect(!fires(verifiedMatches, "High-Value"), "a verified same-team helper is the vendor's own IPC")
+        // A rule reading SameTeam waits for the actor's verdict like one reading SignerType.
+        #expect(HeavyEnrichmentComponent.dependency(forPredicateField: "SameTeam") == .codeSignature)
     }
 
     // MARK: - Non-Apple benign introspector filters (review fix)

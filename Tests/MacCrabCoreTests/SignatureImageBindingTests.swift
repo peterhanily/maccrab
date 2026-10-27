@@ -77,6 +77,8 @@ struct SignatureImageBindingTests {
         let event: Event
         /// The first pass already carried the outcome.
         let inline: Bool
+        /// The event as the first pass left it.
+        let first: Event
         var signature: CodeSignatureInfo? { event.process.codeSignature }
         var coverage: HeavyEnrichmentCoverage? { DeferredEventEnrichment.coverage(in: event)[.codeSignature] }
     }
@@ -85,14 +87,14 @@ struct SignatureImageBindingTests {
     private static func published(_ enricher: EventEnricher, _ event: Event) async -> Outcome? {
         let first = await enricher.enrich(event)
         guard DeferredEventEnrichment.coverage(in: first)[.codeSignature] == .pending else {
-            return Outcome(event: first, inline: true)
+            return Outcome(event: first, inline: true, first: first)
         }
         let deadline = DispatchTime.now().uptimeNanoseconds + 30_000_000_000
         while DispatchTime.now().uptimeNanoseconds < deadline {
             if let patch = await enricher.drainDeferredEnrichments(limit: 16)
                 .first(where: { $0.component == .codeSignature }),
                let applied = patch.applying(to: first) {
-                return Outcome(event: applied, inline: false)
+                return Outcome(event: applied, inline: false, first: first)
             }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
@@ -305,6 +307,38 @@ struct SignatureImageBindingTests {
                                             kernelCdhash: Self.imageY))))
         #expect(outcome.signature == selfSigned.info)
         #expect(outcome.signature?.attestedTeamId == nil)
+        _ = await enricher.shutdownHeavyEnrichment()
+    }
+
+    @Test("an actor claiming its target's team is verified first, and is that team only for its own image")
+    func sameTeamWaitsForTheBoundVerdict() async throws {
+        let fixture = try Self.fixture(named: "helper")
+        defer { try? FileManager.default.removeItem(atPath: fixture.root) }
+        let team = "TEAMX12345"
+        let claimFor = { (kernelCdhash: String) in
+            Self.claim(.devId, team: team, signingId: "com.example.helper", kernelCdhash: kernelCdhash)
+        }
+        let target = ["TargetTeamId": team, "TargetIsSelf": "false",
+                      "TargetImage": "/Applications/1Password.app/Contents/MacOS/1Password"]
+        let enricher = Self.enricher(Self.verdict(
+            .devId, team: team, signingId: "com.example.helper",
+            authorities: Self.chain("Developer ID Application: Example (TEAMX12345)"), cdhashes: [Self.imageX]))
+
+        let probe = Self.event(fixture.path, claim: claimFor(Self.imageX), enrichments: target)
+        #expect(!EventEnricher.needsCryptographicVerification(claimFor(Self.imageX), isPlatformBinary: false),
+                "an ordinary team is not re-verified for its own sake")
+        #expect(EventEnricher.claimsTargetTeam(probe))
+
+        let genuine = try #require(await Self.published(enricher, probe))
+        #expect(!genuine.inline, "the actor waits for Security")
+        #expect(RuleEngine.resolveField("SameTeam", from: genuine.first) == "false", "false until the verdict lands")
+        #expect(RuleEngine.resolveField("SameTeam", from: genuine.event) == "true")
+
+        let renamed = try #require(await Self.published(
+            enricher, Self.event(fixture.path, claim: claimFor(Self.imageY), enrichments: target)))
+        #expect(renamed.inline, "the cached verdict answers")
+        #expect(RuleEngine.resolveField("SameTeam", from: renamed.event) == "false",
+                "the verdict for another image attests no team for this one")
         _ = await enricher.shutdownHeavyEnrichment()
     }
 

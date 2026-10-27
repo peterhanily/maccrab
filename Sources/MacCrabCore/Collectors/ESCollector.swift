@@ -1213,20 +1213,19 @@ public final class ESCollector: @unchecked Sendable {
     /// Enrichment keys describing the TARGET of an actor->target introspection
     /// event (get_task_read / trace / remote_thread_create). Keys are the exact
     /// Sigma field names so RuleEngine.resolveField resolves them via its
-    /// enrichment passthrough — no model or engine change. `TargetIsSelf` and
-    /// `SameTeam` are the cheap FP gates rules use in place of the
-    /// not-yet-implemented |fieldref modifier.
+    /// enrichment passthrough. `TargetIsSelf` is a cheap FP gate rules use in
+    /// place of the not-yet-implemented |fieldref modifier. `TargetTeamId` is
+    /// the target's kernel-reported team: the rule engine derives `SameTeam`
+    /// from it and the actor's verified signature, because the actor's team
+    /// here is only what its code directory claims.
     static func introspectionEnrichments(actor: ProcessInfo, target: ProcessInfo) -> [String: String] {
-        let actorTeam = actor.codeSignature?.teamId ?? ""
-        let targetTeam = target.codeSignature?.teamId ?? ""
-        let sameTeam = !actorTeam.isEmpty && actorTeam == targetTeam
-        return [
+        [
             "TargetImage": target.executable,
             "TargetProcessName": target.name,
             "TargetSignerType": target.codeSignature?.signerType.rawValue ?? "unknown",
             "TargetPid": String(target.pid),
             "TargetIsSelf": actor.pid == target.pid ? "true" : "false",
-            "SameTeam": sameTeam ? "true" : "false",
+            "TargetTeamId": target.codeSignature?.teamId ?? "",
         ]
     }
 
@@ -3016,19 +3015,23 @@ public final class ESCollector: @unchecked Sendable {
         // -----------------------------------------------------------------
         // The subject (msg.process) is the ACTOR; the target is the process
         // being read/traced/injected. We carry the target via Sigma-named
-        // enrichment keys (TargetImage/TargetSignerType/TargetIsSelf/SameTeam)
-        // so RuleEngine resolves them through its enrichment passthrough with
-        // no model change, and rules get cheap FP gates (target-self = JIT/own
-        // process; same-team = legitimate intra-vendor IPC) without the
-        // unimplemented |fieldref modifier. Emitted as .process/.change ->
-        // logsource category "process_event".
+        // enrichment keys (TargetImage/TargetSignerType/TargetIsSelf/
+        // TargetTeamId) so RuleEngine resolves them through its enrichment
+        // passthrough with no model change, and rules get cheap FP gates
+        // (target-self = JIT/own process; same-team = legitimate intra-vendor
+        // IPC) without the unimplemented |fieldref modifier. Emitted as
+        // .process/.change -> logsource category "process_event".
         //
         // Notes: (a) we read ONLY `.target` (and the empty cs_invalidated),
         // which is version-agnostic — the version>=5 `.type` field is
         // deliberately not accessed, so no es_message version guard is needed.
-        // (b) SameTeam is derived from the kernel-attested team_id, so it is an
-        // FP-reduction heuristic an attacker cannot spoof without possessing
-        // the target team's signing identity — not a hard security boundary.
+        // (b) The kernel reports whatever team the actor's code directory
+        // names, and a self-signed chain can name any team, so the collector
+        // decides no SameTeam. A genuine target's team is real, and an
+        // attacker gains nothing from a fake target, so the target's team is
+        // carried; the rule engine answers SameTeam only for a team Security
+        // attested for the actor's running image, and the enricher sends an
+        // actor that claims its target's team to that verification first.
         // (c) these are ES-native; they are NOT carried by the non-root
         // eslogger/kdebug fallback, so these rules require the ES entitlement.
 
