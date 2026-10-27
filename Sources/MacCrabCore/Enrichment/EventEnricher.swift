@@ -263,6 +263,10 @@ public actor EventEnricher {
             severity: event.severity,
             ruleMatches: event.ruleMatches
         )
+        // The kernel's image identity has done its work above (the hash
+        // closure captured it); it is not evidence worth a row on every exec
+        // and fork, so it does not travel to the store.
+        enrichedEvent.enrichments.removeValue(forKey: HeavyEnrichmentFileIdentity.execImageEnrichmentKey)
 
         // Populate parent enrichment fields from lineage (fetched in step 2)
         if let parentInfo {
