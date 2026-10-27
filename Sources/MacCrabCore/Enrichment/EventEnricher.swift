@@ -461,8 +461,9 @@ public actor EventEnricher {
         // The kernel's identity of the exec'd image, when the collector saw
         // it. The digest below is of whatever the path holds at hashing time;
         // it stands for the process only if that file is the image itself.
-        let image = event.enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey]
-            .flatMap(HeavyEnrichmentFileIdentity.init(serialized:))
+        // Read from the binding: the plane keys this hash work on the same
+        // value, so every event the result is delivered to ran this image.
+        let image = binding.execImageIdentity
         let offer = await heavyEnrichmentPlane.offer(
             component: .processHashes,
             binding: binding,

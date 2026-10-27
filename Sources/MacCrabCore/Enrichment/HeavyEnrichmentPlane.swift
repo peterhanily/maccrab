@@ -462,6 +462,13 @@ public struct HeavyEnrichmentBinding: Sendable, Hashable {
     public let userID: UInt32
     public let filePath: String?
     public let eventFileSize: UInt64?
+    /// The image the kernel reported for an exec or fork, when the collector
+    /// recorded one. Hash work is keyed on it, so two execs of one path by
+    /// one process (exec keeps the pid and the birth time) never share a
+    /// digest or its image binding. It routes work only and is not part of
+    /// the binding's identity: the enricher removes the key from the event it
+    /// returns, and a binding rebuilt from that event must still equal this.
+    public let execImageIdentity: HeavyEnrichmentFileIdentity?
 
     public init(event: Event) {
         eventID = event.id
@@ -471,6 +478,30 @@ public struct HeavyEnrichmentBinding: Sendable, Hashable {
         userID = event.process.userId
         filePath = event.file?.path
         eventFileSize = event.file?.size
+        execImageIdentity = event.enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey]
+            .flatMap(HeavyEnrichmentFileIdentity.init(serialized:))
+    }
+
+    /// Every stored field except `execImageIdentity`. A new field belongs
+    /// here and in `hash(into:)` unless it, too, only routes work.
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.eventID == rhs.eventID
+            && lhs.processID == rhs.processID
+            && lhs.processStartTime == rhs.processStartTime
+            && lhs.executablePath == rhs.executablePath
+            && lhs.userID == rhs.userID
+            && lhs.filePath == rhs.filePath
+            && lhs.eventFileSize == rhs.eventFileSize
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(eventID)
+        hasher.combine(processID)
+        hasher.combine(processStartTime)
+        hasher.combine(executablePath)
+        hasher.combine(userID)
+        hasher.combine(filePath)
+        hasher.combine(eventFileSize)
     }
 
     public func matches(_ event: Event) -> Bool {
@@ -900,7 +931,8 @@ public actor HeavyEnrichmentPlane {
     public typealias Operation = @Sendable () async -> HeavyEnrichmentValue
 
     private enum WorkSubject: Hashable, Sendable {
-        case process(pid: Int32, started: Date, executable: String)
+        case process(pid: Int32, started: Date, executable: String,
+                     image: HeavyEnrichmentFileIdentity?)
         case exactFileEvent(id: UUID, path: String?, size: UInt64?)
         case user(UInt32)
     }
@@ -912,11 +944,25 @@ public actor HeavyEnrichmentPlane {
         init(component: HeavyEnrichmentComponent, binding: HeavyEnrichmentBinding) {
             self.component = component
             switch component {
-            case .codeSignature, .processHashes, .environment:
+            case .codeSignature, .environment:
                 subject = .process(
                     pid: binding.processID,
                     started: binding.processStartTime,
-                    executable: binding.executablePath
+                    executable: binding.executablePath,
+                    image: nil
+                )
+            case .processHashes:
+                // Every subscriber of one work item receives its value, and a
+                // digest's image binding holds only for the image it was
+                // checked against. Exec keeps the pid and the birth time, so
+                // two execs of one path by one process would share this key,
+                // and the second would inherit the first's binding, unless
+                // the image is part of it.
+                subject = .process(
+                    pid: binding.processID,
+                    started: binding.processStartTime,
+                    executable: binding.executablePath,
+                    image: binding.execImageIdentity
                 )
             case .fileContent:
                 // Content belongs to the one callback that proved a completed

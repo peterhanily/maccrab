@@ -233,6 +233,12 @@ struct SuppressionScopeWiringTests {
         let enricher = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/EventEnricher.swift"), encoding: .utf8)
         #expect(enricher.contains("imageBound: Self.digestIsImageBound(hashed: computed.fileIdentity, image: image)"))
         #expect(!enricher.contains("image == stable"))
+        // The image the digest is checked against is the one the hash work is
+        // keyed on, so no subscriber can receive another image's binding.
+        #expect(enricher.contains("let image = binding.execImageIdentity"))
+        let plane = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabCore/Enrichment/HeavyEnrichmentPlane.swift"), encoding: .utf8)
+        let hashKey = try #require(plane.range(of: "case .processHashes:\n                // Every subscriber"))
+        #expect(plane[hashKey.upperBound...].prefix(700).contains("image: binding.execImageIdentity"))
         let state = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/DaemonState.swift"), encoding: .utf8)
         let instance = try #require(state.range(of: "func isSuppressed(_ match: RuleMatch, event: Event) async -> Bool {"))
         #expect(state[instance.upperBound...].prefix(120).contains("Self.isSuppressed(match, event: event, manager: suppressionManager)"))
@@ -253,6 +259,134 @@ struct SuppressionScopeWiringTests {
         let row = try #require(snapshot.events.first { $0.id == enriched.id })
         #expect(row.enrichments[key] == nil)
         #expect(row.enrichments["enriched"] == "true", "enrichments do reach the store; the key was removed before")
+    }
+
+    // MARK: Per-image hash work
+
+    /// An exec event carrying the kernel's view of the image, with a collector
+    /// signature and a user name, so enrichment offers only hash work.
+    private func execEvent(path: String, pid: Int32, started: Date,
+                           image: HeavyEnrichmentFileIdentity?) -> Event {
+        let process = MacCrabCore.ProcessInfo(
+            pid: pid, ppid: 1, rpid: pid, name: (path as NSString).lastPathComponent,
+            executable: path, commandLine: path, args: [path], workingDirectory: "/",
+            userId: 501, userName: "u", groupId: 20, startTime: started,
+            codeSignature: CodeSignatureInfo(signerType: .unsigned))
+        var enrichments: [String: String] = [:]
+        if let image {
+            enrichments[HeavyEnrichmentFileIdentity.execImageEnrichmentKey] = image.serialized
+        }
+        return Event(timestamp: Date(), eventCategory: .process, eventType: .start,
+                     eventAction: "exec", process: process, enrichments: enrichments)
+    }
+
+    @Test("two execs of one path by one process are hashed and bound per image")
+    func reexecIsBoundPerImage() async throws {
+        let (directory, path, image) = try imageFixture()
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let digest = try #require(await FileHasher().hash(path: path))
+        let (mgr, store) = try manager()
+        defer { try? FileManager.default.removeItem(atPath: store) }
+        _ = await mgr.add(Suppression(scope: .ruleHash(ruleId: "rule.x", sha256: digest),
+                                      source: .cli, reason: "test"))
+        // The image a later exec of the same path ran: another file than the
+        // one the path holds when the hash is taken. Exec keeps the pid and
+        // the birth time, so both execs have one process identity.
+        let replaced = HeavyEnrichmentFileIdentity(
+            deviceID: image.deviceID, inodeNumber: image.inodeNumber &+ 1,
+            sizeBytes: image.sizeBytes,
+            modificationSeconds: image.modificationSeconds,
+            modificationNanoseconds: image.modificationNanoseconds,
+            statusChangeSeconds: image.statusChangeSeconds,
+            statusChangeNanoseconds: image.statusChangeNanoseconds)
+
+        let plane = HeavyEnrichmentPlane(
+            configuration: .init(maximumConcurrentWorkers: 1, operationTimeoutSeconds: 30),
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting())
+        let enricher = EventEnricher(processHasher: ProcessHasher(), heavyEnrichmentPlane: plane)
+        // Hold the plane's only worker, so every hash offer below is queued
+        // and a later offer with the same work key joins the earlier one.
+        let gate = AsyncStream<Void>.makeStream()
+        let holder = execEvent(path: "/usr/bin/true", pid: 999_990, started: Date(), image: nil)
+        let held = await plane.offer(component: .environment,
+                                     binding: HeavyEnrichmentBinding(event: holder),
+                                     cacheResult: false) {
+            for await _ in gate.stream { break }
+            return .environment(nil)
+        }
+        guard case .pending = held else {
+            Issue.record("the gate did not take the only worker: \(held)")
+            return
+        }
+
+        let started = Date(timeIntervalSince1970: 1_750_000_000)
+        let first = await enricher.enrich(execEvent(path: path, pid: 999_991, started: started, image: image))
+        let beforeReexec = await plane.snapshot().coalescedRequestsTotal
+        let second = await enricher.enrich(execEvent(path: path, pid: 999_991, started: started, image: replaced))
+        #expect(await plane.snapshot().coalescedRequestsTotal == beforeReexec,
+                "a different image must not join the earlier exec's hash work")
+        let third = await enricher.enrich(execEvent(path: path, pid: 999_992, started: started, image: image))
+        let beforeRepeat = await plane.snapshot().coalescedRequestsTotal
+        let fourth = await enricher.enrich(execEvent(path: path, pid: 999_992, started: started, image: image))
+        #expect(await plane.snapshot().coalescedRequestsTotal == beforeRepeat + 1,
+                "the same image still shares one hash")
+
+        gate.continuation.yield()
+        gate.continuation.finish()
+        let events = [first, second, third, fourth]
+        var hashed: [UUID: Event] = [:]
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(30))
+        while hashed.count < events.count, clock.now < deadline {
+            for patch in await enricher.drainDeferredEnrichments(limit: 16)
+            where patch.component == .processHashes {
+                guard let event = events.first(where: { $0.id == patch.binding.eventID }) else { continue }
+                hashed[event.id] = try #require(patch.applying(to: event))
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        _ = await enricher.shutdownHeavyEnrichment()
+
+        let original = try #require(hashed[first.id])
+        let reexec = try #require(hashed[second.id])
+        #expect(original.process.hashes?.imageBound == true)
+        #expect(reexec.process.hashes?.sha256 == digest, "the path still holds the first image's bytes")
+        #expect(reexec.process.hashes?.imageBound != true)
+        #expect(await DaemonState.isSuppressed(match, event: original, manager: mgr))
+        #expect(!(await DaemonState.isSuppressed(match, event: reexec, manager: mgr)))
+        for event in [third, fourth] {
+            let repeated = try #require(hashed[event.id])
+            #expect(repeated.process.hashes?.imageBound == true)
+            #expect(await DaemonState.isSuppressed(match, event: repeated, manager: mgr))
+        }
+    }
+
+    @Test("a binding rebuilt from the returned event equals the one its patch carries")
+    func bindingEqualityIgnoresImage() throws {
+        let (directory, path, image) = try imageFixture()
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let started = Date(timeIntervalSince1970: 1_750_000_000)
+        let raw = execEvent(path: path, pid: 999_993, started: started, image: image)
+        var returned = raw
+        returned.enrichments.removeValue(forKey: HeavyEnrichmentFileIdentity.execImageEnrichmentKey)
+        let carried = HeavyEnrichmentBinding(event: raw)
+        let rebuilt = HeavyEnrichmentBinding(event: returned)
+        #expect(carried.execImageIdentity == image)
+        #expect(rebuilt.execImageIdentity == nil)
+        // The deferred buffer compares these two for an event it retained only
+        // as a rejected identity; the image routes work and is not identity.
+        #expect(carried == rebuilt)
+        #expect(carried.hashValue == rebuilt.hashValue)
+        #expect(carried.matches(returned))
+        // Every field that names the event still counts.
+        #expect(carried != HeavyEnrichmentBinding(event: execEvent(path: path, pid: 999_994, started: started, image: image)))
+        #expect(carried != HeavyEnrichmentBinding(event: execEvent(path: path, pid: 999_993, started: started, image: image)),
+                "another event of the same process")
+        // A new stored field must join the hand-written equality as well.
+        #expect(Mirror(reflecting: carried).children.compactMap(\.label) == [
+            "eventID", "processID", "processStartTime", "executablePath", "userID",
+            "filePath", "eventFileSize", "execImageIdentity",
+        ])
     }
 
     @Test("an image identity survives its enrichment round trip and rejects damage")
