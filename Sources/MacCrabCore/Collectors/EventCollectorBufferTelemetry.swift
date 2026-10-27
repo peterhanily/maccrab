@@ -232,17 +232,21 @@ protocol BoundedTableEntry: AnyObject {
 
 /// A fixed number of keyed entries, so a budget drained by one source cannot
 /// refuse another's. Once `capacity` keys are held, a new key first makes
-/// room by dropping every key idle for `idleEvictionNanos`. If none is idle,
-/// the policy decides: a lane table recycles the least recently seen live
-/// entry, and the key it then inserts is marked `churned` — it is no first
-/// sighting, and its entry is built as the maker sees fit for a key that
-/// arrived under churn (one token, no allowance) — while a signal table
-/// refuses the key outright, so cycling through fresh keys cannot buy a
-/// fresh bucket each time. Unlocked — the owner serializes access (the ES
+/// room by dropping every key idle for `idleEvictionNanos`; that full scan
+/// runs at most once per quarter idle window, so a table held full costs a
+/// new key a hash probe, not a scan. If no room is made, the policy decides.
+/// A lane table frees an eighth of itself in one pass, least recently seen
+/// first, and each key that then takes a slot a live entry left is marked
+/// `churned`: it is no first sighting, and its entry is built as the maker
+/// sees fit for a key that arrived under churn (one token, no allowance). A
+/// signal table refuses the key outright. Either way, cycling through fresh
+/// keys cannot buy a fresh bucket each time. Churn is forgotten once an idle
+/// window passes with no live eviction, so a storm that has stopped does not
+/// mark later newcomers. Unlocked — the owner serializes access (the ES
 /// worker's queue, or `SignalRateLimiter`'s lock).
 final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
     enum OverflowPolicy {
-        /// Recycle the least recently seen live entry; the newcomer is `churned`.
+        /// Recycle the least recently seen live entries; newcomers in their slots are `churned`.
         case evictLeastRecentlyUsed
         /// Fail closed: refuse the newcomer until a key has gone idle.
         case refuseWhenFull
@@ -253,7 +257,7 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
         let entry: Entry?
         /// The key entered the table without displacing a live one.
         let firstSighting: Bool
-        /// The key entered the table over a live one just recycled.
+        /// The key entered the table in a slot a live entry was recycled from.
         let churned: Bool
     }
 
@@ -265,6 +269,10 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
     /// Live entries recycled but not yet replaced; the inserts that take
     /// their slots are the churned ones.
     private var liveEvictionCredits = 0
+    private var lastLiveEvictionNanos: UInt64 = 0
+    private var lastSweepNanos: UInt64?
+    /// Full scans for idle keys run so far; a test aid.
+    private(set) var sweepCount = 0
 
     init(capacity: Int, idleEvictionNanos: UInt64 = 60_000_000_000,
          policy: OverflowPolicy = .evictLeastRecentlyUsed,
@@ -280,15 +288,21 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
         if let entry = entries[key] {
             return Lookup(entry: entry, firstSighting: false, churned: false)
         }
+        if liveEvictionCredits > 0, nowNanos > lastLiveEvictionNanos,
+           nowNanos - lastLiveEvictionNanos >= idleEvictionNanos {
+            liveEvictionCredits = 0
+        }
         if entries.count >= capacity {
-            evictIdle(nowNanos: nowNanos)
+            if sweepIsDue(nowNanos: nowNanos) {
+                evictIdle(nowNanos: nowNanos)
+            }
             if entries.count >= capacity {
                 switch policy {
                 case .refuseWhenFull:
                     return Lookup(entry: nil, firstSighting: false, churned: false)
                 case .evictLeastRecentlyUsed:
-                    evictLeastRecentlySeen()
-                    liveEvictionCredits += 1
+                    liveEvictionCredits += evictLeastRecentlySeenBatch(nowNanos: nowNanos)
+                    lastLiveEvictionNanos = nowNanos
                 }
             }
         }
@@ -299,6 +313,11 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
         return Lookup(entry: entry, firstSighting: !churned, churned: churned)
     }
 
+    /// The key's entry if it is tracked, never inserting it.
+    func existing(key: Key) -> Entry? {
+        entries[key]
+    }
+
     /// Whether `key` is tracked, without inserting it.
     func contains(key: Key) -> Bool {
         entries[key] != nil
@@ -306,28 +325,39 @@ final class BoundedTable<Key: Hashable, Entry: BoundedTableEntry> {
 
     var count: Int { entries.count }
 
-    private func evictIdle(nowNanos: UInt64) {
-        for (key, entry) in entries {
-            let seen = entry.lastSeenNanos ?? 0
-            if nowNanos > seen, nowNanos - seen >= idleEvictionNanos {
-                entries[key] = nil
-            }
-        }
+    private func isIdle(_ seen: UInt64?, nowNanos: UInt64) -> Bool {
+        let seen = seen ?? 0
+        return nowNanos > seen && nowNanos - seen >= idleEvictionNanos
     }
 
-    private func evictLeastRecentlySeen() {
-        var oldestKey: Key?
-        var oldestSeen = UInt64.max
-        for (key, entry) in entries {
-            let seen = entry.lastSeenNanos ?? 0
-            if seen < oldestSeen {
-                oldestSeen = seen
-                oldestKey = key
-            }
+    /// A full scan for idle keys runs at most once per quarter idle window,
+    /// and at once if the clock has gone backwards.
+    private func sweepIsDue(nowNanos: UInt64) -> Bool {
+        guard let last = lastSweepNanos, nowNanos >= last else { return true }
+        return nowNanos - last >= Swift.max(1, idleEvictionNanos / 4)
+    }
+
+    private func evictIdle(nowNanos: UInt64) {
+        lastSweepNanos = nowNanos
+        sweepCount += 1
+        let idle = entries.compactMap { isIdle($0.value.lastSeenNanos, nowNanos: nowNanos) ? $0.key : nil }
+        for key in idle { entries[key] = nil }
+    }
+
+    /// Frees an eighth of the table in one pass, least recently seen first,
+    /// so the next inserts find room without scanning; returns how many of
+    /// the entries it dropped were live.
+    private func evictLeastRecentlySeenBatch(nowNanos: UInt64) -> Int {
+        let batch = Swift.max(1, capacity / 8)
+        let oldest = entries.map { (key: $0.key, seen: $0.value.lastSeenNanos) }
+            .sorted { ($0.seen ?? 0) < ($1.seen ?? 0) }
+            .prefix(batch)
+        var live = 0
+        for item in oldest {
+            entries[item.key] = nil
+            if !isIdle(item.seen, nowNanos: nowNanos) { live += 1 }
         }
-        if let key = oldestKey {
-            entries[key] = nil
-        }
+        return live
     }
 }
 
@@ -457,15 +487,26 @@ final class PerProcessLaneBudgets {
 /// keeps only a fatal signal aimed at MacCrab or at a security tool, but one
 /// process can send that signal in a loop, or name a decoy after a security
 /// tool and signal it, and every kept message rides the lane that carries
-/// exec/fork/exit. Two bounds. Each (source pid, target pid) pair gets a
-/// small bucket, checked before any path is decoded. Each relevant target
-/// then gets a shared bucket that every source's repeats draw on, so a kill
-/// loop at a decoy spends the decoy's budget and never the engine's or a
-/// real tool's; a pair's first signal bypasses it, so every distinct source
-/// keeps its first signal at a target whatever the others did. Ordinary
-/// targets never reach the shared bucket, so the build-storm SIGTERMs cannot
-/// spend it. Locked: the ES callback may run on more than one thread across
-/// clients.
+/// exec/fork/exit. Two bounds.
+///
+/// Each (source pid, target pid) pair gets a small bucket. A tracked pair is
+/// probed before any path is decoded; an untracked one is decoded first and
+/// enters the table only if its target proved relevant, so the build's
+/// fatal signals at ordinary processes never fill it. When the table is full
+/// of live pairs a new pair is refused, so cycling through sources or
+/// decoys cannot buy fresh budgets; the refusals are counted as
+/// `es_signal_pair_refused_total`.
+///
+/// A pair's repeats then draw on a shared bucket: the target's own for the
+/// engine and for a tool whose executable is root-owned at a canonical path
+/// (read from the stat ES reports, with no syscall on the callback), and one
+/// decoy bucket that every other target shares, so a kill loop at decoys
+/// spends neither the engine's budget nor a real tool's. A pair's first
+/// signal bypasses it, so every distinct source keeps its first signal at a
+/// target whatever the others did. Kept signals are therefore bounded by the
+/// pair table's first sightings per idle window plus the shared buckets,
+/// whatever the attacker's process count. Locked: the ES callback may run on
+/// more than one thread across clients.
 final class SignalRateLimiter: @unchecked Sendable {
     struct Pair: Hashable {
         let source: pid_t
@@ -480,12 +521,13 @@ final class SignalRateLimiter: @unchecked Sendable {
     /// and however many, draws on this and never on the engine's or a real
     /// tool's own bucket.
     private let decoyRepeats: ProtectedFileLaneBudget
-    private let rootOwnedCanonical: (String) -> Bool
+    private let rootOwnedCanonical: (_ path: String, _ ownerUID: uid_t?) -> Bool
 
     init(pairCapacity: Int = 8, pairRefillPerSecond: Double = 2,
          targetCapacity: Int = 64, targetRefillPerSecond: Double = 16,
          trackedPairs: Int = 1024, trackedTargets: Int = 1024,
-         rootOwnedCanonical: @escaping (String) -> Bool = SignalRateLimiter.isRootOwnedCanonicalExecutable) {
+         rootOwnedCanonical: @escaping (_ path: String, _ ownerUID: uid_t?) -> Bool
+             = SignalRateLimiter.isRootOwnedCanonicalExecutable) {
         pairs = BoundedTable(capacity: trackedPairs, idleEvictionNanos: 10_000_000_000, policy: .refuseWhenFull) { _ in
             ProtectedFileLaneBudget(capacity: pairCapacity, refillPerSecond: pairRefillPerSecond)
         }
@@ -498,29 +540,33 @@ final class SignalRateLimiter: @unchecked Sendable {
 
     /// Whether an executable lives where only root writes: the SIP-protected
     /// system trees by prefix, and under /Library or /Applications only when
-    /// the file itself is root-owned, since an admin can create directories
-    /// there. Anything else — /tmp, a home, /opt/homebrew, a mounted volume —
-    /// is where a decoy named after a tool would live.
-    static func isRootOwnedCanonicalExecutable(_ path: String) -> Bool {
+    /// the file is root-owned (`ownerUID`, from the stat in the ES message),
+    /// since an admin can create directories there. Anything else — /tmp, a
+    /// home, /opt/homebrew, a mounted volume, or an owner not known — is
+    /// where a decoy named after a tool would live.
+    static func isRootOwnedCanonicalExecutable(_ path: String, ownerUID: uid_t?) -> Bool {
         for prefix in ["/System/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/bin/", "/sbin/"]
         where path.hasPrefix(prefix) {
             return true
         }
         guard path.hasPrefix("/Library/") || path.hasPrefix("/Applications/") else { return false }
-        var info = stat()
-        return lstat(path, &info) == 0 && info.st_uid == 0
+        return ownerUID == 0
     }
 
-    /// Whether this pair is already tracked; an untracked pair is inserted
-    /// only once its target proved relevant (`admitPair`).
-    func isTracked(source: pid_t, target: pid_t) -> Bool {
+    /// For a tracked pair, whether a signal may still be kept; nil for a pair
+    /// not tracked, which `admitPair` inserts once its target proved
+    /// relevant. One lock and an integer probe, before any path decode.
+    func admitIfTracked(source: pid_t, target: pid_t, nowNanos: UInt64) -> Bool? {
         lock.lock(); defer { lock.unlock() }
-        return pairs.contains(key: Pair(source: source, target: target))
+        guard let bucket = pairs.existing(key: Pair(source: source, target: target)) else { return nil }
+        let admitted = bucket.admit(nowNanos: nowNanos)
+        if !admitted { pairRefusedCount &+= 1 }
+        return admitted
     }
 
-    /// Whether this pair may still have a signal kept, and whether this is
-    /// the pair's first. For a tracked pair this is an integer probe before
-    /// any path decode; a pair the table is too full to take is refused.
+    /// Whether this pair may have a signal kept, inserting it if the table has
+    /// room, and whether this is the pair's first. A pair the table is too full
+    /// to take is refused.
     func admitPair(source: pid_t, target: pid_t, nowNanos: UInt64) -> (admitted: Bool, firstSighting: Bool) {
         lock.lock(); defer { lock.unlock() }
         let lookup = pairs.lookup(key: Pair(source: source, target: target), nowNanos: nowNanos)
@@ -533,11 +579,10 @@ final class SignalRateLimiter: @unchecked Sendable {
 
     /// Whether one more repeat signal at this relevant target may be kept:
     /// from the target's own bucket for the engine (`executable` nil) and
-    /// for a tool at a root-owned canonical path, from the shared decoy
+    /// for a tool root-owned at a canonical path, from the shared decoy
     /// bucket for every other target.
-    func admitKept(target: pid_t, executable: String?, nowNanos: UInt64) -> Bool {
-        // Classify outside the lock: the canonical check may stat the file.
-        let ownBucket = executable.map(rootOwnedCanonical) ?? true
+    func admitKept(target: pid_t, executable: String?, ownerUID: uid_t?, nowNanos: UInt64) -> Bool {
+        let ownBucket = executable.map { rootOwnedCanonical($0, ownerUID) } ?? true
         lock.lock(); defer { lock.unlock() }
         let admitted: Bool
         if ownBucket {
@@ -555,10 +600,18 @@ final class SignalRateLimiter: @unchecked Sendable {
         return pairs.count
     }
 
+    /// Full scans of the pair table for idle pairs; a test aid.
+    var pairSweepCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pairs.sweepCount
+    }
+
     private var pairRefusedCount: UInt64 = 0
     private var aggregateRefusedCount: UInt64 = 0
 
-    /// Fatal signals whose (source, target) pair had no token left.
+    /// Fatal signals at a relevant target whose (source, target) pair had no
+    /// token left, or that a pair table full of live pairs refused. Surfaced
+    /// as `es_signal_pair_refused_total`.
     var pairRefusedTotal: UInt64 {
         lock.lock(); defer { lock.unlock() }
         return pairRefusedCount

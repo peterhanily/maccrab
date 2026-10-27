@@ -1128,6 +1128,7 @@ public final class ESCollector: @unchecked Sendable {
         signalTargetPID: Int32 = -1,
         signalNowNanos: UInt64 = 0,
         signalLimiter: SignalRateLimiter? = nil,
+        signalTargetOwnerUID: uid_t? = nil,
         signalTargetExecutable: @autoclosure () -> String = ""
     ) -> Bool {
         switch eventType {
@@ -1154,6 +1155,7 @@ public final class ESCollector: @unchecked Sendable {
                 targetPID: signalTargetPID,
                 nowNanos: signalNowNanos,
                 limiter: signalLimiter,
+                targetOwnerUID: signalTargetOwnerUID,
                 targetExecutable: signalTargetExecutable()
             )
 
@@ -1183,6 +1185,8 @@ public final class ESCollector: @unchecked Sendable {
             )
 
         case ES_EVENT_TYPE_NOTIFY_SIGNAL:
+            // The flood is non-fatal: drop it before any pid, clock or path read.
+            guard fatalSignals.contains(msg.event.signal.sig) else { return true }
             let target = msg.event.signal.target
             return shouldDropAtCallback(
                 eventType: eventType,
@@ -1191,6 +1195,7 @@ public final class ESCollector: @unchecked Sendable {
                 signalTargetPID: audit_token_to_pid(target.pointee.audit_token),
                 signalNowNanos: DispatchTime.now().uptimeNanoseconds,
                 signalLimiter: signalRateLimiter,
+                signalTargetOwnerUID: target.pointee.executable.pointee.stat.st_uid,
                 signalTargetExecutable: esFileToPath(target.pointee.executable)
             )
 
@@ -1501,18 +1506,18 @@ public final class ESCollector: @unchecked Sendable {
         ownPID: Int32 = ownProcessID,
         nowNanos: UInt64 = 0,
         limiter: SignalRateLimiter? = nil,
+        targetOwnerUID: uid_t? = nil,
         targetExecutable: @autoclosure () -> String
     ) -> Bool {
         guard fatalSignals.contains(sig) else { return false }
-        // A tracked pair is probed first and decoded only when admitted; an
-        // untracked pair is decoded first and enters the table only if its
-        // target is relevant, so the build's kill round-robin never fills it.
-        let tracked = limiter?.isTracked(source: sourcePID, target: targetPID) ?? false
-        var firstFromThisPair = true
-        if tracked, let limiter {
-            let pair = limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos)
-            guard pair.admitted else { return false }
-            firstFromThisPair = pair.firstSighting
+        // A tracked pair is probed first, under one lock, and decoded only
+        // when admitted; an untracked pair is decoded first and enters the
+        // table only if its target is relevant, so the build's fatal signals
+        // at ordinary processes never fill it.
+        var tracked = false
+        if let limiter, let admitted = limiter.admitIfTracked(source: sourcePID, target: targetPID, nowNanos: nowNanos) {
+            guard admitted else { return false }
+            tracked = true
         }
         var executable: String?
         if targetPID != ownPID {
@@ -1521,6 +1526,7 @@ public final class ESCollector: @unchecked Sendable {
             guard securityToolProcessNames.contains(basename) else { return false }
             executable = path
         }
+        var firstFromThisPair = !tracked
         if !tracked, let limiter {
             let pair = limiter.admitPair(source: sourcePID, target: targetPID, nowNanos: nowNanos)
             guard pair.admitted else { return false }
@@ -1529,7 +1535,7 @@ public final class ESCollector: @unchecked Sendable {
         // A pair's first signal is kept whatever the target's shared budget
         // holds, so every distinct source keeps its first; the repeats share it.
         if !firstFromThisPair, let limiter,
-           !limiter.admitKept(target: targetPID, executable: executable, nowNanos: nowNanos) {
+           !limiter.admitKept(target: targetPID, executable: executable, ownerUID: targetOwnerUID, nowNanos: nowNanos) {
             return false
         }
         return true
@@ -2419,6 +2425,16 @@ public final class ESCollector: @unchecked Sendable {
     /// read as ordinary filtering.
     public func esSignalAggregateRefused() -> UInt64 {
         Self.signalRateLimiter.aggregateRefusedTotal
+    }
+
+    /// Fatal signals at MacCrab or a security tool refused because their
+    /// (source, target) pair had no token left, or because the pair table was
+    /// full of live pairs (`SignalRateLimiter`). Also inside the
+    /// intentional-filter count; surfaced apart as
+    /// `es_signal_pair_refused_total`. Signals at ordinary processes never
+    /// reach the pair table, so this counts only relevant ones.
+    public func esSignalPairRefused() -> UInt64 {
+        Self.signalRateLimiter.pairRefusedTotal
     }
 
     /// Per-event-type normalized Events offered to the collector-local stream.

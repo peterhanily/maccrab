@@ -668,4 +668,75 @@ struct ESIngressStormBenchmarkTests {
         #expect(lineageRefused == 0)
         #expect(perSecond >= 100_000, "worker submit floor (submits/s): \(perSecond)")
     }
+
+    // MARK: 5. Kept-signal limiter cost on the callback
+
+    /// 100k fatal signals, each from its own source at its own target, through
+    /// the callback policy: once with no limiter (the decode-only base) and
+    /// once with `limiter`. Returns the nanoseconds of each run and how many
+    /// messages each dropped.
+    private func signalCallbackRuns(
+        limiter: SignalRateLimiter, signal: Int32, executable: String,
+        target: (Int) -> Int32, from t0: UInt64
+    ) -> (base: UInt64, limited: UInt64, droppedBase: Int, dropped: Int) {
+        let n = 100_000
+        var droppedBase = 0
+        let startBase = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<n where ESCollector.shouldDropAtCallback(
+            eventType: Self.signalType, signal: signal,
+            signalSourcePID: Int32(200_000 + i), signalTargetPID: target(i),
+            signalNowNanos: t0 + UInt64(i), signalTargetExecutable: executable
+        ) {
+            droppedBase += 1
+        }
+        let base = DispatchTime.now().uptimeNanoseconds &- startBase
+        var dropped = 0
+        let start = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<n where ESCollector.shouldDropAtCallback(
+            eventType: Self.signalType, signal: signal,
+            signalSourcePID: Int32(200_000 + i), signalTargetPID: target(i),
+            signalNowNanos: t0 + UInt64(i), signalLimiter: limiter, signalTargetExecutable: executable
+        ) {
+            dropped += 1
+        }
+        let limited = DispatchTime.now().uptimeNanoseconds &- start
+        return (base, limited, droppedBase, dropped)
+    }
+
+    @Test("100k fatal signals at distinct ordinary pairs cost the callback the decode plus a probe, and never enter the pair table")
+    func ordinaryFatalSignalsStayOffThePairTable() {
+        let limiter = SignalRateLimiter()
+        let run = signalCallbackRuns(limiter: limiter, signal: SIGTERM, executable: "/usr/local/bin/node",
+                                     target: { Int32(300_000 + $0) }, from: 1_000_000_000)
+        let n: UInt64 = 100_000
+        print("BENCH signal_ordinary_pairs base_ns/msg=\(run.base / n) limited_ns/msg=\(run.limited / n) tracked_pairs=\(limiter.trackedPairCount) sweeps=\(limiter.pairSweepCount)")
+        #expect(run.droppedBase == 100_000 && run.dropped == 100_000, "a fatal signal at an ordinary process is filtered")
+        #expect(limiter.trackedPairCount == 0, "an ordinary target never enters the pair table")
+        #expect(limiter.pairRefusedTotal == 0 && limiter.pairSweepCount == 0)
+        #expect(run.limited <= run.base * 3 + n * 1_000,
+                "the limiter adds at most a probe per message to the decode-only base: \(run.limited / n) vs \(run.base / n) ns")
+    }
+
+    @Test("100k fatal signals at distinct decoy pairs against a full pair table are refused at a bounded cost each")
+    func decoyPairsAgainstAFullTableAreRefusedCheaply() {
+        let limiter = SignalRateLimiter(rootOwnedCanonical: { _, _ in false })
+        let t0: UInt64 = 1_000_000_000
+        // A pair table full of live relevant pairs.
+        for i in 0..<1_024 {
+            #expect(ESCollector.shouldKeepSignal(
+                sig: SIGKILL, sourcePID: Int32(400_000 + i), targetPID: 777, ownPID: 1,
+                nowNanos: t0 + UInt64(i), limiter: limiter, targetExecutable: "/tmp/x/santad"))
+        }
+        #expect(limiter.trackedPairCount == 1_024)
+        let run = signalCallbackRuns(limiter: limiter, signal: SIGKILL, executable: "/tmp/x/santad",
+                                     target: { _ in 777 }, from: t0 + 1_000_000)
+        let n: UInt64 = 100_000
+        print("BENCH signal_decoy_pairs_full_table base_ns/msg=\(run.base / n) limited_ns/msg=\(run.limited / n) refused=\(limiter.pairRefusedTotal) sweeps=\(limiter.pairSweepCount)")
+        #expect(run.droppedBase == 0, "with no limiter every fatal signal at a tool-named target is kept")
+        #expect(run.dropped == 100_000, "a table full of live pairs refuses every new pair")
+        #expect(limiter.pairRefusedTotal == n)
+        #expect(limiter.pairSweepCount == 1, "one idle scan, then refusals without scanning")
+        #expect(run.limited <= run.base * 3 + n * 1_000,
+                "a refusal costs the decode, a probe and a constant, not a scan of the table: \(run.limited / n) vs \(run.base / n) ns")
+    }
 }
