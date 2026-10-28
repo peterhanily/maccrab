@@ -711,8 +711,10 @@ struct EventStream: View {
     /// the session allows: never while paused (once on resume), and at most
     /// every 15 s.
     private func reloadForLiveGapIfDue() {
+        // A selection holds the window only while its row is still shown.
+        let selectionShown = selectedEventID.map { id in filteredCache.contains { $0.id == id } } ?? false
         guard !isAggregateMode,
-              querySession.claimLiveGapReload(paused: isPaused, selectionHeld: selectedEventID != nil)
+              querySession.claimLiveGapReload(paused: isPaused, selectionHeld: selectionShown)
         else { return }
         liveGapReloadTick &+= 1
     }

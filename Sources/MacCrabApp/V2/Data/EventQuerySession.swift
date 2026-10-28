@@ -204,6 +204,7 @@ final class EventQuerySession: ObservableObject {
         isLoadingOlderEvents = false
         retryNeeded = false
         liveGapPending = false
+        liveGapAwaitingReload = false
         retainedOverLiveGap = false
         queryLoaded = false
         readiness.invalidate()
@@ -268,6 +269,7 @@ final class EventQuerySession: ObservableObject {
         queryLoaded = false
         retryNeeded = false
         liveGapPending = false
+        liveGapAwaitingReload = false
         retainedOverLiveGap = false
         events = []
         cursor = nil

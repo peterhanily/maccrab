@@ -57,7 +57,9 @@ struct EventLiveGapTests {
         let key = try #require(view.range(of: "private var eventQueryKey: EventQueryKey {"))
         #expect(!view[key.upperBound...].prefix(400).contains("liveGap"), "a gap is not part of the query key")
         #expect(view.contains(".onChange(of: querySession.liveGapTick) { _ in reloadForLiveGapIfDue() }"))
-        #expect(view.contains("querySession.claimLiveGapReload(paused: isPaused, selectionHeld: selectedEventID != nil)"),
+        #expect(view.contains("let selectionShown = selectedEventID.map { id in filteredCache.contains { $0.id == id } } ?? false"),
+                "only a selection still shown holds the window's gap")
+        #expect(view.contains("querySession.claimLiveGapReload(paused: isPaused, selectionHeld: selectionShown)"),
                 "a selection holds the window's gap")
         #expect(view.contains("guard !isAggregateMode, querySession.claimLiveGapReloadManually() else { return }"),
                 "the held gap is read when the user asks")

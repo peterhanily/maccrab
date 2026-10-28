@@ -636,6 +636,28 @@ struct EventQuerySessionTests {
         #expect(!session.liveGapAwaitingReload)
     }
 
+    @Test("dropping a held gap also drops its reload offer")
+    func droppedGapClearsTheReloadOffer() async {
+        let reader = Reader()
+        var current = Date()
+        let session = EventQuerySession(reader: reader, now: { current })
+        reader.result = .init(events: [row("shown", at: current.addingTimeInterval(-60))], nextCursor: nil)
+        func holdAGap() async {
+            await session.loadEvents(query(live: true))
+            session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+            current = current.addingTimeInterval(EventQuerySession.liveGapReloadInterval + 1)
+            session.pollTick()
+            #expect(!session.claimLiveGapReload(paused: false, selectionHeld: true))
+            #expect(session.liveGapAwaitingReload)
+        }
+        await holdAGap()
+        session.invalidatePendingReads()
+        #expect(!session.liveGapAwaitingReload, "no reload button for a gap that is gone")
+        await holdAGap()
+        session.deactivateExactPresentation()
+        #expect(!session.liveGapAwaitingReload, "no reload button outside the exact-row table")
+    }
+
     @Test("a window with older pages loaded keeps them across a saturated gap")
     func olderPagesHoldTheGap() async {
         let reader = Reader()
