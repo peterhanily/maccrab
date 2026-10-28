@@ -244,9 +244,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   through the engine,** so the engine's next save does not undo a removal.
   maccrabctl no longer warns about running as root for `unsuppress`, which
   needs root to read the allowlist.
-- **The Events window keeps your place on a busy Mac.** While an event is
-  selected or older pages are loaded, a full poll no longer reloads the window
-  to its newest rows; newer events wait behind a Reload events button.
+- **The Events window keeps your place on a busy Mac.** While a selected
+  event is still shown or older pages are loaded, a full poll no longer
+  reloads the window to its newest rows; newer events wait behind a Reload
+  events button.
 - **Allowlist entries scoped to a file hash or to this host now apply.**
   Earlier versions stored them without applying them. A host entry that
   names this Mac silences the single-event rule, sequence rule and baseline
