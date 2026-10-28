@@ -353,8 +353,17 @@ public struct CodeSignatureInfo: Codable, Sendable, Hashable {
     /// one.
     public static func kernelCdhash<Bytes: Collection>(bytes: Bytes) -> String? where Bytes.Element == UInt8 {
         guard bytes.count == 20, bytes.contains(where: { $0 != 0 }) else { return nil }
-        return bytes.map { String(format: "%02x", $0) }.joined()
+        // A table lookup per nibble: this runs for every ES event.
+        var ascii = [UInt8]()
+        ascii.reserveCapacity(40)
+        for byte in bytes {
+            ascii.append(hexDigits[Int(byte >> 4)])
+            ascii.append(hexDigits[Int(byte & 0x0f)])
+        }
+        return String(decoding: ascii, as: UTF8.self)
     }
+
+    private static let hexDigits: [UInt8] = Array("0123456789abcdef".utf8)
 
     /// `kernelCdhash(bytes:)` for a hash written as 40 hex digits, as
     /// eslogger writes it.

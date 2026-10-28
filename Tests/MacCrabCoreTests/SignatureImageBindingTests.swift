@@ -129,6 +129,12 @@ struct SignatureImageBindingTests {
         #expect(logged("") == nil)
 
         #expect(CodeSignatureInfo.kernelCdhash(bytes: [UInt8](repeating: 0xab, count: 20)) == String(repeating: "ab", count: 20))
+        // Every byte value, 20 at a time, matches the two-digit hex the kernel
+        // hash is compared in.
+        for start in stride(from: 0, to: 256, by: 20) {
+            let bytes = (start..<(start + 20)).map { UInt8(truncatingIfNeeded: $0 == 0 ? 1 : $0) }
+            #expect(CodeSignatureInfo.kernelCdhash(bytes: bytes) == bytes.map { String(format: "%02x", $0) }.joined())
+        }
         #expect(CodeSignatureInfo.kernelCdhash(bytes: [UInt8](repeating: 0, count: 20)) == nil)
         #expect(CodeSignatureInfo.kernelCdhash(bytes: [UInt8](repeating: 0xab, count: 19)) == nil)
         #expect(CodeSignatureInfo.kernelCdhash(hex: "+" + String(repeating: "a", count: 39)) == nil)
