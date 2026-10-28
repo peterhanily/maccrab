@@ -653,7 +653,11 @@ source "$BARE_TOOL_GUARDS"
 CODESIGN_BIN=/usr/bin/codesign
 BARE_TOOL_FIXTURE="$TMP_ROOT/bare-tool-signatures"
 /bin/mkdir -p "$BARE_TOOL_FIXTURE/clean" "$BARE_TOOL_FIXTURE/restricted"
-/bin/cp /bin/echo "$BARE_TOOL_FIXTURE/clean/maccrabctl"
+# macOS 27 system binaries carry an arm64e.x1 slice that lipo names
+# unknown(16777228,12) and codesign --arch cannot address; the guard rightly
+# refuses a slice it cannot inspect. MacCrab's tools are x86_64 and arm64, so
+# the fixture keeps only the slices the toolchain names.
+/usr/bin/lipo /bin/echo -extract x86_64 -extract arm64e -output "$BARE_TOOL_FIXTURE/clean/maccrabctl"
 "$CODESIGN_BIN" --force --sign - \
     --identifier com.maccrab.maccrabctl --options runtime \
     "$BARE_TOOL_FIXTURE/clean/maccrabctl" >/dev/null
@@ -664,7 +668,7 @@ RESTRICTED_ENTITLEMENTS="$BARE_TOOL_FIXTURE/restricted.plist"
 /usr/bin/plutil -create xml1 "$RESTRICTED_ENTITLEMENTS"
 /usr/bin/plutil -insert keychain-access-groups \
     -json '["79S425CW99.com.maccrab.shared"]' "$RESTRICTED_ENTITLEMENTS"
-/bin/cp /bin/echo "$BARE_TOOL_FIXTURE/restricted/maccrab-mcp"
+/usr/bin/lipo /bin/echo -extract x86_64 -extract arm64e -output "$BARE_TOOL_FIXTURE/restricted/maccrab-mcp"
 "$CODESIGN_BIN" --force --sign - \
     --identifier com.maccrab.maccrab-mcp --options runtime \
     --entitlements "$RESTRICTED_ENTITLEMENTS" \
