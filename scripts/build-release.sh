@@ -1557,8 +1557,14 @@ ATTESTATION_EOF
         # +1,748, system extension +1,384, app +988) for the RC13 fix code, so
         # no resource trim could clear the old cap. CPU, memory, write-rate,
         # detection and free-disk limits are unchanged.
+        # 2026-10-28, v1.22.6-rc.13: 191488 -> 192512 (187 -> 188 MiB),
+        # explicitly approved for installed disk size only. The signed RC13
+        # with the re-audit fixes measured 191604 KiB, 912 KiB above the first
+        # signed RC13; the growth is in the statically linked Swift
+        # executables (app, system extension, CLI and MCP tools). CPU, memory,
+        # write-rate, detection and free-disk limits are unchanged.
         # BEGIN INSTALLED_APP_FOOTPRINT_GATE
-        APP_FOOTPRINT_BUDGET_KIB=191488
+        APP_FOOTPRINT_BUDGET_KIB=192512
         APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)
         case "$APP_FOOTPRINT_KIB" in
             ''|*[!0-9]*)
