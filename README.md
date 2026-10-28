@@ -256,7 +256,7 @@ For Claude Desktop, add the same command to
 `swift build --target maccrab-mcp`, then copy `.mcp.json` from the repo root
 into your project; it points at the local `.build/debug/maccrab-mcp`.
 
-**Available tools — 67 built-in** (including the 20 always-present `forensics_*` case/plugin meta-tools) **plus per-plugin tools contributed by installed forensic plugins** (31 on a default install: `launchd_*`, `tcc_*`, `safari_*`, `mail_*`, `imessage_*`, `*_analyze_path`, …) **— 98 total here.** Neither `maccrabctl mcp list` (which inventories MCP *server configs*, not tools) nor `agent_capabilities` (which reports control-plane capability tiers) prints a tool list; ask your MCP client for its tool inventory. A representative slice:
+**Available tools — 67 built-in** (including the 20 always-present `forensics_*` case/plugin meta-tools) **plus per-plugin tools contributed by installed forensic plugins** (30 on a release install: `launchd_*`, `tcc_*`, `safari_*`, `mail_*`, `imessage_*`, `*_analyze_path`, …) **— 97 total on a release install.** Neither `maccrabctl mcp list` (which inventories MCP *server configs*, not tools) nor `agent_capabilities` (which reports control-plane capability tiers) prints a tool list; ask your MCP client for its tool inventory. A representative slice:
 
 | Tool | Purpose |
 |------|---------|
