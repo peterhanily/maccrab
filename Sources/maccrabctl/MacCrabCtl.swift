@@ -13,11 +13,12 @@ struct MacCrabCtl {
 
         let args = CommandLine.arguments
 
-        // Most commands are designed for the logged-in user. The one explicit
-        // exception is `agent-capabilities`: a root-owned inbox request is its
-        // authorization boundary, so its grant path intentionally requires
-        // sudo. Keep warning for every other root invocation.
-        if geteuid() == 0 && args.dropFirst().first != "agent-capabilities" {
+        // Most commands are designed for the logged-in user. Two explicit
+        // exceptions intentionally require sudo: `agent-capabilities`, whose
+        // grant is authorized by a root-owned inbox request, and `unsuppress`,
+        // which reads the root-only allowlist. Keep warning for every other
+        // root invocation.
+        if geteuid() == 0 && !["agent-capabilities", "unsuppress"].contains(args.dropFirst().first ?? "") {
             FileHandle.standardError.write(Data(
                 "warning: maccrabctl is running as root (euid 0); it is meant to run as the logged-in user. This is unnecessary and, if the app bundle is user-writable, a privilege-escalation risk. Continuing.\n".utf8))
         }

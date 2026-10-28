@@ -35,7 +35,7 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Reference remeasurement, full CI and installed qualification remain
   required; these source changes do not constitute release clearance.
 
-## [1.22.6] — 2026-10-09
+## [1.22.6] — Unreleased
 
 ### Added
 - **Diagnostic coverage checks actual storage bindings and quiet-timer callbacks.**
@@ -196,7 +196,8 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Google's or Brave's) is accepted only once Security has verified the running
   program, matched by the code-directory hash the kernel reports; Apple's
   platform binaries keep the kernel's verdict. A verdict for another image, an
-  ad-hoc signature and a self-signed certificate naming an exempted team grant
+  ad-hoc signature, a signature that fails validation and a self-signed
+  certificate naming an exempted team grant
   no team-based exemption; git's credential helper and Sparkle's release tools
   are still recognized by name when they carry no team. A notarized Developer
   ID program that names itself com.apple.* is not trusted as notarized. A
@@ -213,11 +214,39 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   inside apps in /Applications are still trusted by location, along with
   everything they start. Must-fire matches and credential-theft techniques
   (T1555, T1003, T1552, T1539) survive the updater gate.
-- **Developer-tool paths lower only medium alerts.** High and critical
-  execution and command-and-control alerts from processes under node_modules,
-  Homebrew, nvm, Cargo and similar locations are no longer stored as low, and
-  must-fire, command-and-control and TraceGraph alerts are never lowered
-  there.
+- **Developer-tool paths lower no alert.** Processes under node_modules,
+  Homebrew, nvm, Cargo and similar locations, including the paths AI coding
+  agents run from, used to have high and critical execution and
+  command-and-control alerts stored as low. No alert is lowered there now.
+- **Keychain reads by tools an AI agent runs are reported.** The exemptions
+  for Apple's signing tools, ssh and ssh-add, Chrome, Brave and MacCrab's own
+  tools depend on the binary's signing identity, not its name or location;
+  scp, sftp, pkgbuild and productbuild are no longer exempt.
+- **The engine is hardened against being stopped through a terminal,** and
+  against crafted files that stalled its code-signing, library, TCC and
+  Downloads checks. File hashing no longer follows a symlinked folder.
+- **Notifications follow the minimum severity and the order alerts are
+  stored,** so lower-severity floods no longer delay critical banners. An
+  alert re-scored in place is notified again, and alerts from while
+  notifications were off are not replayed.
+- **`sudo maccrabctl` requests go through a root-only request directory.**
+  The shared directory accepts requests only from the signed-in administrator
+  and refuses stale or replayed ones, so another local user cannot replay a
+  saved request or restore an MCP capability tier the operator revoked.
+- **`-p` and `-P` command-line values are redacted by default,** unless the
+  program is known to use the flag for something other than a secret.
+  Passwords given to sshpass, zip, security, ssh-keygen and registry logins
+  are redacted in stored arguments, command lines and parent command lines,
+  and in OCSF and OpenTelemetry exports.
+- **MCP `explain_alert` shows the rule definition the engine runs,** following
+  its user-rule precedence and trust.
+- **`maccrabctl allow remove` and `sudo maccrabctl unsuppress` remove entries
+  through the engine,** so the engine's next save does not undo a removal.
+  maccrabctl no longer warns about running as root for `unsuppress`, which
+  needs root to read the allowlist.
+- **The Events window keeps your place on a busy Mac.** While an event is
+  selected or older pages are loaded, a full poll no longer reloads the window
+  to its newest rows; newer events wait behind a Reload events button.
 - **Allowlist entries scoped to a file hash or to this host now apply.**
   Earlier versions stored them without applying them. A host entry that
   names this Mac silences the single-event rule, sequence rule and baseline

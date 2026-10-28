@@ -87,7 +87,7 @@ MacCrab does **not** protect against:
 
 - **MacCrabAgent** (System Extension) runs as root, launched and managed by `sysextd`, with the ES entitlement. It is not App Sandboxed. On release builds this replaces the legacy root-daemon model
 - **maccrabd** (legacy) runs as root — retained only for local development when no ES entitlement is available; falls back through `eslogger` → `kdebug` → FSEvents
-- **maccrabctl** runs as the invoking user (reads database only)
+- **maccrabctl** runs as the invoking user: it reads the database and files requests through the engine's inbox; `agent-capabilities set` and `unsuppress` run under sudo
 - **MacCrab.app** runs as the logged-in user (reads database; activates and replaces the System Extension)
 - **maccrab-mcp** runs as the invoking user (reads the database; suppressing alerts or campaigns, and other response, configuration and rule-authoring tools, work only for the capability tiers a human grants with `sudo maccrabctl agent-capabilities set <tier> on`; the dashboard's Agent Control (MCP) settings show that command and can only revoke). The tiers gate the MCP server only. They are not a boundary against code running as the console user, which can file the same requests through the engine's inbox with `maccrabctl`; granting a tier itself requires root
 
