@@ -41,6 +41,8 @@ struct EventQuerySessionTests {
         var eventReadsDeferred = false
         var result = EventQuerySession.Page(events: [], nextCursor: nil)
         var deferQuery = false
+        /// The engine refuses reads for transient pressure.
+        var pressure = false
         var blockedQueries: Set<String> = []
         var pendingQueries: [String: CheckedContinuation<EventQuerySession.Page?, Error>] = [:]
         var blockPage = false
@@ -51,6 +53,7 @@ struct EventQuerySessionTests {
         var pendingHistogram: CheckedContinuation<EventQuerySession.Histogram?, Error>?
 
         func readEventQuery(_ query: EventQuerySession.Query, limit: Int) async throws -> EventQuerySession.Page? {
+            if pressure { throw EventStoreError.busy("fixture: engine busy") }
             let key = query.filter ?? ""
             if blockedQueries.contains(key) {
                 return try await withCheckedThrowingContinuation { pendingQueries[key] = $0 }
@@ -608,5 +611,103 @@ struct EventQuerySessionTests {
         current = current.addingTimeInterval(60)
         await session.loadEvents(query(live: true))
         #expect(!session.claimLiveGapReload(paused: false))
+    }
+
+    @Test("a saturated gap leaves a window with a selection as it is, and offers a manual reload")
+    func selectionHoldsTheGap() async {
+        let reader = Reader()
+        var current = Date()
+        let session = EventQuerySession(reader: reader, now: { current })
+        let selected = row("selected", at: current.addingTimeInterval(-120))
+        reader.result = .init(events: [row("shown", at: current.addingTimeInterval(-60)), selected], nextCursor: nil)
+        await session.loadEvents(query(live: true))
+        let retry = session.retryTick
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        for _ in 0..<4 {
+            current = current.addingTimeInterval(EventQuerySession.liveGapReloadInterval + 1)
+            session.pollTick()
+            #expect(!session.claimLiveGapReload(paused: false, selectionHeld: true), "a selection holds the window")
+        }
+        #expect(session.liveGapAwaitingReload, "newer events are offered by hand")
+        #expect(session.events.contains { $0.id == selected.id }, "the selected row stays")
+        #expect(session.retryTick == retry, "no query restart")
+        // Letting go of the selection hands the gap back to the reload policy.
+        #expect(session.claimLiveGapReload(paused: false, selectionHeld: false))
+        #expect(!session.liveGapAwaitingReload)
+    }
+
+    @Test("a window with older pages loaded keeps them across a saturated gap")
+    func olderPagesHoldTheGap() async {
+        let reader = Reader()
+        var current = Date()
+        let session = EventQuerySession(reader: reader, now: { current })
+        let newest = row("newest", at: current.addingTimeInterval(-30))
+        reader.result = .init(events: [newest], nextCursor: .init(timestamp: newest.timestamp, id: newest.id.uuidString))
+        await session.loadEvents(query(live: true))
+        reader.result = .init(events: [row("older", at: current.addingTimeInterval(-600))], nextCursor: nil)
+        await session.loadOlderEvents()
+        #expect(session.events.map(\.processName) == ["newest", "older"])
+        #expect(session.olderPagesLoaded)
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        for _ in 0..<3 {
+            current = current.addingTimeInterval(EventQuerySession.liveGapReloadInterval + 1)
+            session.pollTick()
+            #expect(!session.claimLiveGapReload(paused: false), "older pages hold the window")
+        }
+        #expect(session.liveGapAwaitingReload)
+        #expect(session.events.map(\.processName) == ["newest", "older"], "the older page stays")
+    }
+
+    @Test("the manual reload reads over the held gap at once and clears the offer")
+    func manualReloadAppliesTheGap() async {
+        let reader = Reader()
+        let current = Date()
+        let session = EventQuerySession(reader: reader, now: { current })
+        let key = EventQuerySession.PresentationKey(range: "1h", filter: "", category: nil, center: nil,
+                                                    halfWindowSeconds: 0)
+        reader.result = .init(events: [row("shown", at: current.addingTimeInterval(-60))], nextCursor: nil)
+        await session.loadEvents(query(live: true), presentationKey: key)
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        #expect(!session.claimLiveGapReload(paused: false, selectionHeld: true))
+        #expect(session.liveGapAwaitingReload)
+        let resets = session.presentationResetTick
+        #expect(session.claimLiveGapReloadManually(), "the user's reload claims the held gap at once")
+        #expect(!session.claimLiveGapReloadManually(), "and only once")
+        reader.result = .init(events: [row("newer", at: current.addingTimeInterval(-5)),
+                                       row("shown", at: current.addingTimeInterval(-60))], nextCursor: nil)
+        await session.loadEvents(query(live: true), presentationKey: key, overLiveGap: true)
+        #expect(session.events.map(\.processName) == ["newer", "shown"])
+        #expect(!session.liveGapAwaitingReload)
+        #expect(session.presentationResetTick == resets, "the reload keeps the window's presentation")
+        session.receiveIncremental([row("latest", at: current.addingTimeInterval(1))], epoch: session.sourceEpoch)
+        #expect(session.events.first?.processName == "latest", "live rows prepend again")
+    }
+
+    @Test("a refused gap reload is retried as a gap reload, never as a query restart", arguments: [false, true])
+    func refusedGapReloadRetriesTheGap(pressure: Bool) async {
+        let reader = Reader()
+        var current = Date()
+        let session = EventQuerySession(reader: reader, now: { current })
+        let key = EventQuerySession.PresentationKey(range: "1h", filter: "", category: nil, center: nil,
+                                                    halfWindowSeconds: 0)
+        reader.result = .init(events: [row("shown", at: current.addingTimeInterval(-60))], nextCursor: nil)
+        await session.loadEvents(query(live: true), presentationKey: key)
+        session.receiveIncremental([], epoch: session.sourceEpoch, saturated: true)
+        #expect(session.claimLiveGapReload(paused: false))
+        let retry = session.retryTick
+        let resets = session.presentationResetTick
+        let gap = session.liveGapTick
+        if pressure { reader.pressure = true } else { reader.deferQuery = true }
+        await session.loadEvents(query(live: true), presentationKey: key, overLiveGap: true)
+        session.pollTick()
+        // retryTick is the window's query key: bumping it clears the
+        // selection and rebuilds a paused table.
+        #expect(session.retryTick == retry, "no query restart")
+        #expect(session.presentationResetTick == resets)
+        #expect(session.liveGapTick > gap, "the gap is offered again")
+        reader.pressure = false
+        reader.deferQuery = false
+        current = current.addingTimeInterval(EventQuerySession.liveGapReloadInterval)
+        #expect(session.claimLiveGapReload(paused: false), "and reloaded as a gap once the interval allows")
     }
 }

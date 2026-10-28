@@ -69,6 +69,10 @@ final class EventQuerySession: ObservableObject {
     /// that page. The window reloads its own query when `claimLiveGapReload`
     /// allows, so unlike `retryTick` this starts no new query.
     @Published private(set) var liveGapTick: UInt64 = 0
+    /// A live gap is pending but the window holds a selection or older pages,
+    /// so it is not reloaded on its own: the view offers a manual reload
+    /// instead, as Pause would, rather than drop what the user is reading.
+    @Published private(set) var liveGapAwaitingReload = false
     /// Query/source replacements invalidate a paused view's retained table too.
     @Published private(set) var presentationResetTick: UInt64 = 0
     @Published private(set) var events: [EventViewModel] = []
@@ -93,6 +97,9 @@ final class EventQuerySession: ObservableObject {
     private var queryLoaded = false
     private var retryNeeded = false
     private var liveGapPending = false
+    /// Rows appended by "Load older" are on screen: a reload of the newest
+    /// page would drop them.
+    private(set) var olderPagesLoaded = false
     /// A live-gap reload keeps the shown rows on screen while it reads, past
     /// the cached-rows lifetime: they are the window's own, not an old visit's.
     private var retainedOverLiveGap = false
@@ -325,9 +332,13 @@ final class EventQuerySession: ObservableObject {
         isLoadingOlderEvents = false
         retryNeeded = false
         liveGapPending = false
+        liveGapAwaitingReload = false
         query = next
         presentationKey = nextKey
-        if !retainRows { presentationResetTick &+= 1 }
+        if !retainRows {
+            presentationResetTick &+= 1
+            olderPagesLoaded = false
+        }
         let generation = queryGeneration
         let epoch = sourceEpoch
         // A new label must never describe the preceding query's rows/cursor,
@@ -373,7 +384,7 @@ final class EventQuerySession: ObservableObject {
                 operation: { [reader] in try await reader.readEventQuery(next, limit: limit) })
             guard let page = result else {
                 if accepts(generation, epoch: epoch) {
-                    retryNeeded = true
+                    retryAfterFailedRead(overLiveGap: overLiveGap)
                     eventSearchCoverageWarning = String(localized: "events.readDeferredDetail", defaultValue: "Event read is temporarily deferred. It will retry on the next refresh.")
                     readiness.complete(.deferred, for: readyTicket)
                 }
@@ -381,6 +392,7 @@ final class EventQuerySession: ObservableObject {
             }
             guard accepts(generation, epoch: epoch) else { return }
             events = page.events
+            olderPagesLoaded = false
             cursor = page.nextCursor
             hasMoreEvents = page.nextCursor != nil
             eventSearchCoverageWarning = page.coverageWarning
@@ -391,7 +403,7 @@ final class EventQuerySession: ObservableObject {
                 ? (events.isEmpty ? .loadedEmpty : .loadedNonempty) : .partial, for: readyTicket)
         } catch is CancellationError {
             if accepts(generation, epoch: epoch) {
-                retryNeeded = true
+                retryAfterFailedRead(overLiveGap: overLiveGap)
                 eventSearchCoverageWarning = String(localized: "events.readInterrupted", defaultValue: "Event read was interrupted. Refresh to retry.")
                 readiness.complete(.deferred, for: readyTicket)
             }
@@ -399,7 +411,7 @@ final class EventQuerySession: ObservableObject {
             // The engine was busy or under memory pressure: retry on the next
             // poll instead of stopping at a failure.
             if accepts(generation, epoch: epoch) {
-                retryNeeded = true
+                retryAfterFailedRead(overLiveGap: overLiveGap)
                 eventSearchCoverageWarning = String(localized: "events.readInterrupted", defaultValue: "Event read was interrupted. Refresh to retry.")
                 readiness.complete(.deferred, for: readyTicket)
             }
@@ -407,6 +419,18 @@ final class EventQuerySession: ObservableObject {
             guard accepts(generation, epoch: epoch) else { return }
             eventSearchCoverageWarning = String(localized: "events.readFailed", defaultValue: "Couldn’t load events.") + "\n" + error.localizedDescription
             readiness.complete(.failed, for: readyTicket)
+        }
+    }
+
+    /// A failed read is retried on the next poll. A failed live-gap reload is
+    /// retried as a live-gap reload: a full query restart (`retryTick`) would
+    /// clear the selection and rebuild a paused table, which is what reading
+    /// over the gap exists to avoid.
+    private func retryAfterFailedRead(overLiveGap: Bool) {
+        if overLiveGap {
+            liveGapPending = true
+        } else {
+            retryNeeded = true
         }
     }
 
@@ -434,7 +458,9 @@ final class EventQuerySession: ObservableObject {
             guard let page = result,
                   accepts(generation, epoch: epoch), pageToken == pageGeneration else { return }
             let existing = Set(events.map(\.id))
-            events.append(contentsOf: page.events.filter { !existing.contains($0.id) })
+            let older = page.events.filter { !existing.contains($0.id) }
+            events.append(contentsOf: older)
+            if !older.isEmpty { olderPagesLoaded = true }
             self.cursor = page.nextCursor
             hasMoreEvents = page.nextCursor != nil
             eventSearchCoverageWarning = page.coverageWarning
@@ -465,16 +491,34 @@ final class EventQuerySession: ObservableObject {
 
     /// Whether the window should reload its query now for an unhandled live
     /// gap, which claiming clears. A paused window keeps it until it resumes,
-    /// and reloads happen at most once per `liveGapReloadInterval`.
-    func claimLiveGapReload(paused: Bool) -> Bool {
+    /// and reloads happen at most once per `liveGapReloadInterval`. A window
+    /// holding a selection or older pages keeps them, as if paused, and
+    /// raises `liveGapAwaitingReload` for a manual reload: the reload reads
+    /// only the newest page, which would drop both.
+    func claimLiveGapReload(paused: Bool, selectionHeld: Bool = false) -> Bool {
         guard liveGapPending, !paused, !isLoading else { return false }
+        if selectionHeld || olderPagesLoaded {
+            liveGapAwaitingReload = true
+            return false
+        }
         let current = now()
         if let last = lastLiveGapReloadAt {
             let elapsed = current.timeIntervalSince(last)
             if elapsed >= 0, elapsed < Self.liveGapReloadInterval { return false }
         }
         liveGapPending = false
+        liveGapAwaitingReload = false
         lastLiveGapReloadAt = current
+        return true
+    }
+
+    /// The user asked for the newer events a held window kept back. Claims
+    /// the pending gap at once, past the reload interval.
+    func claimLiveGapReloadManually() -> Bool {
+        guard liveGapPending, !isLoading else { return false }
+        liveGapPending = false
+        liveGapAwaitingReload = false
+        lastLiveGapReloadAt = now()
         return true
     }
 
