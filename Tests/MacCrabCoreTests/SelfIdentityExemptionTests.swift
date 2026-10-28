@@ -205,6 +205,27 @@ struct SelfIdentityExemptionTests {
         #expect(!EventLoop.isCredentialFenceExempt(event("/opt/homebrew/bin/ssh", signer: .adHoc, signingId: "ssh")))
     }
 
+    @Test("An invalid signature's team owns no keychain")
+    func invalidSignatureTeamOwnsNoKeychain() {
+        let fence = CredentialFence()
+        func reported(_ event: Event) -> Bool {
+            EventLoop.credentialFenceFinding(
+                event: event, fence: fence, toolName: "Claude Code", toolType: .claudeCode,
+                developmentEngine: false) != nil
+        }
+        // A signature that failed validation keeps the team its code directory
+        // names, and no certificate stands behind it.
+        #expect(reported(event("/tmp/x/Google Chrome", signer: .unsigned,
+                               teamId: CredentialFence.googleTeamId, signingId: "com.google.Chrome")))
+        #expect(reported(event("/tmp/x/Google Chrome Helper", signer: .unsigned,
+                               teamId: CredentialFence.googleTeamId, signingId: "com.google.Chrome.helper")))
+        #expect(reported(event("/tmp/x/Brave Browser", signer: .unsigned,
+                               teamId: CredentialFence.braveTeamId, signingId: "com.brave.Browser")))
+        // A verified owner is still not reported.
+        #expect(!reported(event("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", signer: .devId,
+                                teamId: CredentialFence.googleTeamId, signingId: "com.google.Chrome")))
+    }
+
     @Test("An agent copying the login keychain with scp, sftp or a renamed platform tool is reported")
     func keychainCopyIsReported() {
         let fence = CredentialFence()

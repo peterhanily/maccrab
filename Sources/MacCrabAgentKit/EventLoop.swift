@@ -345,9 +345,11 @@ enum EventLoop {
             accessingBinary: (process.executable as NSString).lastPathComponent,
             accessorIdentity: (process.codeSignature
                 ?? pendingVerificationSignature(process, collector: collectorSignature)).map {
+                // A team counts only when a certificate attests it: never
+                // an ad-hoc signature's, nor one that failed validation.
                 CredentialFence.AccessorIdentity(
                     isPlatformBinary: process.isPlatformBinary,
-                    teamId: $0.teamId,
+                    teamId: $0.attestedTeamId,
                     signingId: $0.signingId,
                     isAdHoc: $0.isAdHocFlagged
                 )
