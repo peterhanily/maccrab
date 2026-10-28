@@ -690,8 +690,8 @@ struct AlertSinkRecalibrationTests {
             mitreTactics: "attack.execution,attack.command_and_control"
         )
         #expect(try await storedSeverity(after: a, mustFire: true) == .high)
-        // A medium match of a class the rewrite does lower keeps its severity
-        // when its rule is must-fire, and is quieted when the rule is not.
+        // A medium match keeps its severity on a dev-tooling path, whether or
+        // not its rule is must-fire.
         let medium = alert(
             ruleId: "d1a2b3c4-0101", ruleTitle: "Environment Variable Enumeration",
             severity: .medium,
@@ -699,10 +699,10 @@ struct AlertSinkRecalibrationTests {
             mitreTactics: "attack.discovery"
         )
         #expect(try await storedSeverity(after: medium, mustFire: true) == .medium)
-        #expect(try await storedSeverity(after: medium) == .low)
+        #expect(try await storedSeverity(after: medium) == .medium)
     }
 
-    @Test("the engine batch keeps must-fire alerts at full severity beside quieted ones")
+    @Test("the engine batch keeps every alert's severity on a dev-tooling path")
     func batchKeepsMustFire() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-recal-batch-\(UUID().uuidString)")
@@ -720,7 +720,7 @@ struct AlertSinkRecalibrationTests {
             alerts: [mustFire, quiet], event: event, mustFireRuleIds: ["must.fire"])
         let severities = Dictionary(uniqueKeysWithValues: inserted.map { ($0.ruleId, $0.severity) })
         #expect(severities["must.fire"] == .high)
-        #expect(severities["quiet.rule"] == .low)
+        #expect(severities["quiet.rule"] == .medium)
     }
 
     @Test("a critical under a dev-tooling path is never lowered")
@@ -765,15 +765,29 @@ struct AlertSinkRecalibrationTests {
         #expect(match([]).tactics.isEmpty)
     }
 
-    @Test("dev-tooling medium → low (visible, not hidden)")
-    func devToolingMediumDownweighted() async throws {
+    @Test("a MEDIUM alert on a dev-tooling path keeps its severity")
+    func devToolingMediumKept() async throws {
         let a = alert(
             ruleId: "d1a2b3c4-0101", ruleTitle: "Environment Variable Enumeration",
             severity: .medium,
             processPath: "/Users/x/proj/node_modules/.bin/esbuild",
             mitreTactics: "attack.discovery"
         )
-        #expect(try await storedSeverity(after: a) == .low)
+        #expect(try await storedSeverity(after: a) == .medium)
+    }
+
+    @Test("an AI-safety MEDIUM under an agent's dev-tooling path keeps its severity")
+    func agentAISafetyMediumKept() async throws {
+        // ai_tool_downloads_script: an agent's shell piping a download into sh.
+        let a = alert(
+            ruleId: "d1a2b3c4-2004-4000-a000-000000002004",
+            ruleTitle: "AI Coding Tool Downloads and Executes Script",
+            severity: .medium,
+            processPath: "/bin/zsh",
+            mitreTactics: "attack.execution",
+            parentExecutable: "/Users/x/.local/share/claude/versions/2.1.0"
+        )
+        #expect(try await storedSeverity(after: a) == .medium)
     }
 
     @Test("a HIGH suppressible alert is never lowered on a dev-tooling path")
@@ -817,14 +831,14 @@ struct AlertSinkRecalibrationTests {
             processPath: path, mitreTactics: "attack.persistence", parentExecutable: node
         )
         #expect(try await storedSeverity(after: persistence, mustFire: true) == .high)
-        // A graph rule is never suppressible, so even a medium one that
-        // belongs to no preserved class keeps its severity.
+        // A medium graph alert keeps its severity under an agent's path, and
+        // so would an ordinary medium match.
         let execution = alert(
             ruleId: "maccrab_graph_fixture", ruleTitle: "Graph fixture", severity: .medium,
             processPath: path, mitreTactics: "attack.execution", parentExecutable: node
         )
         #expect(try await storedSeverity(after: execution, mustFire: true) == .medium)
-        #expect(try await storedSeverity(after: execution) == .low)
+        #expect(try await storedSeverity(after: execution) == .medium)
         // The lane submits every graph alert that way, with its tactics.
         let eventLoop = try String(
             contentsOf: repositoryRoot.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"),
@@ -864,7 +878,7 @@ struct AlertSinkRecalibrationTests {
         #expect(try await stored(mustFire: false) == .low)
     }
 
-    @Test("a must-fire rule match keeps its severity through the engine batch, a suppressible one does not")
+    @Test("a must-fire rule match keeps its severity through the engine batch, and so does a suppressible one on a dev-tooling path")
     func mustFireMatchSurvivesTheEngineBatch() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-recal-pipeline-\(UUID().uuidString)")
@@ -899,7 +913,7 @@ struct AlertSinkRecalibrationTests {
         let severities = Dictionary(uniqueKeysWithValues: inserted.map { ($0.ruleId, $0.severity) })
         #expect(severities["must.high"] == .high)
         #expect(severities["must.medium"] == .medium)
-        #expect(severities["quiet.medium"] == .low)
+        #expect(severities["quiet.medium"] == .medium)
         let eventLoop = try String(
             contentsOf: repositoryRoot.appendingPathComponent("Sources/MacCrabAgentKit/EventLoop.swift"),
             encoding: .utf8)
@@ -928,14 +942,14 @@ struct AlertSinkRecalibrationTests {
         #expect(try await storedSeverity(after: a) == .high)
     }
 
-    @Test("gh reading its own GitHub token → down-weighted (self-credential tool)")
-    func ghGitHubTokenDownweighted() async throws {
+    @Test("gh reading its own GitHub token keeps its medium severity, as in v1.22.5")
+    func ghGitHubTokenKeepsMedium() async throws {
         let a = alert(
             ruleTitle: "🦀 AI Tool Accessed GitHub Token", severity: .medium,
             processPath: "/opt/homebrew/Cellar/gh/2.86.0/bin/gh",
             mitreTactics: "attack.credential_access"
         )
-        #expect(try await storedSeverity(after: a) == .low)
+        #expect(try await storedSeverity(after: a) == .medium)
     }
 
     @Test("non-dev-tooling high is UNCHANGED")
@@ -991,15 +1005,15 @@ struct AlertSinkRecalibrationTests {
         }
     }
 
-    @Test("dev-tooling lineage via PARENT executable down-weights a medium")
-    func parentLineageDevToolingDownweighted() async throws {
+    @Test("a dev-tooling PARENT executable does not lower a medium")
+    func parentLineageDevToolingKeepsMedium() async throws {
         let a = alert(
             ruleTitle: "Environment Variable Enumeration", severity: .medium,
             processPath: "/usr/bin/env",
             mitreTactics: "attack.discovery",
             parentExecutable: "/Users/x/proj/node_modules/.bin/esbuild"
         )
-        #expect(try await storedSeverity(after: a) == .low)
+        #expect(try await storedSeverity(after: a) == .medium)
     }
 
     @Test("non-dev-tooling credential theft (real infostealer) is UNCHANGED")
@@ -1103,12 +1117,11 @@ struct AlertSinkRecalibrationTests {
 
     // MARK: - Parent lineage lifted from the EVENT (production reorder fix)
 
-    /// Proves the recalibration-after-enrichment reorder: the alert's own path is
-    /// benign (/usr/bin/env), the dev-tool lineage lives ONLY on the triggering
-    /// event's parent. Pre-reorder, parentExecutable was nil at recalibration and
-    /// this would have stayed medium.
-    @Test("dev-tooling parent from the triggering event down-weights")
-    func parentFromEventDownweights() async throws {
+    /// The alert's own path is benign (/usr/bin/env) and the dev-tool lineage
+    /// lives only on the triggering event's parent. That lineage lowers
+    /// nothing: the medium is stored as a medium.
+    @Test("a dev-tooling parent from the triggering event lowers nothing")
+    func parentFromEventKeepsMedium() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-recal-evt-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -1125,7 +1138,7 @@ struct AlertSinkRecalibrationTests {
                            parentPath: "/Users/x/proj/node_modules/.bin/esbuild")
         _ = try await sink.submit(alert: a, event: ev)
         let stored = try await store.alerts(forEventId: a.eventId)
-        #expect(stored.first?.severity == .low)
+        #expect(stored.first?.severity == .medium)
     }
 
     // MARK: - Browser self-credential (narrow self-access; system keychain stays loud)

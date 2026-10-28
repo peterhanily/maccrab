@@ -57,7 +57,14 @@ struct EventLiveGapTests {
         let key = try #require(view.range(of: "private var eventQueryKey: EventQueryKey {"))
         #expect(!view[key.upperBound...].prefix(400).contains("liveGap"), "a gap is not part of the query key")
         #expect(view.contains(".onChange(of: querySession.liveGapTick) { _ in reloadForLiveGapIfDue() }"))
-        #expect(view.contains("guard !isAggregateMode, querySession.claimLiveGapReload(paused: isPaused) else { return }"))
+        #expect(view.contains("querySession.claimLiveGapReload(paused: isPaused, selectionHeld: selectedEventID != nil)"),
+                "a selection holds the window's gap")
+        #expect(view.contains("guard !isAggregateMode, querySession.claimLiveGapReloadManually() else { return }"),
+                "the held gap is read when the user asks")
+        let held = try #require(view.range(of: "if querySession.liveGapAwaitingReload && !isPaused && !isAggregateMode {"))
+        #expect(view[held.upperBound...].prefix(300).contains("reloadHeldLiveGap()"), "the status bar offers the reload")
+        let release = try #require(view.range(of: ".onChange(of: selectedEventID) { selection in"))
+        #expect(view[release.upperBound...].prefix(120).contains("if selection == nil { reloadForLiveGapIfDue() }"))
         let reload = try #require(view.range(of: ".task(id: liveGapReloadTick) {"))
         let body = view[reload.upperBound...].prefix(1_100)
         #expect(body.contains("let selection = selectedEventID"))

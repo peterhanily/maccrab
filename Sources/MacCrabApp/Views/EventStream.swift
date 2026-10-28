@@ -711,7 +711,16 @@ struct EventStream: View {
     /// the session allows: never while paused (once on resume), and at most
     /// every 15 s.
     private func reloadForLiveGapIfDue() {
-        guard !isAggregateMode, querySession.claimLiveGapReload(paused: isPaused) else { return }
+        guard !isAggregateMode,
+              querySession.claimLiveGapReload(paused: isPaused, selectionHeld: selectedEventID != nil)
+        else { return }
+        liveGapReloadTick &+= 1
+    }
+
+    /// Newer events a window holding a selection or older pages kept back,
+    /// read when the user asks for them.
+    private func reloadHeldLiveGap() {
+        guard !isAggregateMode, querySession.claimLiveGapReloadManually() else { return }
         liveGapReloadTick &+= 1
     }
 
@@ -1128,6 +1137,19 @@ struct EventStream: View {
                     Text(String(localized: "events.live", defaultValue: "Live"))
                         .foregroundColor(.green)
                 }
+                if querySession.liveGapAwaitingReload && !isPaused && !isAggregateMode {
+                    // Newer events are held back so the selection and older
+                    // pages stay; the user reloads when ready.
+                    Button {
+                        reloadHeldLiveGap()
+                    } label: {
+                        Label(String(localized: "ui.EventStream.reload.events", defaultValue: "Reload events"),
+                              systemImage: "arrow.clockwise.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundColor(.accentColor)
+                    .help(String(localized: "ui.EventStream.reload.events", defaultValue: "Reload events"))
+                }
                 Spacer()
                 Text(String(localized: "ui.final.eventsPerSecond", defaultValue: "Events/sec: \(appState.eventsPerSecond)"))
                     .foregroundColor(.secondary)
@@ -1181,6 +1203,10 @@ struct EventStream: View {
             displayedQueryKey = eventQueryKey
         }
         .onChange(of: querySession.liveGapTick) { _ in reloadForLiveGapIfDue() }
+        // Letting go of the selection hands a held gap back to the reload policy.
+        .onChange(of: selectedEventID) { selection in
+            if selection == nil { reloadForLiveGapIfDue() }
+        }
         // The same query read again over a live gap: unlike a new query it
         // keeps the selection, and leaves a table paused meanwhile alone.
         .task(id: liveGapReloadTick) {

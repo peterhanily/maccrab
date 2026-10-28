@@ -199,8 +199,9 @@ The **dashboard app** (`MacCrab.app`) runs as your regular user. It only
 reads the database.
 
 The **CLI** (`maccrabctl`) runs as your regular user. It reads the
-database; actions like `suppress` and `unsuppress` write to a user-writable
-file.
+database and asks the engine to make changes: `allow remove` and `unsuppress`
+send removal requests that the engine applies, and `unsuppress` needs `sudo`
+because the allowlist it reads is root-only.
 
 For local development without the sysext, you can `sudo maccrabd` to run
 the legacy daemon directly — but release builds don't use that path.

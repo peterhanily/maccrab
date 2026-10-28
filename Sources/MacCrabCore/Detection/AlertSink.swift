@@ -277,22 +277,15 @@ public actor AlertSink {
     /// default dashboard / notification views — quieted, not hidden.
     ///   1. Self-noise — alerts whose actor is one of MacCrab's own binaries
     ///      (self-tamper is covered by SelfDefense, not behavioral alerts).
-    ///   2. Trusted development-tooling lineage — routine bundler/runtime
-    ///      behavior (esbuild/workerd/node fetch+exec, etc.).
-    /// Only a MEDIUM alert is lowered, to LOW. PRESERVED at full severity on
-    /// dev paths: every HIGH and CRITICAL, every rule that declared
-    /// `suppressible: false`, and among MEDIUM matches credential-access,
-    /// keychain, honeyfile, and the catastrophic-if-real classes a malicious
-    /// package is a primary delivery vector for — impact (ransomware / disk
-    /// wipe), defense-evasion (SIP / Gatekeeper disable), persistence (launchd),
-    /// command-and-control and exfiltration. The ONLY credential exception is a self-credential tool
-    /// reading its OWN credential (the GitHub CLI `gh` reading the GitHub token
-    /// is its job, not theft; a real token thief is a different process).
+    ///   2. A trusted browser reading its own credential store.
+    /// Development-tooling lineage (node_modules, Homebrew, nvm, Cargo and the
+    /// like, including the paths AI coding agents run from) lowers nothing:
+    /// a dev path is where a malicious package or an injected agent runs, not
+    /// a signature. HIGH and CRITICAL keep their severity, and so does MEDIUM,
+    /// the outputs' default floor and the level of the AI-safety rules.
     /// Campaign meta-alerts are skipped entirely — their severity is correlation-
-    /// derived, not from one process, and dev-tooling FPs are already filtered at
-    /// the contributing-alert level. Single sink chokepoint so every engine is
-    /// covered uniformly; runs AFTER enrichment so the parent-lineage check sees
-    /// the parent executable lifted from the event.
+    /// derived, not from one process. Single sink chokepoint so every engine is
+    /// covered uniformly; runs AFTER enrichment.
     private func recalibrateDevToolingSeverity(
         _ alert: Alert,
         event: Event? = nil,
@@ -345,37 +338,11 @@ public actor AlertSink {
             }
         }
 
-        // (4) Development-tooling lineage — MEDIUM only. A HIGH or CRITICAL
-        // alert keeps its severity: a dev path is where a malicious package
-        // runs, not a signature, the engine treats an untrusted critical as
-        // must-fire everywhere else, and integrations read HIGH as actionable.
-        // So does a rule that declared itself `suppressible: false`, whatever
-        // its severity. A MEDIUM match of the routine bundler and runtime
-        // classes is lowered to LOW, under the outputs' default medium floor,
-        // and surfaces for review rather than escalation.
-        guard alert.severity == .medium, !mustFire else { return alert }
-        guard CampaignDetector.isDevelopmentToolingPath(alert.processPath)
-            || CampaignDetector.isDevelopmentToolingPath(alert.parentExecutable) else { return alert }
-        let tac = (alert.mitreTactics ?? "").lowercased()
-        let title = alert.ruleTitle.lowercased()
-        let rid = alert.ruleId.lowercased()
-        // Self-credential tool: a tool reading its OWN credential domain. Kept
-        // deliberately narrow (gh ↔ GitHub token) so we never weaken detection
-        // of a *different* process stealing that credential.
-        let basename = (alert.processPath.map { ($0 as NSString).lastPathComponent } ?? "").lowercased()
-        let isSelfCredentialTool = basename == "gh" && title.contains("github token")
-        let isCredentialClass = tac.contains("credential") || title.contains("credential")
-            || title.contains("keychain") || rid.contains("credential")
-        let isHoneyfile = title.contains("honey") || rid.contains("honey")
-        // Catastrophic-if-real classes: a malicious package is a primary delivery
-        // vector for exactly these, so they must keep escalating on dev paths.
-        let isCatastrophic = tac.contains("impact") || tac.contains("defense_evasion")
-            || tac.contains("persistence") || tac.contains("exfiltration")
-            || tac.contains("command_and_control")
-        if (isCredentialClass || isHoneyfile || isCatastrophic) && !isSelfCredentialTool {
-            return alert  // preserve must-fire / high-signal classes at full severity
-        }
-        return downweighted("Severity reduced — trusted development-tooling lineage (\(alert.processName ?? "dev tool")); routine build/runtime activity, surfaced for review not escalation.")
+        // (4) Development-tooling lineage lowers nothing. Lowering HIGH and
+        // CRITICAL there hid supply-chain execution and C2; lowering MEDIUM hid
+        // the AI-safety rules (an agent's download-and-execute) under the
+        // outputs' default medium floor, which v1.22.5 never did.
+        return alert
     }
 
     /// Prove the direct trigger and the already-admitted journal prefix durable

@@ -257,7 +257,7 @@ extension MacCrabCtl {
           maccrabctl export csv 500
           maccrabctl rule create network_connection
           maccrabctl suppress my-rule-id /usr/bin/safe-process
-          maccrabctl unsuppress my-rule-id /usr/bin/safe-process
+          sudo maccrabctl unsuppress my-rule-id /usr/bin/safe-process
           maccrabctl suppression list
           maccrabctl hunt "show critical alerts from last hour"
           maccrabctl report --hours 48 --output incident.html
