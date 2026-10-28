@@ -712,7 +712,7 @@ struct EventStream: View {
     /// every 15 s.
     private func reloadForLiveGapIfDue() {
         // A selection holds the window only while its row is still shown.
-        let selectionShown = selectedEventID.map { id in filteredCache.contains { $0.id == id } } ?? false
+        let selectionShown = selectedEventID.map { id in presentedEvents.contains { $0.id == id } } ?? false
         guard !isAggregateMode,
               querySession.claimLiveGapReload(paused: isPaused, selectionHeld: selectionShown)
         else { return }
