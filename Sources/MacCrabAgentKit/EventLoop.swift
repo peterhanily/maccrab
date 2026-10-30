@@ -2266,8 +2266,9 @@ enum EventLoop {
                 let alertSink = state.alertSink
                 let notifier = state.notifier
                 let scanEvent = enrichedEvent
-                state.detectionWorkLifecycle.submit(
-                    label: "file-injection-scan"
+                state.contentScanWorkLifecycle.submit(
+                    label: "file-injection-scan",
+                    coalescingKey: filePath
                 ) {
                     if let scanResult = await scanner.scanFile(
                         path: filePath,

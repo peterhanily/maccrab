@@ -293,6 +293,9 @@ struct DaemonTimerLifecycleSnapshot: Sendable, Equatable {
     let inlineFallbacksByLabel: [String: UInt64]
     let inFlightHandlers: Int
     let maximumInFlightHandlers: Int
+    /// When this plane last rejected, shed or closed out a handler. Nil while
+    /// it has lost nothing. Consumers judge loss by recency, not lifetime.
+    var lastLossAt: Date? = nil
 
     var conservesAcceptedHandlers: Bool {
         acceptedHandlers == completedHandlers + UInt64(inFlightHandlers)
@@ -337,18 +340,38 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
     private var tasks: [UInt64: Task<Void, Never>] = [:]
     private var taskLabels: [UInt64: String] = [:]
     private var activeLabels: Set<String> = []
+    /// Coalescing keys of accepted handlers that have not started yet, and the
+    /// key each such handler holds. A key is released when its handler starts,
+    /// so a later offer for the same key is admitted and sees newer state.
+    private var pendingKeys: [String: UInt64] = [:]
+    private var taskKeys: [UInt64: String] = [:]
+    private var lastLossAt: Date?
+    private var lossesSinceLastLog: UInt64 = 0
+    private var lastLossLogAt: Date?
     private var timers: [DispatchSourceTimer] = []
     private var shutdownResult: Bool?
     private var shutdownTask: Task<Bool, Never>?
     private let maximumInFlightHandlers: Int
     private let coalesceByLabel: Bool
+    private let name: String
+    /// Test seam: awaited by each submitted handler before it releases its
+    /// coalescing key and runs, so a test can hold handlers waiting. Nil in
+    /// production.
+    private let beforeHandlerStart: (@Sendable () async -> Void)?
+    /// A storm of losses logs once per interval, with the count since the
+    /// previous line, instead of once per handler.
+    static let lossLogIntervalSeconds: TimeInterval = 60
 
     init(
         maximumInFlightHandlers: Int = 256,
-        coalesceByLabel: Bool = false
+        coalesceByLabel: Bool = false,
+        name: String = "work",
+        beforeHandlerStart: (@Sendable () async -> Void)? = nil
     ) {
         self.maximumInFlightHandlers = max(1, maximumInFlightHandlers)
         self.coalesceByLabel = coalesceByLabel
+        self.name = name
+        self.beforeHandlerStart = beforeHandlerStart
     }
 
     func register(_ timer: DispatchSourceTimer) {
@@ -362,10 +385,15 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
         }
     }
 
+    /// - Parameter coalescingKey: while an accepted handler with the same key
+    ///   has not started, a new offer is coalesced instead of queued. Only use
+    ///   it where the pending handler reads current state when it starts, so
+    ///   the coalesced offer loses nothing.
     @discardableResult
     func submit(
         label: String,
         maximumConcurrentHandlersForLabel: Int? = nil,
+        coalescingKey: String? = nil,
         priority: TaskPriority = .utility,
         operation: @escaping @Sendable () async -> Void
     ) -> Bool {
@@ -375,6 +403,14 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
             rejectedHandlers &+= 1
             closedRejectedHandlers &+= 1
             rejectedByLabel[label, default: 0] &+= 1
+            let report = recordLossLocked(label: label)
+            lock.unlock()
+            if let report { logLoss(report) }
+            return false
+        }
+        if let coalescingKey, pendingKeys[coalescingKey] != nil {
+            coalescedHandlers &+= 1
+            coalescedByLabel[label, default: 0] &+= 1
             lock.unlock()
             return false
         }
@@ -399,7 +435,9 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
             rejectedHandlers &+= 1
             overloadShedHandlers &+= 1
             rejectedByLabel[label, default: 0] &+= 1
+            let report = recordLossLocked(label: label)
             lock.unlock()
+            if let report { logLoss(report) }
             return false
         }
         nextID &+= 1
@@ -408,17 +446,24 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
         // Keep the lock held until insertion. A very short task may reach
         // complete(id:) immediately, but it cannot remove itself before its
         // handle is present in the ledger.
+        let beforeHandlerStart = beforeHandlerStart
         let task = Task(priority: priority) { [weak self] in
+            await beforeHandlerStart?()
             guard !Task.isCancelled else {
                 self?.complete(id: id)
                 return
             }
+            self?.start(id: id)
             await operation()
             self?.complete(id: id)
         }
         tasks[id] = task
         taskLabels[id] = label
         activeLabels.insert(label)
+        if let coalescingKey {
+            pendingKeys[coalescingKey] = id
+            taskKeys[id] = coalescingKey
+        }
         lock.unlock()
         _ = label // fixed-cardinality debug label; never user-controlled data.
         return true
@@ -456,7 +501,9 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
             rejectedHandlers &+= 1
             closedRejectedHandlers &+= 1
             rejectedByLabel[label, default: 0] &+= 1
+            let report = recordLossLocked(label: label)
             lock.unlock()
+            if let report { logLoss(report) }
             return .rejectedAfterClose
         }
         if coalesceByLabel, activeLabels.contains(label) {
@@ -490,6 +537,10 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
         return .accepted
     }
 
+    private func start(id: UInt64) {
+        lock.withLock { releaseKeyLocked(id: id) }
+    }
+
     private func complete(id: UInt64) {
         lock.withLock {
             guard tasks.removeValue(forKey: id) != nil else { return }
@@ -497,8 +548,45 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
                !taskLabels.values.contains(label) {
                 activeLabels.remove(label)
             }
+            releaseKeyLocked(id: id)
             completedHandlers &+= 1
         }
+    }
+
+    private func releaseKeyLocked(id: UInt64) {
+        guard let key = taskKeys.removeValue(forKey: id) else { return }
+        if pendingKeys[key] == id { pendingKeys.removeValue(forKey: key) }
+    }
+
+    private struct LossReport {
+        let plane: String
+        let label: String
+        let lostSinceLastReport: UInt64
+        let rejectedSinceStart: UInt64
+    }
+
+    /// Caller holds `lock` and has already counted the loss.
+    private func recordLossLocked(label: String) -> LossReport? {
+        let now = Date()
+        lastLossAt = now
+        lossesSinceLastLog &+= 1
+        if let lastLossLogAt,
+           now.timeIntervalSince(lastLossLogAt) < Self.lossLogIntervalSeconds {
+            return nil
+        }
+        lastLossLogAt = now
+        let report = LossReport(
+            plane: name,
+            label: label,
+            lostSinceLastReport: lossesSinceLastLog,
+            rejectedSinceStart: rejectedHandlers
+        )
+        lossesSinceLastLog = 0
+        return report
+    }
+
+    private func logLoss(_ report: LossReport) {
+        logger.warning("\(report.plane, privacy: .public) plane dropped \(report.lostSinceLastReport) handler(s) since its last loss report (latest label \(report.label, privacy: .public); \(report.rejectedSinceStart) rejected since engine start)")
     }
 
     func snapshot() -> DaemonTimerLifecycleSnapshot {
@@ -517,7 +605,8 @@ final class DaemonTimerLifecycle: @unchecked Sendable {
                 inlineFallbackHandlers: inlineFallbackHandlers,
                 inlineFallbacksByLabel: inlineFallbacksByLabel,
                 inFlightHandlers: tasks.count,
-                maximumInFlightHandlers: maximumInFlightHandlers
+                maximumInFlightHandlers: maximumInFlightHandlers,
+                lastLossAt: lastLossAt
             )
         }
     }
@@ -684,7 +773,9 @@ enum DaemonShutdownCoordinator {
         )
         async let notarizationFollowUps = state.notarizationFollowUpLifecycle
             .shutdown(deadline: workBudget)
-        let workResults = await (detection, advisory, outputs, notarizationFollowUps)
+        async let contentScans = state.contentScanWorkLifecycle
+            .shutdown(deadline: workBudget)
+        let workResults = await (detection, advisory, outputs, notarizationFollowUps, contentScans)
 
         // The output lane is joined, so no further send() can land. Drain the
         // batching sinks (S3, SFTP) that hold alerts in memory until flush();
@@ -777,7 +868,7 @@ enum DaemonShutdownCoordinator {
             monitorPlane: producerResults.4,
             startupPlane: producerResults.5,
             heavyEnrichmentPlane: heavyEnrichment.clean,
-            detectionWorkPlane: workResults.0 && workResults.3,
+            detectionWorkPlane: workResults.0 && workResults.3 && workResults.4,
             advisoryWorkPlane: workResults.1,
             outputWorkPlane: workResults.2,
             uebaPersistence: uebaPersistence,

@@ -56,6 +56,33 @@ struct V2DiagnosticsExportProtectionTests {
         #expect(checkpoint["restore_status"] as? String == "rejected")
     }
 
+    @Test("A recent content-scan shed degrades protection and is named in the reasons")
+    func contentScanShed() throws {
+        var raw = ready(Date())
+        raw["content_scan_work_lifecycle"] = [
+            "accepting": true, "offered_handlers_total": 40, "accepted_handlers_total": 32,
+            "completed_handlers_total": 32, "rejected_handlers_total": 8,
+            "closed_rejected_handlers_total": 0, "overload_shed_handlers_total": 8,
+            "coalesced_handlers_total": 0, "coalesced_by_label": [String: Int](),
+            "rejected_by_label": ["file-injection-scan": 8], "inline_fallback_handlers_total": 0,
+            "inline_fallbacks_by_label": [String: Int](), "in_flight_handlers": 0,
+            "maximum_in_flight_handlers": 4096, "conserves_accepted_handlers": true,
+            "conserves_offered_handlers": true, "loss_last_at_unix": 1_793_300_000.0,
+            "loss_recent": true,
+        ] as [String: Any]
+        let protection = try #require(try export(raw)["protection"] as? [String: Any])
+        #expect(protection["resolved_from_heartbeat"] as? String == "degraded")
+        #expect((protection["reasons"] as? [String])?.contains("content_scan_degraded") == true)
+        #expect(protection["content_scan_degraded"] as? Bool == true)
+        // Once the shed is no longer recent the warning clears.
+        var plane = try #require(raw["content_scan_work_lifecycle"] as? [String: Any])
+        plane["loss_recent"] = false
+        raw["content_scan_work_lifecycle"] = plane
+        let cleared = try #require(try export(raw)["protection"] as? [String: Any])
+        #expect((cleared["reasons"] as? [String])?.contains("content_scan_degraded") == false)
+        #expect(cleared["content_scan_degraded"] as? Bool == false)
+    }
+
     @Test("A shed notarization follow-up degrades protection and is named in the reasons")
     func notarizationFollowUpShed() throws {
         var raw = ready(Date())
@@ -82,6 +109,15 @@ struct V2DiagnosticsExportProtectionTests {
         #expect(AppState.detectionProtectionDegraded(in: ["notarization_follow_up_lifecycle": healthy,
                                                           "detection_work_lifecycle": healthy]) == false)
         #expect(AppState.detectionProtectionDegraded(in: [:]) == nil)
+        // A recent content-scan shed is a skipped scan; an earlier one is history.
+        var recentScanShed = shed
+        recentScanShed["loss_recent"] = true
+        #expect(AppState.detectionProtectionDegraded(in: ["content_scan_work_lifecycle": recentScanShed,
+                                                          "detection_work_lifecycle": healthy]) == true)
+        var earlierScanShed = shed
+        earlierScanShed["loss_recent"] = false
+        #expect(AppState.detectionProtectionDegraded(in: ["content_scan_work_lifecycle": earlierScanShed,
+                                                          "detection_work_lifecycle": healthy]) == false)
         // Both heartbeat payloads the menu bar reads go through it.
         let appState = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

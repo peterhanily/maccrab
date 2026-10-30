@@ -720,7 +720,20 @@ final class DaemonState {
     /// calls for capacity; each plane has independent conservation and overload
     /// telemetry and is sealed before final persistence.
     let detectionWorkLifecycle = DaemonTimerLifecycle(
-        maximumInFlightHandlers: 256
+        maximumInFlightHandlers: 256,
+        name: "detection work"
+    )
+    /// Hidden-text scans of text files that AI tools open or modify. A burst of
+    /// agent file activity (a repository sweep, a build) offers thousands of
+    /// distinct files within a second, and the scanner reads them one at a
+    /// time; on the shared detection plane that shed scans and took the slots
+    /// other detection work needs. This plane has burst headroom, coalesces a
+    /// file already waiting (the waiting scan reads the newest bytes), and is
+    /// joined with the detection plane at shutdown. A shed here is a skipped
+    /// scan, so it degrades protection like the detection plane.
+    let contentScanWorkLifecycle = DaemonTimerLifecycle(
+        maximumInFlightHandlers: 4096,
+        name: "content scan"
     )
     let advisoryWorkLifecycle = DaemonTimerLifecycle(
         maximumInFlightHandlers: 64
@@ -734,7 +747,8 @@ final class DaemonState {
     /// revoked-cert, not-notarized and sandbox checks. Joined with the
     /// detection plane at shutdown.
     let notarizationFollowUpLifecycle = DaemonTimerLifecycle(
-        maximumInFlightHandlers: 32
+        maximumInFlightHandlers: 32,
+        name: "notarization follow-up"
     )
 
     // MARK: - Core Engines

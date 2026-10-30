@@ -2787,6 +2787,7 @@ def validate_runtime_report(
             "upstream_collector_loss",
             "unclassified_file_queue_loss",
             "trace_graph_handoff_loss",
+            "work_plane_loss",
         ):
             require_zero(sample_losses.get(loss_name), f"{path}.losses.{loss_name}")
         if prior_offset is None:
@@ -3830,6 +3831,16 @@ def validate_runtime_report(
     recorded_at = parse_time(evidence.get("recorded_at"), "runtime.evidence.recorded_at")
     if recorded_at < ended:
         fail("runtime.evidence.recorded_at precedes the end of the epoch")
+
+
+# Work planes whose rejected, shed or closed-out handler is a skipped security
+# decision: a detection task, a notarization follow-up, or a hidden-text scan.
+# `rejected_handlers_total` counts all three kinds of loss on each plane.
+PROTECTION_WORK_PLANES = (
+    "detection_work_lifecycle",
+    "notarization_follow_up_lifecycle",
+    "content_scan_work_lifecycle",
+)
 
 
 def heartbeat_counter(container: Mapping[str, Any], key: str, path: str) -> int:
@@ -5026,6 +5037,14 @@ def normalized_runtime_sample(
         for key in ("upstream_dropped_by_lane", "upstream_terminated_by_lane")
         for lane in ("priority", "file")
     )
+    work_plane_loss = sum(
+        heartbeat_counter(
+            object_value(heartbeat.get(plane), f"heartbeat.{plane}"),
+            "rejected_handlers_total",
+            f"heartbeat.{plane}",
+        )
+        for plane in PROTECTION_WORK_PLANES
+    )
     return {
         "offset_seconds": offset_seconds,
         "recorded_at": recorded_at,
@@ -5085,6 +5104,7 @@ def normalized_runtime_sample(
             "upstream_collector_loss": upstream_loss,
             "unclassified_file_queue_loss": boundaries["file-ingress"]["explicitly_shed"],
             "trace_graph_handoff_loss": graph_handoff["loss_total"],
+            "work_plane_loss": work_plane_loss,
         },
         "llm_quality": llm_runtime_quality_sample(heartbeat),
     }

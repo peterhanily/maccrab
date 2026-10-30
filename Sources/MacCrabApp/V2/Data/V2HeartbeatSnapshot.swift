@@ -119,6 +119,9 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     /// Notarization checks a saturated detection lane handed off; a shed is an
     /// unchecked first launch, judged as protection like the detection plane.
     public var notarizationFollowUpLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? = nil
+    /// Hidden-text scans of files AI tools touch; a shed is a skipped scan,
+    /// judged as protection like the detection plane.
+    public var contentScanWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? = nil
     /// Pre-split compatibility only; never projected into one of the typed
     /// lanes because that would hide which class actually shed work.
     public let legacyDerivedWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
@@ -1206,6 +1209,8 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             decodeCoreBlock(raw["output_work_lifecycle"])
         let notarizationFollowUpLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
             decodeCoreBlock(raw["notarization_follow_up_lifecycle"])
+        let contentScanWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
+            decodeCoreBlock(raw["content_scan_work_lifecycle"])
         let legacyDerivedWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
             decodeCoreBlock(raw["derived_work_lifecycle"])
         let otlpReceiverLifecycle: MacCrabCore.HeartbeatSnapshot.OTLPReceiverLifecycle? =
@@ -1269,6 +1274,7 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             advisoryWorkLifecycle: advisoryWorkLifecycle,
             outputWorkLifecycle: outputWorkLifecycle,
             notarizationFollowUpLifecycle: notarizationFollowUpLifecycle,
+            contentScanWorkLifecycle: contentScanWorkLifecycle,
             legacyDerivedWorkLifecycle: legacyDerivedWorkLifecycle,
             otlpReceiverLifecycle: otlpReceiverLifecycle,
             eventPipeline: eventPipeline,

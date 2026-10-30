@@ -590,6 +590,47 @@ struct MacCrabCtlUnitTests {
         #expect(mcpOTLP.contains("kernel detection continues"))
     }
 
+    @Test("an earlier work-plane loss is history; a recent content-scan shed is degraded")
+    func workPlaneLossRecencyStatusLines() throws {
+        func plane(shed: Int, recent: Bool, maximum: Int) -> [String: Any] {
+            [
+                "accepting": true, "offered_handlers_total": 100 + shed,
+                "accepted_handlers_total": 100, "completed_handlers_total": 100,
+                "rejected_handlers_total": shed, "closed_rejected_handlers_total": 0,
+                "overload_shed_handlers_total": shed, "coalesced_handlers_total": 0,
+                "inline_fallback_handlers_total": 0, "in_flight_handlers": 0,
+                "maximum_in_flight_handlers": maximum,
+                "conserves_accepted_handlers": true, "conserves_offered_handlers": true,
+                "loss_last_at_unix": 1_793_300_000.0, "loss_recent": recent,
+            ]
+        }
+        let heartbeat: [String: Any] = [
+            "written_at_unix": Date().timeIntervalSince1970,
+            "detection_work_lifecycle": plane(shed: 2181, recent: false, maximum: 256),
+            "content_scan_work_lifecycle": plane(shed: 3, recent: true, maximum: 4096),
+        ]
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-loss-recency-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try JSONSerialization.data(withJSONObject: heartbeat).write(
+            to: dir.appendingPathComponent("heartbeat_rich.json")
+        )
+        let work = MacCrabCtl.workLifecycleStatusLines(supportDir: dir.path)
+            .joined(separator: "\n")
+        #expect(work.contains("Detection Work: Conserving ✓ (offered=2281"), "\(work)")
+        #expect(work.contains("Earlier loss only: last at 2026-10-29T"), "\(work)")
+        #expect(work.contains("Content Scans:  Degraded ⚠ (offered=103"), "\(work)")
+        #expect(work.contains("that file went unscanned"))
+
+        let typed = try #require(HeartbeatSnapshot.readFreshest(supportDirs: [dir.path]))
+        let mcpWork = maccrab_mcp.workLifecycleOperatorStatusLines(typed)
+            .joined(separator: "\n")
+        #expect(mcpWork.contains("Detection Work: conserving"), "\(mcpWork)")
+        #expect(mcpWork.contains("Earlier loss only: last at"))
+        #expect(mcpWork.contains("Content Scans: DEGRADED"))
+    }
+
     @Test("heartbeat producers and every shipped operator surface cannot drift")
     func operatorHealthSourceWiring() throws {
         let root = URL(fileURLWithPath: #filePath)
@@ -675,7 +716,7 @@ struct MacCrabCtlUnitTests {
             "timer_lifecycle", "liveness_timer_lifecycle",
             "startup_work_lifecycle", "detection_work_lifecycle",
             "advisory_work_lifecycle", "output_work_lifecycle",
-            "notarization_follow_up_lifecycle",
+            "notarization_follow_up_lifecycle", "content_scan_work_lifecycle",
         ]
         for object in lifecycleObjects {
             #expect(timers.contains("\"\(object)\""))
@@ -689,7 +730,7 @@ struct MacCrabCtlUnitTests {
             "rejected_by_label", "inline_fallback_handlers_total",
             "inline_fallbacks_by_label", "in_flight_handlers",
             "maximum_in_flight_handlers", "conserves_accepted_handlers",
-            "conserves_offered_handlers",
+            "conserves_offered_handlers", "loss_last_at_unix", "loss_recent",
         ]
         for key in lifecycleKeys {
             #expect(timers.contains("\"\(key)\""), "producer lost \(key)")
@@ -701,6 +742,7 @@ struct MacCrabCtlUnitTests {
             #expect(surface.contains("outputWorkLifecycle"))
             #expect(surface.contains("otlpReceiverLifecycle"))
             #expect(surface.contains("notarizationFollowUpLifecycle"))
+            #expect(surface.contains("contentScanWorkLifecycle"))
         }
         #expect(appState.contains("detectionWorkProtectionUnavailable"))
         #expect(workspace.contains("lifecycleDegradedBanner"))

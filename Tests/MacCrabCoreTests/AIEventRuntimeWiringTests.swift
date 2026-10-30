@@ -169,5 +169,13 @@ struct AIEventRuntimeWiringTests {
         #expect(!eventLoop.contains(
             "await state.fileInjectionScanner.scanFile("
         ))
+        // Its own plane with burst headroom, coalesced per waiting file, so a
+        // repository sweep neither sheds scans nor takes detection slots.
+        #expect(eventLoop.contains("state.contentScanWorkLifecycle.submit("))
+        #expect(eventLoop.contains("coalescingKey: filePath"))
+        let daemonState = try source("Sources/MacCrabAgentKit/DaemonState.swift")
+        #expect(daemonState.contains("let contentScanWorkLifecycle = DaemonTimerLifecycle("))
+        let lifecycle = try source("Sources/MacCrabAgentKit/DaemonLifecycle.swift")
+        #expect(lifecycle.contains("async let contentScans = state.contentScanWorkLifecycle"))
     }
 }

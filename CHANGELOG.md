@@ -75,6 +75,24 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   after a size pause.
 
 ### Changed
+- **Hidden-text scans run on their own lane.** Scans of text files that AI tools
+  open or modify moved from the shared 256-slot detection plane to a
+  `content_scan_work_lifecycle` plane with 4,096 slots, which is joined at
+  shutdown and counted as protection in the app, `maccrabctl status` and the
+  diagnostics export. An offer for a file whose scan has not started is
+  coalesced; once the scan starts, a new offer runs again. The unchanged-file
+  cache grew from 500 to 4,096 entries and evicts its oldest eighth at once. An
+  agent-style load of about 3,500 events/s had shed 0.4% of these scans on the
+  shared plane.
+- **Work-plane loss is judged by recency.** Each work plane publishes
+  `loss_last_at_unix` and `loss_recent` (the 15-minute window used for failed
+  writes); the protection and feature verdicts use `loss_recent` and fall back
+  to lifetime totals for engines without it. Totals stay in the heartbeat and
+  `maccrabctl status` adds the time of the last earlier loss. A loss is logged
+  at most once a minute per plane, with the count since the previous line.
+- **The release recorder counts work-plane loss.** `work_plane_loss`, the sum of
+  `rejected_handlers_total` on the detection, notarization follow-up and
+  content-scan planes, must stay zero across the runtime epoch.
 - **Security posture distinguishes unknown from healthy.** Missing screen-lock
   preferences and unverified XProtect definition currency no longer receive
   healthy credit. Engine readiness uses fresh matching heartbeat identity and

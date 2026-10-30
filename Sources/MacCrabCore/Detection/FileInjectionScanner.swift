@@ -51,7 +51,12 @@ public actor FileInjectionScanner {
 
     private var scanCache: [String: CacheEntry] = [:]
     private var cacheAccessSequence: UInt64 = 0
-    private let maxCacheSize = 500
+    /// Large enough that an agent re-reading a repository of a few thousand
+    /// text files hits the cache (a stat) instead of rescanning every file.
+    static let maxCacheSize = 4096
+    /// Eviction drops the least recently used eighth in one pass, so a storm
+    /// of new files does not scan the whole cache once per insert.
+    static let cacheEvictionBatch = maxCacheSize / 8
 
     public struct ScanResult: Sendable {
         public let filePath: String
@@ -328,9 +333,11 @@ public actor FileInjectionScanner {
             identity: identity,
             accessSequence: cacheAccessSequence
         )
-        if scanCache.count > maxCacheSize {
-            let oldest = scanCache.min { $0.value.accessSequence < $1.value.accessSequence }?.key
-            if let oldest { scanCache.removeValue(forKey: oldest) }
+        if scanCache.count > Self.maxCacheSize {
+            let oldest = scanCache
+                .sorted { $0.value.accessSequence < $1.value.accessSequence }
+                .prefix(Self.cacheEvictionBatch)
+            for entry in oldest { scanCache.removeValue(forKey: entry.key) }
         }
     }
 

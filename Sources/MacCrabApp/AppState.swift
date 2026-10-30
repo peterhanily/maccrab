@@ -344,12 +344,14 @@ final class AppState: ObservableObject, EventQueryReading {
     }
 
     /// The detection plane's protection verdict in one heartbeat payload. A
-    /// shed notarization follow-up is an unchecked first launch, so it
-    /// degrades protection as a lost detection decision does. Nil when the
-    /// payload has neither.
+    /// shed notarization follow-up is an unchecked first launch and a shed
+    /// content scan is a skipped hidden-text scan, so each degrades protection
+    /// as a lost detection decision does. Nil when the payload has none.
     nonisolated static func detectionProtectionDegraded(in payload: [String: Any]) -> Bool? {
-        if let notarizationFollowUpLifecycle = payload["notarization_follow_up_lifecycle"] as? [String: Any],
-           detectionWorkLifecycleDegraded(from: notarizationFollowUpLifecycle) == true {
+        let notarizationFollowUpLifecycle = payload["notarization_follow_up_lifecycle"] as? [String: Any]
+        let contentScanWorkLifecycle = payload["content_scan_work_lifecycle"] as? [String: Any]
+        for lifecycle in [notarizationFollowUpLifecycle, contentScanWorkLifecycle].compactMap({ $0 })
+        where detectionWorkLifecycleDegraded(from: lifecycle) == true {
             return true
         }
         return (payload["detection_work_lifecycle"] as? [String: Any]).flatMap {

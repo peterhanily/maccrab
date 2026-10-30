@@ -193,6 +193,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                     "callback_copy_loss": 0,
                     "upstream_collector_loss": 0,
                     "unclassified_file_queue_loss": 0,
+                    "work_plane_loss": 0,
                 },
                 "trace_graph_write_accounting": {
                     "ingest_events_total": counter_value,
@@ -343,6 +344,10 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
             "engine_uptime_seconds": 600 + sample["offset_seconds"],
             "engine_version": VERSION,
             "engine_build": BUILD_NUMBER,
+            **{
+                plane: {"rejected_handlers_total": 0, "overload_shed_handlers_total": 0}
+                for plane in qualification.PROTECTION_WORK_PLANES
+            },
             "event_pipeline": pipeline,
             "events_storage_write_offered_by_lane": {
                 lane: boundaries[f"{lane}-event-persistence"]["offered"]
@@ -4761,6 +4766,7 @@ class CandidateQualificationTests(unittest.TestCase):
             ("batch", "write_batches_failed_total=1"),
             ("row", "write_rows_failed_total=1"),
             ("handoff", "trace_graph_handoff_loss"),
+            ("content_scan", "work_plane_loss"),
         ):
             with self.subTest(failure_kind=failure_kind):
                 observations = copy.deepcopy(
@@ -4778,6 +4784,11 @@ class CandidateQualificationTests(unittest.TestCase):
                     elif failure_kind == "batch":
                         graph["write_attempts_total"] += 1
                         graph["write_batches_failed_total"] += 1
+                    elif failure_kind == "content_scan":
+                        # One hidden-text scan shed by its own plane.
+                        plane = observation["heartbeat"]["content_scan_work_lifecycle"]
+                        plane["rejected_handlers_total"] += 1
+                        plane["overload_shed_handlers_total"] += 1
                     elif failure_kind == "handoff":
                         # One graph input evicted from the bounded hand-off
                         # queue: the writer ledger below it stays clean.

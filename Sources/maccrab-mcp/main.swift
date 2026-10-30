@@ -2825,6 +2825,11 @@ func workLifecycleOperatorStatusLines(
         detail: "PROTECTION DEGRADED: a notarization or revoked-certificate check handed off by a saturated detection lane was shed, left unjoined, or could not be accounted for; that first launch went unchecked."
     )
     append(
+        "Content Scans", heartbeat.contentScanWorkLifecycle,
+        degraded: { $0.detectionProtectionDegraded },
+        detail: "PROTECTION DEGRADED: a hidden-text scan of a file an AI tool opened or modified was shed, left unjoined, or could not be accounted for; that file went unscanned."
+    )
+    append(
         "AI Advisory", heartbeat.advisoryWorkLifecycle,
         degraded: { $0.featureDegraded },
         detail: "AI/advisory features shed work or reported incomplete ownership; deterministic detection and locally persisted alerts continue."
@@ -2863,6 +2868,12 @@ private func lifecycleOperatorStatusLines(
         lines.append("  \(degradedDetail)")
     } else if lifecycle.losslessPressureObserved {
         lines.append("  Capacity pressure was handled without measured loss (coalesced or run inline).")
+    }
+    if !degraded, lifecycle.lossSinceStartObserved,
+       let lastLoss = lifecycle.lossLastAtUnix {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        lines.append("  Earlier loss only: last at \(formatter.string(from: Date(timeIntervalSince1970: lastLoss))); none in the last 15 minutes. Counts above are since engine start.")
     }
     return lines
 }

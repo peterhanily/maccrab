@@ -4793,6 +4793,7 @@ enum DaemonTimers {
             let advisoryWorkPlane = state.advisoryWorkLifecycle.snapshot()
             let outputWorkPlane = state.outputWorkLifecycle.snapshot()
             let notarizationFollowUpPlane = state.notarizationFollowUpLifecycle.snapshot()
+            let contentScanWorkPlane = state.contentScanWorkLifecycle.snapshot()
             let notarizationCheckerCounters = await state.notarizationChecker.diagnostics()
             let heavyEnrichmentPlane = await state.enricher
                 .heavyEnrichmentSnapshot()
@@ -4848,6 +4849,15 @@ enum DaemonTimers {
                         plane.conservesAcceptedHandlers,
                     "conserves_offered_handlers":
                         plane.conservesOfferedHandlers,
+                    // Degraded means losing work now, not that this process
+                    // lost some earlier: recency is judged here, against the
+                    // engine clock, as for failed writes. Totals stay above.
+                    "loss_last_at_unix":
+                        plane.lastLossAt?.timeIntervalSince1970 ?? NSNull(),
+                    "loss_recent": plane.lastLossAt.map {
+                        Date().timeIntervalSince($0)
+                            <= MacCrabCore.HeartbeatSnapshot.recentWriteFailureWindowSeconds
+                    } ?? false,
                 ]
             }
 
@@ -5190,6 +5200,10 @@ enum DaemonTimers {
                 // notarization check; it was otherwise counted nowhere.
                 "notarization_follow_up_lifecycle":
                     workLifecycleDictionary(notarizationFollowUpPlane),
+                // Hidden-text scans of files AI tools touch; a shed is a
+                // skipped scan, judged as protection like the planes above.
+                "content_scan_work_lifecycle":
+                    workLifecycleDictionary(contentScanWorkPlane),
                 // A check refused at the checker's assessment cap is a first
                 // launch left unchecked with no plane shed. Reported, not in
                 // the protection verdict: build storms reach the cap routinely.

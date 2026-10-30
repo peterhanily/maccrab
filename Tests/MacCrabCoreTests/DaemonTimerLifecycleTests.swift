@@ -156,6 +156,58 @@ struct DaemonTimerLifecycleTests {
         #expect(snapshot.conservesAcceptedHandlers)
     }
 
+    @Test("a waiting keyed handler absorbs repeat offers; once it starts, the key is free again")
+    func coalescingKeyHoldsOnlyWhileWaiting() async {
+        let gate = BlockingTimerHandler()
+        let lifecycle = DaemonTimerLifecycle(beforeHandlerStart: { await gate.run() })
+        let running = BlockingTimerHandler()
+        #expect(lifecycle.submit(label: "file-injection-scan", coalescingKey: "/repo/a.md") {
+            await running.run()
+        })
+        // Still waiting to start: the waiting scan will read the newest bytes,
+        // so a repeat offer for the same file is coalesced, a different file is not.
+        #expect(!lifecycle.submit(label: "file-injection-scan", coalescingKey: "/repo/a.md") {})
+        #expect(lifecycle.submit(label: "file-injection-scan", coalescingKey: "/repo/b.md") {})
+        await gate.release()
+        await running.waitUntilStarted()
+        // Started: it may already have read the file, so a new offer must run.
+        #expect(lifecycle.submit(label: "file-injection-scan", coalescingKey: "/repo/a.md") {})
+        var snapshot = lifecycle.snapshot()
+        #expect(snapshot.offeredHandlers == 4)
+        #expect(snapshot.acceptedHandlers == 3)
+        #expect(snapshot.coalescedHandlers == 1)
+        #expect(snapshot.coalescedByLabel["file-injection-scan"] == 1)
+        #expect(snapshot.rejectedHandlers == 0)
+        #expect(snapshot.lastLossAt == nil)
+        #expect(snapshot.conservesOfferedHandlers)
+        await running.release()
+        #expect(await lifecycle.shutdown(deadline: 30.0))
+        snapshot = lifecycle.snapshot()
+        #expect(snapshot.completedHandlers == 3)
+        #expect(snapshot.conservesAcceptedHandlers)
+    }
+
+    @Test("a shed or closed-out handler records when it was lost")
+    func lossRecordsItsTime() async throws {
+        let lifecycle = DaemonTimerLifecycle(maximumInFlightHandlers: 1)
+        #expect(lifecycle.snapshot().lastLossAt == nil)
+        let blocker = BlockingTimerHandler()
+        #expect(lifecycle.submit(label: "hold") { await blocker.run() })
+        await blocker.waitUntilStarted()
+        let beforeShed = Date()
+        #expect(!lifecycle.submit(label: "overflow") {})
+        let shed = lifecycle.snapshot()
+        #expect(shed.overloadShedHandlers == 1)
+        let shedAt = try #require(shed.lastLossAt)
+        #expect(shedAt >= beforeShed)
+        await blocker.release()
+        #expect(await lifecycle.shutdown(deadline: 30.0))
+        #expect(!lifecycle.submit(label: "late") {})
+        let closed = lifecycle.snapshot()
+        #expect(closed.closedRejectedHandlers == 1)
+        #expect(try #require(closed.lastLossAt) >= shedAt)
+    }
+
     @Test("Two coverage generations stay bounded and finishing one preserves the active label")
     func boundedCoverageGenerationOverlap() async {
         let lifecycle = DaemonTimerLifecycle(maximumInFlightHandlers: 4, coalesceByLabel: true)

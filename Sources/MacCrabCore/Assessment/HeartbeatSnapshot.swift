@@ -95,6 +95,10 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// lane handed off instead of running inline. A shed here is an unchecked
     /// first launch, so it is a protection gap like the detection plane's.
     public let notarizationFollowUpLifecycle: TimerLifecycle?
+    /// Hidden-text scans of text files that AI tools open or modify, on their
+    /// own plane. A shed is a skipped scan, so it is a protection gap. Nil
+    /// from engines that ran these scans on the detection plane.
+    public let contentScanWorkLifecycle: TimerLifecycle?
     /// NotarizationChecker's own counters. A check refused at its assessment
     /// cap leaves a first launch unchecked even when no plane shed it.
     /// Reported only: a build storm reaches the cap routinely, so it is not
@@ -273,6 +277,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case advisoryWorkLifecycle = "advisory_work_lifecycle"
         case outputWorkLifecycle = "output_work_lifecycle"
         case notarizationFollowUpLifecycle = "notarization_follow_up_lifecycle"
+        case contentScanWorkLifecycle = "content_scan_work_lifecycle"
         case notarizationChecker = "notarization_checker"
         case legacyDerivedWorkLifecycle = "derived_work_lifecycle"
         case otlpReceiverLifecycle = "otlp_receiver_lifecycle"
@@ -1107,6 +1112,14 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let maximumInFlightHandlers: Int?
         public let conservesAcceptedHandlers: Bool?
         public let conservesOfferedHandlers: Bool?
+        /// When the plane last rejected, shed or closed out a handler, on the
+        /// engine clock. Nil while it has lost nothing and from older engines.
+        public let lossLastAtUnix: Double?
+        /// A loss inside the producer's recent window
+        /// (`recentWriteFailureWindowSeconds`), judged when the heartbeat was
+        /// written. Nil from engines that publish only lifetime totals; those
+        /// fall back to the totals, so an older engine never reads healthier.
+        public let lossRecent: Bool?
 
         private enum CodingKeys: String, CodingKey {
             case accepting
@@ -1125,6 +1138,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case maximumInFlightHandlers = "maximum_in_flight_handlers"
             case conservesAcceptedHandlers = "conserves_accepted_handlers"
             case conservesOfferedHandlers = "conserves_offered_handlers"
+            case lossLastAtUnix = "loss_last_at_unix"
+            case lossRecent = "loss_recent"
         }
 
         public var conservationMaintained: Bool? {
@@ -1188,6 +1203,21 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             telemetryPresent && !telemetryComplete
         }
 
+        /// Any handler rejected, shed or closed out since the engine started.
+        /// History for detail views; the protection verdicts use recency.
+        public var lossSinceStartObserved: Bool {
+            (rejectedHandlersTotal ?? 0) > 0
+                || (closedRejectedHandlersTotal ?? 0) > 0
+                || (overloadShedHandlersTotal ?? 0) > 0
+        }
+
+        /// Loss judged by recency when the engine publishes it. Degraded means
+        /// losing work now, as for failed writes; `legacyLoss` is the
+        /// lifetime test used for engines without the recency flag.
+        private func currentLoss(legacyLoss: Bool) -> Bool {
+            lossRecent ?? legacyLoss
+        }
+
         /// While a lane accepts work, explicit loss or conservation failure is
         /// degraded. Reaching the capacity gauge alone is not: the detection
         /// lane runs inline and liveness may intentionally coalesce a duplicate.
@@ -1196,8 +1226,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
                 && (conservesAcceptedHandlers == false
                     || conservesOfferedHandlers == false
                     || telemetryIncomplete
-                    || (rejectedHandlersTotal ?? 0) > 0
-                    || (overloadShedHandlersTotal ?? 0) > 0)
+                    || currentLoss(legacyLoss: (rejectedHandlersTotal ?? 0) > 0
+                        || (overloadShedHandlersTotal ?? 0) > 0))
         }
 
         public var uncleanOutstandingAfterClose: Bool {
@@ -1215,15 +1245,13 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             degradedWhileRunning || uncleanOutstandingAfterClose
         }
 
-        /// Security-plane verdict: every rejection (including a late
+        /// Security-plane verdict: every recent rejection (including a late
         /// post-seal producer) is a dropped security decision. Inline fallback
         /// and coalescing are independently measured owned outcomes, not loss.
         public var detectionProtectionDegraded: Bool {
             degraded
                 || telemetryIncomplete
-                || (rejectedHandlersTotal ?? 0) > 0
-                || (closedRejectedHandlersTotal ?? 0) > 0
-                || (overloadShedHandlersTotal ?? 0) > 0
+                || currentLoss(legacyLoss: lossSinceStartObserved)
         }
 
         /// Advisory/output verdict. This deliberately says "feature" rather
@@ -1231,9 +1259,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public var featureDegraded: Bool {
             degraded
                 || telemetryIncomplete
-                || (rejectedHandlersTotal ?? 0) > 0
-                || (closedRejectedHandlersTotal ?? 0) > 0
-                || (overloadShedHandlersTotal ?? 0) > 0
+                || currentLoss(legacyLoss: lossSinceStartObserved)
         }
 
         public var losslessPressureObserved: Bool {

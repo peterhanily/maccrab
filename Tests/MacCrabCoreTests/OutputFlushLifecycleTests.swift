@@ -68,7 +68,7 @@ struct OutputFlushLifecycleTests {
     @Test("Graceful shutdown drains the sinks after the output lane is joined and before persistence")
     func shutdownDrainsSinks() throws {
         let lifecycle = try source("Sources/MacCrabAgentKit/DaemonLifecycle.swift")
-        let joined = try #require(lifecycle.range(of: "let workResults = await (detection, advisory, outputs, notarizationFollowUps)"))
+        let joined = try #require(lifecycle.range(of: "let workResults = await (detection, advisory, outputs, notarizationFollowUps, contentScans)"))
         let ueba = try #require(lifecycle.range(
             of: "if let ueba = state.uebaEngine",
             range: joined.upperBound..<lifecycle.endIndex
