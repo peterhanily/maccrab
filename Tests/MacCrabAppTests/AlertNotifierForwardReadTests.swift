@@ -326,4 +326,137 @@ struct AlertNotifierForwardReadTests {
         let second = try await read(store, first.cursor)
         #expect(second.alerts.isEmpty && second.outcome == .nothingFresh)
     }
+
+    private func rewritePosition(_ cursor: Cursor) throws -> Int64? {
+        let raw = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(cursor)) as? [String: Any])
+        return (raw["rewriteRowIDAtWatermark"] as? NSNumber)?.int64Value
+    }
+
+    private func rewriteBacklog(_ store: AlertStore, count: Int, tied: Bool = false) async throws -> (Cursor, [String]) {
+        let empty = try await read(store, nil).cursor
+        let ids = (0..<count).map { "rewrite-\($0)" }
+        _ = try await store.insert(alerts: ids.enumerated().map { alert($1, at: 1_000 + Double($0), severity: .high) })
+        let cursor = try await read(store, empty).cursor
+        _ = try await store.insert(alerts: ids.enumerated().map { alert($1, at: 5_000 + (tied ? 0 : Double($0))) })
+        return (cursor, ids)
+    }
+
+    @Test("rewrite bursts beyond the old cap drain in bounded pages, including timestamp ties", arguments: [false, true])
+    func largeRewriteBacklogDrains(tied: Bool) async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (initial, ids) = try await rewriteBacklog(store, count: 1_001, tied: tied)
+        var cursor = initial
+        var delivered: [String] = []
+        for _ in 0..<30 {
+            let step = try await read(store, cursor)
+            cursor = step.cursor
+            guard step.outcome == .delivered else { break }
+            #expect(step.alerts.count <= AlertNotifier.maximumDeliveriesPerTick)
+            delivered += step.alerts.map(\.id)
+            #expect(step.backlog == ids.count - delivered.count)
+            if step.backlog > 0 {
+                #expect(cursor.rowID == initial.rowID && cursor.alertID == initial.alertID,
+                        "fresh commit anchor stays fixed while rewrites wait")
+            }
+        }
+        #expect(delivered == ids)
+        #expect(try await read(store, cursor).alerts.isEmpty)
+    }
+
+    @Test("rewrites and fresh commits share one delivery budget", arguments: [49, 50, 51])
+    func mixedRewriteAndFreshBudget(count: Int) async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (initial, rewrittenIDs) = try await rewriteBacklog(store, count: count, tied: true)
+        let freshIDs = (0..<60).map { "fresh-\($0)" }
+        _ = try await store.insert(alerts: freshIDs.enumerated().map { alert($1, at: 8_000 + Double($0)) })
+        var cursor = initial
+        var delivered: [String] = []
+        for _ in 0..<6 {
+            let step = try await read(store, cursor)
+            cursor = step.cursor
+            guard step.outcome == .delivered else { break }
+            #expect(step.alerts.count <= AlertNotifier.maximumDeliveriesPerTick)
+            delivered += step.alerts.map(\.id)
+            #expect(step.backlog == rewrittenIDs.count + freshIDs.count - delivered.count)
+        }
+        #expect(delivered == rewrittenIDs + freshIDs)
+    }
+
+    @Test("an unfinished rewrite tie survives cursor persistence and older cursor JSON still decodes")
+    func rewriteCursorRoundTrip() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (initial, ids) = try await rewriteBacklog(store, count: 120, tied: true)
+        let first = try await read(store, initial)
+        let encoded = try JSONEncoder().encode(first.cursor)
+        let restored = try #require(AlertNotifier.restoredCursor(
+            rowCursor: encoded, legacy: first.cursor.watermark.timeIntervalSince1970))
+        #expect(restored == first.cursor)
+        #expect(try rewritePosition(restored) != nil)
+        let second = try await read(store, restored)
+        let third = try await read(store, try JSONDecoder().decode(Cursor.self, from: JSONEncoder().encode(second.cursor)))
+        #expect((first.alerts + second.alerts + third.alerts).map(\.id) == ids)
+        var legacyObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacyObject.removeValue(forKey: "rewriteRowIDAtWatermark")
+        let legacy = try JSONDecoder().decode(Cursor.self, from: JSONSerialization.data(withJSONObject: legacyObject))
+        #expect((try rewritePosition(legacy)) == nil)
+        let downgraded = try #require(AlertNotifier.restoredCursor(
+            rowCursor: encoded, legacy: first.cursor.watermark.timeIntervalSince1970 + 1))
+        #expect(downgraded.rowID == 0)
+        #expect(try rewritePosition(downgraded) == nil)
+    }
+
+    @Test("deleting or reusing the commit anchor during a rewrite tie loses no pending alert", arguments: [false, true])
+    func rewriteContinuationAfterAnchorLoss(reuse: Bool) async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (initial, ids) = try await rewriteBacklog(store, count: 120, tied: true)
+        let first = try await read(store, initial)
+        #expect(try await store.delete(alertId: try #require(ids.last)))
+        if reuse {
+            try await store.insert(alert: alert("reused-anchor", at: 8_000))
+            #expect(try await store.newestAlertRow()?.rowID == initial.rowID)
+        }
+        var cursor = first.cursor
+        var delivered = first.alerts.map(\.id)
+        for _ in 0..<5 {
+            let step = try await read(store, cursor)
+            cursor = step.cursor
+            guard step.outcome == .delivered else { break }
+            #expect(step.alerts.count <= AlertNotifier.maximumDeliveriesPerTick)
+            delivered += step.alerts.map(\.id)
+        }
+        #expect(delivered == Array(ids.dropLast()) + (reuse ? ["reused-anchor"] : []))
+        #expect(try await read(store, cursor).alerts.isEmpty)
+    }
+
+    @Test("authorization pending preserves an unfinished rewrite page and its full backlog")
+    func rewriteAuthorizationPending() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (initial, ids) = try await rewriteBacklog(store, count: 120, tied: true)
+        let first = try await read(store, initial)
+        let pending = try await read(store, first.cursor, determined: false)
+        #expect(pending.outcome == .authorizationPending && pending.cursor == first.cursor)
+        #expect(pending.alerts.isEmpty && pending.backlog == 70)
+        let resumed = try await read(store, pending.cursor)
+        #expect(resumed.alerts.map(\.id) == Array(ids[50..<100]))
+    }
+
+    @Test("muting during rewrite pagination discards its continuation and does not replay on unmute")
+    func muteDiscardsRewriteContinuation() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (initial, _) = try await rewriteBacklog(store, count: 120, tied: true)
+        let first = try await read(store, initial)
+        let muted = try await read(store, first.cursor, enabled: false, now: Date(timeIntervalSince1970: 5_000))
+        #expect(muted.outcome == .disabled)
+        #expect(try rewritePosition(muted.cursor) == nil)
+        #expect(try await read(store, muted.cursor).alerts.isEmpty)
+        try await store.insert(alert: alert("after-mute", at: 6_000))
+        #expect(try await read(store, muted.cursor).alerts.map(\.id) == ["after-mute"])
+    }
+
 }

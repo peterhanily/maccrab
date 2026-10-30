@@ -269,15 +269,23 @@ final class AlertNotifier: NSObject {
         /// placed): when the rowid no longer counts, reading resumes after
         /// the newest row stamped at or before it.
         var watermark: Date
+        /// An unfinished rewrite page has considered only rows through this
+        /// rowid at `watermark`. Nil means every row at that stamp was passed.
+        /// The optional field keeps older persisted cursors decodable.
+        var rewriteRowIDAtWatermark: Int64?
 
-        init(rowID: Int64, alertID: String?, watermark: Date) {
+        init(rowID: Int64, alertID: String?, watermark: Date,
+             rewriteRowIDAtWatermark: Int64? = nil) {
             self.rowID = rowID
             self.alertID = alertID
             self.watermark = watermark
+            self.rewriteRowIDAtWatermark = rewriteRowIDAtWatermark
         }
 
-        init(_ row: AlertStore.AlertRowReference?, watermark: Date) {
-            self.init(rowID: row?.rowID ?? 0, alertID: row?.id, watermark: watermark)
+        init(_ row: AlertStore.AlertRowReference?, watermark: Date,
+             rewriteRowIDAtWatermark: Int64? = nil) {
+            self.init(rowID: row?.rowID ?? 0, alertID: row?.id, watermark: watermark,
+                      rewriteRowIDAtWatermark: rewriteRowIDAtWatermark)
         }
     }
 
@@ -325,21 +333,26 @@ final class AlertNotifier: NSObject {
         if named == nil || named != cursor.alertID {
             // Resume after the watermark on a row that still exists, so later
             // ticks follow its rowid instead of resolving the watermark again.
-            cursor = NotificationCursor(try await store.notificationResumeRow(after: cursor.watermark),
-                                        watermark: cursor.watermark)
+            cursor = NotificationCursor(
+                try await store.notificationResumeRow(
+                    after: cursor.watermark, atWatermarkThroughRowID: cursor.rewriteRowIDAtWatermark),
+                watermark: cursor.watermark, rewriteRowIDAtWatermark: cursor.rewriteRowIDAtWatermark)
         }
         let severities = MacCrabCore.Severity.allCases.filter { $0 >= floor }
-        // A deterministic id is rewritten on its own row, behind the cursor,
-        // with a new stamp and severity (a CVE re-scored as critical). Rare,
-        // so all of them go in this tick, ahead of newer commits.
+        // Re-scored deterministic ids stay behind the commit cursor. Drain
+        // their timestamp/rowid pages before moving that cursor, with the same
+        // per-tick budget as fresh commits. The extra row detects a backlog.
         let rewritten = try await store.alertsRewrittenForNotification(
-            throughRowID: cursor.rowID, after: cursor.watermark, severities: severities, limit: 1_000)
+            throughRowID: cursor.rowID, after: cursor.watermark,
+            afterRowIDAtWatermark: cursor.rewriteRowIDAtWatermark,
+            severities: severities, limit: Self.maximumDeliveriesPerTick + 1)
         guard let newest = try await store.newestAlertRow(), newest.rowID > cursor.rowID || !rewritten.isEmpty else {
             // Nothing to read, but alerts behind the cursor may have been stamped
             // again below the floor or while suppressed: pass those stamps, so a
             // later resume by watermark does not start behind them.
             let anchor = cursor.alertID.map { AlertStore.AlertRowReference(rowID: cursor.rowID, id: $0) }
             cursor.watermark = try await passed(anchor, cursor.watermark)
+            cursor.rewriteRowIDAtWatermark = nil
             return ForwardRead(outcome: .nothingFresh, cursor: cursor)
         }
         guard enabled else {
@@ -348,35 +361,53 @@ final class AlertNotifier: NSObject {
             return ForwardRead(outcome: .disabled,
                                cursor: NotificationCursor(newest, watermark: try await passed(newest, max(cursor.watermark, now))))
         }
-        // This tick's slice plus one row to learn whether more wait, at or
-        // above the floor only: a flood below it must not hold a critical
-        // banner back, a slice at a time, behind its own backlog.
+        let rewriteSlice = Array(rewritten.prefix(Self.maximumDeliveriesPerTick))
+        let freshBudget = Self.maximumDeliveriesPerTick - rewriteSlice.count
+        // A flood below the severity floor must not use the delivery budget.
         let fresh = newest.rowID > cursor.rowID
             ? try await store.alertsForNotification(
                 afterRowID: cursor.rowID, throughRowID: newest.rowID,
-                severities: severities, limit: Self.maximumDeliveriesPerTick + 1)
+                severities: severities, limit: freshBudget + 1)
             : []
         guard !fresh.isEmpty || !rewritten.isEmpty else {
             return ForwardRead(outcome: .nothingFresh,
                                cursor: NotificationCursor(newest, watermark: try await passed(newest, cursor.watermark)))
         }
         guard await isAuthorizationDetermined() else {
-            let backlog = try await store.notificationBacklogCount(afterRowID: cursor.rowID, severities: severities)
-            return ForwardRead(outcome: .authorizationPending, cursor: cursor, backlog: backlog + rewritten.count)
+            let freshBacklog = try await store.notificationBacklogCount(afterRowID: cursor.rowID, severities: severities)
+            let rewriteBacklog = try await store.notificationRewriteBacklogCount(
+                throughRowID: cursor.rowID, after: cursor.watermark,
+                afterRowIDAtWatermark: cursor.rewriteRowIDAtWatermark, severities: severities)
+            return ForwardRead(outcome: .authorizationPending, cursor: cursor, backlog: freshBacklog + rewriteBacklog)
         }
-        let slice = Array(fresh.prefix(Self.maximumDeliveriesPerTick))
-        let alerts = rewritten.map(\.alert) + slice.map(\.alert)
+        if rewritten.count > rewriteSlice.count, let last = rewriteSlice.last {
+            // No later stamp or fresh commit has been considered yet. In
+            // particular, passed(newest) would skip every unfetched rewrite.
+            cursor.watermark = last.alert.timestamp
+            cursor.rewriteRowIDAtWatermark = last.rowID
+            let rewriteBacklog = try await store.notificationRewriteBacklogCount(
+                throughRowID: cursor.rowID, after: cursor.watermark,
+                afterRowIDAtWatermark: last.rowID, severities: severities)
+            let freshBacklog = try await store.notificationBacklogCount(afterRowID: cursor.rowID, severities: severities)
+            return ForwardRead(outcome: .delivered, alerts: rewriteSlice.map(\.alert),
+                               cursor: cursor, backlog: rewriteBacklog + freshBacklog)
+        }
+        let slice = Array(fresh.prefix(freshBudget))
+        let alerts = rewriteSlice.map(\.alert) + slice.map(\.alert)
         let watermark = max(cursor.watermark, alerts.map(\.timestamp).max() ?? cursor.watermark)
-        guard fresh.count > slice.count, let last = slice.last else {
-            // Everything at or above the floor up to the newest row is here.
+        guard fresh.count > slice.count else {
+            // Both streams up to the newest row have now been considered.
             return ForwardRead(outcome: .delivered, alerts: alerts,
                                cursor: NotificationCursor(newest, watermark: try await passed(newest, watermark)))
         }
-        let reached = AlertStore.AlertRowReference(rowID: last.rowID, id: last.alert.id)
+        // A full rewrite page may leave no budget for fresh commits. In that
+        // case the commit anchor stays put, but its rewrite page is complete.
+        let reached = slice.last.map { AlertStore.AlertRowReference(rowID: $0.rowID, id: $0.alert.id) }
+            ?? cursor.alertID.map { AlertStore.AlertRowReference(rowID: cursor.rowID, id: $0) }
         return ForwardRead(
             outcome: .delivered, alerts: alerts,
             cursor: NotificationCursor(reached, watermark: try await passed(reached, watermark)),
-            backlog: try await store.notificationBacklogCount(afterRowID: last.rowID, severities: severities)
+            backlog: try await store.notificationBacklogCount(afterRowID: reached?.rowID ?? 0, severities: severities)
         )
     }
 

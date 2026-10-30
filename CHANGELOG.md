@@ -79,8 +79,8 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   open or modify moved from the shared 256-slot detection plane to a
   `content_scan_work_lifecycle` plane with 4,096 slots, which is joined at
   shutdown and counted as protection in the app, `maccrabctl status` and the
-  diagnostics export. An offer for a file whose scan has not started is
-  coalesced; once the scan starts, a new offer runs again. The unchanged-file
+  diagnostics export. An offer for a file whose queued task has not started
+  is coalesced; once that task starts, a new offer is admitted separately. The unchanged-file
   cache grew from 500 to 4,096 entries and evicts its oldest eighth at once. An
   agent-style load of about 3,500 events/s had shed 0.4% of these scans on the
   shared plane.
@@ -245,8 +245,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Downloads checks. File hashing no longer follows a symlinked folder.
 - **Notifications follow the minimum severity and the order alerts are
   stored,** so lower-severity floods no longer delay critical banners. An
-  alert re-scored in place is notified again, and alerts from while
-  notifications were off are not replayed.
+  alert re-scored in place is notified again. Re-scored and fresh alerts
+  share the 50-alert tick budget, and large rewrite bursts or identical
+  timestamps no longer skip notifications. The cursor preserves unfinished
+  rewrite pages across app restarts and a deleted or reused anchor row.
+  Alerts from while notifications were off are not replayed.
 - **`sudo maccrabctl` requests go through a root-only request directory.**
   The shared directory accepts requests only from the signed-in administrator
   and refuses stale or replayed ones, so another local user cannot replay a
@@ -256,8 +259,9 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Passwords given to sshpass, zip, security, ssh-keygen and registry logins
   are redacted in stored arguments, command lines and parent command lines,
   and in OCSF and OpenTelemetry exports.
-- **MCP `explain_alert` shows the rule definition the engine runs,** following
-  its user-rule precedence and trust.
+- **MCP `explain_alert` follows user-rule precedence and file trust checks.**
+  Semantic-validation and in-place rule-ID edit limits remain in explanations;
+  they do not change the engine's validation or rule authorization.
 - **`maccrabctl allow remove` and `sudo maccrabctl unsuppress` remove entries
   through the engine,** so the engine's next save does not undo a removal.
   maccrabctl no longer warns about running as root for `unsuppress`, which

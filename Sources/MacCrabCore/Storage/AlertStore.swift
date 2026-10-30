@@ -1765,21 +1765,27 @@ public actor AlertStore {
     /// and read every alert committed since it as new. Nil when no row is
     /// stamped at or before the watermark (or the table is empty). It is a
     /// row that exists, so the reader can anchor on its id and follow rowids.
-    public func notificationResumeRow(after watermark: Date) throws -> AlertRowReference? {
+    public func notificationResumeRow(
+        after watermark: Date, atWatermarkThroughRowID: Int64? = nil
+    ) throws -> AlertRowReference? {
         // With no row at or before the watermark (a fresh cursor, or an older
         // build's watermark behind every kept row) the walk below visits the
         // whole table, every tick while authorization is pending; the
         // timestamp index answers that at once.
-        let probe = try prepare("SELECT 1 FROM alerts WHERE timestamp <= ?1 LIMIT 1")
+        // During rewrite pagination, rows later in the watermark's tie group
+        // are still pending. They cannot become a replacement commit anchor.
+        let probe = try prepare("SELECT 1 FROM alerts WHERE timestamp <= ?1 AND (timestamp < ?1 OR +rowid <= ?2) LIMIT 1")
         defer { sqlite3_finalize(probe) }
         sqlite3_bind_double(probe, 1, watermark.timeIntervalSince1970)
+        sqlite3_bind_int64(probe, 2, atWatermarkThroughRowID ?? .max)
         guard try AlertQueryReadStep.advance(statement: probe, database: db) else { return nil }
         // `+timestamp` keeps the planner on a backward rowid walk that stops
         // at the first row at or before the watermark, usually the newest;
         // the timestamp index would sort every row before it.
-        let stmt = try prepare("SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 ORDER BY rowid DESC LIMIT 1")
+        let stmt = try prepare("SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 AND (+timestamp < ?1 OR rowid <= ?2) ORDER BY rowid DESC LIMIT 1")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_double(stmt, 1, watermark.timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 2, atWatermarkThroughRowID ?? .max)
         guard try AlertQueryReadStep.advance(statement: stmt, database: db),
               let id = columnTextOrNil(stmt, index: 1) else { return nil }
         return AlertRowReference(rowID: sqlite3_column_int64(stmt, 0), id: id)
@@ -1857,7 +1863,8 @@ public actor AlertStore {
     }
 
     /// Unsuppressed alerts at one of `severities` at or below `throughRowID`
-    /// stamped after `watermark`, oldest stamp first. A deterministic id
+    /// stamped after `watermark`, or later in its unfinished rowid tie group,
+    /// in timestamp/rowid order. A deterministic id
     /// (vuln-<cve>, privacy-<app>-<kind>, the security score) is rewritten on
     /// its own row with a new timestamp and severity, behind a rowid cursor
     /// that already passed it; the timestamp cursor that cursor replaced saw
@@ -1866,31 +1873,61 @@ public actor AlertStore {
     public func alertsRewrittenForNotification(
         throughRowID: Int64,
         after watermark: Date,
+        afterRowIDAtWatermark: Int64? = nil,
         severities: [Severity],
         limit: Int
     ) throws -> [CommittedAlert] {
         guard !severities.isEmpty, throughRowID > 0 else { return [] }
-        let placeholders = severities.indices.map { "?\($0 + 4)" }.joined(separator: ", ")
+        let placeholders = severities.indices.map { "?\($0 + 5)" }.joined(separator: ", ")
         let sql = """
             SELECT id, timestamp, rule_id, rule_title, severity, event_id, process_path,
                    process_name, description, mitre_tactics, mitre_techniques, suppressed,
                    NULL, d3fend_techniques, remediation_hint, NULL, campaign_id, user_id,
                    user_name, working_directory, ai_tool, parent_executable, process_sha256,
                    host_name, NULL, ai_tool_session_id, rowid
-            FROM alerts WHERE +rowid <= ?1 AND timestamp > ?2 AND suppressed = 0
+            FROM alerts WHERE +rowid <= ?1 AND timestamp >= ?2
+                AND (timestamp > ?2 OR +rowid > ?4) AND suppressed = 0
                 AND +severity IN (\(placeholders))
-            ORDER BY timestamp ASC LIMIT ?3
+            ORDER BY timestamp ASC, rowid ASC LIMIT ?3
             """
         var bindings: [(Int32, BindingValue)] = [
             (1, .int64(throughRowID)),
             (2, .double(watermark.timeIntervalSince1970)),
             (3, .int(Int32(max(1, min(limit, 1_000))))),
+            (4, .int64(afterRowIDAtWatermark ?? .max)),
         ]
         for (index, severity) in severities.enumerated() {
-            bindings.append((Int32(index + 4), .text(severity.rawValue)))
+            bindings.append((Int32(index + 5), .text(severity.rawValue)))
         }
         return try queryAlertRows(sql: sql, bindings: bindings, rowIDColumn: 26)
             .map { CommittedAlert(rowID: $0.rowID, alert: $0.alert) }
+    }
+
+    /// Eligible rewrites still waiting after the timestamp/rowid cursor.
+    /// This uses the same predicate as alertsRewrittenForNotification, so
+    /// capped reads report their remaining work instead of hiding it.
+    public func notificationRewriteBacklogCount(
+        throughRowID: Int64,
+        after watermark: Date,
+        afterRowIDAtWatermark: Int64? = nil,
+        severities: [Severity]
+    ) throws -> Int {
+        guard !severities.isEmpty, throughRowID > 0 else { return 0 }
+        let placeholders = severities.indices.map { "?\($0 + 4)" }.joined(separator: ", ")
+        let stmt = try prepare("""
+            SELECT COUNT(*) FROM alerts WHERE +rowid <= ?1 AND timestamp >= ?2
+                AND (timestamp > ?2 OR +rowid > ?3) AND suppressed = 0
+                AND +severity IN (\(placeholders))
+            """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, throughRowID)
+        sqlite3_bind_double(stmt, 2, watermark.timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, afterRowIDAtWatermark ?? .max)
+        for (index, severity) in severities.enumerated() {
+            bindText(stmt, index: Int32(index + 4), value: severity.rawValue)
+        }
+        guard try AlertQueryReadStep.advance(statement: stmt, database: db) else { return 0 }
+        return Int(sqlite3_column_int64(stmt, 0))
     }
 
     /// How many unsuppressed alerts at one of `severities` were committed

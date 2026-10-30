@@ -94,15 +94,15 @@ struct AlertNotificationReadTests {
         // A bare timestamp term lets the planner sort every row at or before
         // the watermark to find the newest; a bare rowid or severity term in
         // the rewrite read walks the table, or every alert of a severity.
-        #expect(source.contains("SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 ORDER BY rowid DESC LIMIT 1"))
+        #expect(source.contains("SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 AND (+timestamp < ?1 OR rowid <= ?2) ORDER BY rowid DESC LIMIT 1"))
         // The walk visits every row when none qualifies, so the timestamp
         // index answers that first.
-        let resume = try #require(source.range(of: "public func notificationResumeRow(after watermark: Date)"))
-        let probe = try #require(source.range(of: "SELECT 1 FROM alerts WHERE timestamp <= ?1 LIMIT 1"))
-        let walk = try #require(source.range(of: "SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 ORDER BY rowid DESC LIMIT 1"))
+        let resume = try #require(source.range(of: "public func notificationResumeRow("))
+        let probe = try #require(source.range(of: "SELECT 1 FROM alerts WHERE timestamp <= ?1 AND (timestamp < ?1 OR +rowid <= ?2) LIMIT 1"))
+        let walk = try #require(source.range(of: "SELECT rowid, id FROM alerts WHERE +timestamp <= ?1 AND (+timestamp < ?1 OR rowid <= ?2) ORDER BY rowid DESC LIMIT 1"))
         #expect(resume.upperBound < probe.lowerBound && probe.upperBound < walk.lowerBound)
         #expect(source.contains("guard try AlertQueryReadStep.advance(statement: probe, database: db) else { return nil }"))
-        #expect(source.contains("FROM alerts WHERE +rowid <= ?1 AND timestamp > ?2 AND suppressed = 0"))
+        #expect(source.contains("FROM alerts WHERE +rowid <= ?1 AND timestamp >= ?2"))
         #expect(source.contains("AND +severity IN (\\(placeholders))"))
     }
 
@@ -146,4 +146,30 @@ struct AlertNotificationReadTests {
                                                                after: Date(timeIntervalSince1970: 3_600),
                                                                severities: [.critical], limit: 10).isEmpty)
     }
+
+    @Test("rewrite pagination includes only the unconsumed rows at its watermark")
+    func rewrittenTimestampTiePages() async throws {
+        let (store, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 0..<5 { try await store.insert(alert: alert("tie-\(index)", at: 5_000, severity: .critical)) }
+        let through = try #require(try await store.newestAlertRow()).rowID
+        let first = try await store.alertsRewrittenForNotification(
+            throughRowID: through, after: Date(timeIntervalSince1970: 4_999),
+            severities: [.critical], limit: 2)
+        let last = try #require(first.last)
+        let next = try await store.alertsRewrittenForNotification(
+            throughRowID: through, after: last.alert.timestamp, afterRowIDAtWatermark: last.rowID,
+            severities: [.critical], limit: 2)
+        #expect(first.map(\.alert.id) == ["tie-0", "tie-1"])
+        #expect(next.map(\.alert.id) == ["tie-2", "tie-3"])
+        #expect(try await store.notificationRewriteBacklogCount(
+            throughRowID: through, after: last.alert.timestamp, afterRowIDAtWatermark: last.rowID,
+            severities: [.critical]) == 3)
+        #expect(try await store.notificationResumeRow(
+            after: last.alert.timestamp, atWatermarkThroughRowID: last.rowID)?.id == "tie-1",
+            "an unfinished tie must not resume after rows that were never considered")
+        #expect(try await store.notificationResumeRow(after: last.alert.timestamp)?.id == "tie-4",
+                "legacy cursors still pass every row at their timestamp")
+    }
+
 }
