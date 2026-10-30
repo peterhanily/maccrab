@@ -116,8 +116,10 @@ struct AlertNotifierLifetimeTests {
         let notifier = try source("Sources/MacCrabApp/AlertNotifier.swift")
         #expect(notifier.contains("static let maximumDeliveriesPerTick = 50"))
         #expect(
-            notifier.contains("fresh.prefix(Self.maximumDeliveriesPerTick)"),
-            "recovering from a 2,091-alert backlog must not post 2,091 banners in one MainActor turn"
+            notifier.contains("rewritten.prefix(Self.maximumDeliveriesPerTick)")
+                && notifier.contains("let freshBudget = Self.maximumDeliveriesPerTick - rewriteSlice.count")
+                && notifier.contains("fresh.prefix(freshBudget)"),
+            "rewritten and fresh alerts must share the 50-alert budget in one MainActor turn"
         )
         #expect(
             notifier.contains("persistCursor()"),
