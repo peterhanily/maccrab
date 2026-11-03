@@ -4146,13 +4146,11 @@ enum DaemonTimers {
                 detectionInputDroppedTotal
             )
 
-            // Sequence-engine partial-match state. The 10K cap evicts
-            // oldest-first from ONE global queue shared by all 41 sequence
-            // rules, so flooding any enabled rule's cheap first step flushes
-            // every other rule's in-flight kill-chain state. Publishing both the
-            // cumulative evictions and the current depth makes that visible:
-            // in-flight parked near the cap with evictions climbing is the
-            // signature of the flush, whether accidental or deliberate.
+            // Sequence-engine partial-match state. The partial cap sheds the
+            // oldest partials of the largest rule bucket first, so flooding one
+            // rule's cheap first step sheds that rule's own in-flight state;
+            // publishing cumulative evictions and the current depth keeps any
+            // shedding visible.
             let sequencePartialPressure = await state.sequenceEngine.partialPressureDiagnostics()
             let sequencePartialsEvicted = sequencePartialPressure.totalShed
             let sequencePartialPressureDict = SequencePartialPressureHeartbeat.fields(sequencePartialPressure)

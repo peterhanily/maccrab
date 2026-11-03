@@ -801,15 +801,14 @@ struct SequenceEngineFireTests {
 
     @Test("#20: expired partials are swept before eviction, so a live sequence is not crowded out")
     func sweepBeforeEvictProtectsLivePartial() async throws {
-        // Detection-exactness guard for the throttle. `evictOldest` removes
-        // oldest-by-createdAt, so the FIRST-created partial (rule A, long window,
-        // still live) sits at the front of the eviction queue. Short-window
-        // EXPIRED filler partials then saturate the pool. Without the sweep-
-        // before-evict guard the throttle could let those expired filler partials
-        // push the total over the cap and evict the older, LIVE A partial first.
-        // The guard clears the expired filler before eviction, so A survives —
-        // matching the pre-throttle behavior where the per-event pre-emptive
-        // sweep had already cleared them.
+        // Detection-exactness guard for the throttle. The FIRST-created partial
+        // (rule A, long window, still live) is the oldest in the pool.
+        // Short-window EXPIRED filler partials then saturate the pool. The guard
+        // clears the expired filler before eviction, so A survives — matching
+        // the pre-throttle behavior where the per-event pre-emptive sweep had
+        // already cleared them. (Since v1.22.6 `evictOldest` sheds the largest
+        // bucket's front, so the filler, not A, would be the victim even without
+        // the guard; this pins the outcome rather than the guard itself.)
         let engine = SequenceEngine(lineage: ProcessLineage(), maxPartialMatches: 10)
         try await engine.addRule(dlExecRule(id: "seq-live", window: 600))   // long window (live)
         try await engine.addRule(fillerRule(id: "filler", window: 0.05))    // short window (expires)

@@ -356,18 +356,24 @@ public actor SequenceEngine {
     /// replay them whenever a delayed `step[0]` seeds a partial. A later event is
     /// history, not a consumable token: the live path fans one event out to every
     /// compatible partial, and replay must do the same for partials that become
-    /// known later. Bounded per rule + window-pruned so a broadly matching later
-    /// step cannot grow the history without limit.
+    /// known later. Window-pruned and bounded by the shared count and
+    /// semantic-weight limits. At a limit, relievePendingPressure retires
+    /// expired history and only then sheds the oldest entry of the largest rule
+    /// bucket, so a broadly matching rule sheds its own history instead of
+    /// flushing other rules'.
     private var pendingLaterSteps: [String: [PendingStep]] = [:]
 
-    /// Per-rule cap on buffered out-of-order later steps. Oldest evicted first.
+    /// Per-rule cap on buffered out-of-order later steps.
     ///
     /// rc.10 proved that the old 256-entry sub-cap discarded exact history long
     /// before the already-enforced global/serialized-state budgets were full:
     /// 510,591 per-rule evictions were observed while the aggregate journal held
-    /// only 330 entries. Let one genuinely hot rule use the complete existing
-    /// global allowance. This expands no resource envelope—the independent
-    /// global count and 7.5 MiB semantic-weight ceilings remain authoritative.
+    /// only 330 entries. One genuinely hot rule may still use the complete
+    /// global allowance while no other rule competes for it; under contention
+    /// the victim is the oldest entry of the largest bucket, so the hot rule
+    /// pays for its own pressure. This expands no resource envelope—the
+    /// independent global count and 7.5 MiB semantic-weight ceilings remain
+    /// authoritative.
     static let maxPendingPerRule = SequenceCheckpointLimits.maximumTotalPendingSteps
 
     /// Global cap shared by runtime, capture, and restore. A per-rule bound is
@@ -378,8 +384,11 @@ public actor SequenceEngine {
         let identity: SequenceCheckpointPendingIdentity
     }
 
-    /// Arrival-ordered global queue. Stale references created by per-rule
-    /// eviction/sweeps are compacted in bounded batches, mirroring partial LRU.
+    /// Arrival-ordered global identity queue, persisted as pendingEvictionOrder
+    /// (validators require exact identity coverage). Since v1.22.6 it no longer
+    /// chooses victims; removals leave stale references for the bounded lazy
+    /// compaction, and capture compacts it exactly. The head index is no
+    /// longer advanced.
     private var pendingEvictionQueue: [PendingStepRef] = []
     private var pendingEvictionQueueHead = 0
     private static let pendingEvictionQueueStaleSlack = 256
@@ -401,6 +410,18 @@ public actor SequenceEngine {
     private var pendingStepsOfferedByRule: [String: UInt64] = [:]
     private var pendingStepsCompletedByRule: [String: UInt64] = [:]
     private var pendingStepsExplicitlyShedByRule: [String: UInt64] = [:]
+
+    /// Victim order at a pending count or weight limit, published with the
+    /// pending pressure diagnostics.
+    static let pendingVictimPolicy = "largest_bucket_oldest_first"
+    /// Deterministic saturation-path operation counts; read only by tests.
+    /// Identity rebuilds are setPendingBucket calls plus queue rebuilds that
+    /// actually run. Element visits are the records scanned by the
+    /// pressure-boundary expiry sweep plus the records summed or shifted by
+    /// in-place front removal: the linear work that remains per boundary.
+    private var pendingIdentityRebuildCount: UInt64 = 0
+    private var pendingForcedQueueCompactionCount: UInt64 = 0
+    private var pendingCapacityElementVisitCount: UInt64 = 0
 
     private enum PendingStepRemovalDisposition {
         case completed
@@ -486,19 +507,19 @@ public actor SequenceEngine {
     private var regexAccessCounter: UInt64 = 0
     private static let maxRegexCacheSize = 2048
 
-    /// Reference to a partial match by stable identity, used for LRU eviction.
-    /// Entries are appended at the back (newest) and
-    /// removed from the front (oldest), so the array stays naturally sorted
-    /// by creation time without any explicit sorting.
+    /// Reference to a partial match by stable identity, appended at seed time.
+    /// Since v1.22.6 victims come from the largest partial bucket; this order
+    /// is kept because the checkpoint persists it as evictionOrder with exact
+    /// coverage.
     struct PartialMatchRef: Sendable, Equatable {
         let ruleId: String
         let partialId: UUID
         let createdAt: Date
     }
 
-    /// Queue of partial-match references ordered oldest-first (append new,
-    /// advance `evictionQueueHead` at the front). A head index avoids Array's
-    /// O(n) `removeFirst()` shift on every cap eviction. Completed/expired
+    /// Queue of partial-match references in creation order (append new). The
+    /// head index is no longer advanced; eviction removes bucket fronts and
+    /// leaves stale refs here. Completed/expired
     /// partials leave stale refs until the bounded compactor runs; the queue is
     /// periodically rebuilt from the authoritative partial-ID set so metadata
     /// cannot grow with lifetime seed throughput.
@@ -560,7 +581,8 @@ public actor SequenceEngine {
     ///   - lineage: The process lineage tracker used for ancestry-based
     ///     correlation checks.
     ///   - maxPartialMatches: Upper bound on total in-flight partial matches
-    ///     across all rules. Oldest are evicted when exceeded. Values outside
+    ///     across all rules. The oldest partials of the largest rule bucket
+    ///     are evicted when exceeded. Values outside
     ///     1...13,000 range are clamped. Defaults to 13,000; the independent
     ///     checkpoint-byte limit can bind sooner, with visible loss reporting.
     ///   - sweepInterval: How often (seconds) to scan for expired partial
@@ -833,6 +855,7 @@ public actor SequenceEngine {
     }
 
     private func compactPendingEvictionQueue(force: Bool = false) {
+        if force { Self.incrementSaturating(&pendingForcedQueueCompactionCount) }
         let liveCount = totalPendingStepCount
         let retentionLimit = liveCount > Int.max - Self.pendingEvictionQueueStaleSlack
             ? Int.max
@@ -843,32 +866,22 @@ public actor SequenceEngine {
                 || activePendingEvictionReferenceCount > retentionLimit
                 || prefixNeedsCompaction else { return }
 
-        let liveIdentities = Set(pendingLaterSteps.flatMap { ruleId, pending in
+        Self.incrementSaturating(&pendingIdentityRebuildCount)
+        // Keep only the first reference to each live identity. A removed entry
+        // leaves its reference here until a rebuild; if the same identity is
+        // admitted again before that, a plain liveness filter would keep both
+        // references and capture would reject the duplicate.
+        var liveIdentities = Set(pendingLaterSteps.flatMap { ruleId, pending in
             pending.map { pendingIdentity(ruleId: ruleId, pending: $0) }
         })
         if pendingEvictionQueueHead < pendingEvictionQueue.count {
             pendingEvictionQueue = pendingEvictionQueue[pendingEvictionQueueHead...].filter {
-                liveIdentities.contains($0.identity)
+                liveIdentities.remove($0.identity) != nil
             }
         } else {
             pendingEvictionQueue.removeAll(keepingCapacity: true)
         }
         pendingEvictionQueueHead = 0
-    }
-
-    private func popOldestPendingReference() -> PendingStepRef? {
-        guard pendingEvictionQueueHead < pendingEvictionQueue.count else {
-            pendingEvictionQueue.removeAll(keepingCapacity: true)
-            pendingEvictionQueueHead = 0
-            return nil
-        }
-        let reference = pendingEvictionQueue[pendingEvictionQueueHead]
-        pendingEvictionQueueHead += 1
-        if pendingEvictionQueueHead == pendingEvictionQueue.count {
-            pendingEvictionQueue.removeAll(keepingCapacity: true)
-            pendingEvictionQueueHead = 0
-        }
-        return reference
     }
 
     public enum PartialPressureReason: String, Sendable {
@@ -961,7 +974,9 @@ public actor SequenceEngine {
     }
 
     /// One actual removal boundary, after expiry retirement. The representative
-    /// is the first live FIFO victim, not an estimate of the dominant step.
+    /// is the first live victim under the largest-bucket policy (heartbeat keys
+    /// keep their historical representative_fifo_victim_* names for
+    /// compatibility), not an estimate of the dominant step.
     /// Rule/step IDs are trusted definitions; no event identities are retained.
     public struct PendingPressureSnapshot: Sendable {
         public let reason: PendingPressureReason
@@ -984,6 +999,7 @@ public actor SequenceEngine {
         public let perRuleCountLimit: Int
         public let globalCountLimit: Int
         public let stateWeightLimitBytes: Int
+        public let victimPolicy: String
         public let lastPressure: PendingPressureSnapshot?
     }
 
@@ -1002,7 +1018,26 @@ public actor SequenceEngine {
             perRuleCountLimit: Self.maxPendingPerRule,
             globalCountLimit: Self.maxPendingTotal,
             stateWeightLimitBytes: SequenceCheckpointCodec.maximumSemanticStateWeight,
+            victimPolicy: Self.pendingVictimPolicy,
             lastPressure: lastPendingPressure
+        )
+    }
+
+    /// Saturation-path operation counts, so tests can pin the cost of capacity
+    /// relief: identity rebuilds (setPendingBucket calls plus queue rebuilds
+    /// that actually run), forced queue compactions, and element visits (see
+    /// pendingCapacityElementVisitCount).
+    struct PendingCapacityOperationDiagnostics: Sendable, Equatable {
+        let identityRebuilds: UInt64
+        let forcedQueueCompactions: UInt64
+        let elementVisits: UInt64
+    }
+
+    func pendingCapacityOperationDiagnostics() -> PendingCapacityOperationDiagnostics {
+        PendingCapacityOperationDiagnostics(
+            identityRebuilds: pendingIdentityRebuildCount,
+            forcedQueueCompactions: pendingForcedQueueCompactionCount,
+            elementVisits: pendingCapacityElementVisitCount
         )
     }
 
@@ -1072,63 +1107,6 @@ public actor SequenceEngine {
     func setEvictionTimestampsForTesting(pending: Date?, partial: Date?) {
         lastPendingStepEvictionAt = pending
         lastPartialEvictionAt = partial
-    }
-
-    private func enforceGlobalPendingCap() {
-        let pendingCountBefore = totalPendingStepCount
-        var excess = pendingCountBefore - Self.maxPendingTotal
-        guard excess > 0 else {
-            compactPendingEvictionQueue()
-            return
-        }
-        var removed = 0
-        var pressureBefore: PendingPressureSnapshot?
-        while excess > 0, let reference = popOldestPendingReference() {
-            let identity = reference.identity
-            guard var bucket = pendingLaterSteps[identity.ruleID],
-                  let index = bucket.firstIndex(where: {
-                      $0.step.id == identity.stepID
-                          && $0.matched.eventId == identity.eventID
-                  }) else { continue }
-            if pressureBefore == nil {
-                pressureBefore = pendingPressureSnapshot(
-                    reason: .globalCount, pendingCount: pendingCountBefore,
-                    ruleID: identity.ruleID, stepID: identity.stepID
-                )
-            }
-            bucket.remove(at: index)
-            setPendingBucket(
-                bucket,
-                for: identity.ruleID,
-                removedDisposition: .explicitlyShed
-            )
-            excess -= 1
-            removed += 1
-        }
-        if let pressureBefore { recordPendingEvictions(removed, before: pressureBefore) }
-        compactPendingEvictionQueue()
-    }
-
-    /// Pop in O(1) amortized time. Array storage is occasionally compacted in
-    /// bulk instead of shifted once per cap eviction.
-    private func popOldestEvictionReference() -> PartialMatchRef? {
-        guard evictionQueueHead < evictionQueue.count else {
-            evictionQueue.removeAll(keepingCapacity: true)
-            evictionQueueHead = 0
-            return nil
-        }
-
-        let ref = evictionQueue[evictionQueueHead]
-        evictionQueueHead += 1
-        if evictionQueueHead == evictionQueue.count {
-            evictionQueue.removeAll(keepingCapacity: true)
-            evictionQueueHead = 0
-        } else if evictionQueueHead >= 1_024,
-                  evictionQueueHead * 2 >= evictionQueue.count {
-            evictionQueue = Array(evictionQueue[evictionQueueHead...])
-            evictionQueueHead = 0
-        }
-        return ref
     }
 
     // MARK: - Regex Caching
@@ -1702,17 +1680,17 @@ public actor SequenceEngine {
     }
 
     /// Cumulative count of partial matches evicted by the global cap since
-    /// start. Eviction is oldest-first across a SINGLE global queue shared by
-    /// every rule, so a flood of a cheap step[0] flushes other rules' in-flight
-    /// kill-chain state — and until now the only trace of that was one
-    /// `logger.warning`: no counter, no heartbeat gauge, no alert, so the flush
-    /// primitive was completely unobservable from outside the log. Surfaced as
+    /// start. Victims are the oldest partials of the largest rule bucket (count
+    /// or semantic weight), so a flood of one rule's cheap step[0] sheds that
+    /// rule's own in-flight state rather than every rule's. Surfaced as
     /// `sequence_partials_evicted_total`.
     public var partialsEvictedTotal: Int {
         evictedPartialCount
     }
 
-    /// Pending later-step history shed by the per-rule or global memory cap.
+    /// Live pending later-step history shed by the count or weight limit
+    /// (largest bucket first). Expired retirement is journal completed, not
+    /// counted here.
     /// A nonzero value means out-of-order sequence continuity was degraded.
     public var pendingStepsEvictedTotal: Int {
         evictedPendingStepCount
@@ -2019,6 +1997,7 @@ public actor SequenceEngine {
         for ruleId: String,
         removedDisposition: PendingStepRemovalDisposition = .completed
     ) {
+        Self.incrementSaturating(&pendingIdentityRebuildCount)
         let oldPending = pendingLaterSteps[ruleId] ?? []
         let oldIdentities = Set(oldPending.map {
             pendingIdentity(ruleId: ruleId, pending: $0)
@@ -2084,6 +2063,57 @@ public actor SequenceEngine {
         )
     }
 
+    /// Removes `count` entries from the front (oldest admission) of one bucket,
+    /// in place, and records exactly what
+    /// setPendingBucket(Array(bucket.dropFirst(count)), removedDisposition:)
+    /// would: offered unchanged; `count` completed or explicitly_shed identities
+    /// (bucket identities are unique: bufferPendingStep dedupes and the
+    /// restore validator rejects duplicates) in total and by rule; checkpoint
+    /// weight reduced by the removed records plus the bucket overhead when the
+    /// bucket empties. Global-queue references of removed identities stay for
+    /// the existing lazy compaction. No identity Set is built, but the cost is
+    /// still linear: the removed records are summed and removeFirst shifts
+    /// every survivor. Callers must not hold a local copy of this bucket
+    /// across the call (that forces a whole-bucket copy-on-write).
+    private func removePendingFront(
+        ruleId: String,
+        count: Int,
+        disposition: PendingStepRemovalDisposition
+    ) {
+        guard count > 0, let size = pendingLaterSteps[ruleId]?.count, count <= size else { return }
+        var removedWeight = pendingLaterSteps[ruleId]?[0..<count].reduce(0) {
+            Self.saturatingTelemetryAdd($0, $1.checkpointWeight)
+        } ?? 0
+        if count == size {
+            removedWeight = Self.saturatingTelemetryAdd(
+                removedWeight,
+                SequenceCheckpointCodec.estimatedBucketOverhead(ruleID: ruleId)
+            )
+        }
+        // Recompute only when the cached total is below the weight removed
+        // here, which only accounting drift can cause. (setPendingBucket
+        // recomputes when the total is below the whole old bucket's weight.)
+        if checkpointStateWeight < removedWeight {
+            checkpointStateWeight = recomputedCheckpointAccountingWeight()
+        }
+        checkpointStateWeight -= min(checkpointStateWeight, removedWeight)
+        if count == size {
+            pendingLaterSteps[ruleId] = nil
+        } else {
+            pendingLaterSteps[ruleId]?.removeFirst(count)
+        }
+        Self.addSaturating(UInt64(size), to: &pendingCapacityElementVisitCount)
+        let removed = UInt64(count)
+        switch disposition {
+        case .completed:
+            Self.addSaturating(removed, to: &pendingStepsCompletedTotal)
+            Self.addSaturating(removed, for: ruleId, in: &pendingStepsCompletedByRule)
+        case .explicitlyShed:
+            Self.addSaturating(removed, to: &pendingStepsExplicitlyShedTotal)
+            Self.addSaturating(removed, for: ruleId, in: &pendingStepsExplicitlyShedByRule)
+        }
+    }
+
     private nonisolated static func weightedPartial(
         _ partial: PartialMatch,
         rule: SequenceRule
@@ -2109,101 +2139,64 @@ public actor SequenceEngine {
 
     /// Enforce the conservative carrier budget on runtime state, while the
     /// event mutation is still in progress. Pending replay history is shed
-    /// oldest-first before live partials; both losses are explicit telemetry.
+    /// before live partials; within each kind the victim is the oldest entry
+    /// of the bucket with the most semantic weight; both losses are explicit
+    /// telemetry. Bucket weights are summed once per call and then adjusted
+    /// per removal, so no identity map is built; each partial removal still
+    /// copies its bucket once.
     private func enforceCheckpointStateWeightBudget() {
-        guard checkpointStateWeight > SequenceCheckpointCodec.maximumSemanticStateWeight else { return }
+        let limit = SequenceCheckpointCodec.maximumSemanticStateWeight
+        guard checkpointStateWeight > limit else { return }
         // An entry can expire after the periodic sweep, including while an
         // evaluation awaits its lineage snapshot. Retire that history as
         // completed before attributing any removal to the carrier limit.
         sweepExpiredBeforePressure()
-        var pendingRemoved = 0
+        var pendingShed = 0
         var partialsRemoved = 0
-        while checkpointStateWeight > SequenceCheckpointCodec.maximumSemanticStateWeight {
-            let before = checkpointStateWeight
-            let overage = before - SequenceCheckpointCodec.maximumSemanticStateWeight
-            var removedThisPass = 0
-
-            let pendingCountBefore = totalPendingStepCount
-            if pendingCountBefore > 0 {
-                var weights: [SequenceCheckpointPendingIdentity: Int] = [:]
-                for (ruleId, pending) in pendingLaterSteps {
-                    for item in pending {
-                        weights[pendingIdentity(ruleId: ruleId, pending: item)] = item.checkpointWeight
-                    }
-                }
-                var selected = Set<SequenceCheckpointPendingIdentity>()
-                var representativeVictim: SequenceCheckpointPendingIdentity?
-                var reduction = 0
-                if pendingEvictionQueueHead < pendingEvictionQueue.count {
-                    for reference in pendingEvictionQueue[pendingEvictionQueueHead...] {
-                        guard let weight = weights[reference.identity] else { continue }
-                        selected.insert(reference.identity)
-                        if representativeVictim == nil { representativeVictim = reference.identity }
-                        reduction = Self.saturatingTelemetryAdd(reduction, weight)
-                        if reduction >= overage { break }
-                    }
-                }
-                if let representativeVictim {
-                    let pressureBefore = pendingPressureSnapshot(
-                        reason: .semanticWeight, pendingCount: pendingCountBefore,
-                        ruleID: representativeVictim.ruleID, stepID: representativeVictim.stepID
+        if checkpointStateWeight > limit, !pendingLaterSteps.isEmpty {
+            var weights = Dictionary(uniqueKeysWithValues: pendingLaterSteps.map {
+                ($0.key, pendingBucketWeight(ruleId: $0.key, pending: $0.value))
+            })
+            var pressureBefore: PendingPressureSnapshot?
+            while checkpointStateWeight > limit,
+                  let victim = largestPendingBucketRuleID(weights: weights),
+                  let front = pendingLaterSteps[victim]?.first {
+                if pressureBefore == nil {
+                    pressureBefore = pendingPressureSnapshot(
+                        reason: .semanticWeight, pendingCount: totalPendingStepCount,
+                        ruleID: victim, stepID: front.step.id
                     )
-                    for (ruleId, pending) in Array(pendingLaterSteps) {
-                        let surviving = pending.filter {
-                            !selected.contains(pendingIdentity(ruleId: ruleId, pending: $0))
-                        }
-                        if surviving.count != pending.count {
-                            setPendingBucket(
-                                surviving,
-                                for: ruleId,
-                                removedDisposition: .explicitlyShed
-                            )
-                        }
-                    }
-                    removedThisPass = selected.count
-                    pendingRemoved += selected.count
-                    recordPendingEvictions(selected.count, before: pressureBefore)
-                    compactPendingEvictionQueue(force: true)
                 }
-            } else {
-                var weights: [UUID: Int] = [:]
-                for partials in partialMatches.values {
-                    for partial in partials { weights[partial.id] = partial.checkpointWeight }
-                }
-                var selected = Set<UUID>()
-                var reduction = 0
-                if evictionQueueHead < evictionQueue.count {
-                    for reference in evictionQueue[evictionQueueHead...] {
-                        guard let weight = weights[reference.partialId] else { continue }
-                        selected.insert(reference.partialId)
-                        reduction = Self.saturatingTelemetryAdd(reduction, weight)
-                        if reduction >= overage { break }
-                    }
-                }
-                if !selected.isEmpty {
-                    let pressureObservedAt = Date()
-                    let partialCountBefore = totalPartialCount
-                    for (ruleId, partials) in Array(partialMatches) {
-                        let surviving = partials.filter { !selected.contains($0.id) }
-                        if surviving.count != partials.count {
-                            setPartialBucket(surviving, for: ruleId)
-                        }
-                    }
-                    removedThisPass = selected.count
-                    partialsRemoved += selected.count
-                    recordPartialPressure(
-                        selected.count, reason: .semanticWeight, observedAt: pressureObservedAt,
-                        pendingCountBefore: pendingCountBefore,
-                        partialCountBefore: partialCountBefore, stateWeightBytesBefore: before
-                    )
-                    compactEvictionQueue(force: true)
-                }
+                removePendingFront(ruleId: victim, count: 1, disposition: .explicitlyShed)
+                pendingShed += 1
+                weights[victim] = pendingLaterSteps[victim] == nil
+                    ? nil
+                    : (weights[victim] ?? 0) - front.checkpointWeight
             }
-
-            guard removedThisPass > 0, checkpointStateWeight < before else {
-                logger.error("Sequence checkpoint weight exceeded without evictable runtime state")
-                break
+            if let pressureBefore { recordPendingEvictions(pendingShed, before: pressureBefore) }
+        }
+        if checkpointStateWeight > limit, pendingLaterSteps.isEmpty, !partialMatches.isEmpty {
+            let observedAt = Date()
+            let partialCountBefore = totalPartialCount
+            let weightBefore = checkpointStateWeight
+            var weights = Dictionary(uniqueKeysWithValues: partialMatches.map {
+                ($0.key, partialBucketWeight(ruleId: $0.key, partials: $0.value))
+            })
+            while checkpointStateWeight > limit,
+                  let victim = largestPartialBucketRuleID(weights: weights),
+                  let partials = partialMatches[victim], let front = partials.first {
+                // The front is the oldest seed: partials are appended at seed time.
+                setPartialBucket(Array(partials.dropFirst()), for: victim)
+                partialsRemoved += 1
+                weights[victim] = partialMatches[victim] == nil
+                    ? nil
+                    : (weights[victim] ?? 0) - front.checkpointWeight
             }
+            recordPartialPressure(
+                partialsRemoved, reason: .semanticWeight, observedAt: observedAt,
+                pendingCountBefore: 0,
+                partialCountBefore: partialCountBefore, stateWeightBytesBefore: weightBefore
+            )
         }
         if partialsRemoved > 0 {
             evictedPartialCount = Self.saturatingTelemetryAdd(
@@ -2212,10 +2205,13 @@ public actor SequenceEngine {
             )
             lastPartialEvictionAt = Date()
         }
-        if pendingRemoved > 0 || partialsRemoved > 0 {
+        if pendingShed > 0 || partialsRemoved > 0 {
             markCheckpointStateMutation()
             compactPendingEvictionQueue()
             compactEvictionQueue()
+        }
+        if checkpointStateWeight > limit {
+            logger.error("Sequence checkpoint weight exceeded without evictable runtime state")
         }
     }
 
@@ -3395,9 +3391,9 @@ public actor SequenceEngine {
     }
 
     /// Retain an ordered rule's recent later step for delayed initial events (the
-    /// A2 cross-consumer race — see `pendingLaterSteps`). Bounded per rule (oldest
-    /// evicted) and deduped by (eventId, stepId) so the same event cannot occupy
-    /// the history twice across re-evaluations.
+    /// A2 cross-consumer race — see `pendingLaterSteps`). At capacity the largest
+    /// bucket's oldest entry is shed, after expiry; deduped by (eventId, stepId)
+    /// so the same event cannot occupy the history twice across re-evaluations.
     /// Whether the declared step categories expose the intentional slow-file /
     /// fast-priority inversion shape.
     ///
@@ -3453,27 +3449,103 @@ public actor SequenceEngine {
         // Account admission before retirement so an expired item is completed,
         // and a genuinely displaced live item is shed, in separate mutations.
         appendUniquePendingStep(pending, for: ruleId)
-        if (pendingLaterSteps[ruleId]?.count ?? 0) > Self.maxPendingPerRule
-            || totalPendingStepCount > Self.maxPendingTotal {
-            sweepExpiredBeforePressure()
-        }
-        // Copy only at actual pressure, after the sweep replaced any buckets.
-        if var buf = pendingLaterSteps[ruleId], buf.count > Self.maxPendingPerRule {
-            let pressureBefore = pendingPressureSnapshot(
-                reason: .perRuleCount, pendingCount: totalPendingStepCount,
-                ruleID: ruleId, stepID: buf[0].step.id
-            )
-            let removed = buf.count - Self.maxPendingPerRule
-            buf.removeFirst(removed)
-            setPendingBucket(
-                buf,
-                for: ruleId,
-                removedDisposition: .explicitlyShed
-            )
-            recordPendingEvictions(removed, before: pressureBefore)
-        }
-        enforceGlobalPendingCap()
+        relievePendingPressure(admittingRuleID: ruleId)
+        // The per-admission lazy compaction that bounds stale references.
+        compactPendingEvictionQueue()
         markCheckpointStateMutation()
+    }
+
+    /// Count-limit relief after one unique admission. Synchronous (no await);
+    /// runs inside the evaluation that holds the mutation lease.
+    ///  1. Retire expired history (compare-only sweep) as completed.
+    ///  2. While a count limit is exceeded, pick the victim bucket: the admitting
+    ///     rule if it alone exceeds the per-rule cap, else the largest bucket.
+    ///     Max-min fair: a flooding rule pays with its own history.
+    ///  3. Shed its front (oldest admission) as explicitly_shed. One pressure
+    ///     record per call; the first live victim is the representative.
+    /// Each call follows a single append, so it sheds at most one live entry.
+    /// The work left per over-cap admission is linear but hash-free: the
+    /// admission's dedupe scan of its own bucket, the compare-only sweep over
+    /// all retained state, and the shift of the victim bucket.
+    private func relievePendingPressure(admittingRuleID: String) {
+        func overLimit() -> Bool {
+            totalPendingStepCount > Self.maxPendingTotal
+                || (pendingLaterSteps[admittingRuleID]?.count ?? 0) > Self.maxPendingPerRule
+        }
+        guard overLimit() else { return }
+        sweepExpiredBeforePressure()
+        var pressureBefore: PendingPressureSnapshot?
+        var shed = 0
+        while overLimit() {
+            let victim: String
+            if (pendingLaterSteps[admittingRuleID]?.count ?? 0) > Self.maxPendingPerRule {
+                victim = admittingRuleID
+            } else if let largest = largestPendingBucketRuleID(weights: nil) {
+                victim = largest
+            } else {
+                break
+            }
+            guard let front = pendingLaterSteps[victim]?.first else { break }
+            if pressureBefore == nil {
+                let victimCount = pendingLaterSteps[victim]?.count ?? 0
+                pressureBefore = pendingPressureSnapshot(
+                    reason: victimCount > Self.maxPendingPerRule ? .perRuleCount : .globalCount,
+                    pendingCount: totalPendingStepCount, ruleID: victim, stepID: front.step.id
+                )
+            }
+            removePendingFront(ruleId: victim, count: 1, disposition: .explicitlyShed)
+            shed += 1
+        }
+        if let pressureBefore { recordPendingEvictions(shed, before: pressureBefore) }
+    }
+
+    /// Victim order at a capacity limit: more semantic weight (weight pressure
+    /// only), then more entries, then the older front, then the smaller rule
+    /// ID. A total order, so the choice never depends on Dictionary iteration
+    /// order and a restored engine picks the same victim from the same buckets.
+    private struct BucketVictimRank {
+        let weight: Int
+        let count: Int
+        let front: Date
+        let ruleId: String
+
+        func ranksAhead(of other: BucketVictimRank) -> Bool {
+            if weight != other.weight { return weight > other.weight }
+            if count != other.count { return count > other.count }
+            if front != other.front { return front < other.front }
+            return ruleId < other.ruleId
+        }
+    }
+
+    /// Max-min fair pending victim bucket, O(#rules). With `weights` (weight
+    /// pressure) the most semantic weight ranks first; otherwise the most
+    /// entries. Reads only; never mutates.
+    private func largestPendingBucketRuleID(weights: [String: Int]?) -> String? {
+        var best: BucketVictimRank?
+        for (ruleId, bucket) in pendingLaterSteps {
+            guard let front = bucket.first else { continue }
+            let rank = BucketVictimRank(
+                weight: weights?[ruleId] ?? 0, count: bucket.count,
+                front: front.arrivedAt, ruleId: ruleId
+            )
+            if best.map({ rank.ranksAhead(of: $0) }) ?? true { best = rank }
+        }
+        return best?.ruleId
+    }
+
+    /// The partial-pool counterpart of largestPendingBucketRuleID; the front's
+    /// age is its createdAt.
+    private func largestPartialBucketRuleID(weights: [String: Int]?) -> String? {
+        var best: BucketVictimRank?
+        for (ruleId, bucket) in partialMatches {
+            guard let front = bucket.first else { continue }
+            let rank = BucketVictimRank(
+                weight: weights?[ruleId] ?? 0, count: bucket.count,
+                front: front.createdAt, ruleId: ruleId
+            )
+            if best.map({ rank.ranksAhead(of: $0) }) ?? true { best = rank }
+        }
+        return best?.ruleId
     }
 
     /// Replay retained out-of-order later steps for `ruleId` against the rule's
@@ -3780,21 +3852,67 @@ public actor SequenceEngine {
         if checkpointStateChanged { markCheckpointStateMutation() }
     }
 
-    /// Called only at an actual count/weight boundary, never for every append.
-    /// There is no await or recursive cap enforcement inside the sweep.
+    /// Retire already-expired state at an actual count/weight boundary, before
+    /// any live state can be shed. Compare-only: an unexpired bucket is not
+    /// copied, re-summed or hashed, and neither global queue is compacted here
+    /// (stale references stay bounded by the lazy compaction and are removed
+    /// exactly at capture). The comparison itself still scans all retained
+    /// state once per boundary. No await; no cap enforcement inside.
     private func sweepExpiredBeforePressure() {
         let cutoff = Date()
-        sweepExpired(now: cutoff)
+        var changed = false
+        var visited = 0
+        for ruleId in Array(partialMatches.keys) {
+            guard let rule = rules[ruleId] else {
+                setPartialBucket([], for: ruleId)
+                changed = true
+                continue
+            }
+            let isExpired: (PartialMatch) -> Bool = {
+                cutoff.timeIntervalSince($0.createdAt) > rule.window
+            }
+            visited += partialMatches[ruleId]?.count ?? 0
+            guard partialMatches[ruleId]?.contains(where: isExpired) == true else { continue }
+            setPartialBucket(partialMatches[ruleId]?.filter { !isExpired($0) } ?? [], for: ruleId)
+            changed = true
+        }
+        for ruleId in Array(pendingLaterSteps.keys) {
+            guard let rule = rules[ruleId] else {
+                setPendingBucket([], for: ruleId)
+                changed = true
+                continue
+            }
+            let isExpired: (PendingStep) -> Bool = {
+                cutoff.timeIntervalSince($0.arrivedAt) > rule.window
+            }
+            var prefix = 0
+            var expired = 0
+            // Scoped read: the bucket reference ends before any removal below.
+            if let bucket = pendingLaterSteps[ruleId] {
+                visited += bucket.count
+                prefix = bucket.prefix(while: isExpired).count
+                expired = prefix + bucket[prefix...].lazy.filter(isExpired).count
+            }
+            guard expired > 0 else { continue }
+            if expired == prefix {
+                // Arrival-ordered bucket: the expired entries are its front.
+                removePendingFront(ruleId: ruleId, count: prefix, disposition: .completed)
+            } else {
+                // Arrival order regressed (a wall-clock step or a crafted restore).
+                setPendingBucket(pendingLaterSteps[ruleId]?.filter { !isExpired($0) } ?? [], for: ruleId)
+            }
+            changed = true
+        }
+        Self.addSaturating(UInt64(visited), to: &pendingCapacityElementVisitCount)
         lastSweep = cutoff
+        if changed { markCheckpointStateMutation() }
     }
 
-    /// Evict the oldest partial matches to bring total count back under the cap.
-    ///
-    /// Uses the `evictionQueue` which is naturally ordered oldest-first
-    /// (entries are appended at creation time). This avoids the previous
-    /// O(n log n) sort of all 10K+ partial matches on every eviction.
-    /// Stale refs (whose partial was already removed by sweepExpired or
-    /// a completed sequence) are simply skipped.
+    /// Evict partial matches to bring the total back under the cap. Each
+    /// victim is the front (oldest seed) of the largest partial bucket; ties
+    /// break by older front, then the smaller rule ID. The global
+    /// evictionQueue is not consulted. Each removal copies the victim bucket
+    /// once, as the earlier remove(at:) on a bucket copy did.
     private func evictOldest(count: Int) {
         guard count > 0 else { return }
 
@@ -3803,25 +3921,12 @@ public actor SequenceEngine {
         let pendingCountBefore = totalPendingStepCount
         let stateWeightBefore = checkpointStateWeight
         var removed = 0
-        while removed < count, let ref = popOldestEvictionReference() {
-
-            // Look up the partials array for this rule.
-            guard var partials = partialMatches[ref.ruleId] else {
-                // Rule's partials were already fully cleared (e.g. rule disabled).
-                continue
-            }
-
-            // Find the exact partial. Creation timestamps are not identities:
-            // one event can seed multiple unordered steps at the same instant,
-            // and a stale ref for a completed one must not evict its sibling.
-            guard let idx = partials.firstIndex(where: { $0.id == ref.partialId }) else {
-                continue
-            }
-
-            partials.remove(at: idx)
+        while removed < count,
+              let victim = largestPartialBucketRuleID(weights: nil),
+              let partials = partialMatches[victim], !partials.isEmpty {
+            // The front is the oldest seed: partials are appended at seed time.
+            setPartialBucket(Array(partials.dropFirst()), for: victim)
             removed += 1
-
-            setPartialBucket(partials, for: ref.ruleId)
         }
 
         if removed > 0 {

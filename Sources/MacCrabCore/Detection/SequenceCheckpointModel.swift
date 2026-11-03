@@ -50,9 +50,11 @@ struct SequenceCheckpointPendingBucket: Codable, Sendable, Equatable {
     let steps: [SequenceCheckpointPendingStep]
 }
 
-/// Stable identity for the global oldest-first pending-history queue. Per-rule
-/// arrays preserve their own FIFO semantics; this second order is required to
-/// make global-cap eviction choose the exact same item after a restart.
+/// Stable identity for the arrival-ordered global pending-history queue
+/// persisted as pendingEvictionOrder. Since v1.22.6 victim choice uses the
+/// per-rule buckets (largest bucket, oldest first), so a restart picks the same
+/// victim from the restored buckets alone; this order is kept for wire
+/// compatibility and exact identity coverage.
 struct SequenceCheckpointPendingIdentity: Codable, Sendable, Equatable, Hashable {
     let ruleID: String
     let stepID: String
