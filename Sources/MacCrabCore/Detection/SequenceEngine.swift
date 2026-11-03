@@ -2603,19 +2603,29 @@ public actor SequenceEngine {
             // partial. With no pending history it cannot replay one either.
             // Keep the incoming PID's authoritative ancestry for its durable
             // seed, but do not rebuild unused ancestry for the retained pool.
-            // Any possible advance/replay keeps the complete existing union.
+            // Any possible advance keeps every partial PID.
             let canAdvanceExisting = !plan.rule.ordered || plan.matchingSteps.contains {
                 $0.id != plan.rule.steps.first?.id
             }
-            let hasPendingReplay = pendingLaterSteps[plan.ruleId]?.isEmpty == false
-            guard canAdvanceExisting || hasPendingReplay else { continue }
+            // Only an ordered step[0] match can seed, and only a seed runs the
+            // full replay over pending history (Phase 3), so only such an
+            // event requests pending PIDs. Any replay on advance relies on
+            // each entry's carried evidence. Requesting the history's PIDs for
+            // every later-step event made a flood of buffered writes cost
+            // O(history) lineage lookups per event.
+            let canSeed = plan.rule.ordered
+                && plan.matchingSteps.contains { $0.id == plan.rule.steps.first?.id }
+            let canReplayPending = canSeed && pendingLaterSteps[plan.ruleId]?.isEmpty == false
+            guard canAdvanceExisting || canReplayPending else { continue }
             for partial in partialMatches[plan.ruleId] ?? [] {
                 for matched in partial.matchedSteps.values {
                     relationshipPIDs.insert(matched.processPid)
                 }
             }
-            for pending in pendingLaterSteps[plan.ruleId] ?? [] {
-                relationshipPIDs.insert(pending.matched.processPid)
+            if canReplayPending {
+                for pending in pendingLaterSteps[plan.ruleId] ?? [] {
+                    relationshipPIDs.insert(pending.matched.processPid)
+                }
             }
         }
 

@@ -175,6 +175,55 @@ struct SequenceLineageSeedSnapshotTests {
         #expect(after.evictionOrder == survivors.map(\.id))
     }
 
+    @Test("Only an event that can seed requests the pending history's ancestry")
+    func laterStepEventsSkipPendingAncestry() async throws {
+        let reference = Date()
+        let lineage = ProcessLineage()
+        let engine = SequenceEngine(lineage: lineage, sweepInterval: 3_600)
+        try await engine.addRule(rule())
+        _ = await engine.evaluate(event(pid: 800, at: reference))
+
+        // Unrelated writers: each one is buffered and none advances the partial.
+        let operationsBefore = await lineage.relationshipSnapshotDiagnostics()
+        var completions = 0
+        for offset in 0..<4_000 {
+            let write = event(initial: false, pid: 10_000 + Int32(offset), at: reference.addingTimeInterval(1))
+            completions += await engine.evaluate(write).count
+        }
+        #expect(completions == 0)
+        let afterWrites = await lineage.relationshipSnapshotDiagnostics()
+        let writeRequests = afterWrites.requestCount - operationsBefore.requestCount
+        let writePIDs = afterWrites.requestedPIDCount - operationsBefore.requestedPIDCount
+        #expect(writeRequests == 4_000)
+        #expect(writePIDs == 8_000, "each write requests its own PID and the partial's, not the history's")
+        #expect(afterWrites.largestBatch == 2)
+        let extra = event(initial: false, pid: 20_000, at: reference.addingTimeInterval(3))
+        #expect(await engine.evaluate(extra).isEmpty)
+        let afterExtra = await lineage.relationshipSnapshotDiagnostics()
+        let extraPIDs = afterExtra.requestedPIDCount - afterWrites.requestedPIDCount
+        #expect(extraPIDs == 2)
+
+        // A seed replays the history, so it still requests every pending PID
+        // and completes from lineage recorded after the write was buffered.
+        await record(lineage, pid: 900, ppid: 1, at: reference)
+        await record(lineage, pid: 20_000, ppid: 900, at: reference)
+        let matches = await engine.evaluate(event(pid: 900, at: reference.addingTimeInterval(2)))
+        #expect(matches.count == 1 && matches.first?.ruleId == rule().id)
+        let afterSeed = await lineage.relationshipSnapshotDiagnostics()
+        let seedPIDs = afterSeed.requestedPIDCount - afterExtra.requestedPIDCount
+        #expect(seedPIDs == 4_003, "the seed, the older partial and all 4,001 pending PIDs")
+
+        for ledger in await engine.pendingStepConservationByRule().values {
+            #expect(ledger.conservationMaintained)
+        }
+        #expect(await engine.pendingPressureDiagnostics().classificationConserved)
+        #expect(await engine.partialPressureDiagnostics().classificationConserved)
+        let after = try await capture(engine)
+        #expect(after.pendingBuckets.flatMap(\.steps).count == 4_001)
+        let survivors = after.partialBuckets.flatMap(\.partials)
+        #expect(survivors.count == 1 && survivors.first?.matchedSteps.first?.processPID == 800)
+    }
+
     @Test("Unordered first-step event keeps retained ancestry needed for an existing later-step seed")
     func unorderedPlanKeepsFullSnapshot() async throws {
         let reference = Date()
