@@ -336,6 +336,24 @@ public actor SequenceEngine {
         let matched: MatchedStep
         let arrivedAt: Date
         var checkpointWeight: Int
+        /// Non-nil only for a live admission of the rule's fold-eligible step
+        /// whose event carries an ES audit identity. Restored entries keep nil
+        /// and are never folded. About 40 B inline per entry (0.3 MiB at the
+        /// 8,192-entry cap); the step ID and ancestry buffers are shared with
+        /// the rule and the matched step through copy-on-write, not copied.
+        var foldKey: PendingFoldKey? = nil
+    }
+
+    /// Writer identity plus the exact relation evidence the folded step's
+    /// constraints read (see foldPendingBucket). Runtime only: never encoded,
+    /// never restored.
+    struct PendingFoldKey: Hashable, Sendable {
+        let stepID: String
+        let pid: pid_t
+        let pidVersion: UInt32
+        let parentPid: pid_t
+        let parentWasTracked: Bool
+        let ancestorPids: [pid_t]
     }
 
     private struct EventEvaluationPlan {
@@ -358,9 +376,10 @@ public actor SequenceEngine {
     /// compatible partial, and replay must do the same for partials that become
     /// known later. Window-pruned and bounded by the shared count and
     /// semantic-weight limits. At a limit, relievePendingPressure retires
-    /// expired history and only then sheds the oldest entry of the largest rule
-    /// bucket, so a broadly matching rule sheds its own history instead of
-    /// flushing other rules'.
+    /// expired history, folds one writer's duplicate entries (foldPendingBucket)
+    /// and only then sheds the oldest entry of the largest rule bucket, so a
+    /// broadly matching rule sheds its own history instead of flushing other
+    /// rules'.
     private var pendingLaterSteps: [String: [PendingStep]] = [:]
 
     /// Per-rule cap on buffered out-of-order later steps.
@@ -411,14 +430,32 @@ public actor SequenceEngine {
     private var pendingStepsCompletedByRule: [String: UInt64] = [:]
     private var pendingStepsExplicitlyShedByRule: [String: UInt64] = [:]
 
+    /// Runtime-only fold bookkeeping. Not persisted; not part of the journal.
+    /// The serial counts unique pending admissions across all rules; a rule
+    /// whose last fold attempt was low-yield is not attempted again until the
+    /// serial reaches its entry here.
+    private var pendingAdmissionSerial: UInt64 = 0
+    private var pendingFoldBlockedUntilSerial: [String: UInt64] = [:]
+    private var pendingFoldAttemptsTotal: UInt64 = 0
+    private var pendingFoldedStepsTotal: UInt64 = 0
+    private var lastPendingFold: PendingFoldSnapshot?
+    /// A fold attempt that removes fewer than this many entries blocks further
+    /// attempts on that rule for this many unique pending admissions, so fold
+    /// work stays O(bucket/256) per admission even when each attempt could
+    /// remove only one entry. The price: after a low-yield attempt, a
+    /// single-writer burst on that rule can shed up to 255 live entries before
+    /// the next attempt folds it.
+    private static let pendingFoldRetryAdmissions: UInt64 = 256
+
     /// Victim order at a pending count or weight limit, published with the
     /// pending pressure diagnostics.
     static let pendingVictimPolicy = "largest_bucket_oldest_first"
     /// Deterministic saturation-path operation counts; read only by tests.
     /// Identity rebuilds are setPendingBucket calls plus queue rebuilds that
     /// actually run. Element visits are the records scanned by the
-    /// pressure-boundary expiry sweep plus the records summed or shifted by
-    /// in-place front removal: the linear work that remains per boundary.
+    /// pressure-boundary expiry sweep, the records summed or shifted by
+    /// in-place front removal, and the records a fold attempt reads (twice
+    /// when it merges): the linear work that remains per boundary.
     private var pendingIdentityRebuildCount: UInt64 = 0
     private var pendingForcedQueueCompactionCount: UInt64 = 0
     private var pendingCapacityElementVisitCount: UInt64 = 0
@@ -757,6 +794,7 @@ public actor SequenceEngine {
                 setPendingBucket([], for: ruleId)
                 checkpointStateChanged = true
             }
+            pendingFoldBlockedUntilSerial.removeValue(forKey: ruleId)
             if resetStats {
                 ruleStats.removeValue(forKey: ruleId)
             }
@@ -973,10 +1011,10 @@ public actor SequenceEngine {
         case semanticWeight = "semantic_weight"
     }
 
-    /// One actual removal boundary, after expiry retirement. The representative
-    /// is the first live victim under the largest-bucket policy (heartbeat keys
-    /// keep their historical representative_fifo_victim_* names for
-    /// compatibility), not an estimate of the dominant step.
+    /// One actual removal boundary, after expiry retirement and folding. The
+    /// representative is the first live victim under the largest-bucket policy
+    /// (heartbeat keys keep their historical representative_fifo_victim_* names
+    /// for compatibility), not an estimate of the dominant step.
     /// Rule/step IDs are trusted definitions; no event identities are retained.
     public struct PendingPressureSnapshot: Sendable {
         public let reason: PendingPressureReason
@@ -990,6 +1028,16 @@ public actor SequenceEngine {
         public fileprivate(set) var removedPendingSteps: UInt64
     }
 
+    /// The latest fold that removed entries. Rule/step IDs are trusted
+    /// definitions; no event identities are retained.
+    public struct PendingFoldSnapshot: Sendable {
+        public let observedAt: Date
+        public let ruleID: String
+        public let stepID: String
+        public let removedPendingSteps: UInt64
+        public let foldedGroups: Int
+    }
+
     public struct PendingPressureDiagnostics: Sendable {
         public let perRuleCountShedTotal: UInt64
         public let globalCountShedTotal: UInt64
@@ -1000,6 +1048,11 @@ public actor SequenceEngine {
         public let globalCountLimit: Int
         public let stateWeightLimitBytes: Int
         public let victimPolicy: String
+        /// Same-writer entries folded at a limit. They are journal completed,
+        /// never shed, so classificationConserved does not include them.
+        public let foldedStepsTotal: UInt64
+        public let foldAttemptsTotal: UInt64
+        public let lastFold: PendingFoldSnapshot?
         public let lastPressure: PendingPressureSnapshot?
     }
 
@@ -1019,25 +1072,30 @@ public actor SequenceEngine {
             globalCountLimit: Self.maxPendingTotal,
             stateWeightLimitBytes: SequenceCheckpointCodec.maximumSemanticStateWeight,
             victimPolicy: Self.pendingVictimPolicy,
+            foldedStepsTotal: pendingFoldedStepsTotal,
+            foldAttemptsTotal: pendingFoldAttemptsTotal,
+            lastFold: lastPendingFold,
             lastPressure: lastPendingPressure
         )
     }
 
     /// Saturation-path operation counts, so tests can pin the cost of capacity
     /// relief: identity rebuilds (setPendingBucket calls plus queue rebuilds
-    /// that actually run), forced queue compactions, and element visits (see
-    /// pendingCapacityElementVisitCount).
+    /// that actually run), forced queue compactions, element visits (see
+    /// pendingCapacityElementVisitCount) and fold attempts.
     struct PendingCapacityOperationDiagnostics: Sendable, Equatable {
         let identityRebuilds: UInt64
         let forcedQueueCompactions: UInt64
         let elementVisits: UInt64
+        let foldAttempts: UInt64
     }
 
     func pendingCapacityOperationDiagnostics() -> PendingCapacityOperationDiagnostics {
         PendingCapacityOperationDiagnostics(
             identityRebuilds: pendingIdentityRebuildCount,
             forcedQueueCompactions: pendingForcedQueueCompactionCount,
-            elementVisits: pendingCapacityElementVisitCount
+            elementVisits: pendingCapacityElementVisitCount,
+            foldAttempts: pendingFoldAttemptsTotal
         )
     }
 
@@ -1470,6 +1528,8 @@ public actor SequenceEngine {
         // Even when no invalidated rule currently owns a bucket, remove stale
         // completed/expired refs and any queue-only state from old definitions.
         compactEvictionQueue(force: true)
+        // A fold throttle can outlive its rule's state; drop removed rules'.
+        pendingFoldBlockedUntilSerial = pendingFoldBlockedUntilSerial.filter { rules[$0.key] != nil }
         precompileRegexes()
         logger.info("Reloaded \(batch.rules.count) sequence rules from \(directory.path)")
         return batch.rules.count
@@ -1659,6 +1719,7 @@ public actor SequenceEngine {
         if !enabled {
             setPartialBucket([], for: ruleId)
             setPendingBucket([], for: ruleId)
+            pendingFoldBlockedUntilSerial.removeValue(forKey: ruleId)
             compactEvictionQueue(force: true)
             compactPendingEvictionQueue(force: true)
         }
@@ -1689,8 +1750,8 @@ public actor SequenceEngine {
     }
 
     /// Live pending later-step history shed by the count or weight limit
-    /// (largest bucket first). Expired retirement is journal completed, not
-    /// counted here.
+    /// (largest bucket first). Expired retirement and same-writer folds are
+    /// journal completed, not counted here.
     /// A nonzero value means out-of-order sequence continuity was degraded.
     public var pendingStepsEvictedTotal: Int {
         evictedPendingStepCount
@@ -2061,6 +2122,7 @@ public actor SequenceEngine {
             checkpointStateWeight,
             Self.saturatingTelemetryAdd(bucketOverhead, pending.checkpointWeight)
         )
+        pendingAdmissionSerial &+= 1
     }
 
     /// Removes `count` entries from the front (oldest admission) of one bucket,
@@ -2141,9 +2203,10 @@ public actor SequenceEngine {
     /// event mutation is still in progress. Pending replay history is shed
     /// before live partials; within each kind the victim is the oldest entry
     /// of the bucket with the most semantic weight; both losses are explicit
-    /// telemetry. Bucket weights are summed once per call and then adjusted
-    /// per removal, so no identity map is built; each partial removal still
-    /// copies its bucket once.
+    /// telemetry. A pending victim bucket gets one throttled fold attempt
+    /// before its first shed. Bucket weights are summed once per call and
+    /// then adjusted per removal, so no identity map is built; each partial
+    /// removal still copies its bucket once.
     private func enforceCheckpointStateWeightBudget() {
         let limit = SequenceCheckpointCodec.maximumSemanticStateWeight
         guard checkpointStateWeight > limit else { return }
@@ -2157,10 +2220,17 @@ public actor SequenceEngine {
             var weights = Dictionary(uniqueKeysWithValues: pendingLaterSteps.map {
                 ($0.key, pendingBucketWeight(ruleId: $0.key, pending: $0.value))
             })
+            var foldTried = Set<String>()
             var pressureBefore: PendingPressureSnapshot?
             while checkpointStateWeight > limit,
-                  let victim = largestPendingBucketRuleID(weights: weights),
-                  let front = pendingLaterSteps[victim]?.first {
+                  let victim = largestPendingBucketRuleID(weights: weights) {
+                if foldTried.insert(victim).inserted, foldPendingBucketIfDue(ruleId: victim) > 0 {
+                    weights[victim] = pendingLaterSteps[victim].map {
+                        pendingBucketWeight(ruleId: victim, pending: $0)
+                    }
+                    continue
+                }
+                guard let front = pendingLaterSteps[victim]?.first else { break }
                 if pressureBefore == nil {
                     pressureBefore = pendingPressureSnapshot(
                         reason: .semanticWeight, pendingCount: totalPendingStepCount,
@@ -2865,8 +2935,19 @@ public actor SequenceEngine {
             // for silent sequence false negatives.
             if rule.ordered {
                 let initialStepId = rule.steps.first?.id
+                let foldStepID = Self.pendingFoldStepID(for: rule)
                 for step in matchingSteps where step.id != initialStepId {
-                    bufferPendingStep(ruleId: ruleId, step: step, matched: eventMatchedStep(step), now: now)
+                    let matched = eventMatchedStep(step)
+                    let foldKey = step.id == foldStepID
+                        ? Self.pendingFoldKey(
+                            stepID: step.id,
+                            matched: matched,
+                            identity: event.process.auditIdentity
+                        )
+                        : nil
+                    bufferPendingStep(
+                        ruleId: ruleId, step: step, matched: matched, foldKey: foldKey, now: now
+                    )
                 }
             }
         }
@@ -3402,8 +3483,9 @@ public actor SequenceEngine {
 
     /// Retain an ordered rule's recent later step for delayed initial events (the
     /// A2 cross-consumer race — see `pendingLaterSteps`). At capacity the largest
-    /// bucket's oldest entry is shed, after expiry; deduped by (eventId, stepId)
-    /// so the same event cannot occupy the history twice across re-evaluations.
+    /// bucket's oldest entry is shed, after expiry and folding; deduped by
+    /// (eventId, stepId) so the same event cannot occupy the history twice
+    /// across re-evaluations.
     /// Whether the declared step categories expose the intentional slow-file /
     /// fast-priority inversion shape.
     ///
@@ -3439,7 +3521,13 @@ public actor SequenceEngine {
         step.logsourceCategory == "file_event"
     }
 
-    private func bufferPendingStep(ruleId: String, step: SequenceStep, matched: MatchedStep, now: Date) {
+    private func bufferPendingStep(
+        ruleId: String,
+        step: SequenceStep,
+        matched: MatchedStep,
+        foldKey: PendingFoldKey?,
+        now: Date
+    ) {
         if pendingLaterSteps[ruleId]?.contains(where: {
             $0.matched.eventId == matched.eventId && $0.step.id == step.id
         }) == true {
@@ -3450,7 +3538,8 @@ public actor SequenceEngine {
             step: step,
             matched: matched,
             arrivedAt: now,
-            checkpointWeight: 0
+            checkpointWeight: 0,
+            foldKey: foldKey
         )
         pending = Self.weightedPending(pending, ruleId: ruleId, rule: rule)
         pendingEvictionQueue.append(PendingStepRef(
@@ -3471,12 +3560,19 @@ public actor SequenceEngine {
     ///  2. While a count limit is exceeded, pick the victim bucket: the admitting
     ///     rule if it alone exceeds the per-rule cap, else the largest bucket.
     ///     Max-min fair: a flooding rule pays with its own history.
-    ///  3. Shed its front (oldest admission) as explicitly_shed. One pressure
-    ///     record per call; the first live victim is the representative.
+    ///  3. Fold that bucket at most once per call, when foldPendingBucketIfDue
+    ///     allows it (fold removals are completed). When the victim is another
+    ///     rule, try the same throttled fold on the admitting rule's bucket
+    ///     before shedding, so a foldable burst in a smaller bucket does not
+    ///     shed a larger rule's live history.
+    ///  4. Otherwise shed the victim's front (oldest admission) as
+    ///     explicitly_shed. One pressure record per call; the first live
+    ///     victim is the representative.
     /// Each call follows a single append, so it sheds at most one live entry.
-    /// The work left per over-cap admission is linear but hash-free: the
-    /// admission's dedupe scan of its own bucket, the compare-only sweep over
-    /// all retained state, and the shift of the victim bucket.
+    /// The work left per over-cap admission is linear and, apart from a due
+    /// fold attempt, hash-free: the admission's dedupe scan of its own bucket,
+    /// the compare-only sweep over all retained state, and the shift of the
+    /// victim bucket.
     private func relievePendingPressure(admittingRuleID: String) {
         func overLimit() -> Bool {
             totalPendingStepCount > Self.maxPendingTotal
@@ -3484,6 +3580,7 @@ public actor SequenceEngine {
         }
         guard overLimit() else { return }
         sweepExpiredBeforePressure()
+        var foldTried = Set<String>()
         var pressureBefore: PendingPressureSnapshot?
         var shed = 0
         while overLimit() {
@@ -3494,6 +3591,13 @@ public actor SequenceEngine {
                 victim = largest
             } else {
                 break
+            }
+            if foldTried.insert(victim).inserted, foldPendingBucketIfDue(ruleId: victim) > 0 {
+                continue
+            }
+            if victim != admittingRuleID, foldTried.insert(admittingRuleID).inserted,
+               foldPendingBucketIfDue(ruleId: admittingRuleID) > 0 {
+                continue
             }
             guard let front = pendingLaterSteps[victim]?.first else { break }
             if pressureBefore == nil {
@@ -3556,6 +3660,196 @@ public actor SequenceEngine {
             if best.map({ rank.ranksAhead(of: $0) }) ?? true { best = rank }
         }
         return best?.ruleId
+    }
+
+    // MARK: - At-capacity same-writer fold (v1.22.6)
+    //
+    // Scope. Only inside pressure relief, after expired history is retired and
+    // before any live entry would be shed: the point where earlier releases
+    // discarded live history outright. Only the step pendingFoldStepID(for:)
+    // names (S1 = steps[1]: `.descendant` of steps[0], the only step of its
+    // logsource category, correlation processLineage or none, and no later
+    // step relating to S1 or relying on lineage correlation without its own
+    // relation). Only entries with equal fold keys: the ES audit identity
+    // (pid, pidversion) plus identical processParentPid,
+    // processParentWasTracked and processAncestorPids. Restored entries carry
+    // no key and never fold.
+    //
+    // Dominance. For a partial whose only binding is steps[0] at event time t0
+    // by process p0, advancePartial accepts an S1 entry E iff (a) E's process
+    // is a descendant of p0, decided by the lineage snapshot for E's pid and by
+    // E's recorded parent and ancestry, all identical within a key group; and
+    // (b) E.timestamp >= t0 (checkOrdering; an afterStep can name only
+    // steps[0]). The correlation check is skipped (processLineage with a step
+    // relation) or always passes (none), and the one-event-one-step guard never
+    // rejects E because no other step shares S1's category. So the group's
+    // representative R, its earliest event (earliest arrival on a tie), is
+    // accepted whenever any member is, unless t(R) < t0 <= t(member).
+    // replayPendingSteps binds, per partial, the earliest-timestamp entry that
+    // passes; the folded history is a subset of the unfolded one in which every
+    // removed member is represented by an earlier member of its group, so a
+    // replay binds the same entry, or R where R's own arrival had already aged
+    // out of the unfolded history. Binding R after its own arrival aged out
+    // can add a completion the unfolded history would miss (its remaining
+    // members bind later times), and every such completion is a valid
+    // event-time chain. R takes the group's latest arrival, so a group is
+    // retained exactly as long as its newest member would have been.
+    // Binding R instead of a later member keeps the pid and relation evidence
+    // and lowers the bound time, so later ordering and afterStep checks are at
+    // least as permissive; eligibility keeps later steps independent of which
+    // writer binds S1, so an exact event-time tie between two writers can
+    // change only which equally timed entry is cited. Live Phase-1 advancement
+    // never reads pending history.
+    //
+    // Residual (owner-accepted 2026-11-03, SEQ Q1). A writer acts only after it
+    // exists, so a seed exec'd before the writer was born has t0 <= t(R). The
+    // one loss is an ancestor that execs the seed image after the writer's
+    // first matching write, with that seed evaluated only after the writer's
+    // later writes were folded: R fails (b) where a folded later write would
+    // have passed. npm/pnpm lifecycle scripts cannot produce it, because their
+    // first shell is itself the seed and exists before any descendant writes.
+
+    /// Merge every group of entries with equal fold keys into its
+    /// representative: the member with the earliest event time (the earliest
+    /// arrival on a tie), re-weighted and placed at the group's last index
+    /// with the group's latest arrival, so an arrival-ordered bucket stays
+    /// arrival-ordered. Unkeyed entries and single-entry groups keep their
+    /// place. Removals are completed through the audited setter. A pass that
+    /// finds nothing to merge returns without touching the bucket, so it costs
+    /// one read and one key hash per keyed entry and no identity rebuild.
+    private func foldPendingBucket(ruleId: String, rule: SequenceRule) -> (removed: Int, groups: Int) {
+        guard let bucket = pendingLaterSteps[ruleId], bucket.count > 1 else { return (0, 0) }
+        var groupIndexByKey: [PendingFoldKey: Int] = [:]
+        var groups: [PendingFoldGroup] = []
+        // Each entry's group, so the rebuild below hashes no key a second time.
+        var groupOfEntry = [Int](repeating: -1, count: bucket.count)
+        for (index, entry) in bucket.enumerated() {
+            guard let key = entry.foldKey else { continue }
+            guard let existing = groupIndexByKey[key] else {
+                groupIndexByKey[key] = groups.count
+                groupOfEntry[index] = groups.count
+                groups.append(PendingFoldGroup(
+                    size: 1, representative: index, last: index, latestArrival: entry.arrivedAt
+                ))
+                continue
+            }
+            groupOfEntry[index] = existing
+            groups[existing].size += 1
+            groups[existing].last = index
+            groups[existing].latestArrival = max(groups[existing].latestArrival, entry.arrivedAt)
+            // Strictly earlier only: an equal event time keeps the earlier arrival.
+            if entry.matched.timestamp < bucket[groups[existing].representative].matched.timestamp {
+                groups[existing].representative = index
+            }
+        }
+        Self.addSaturating(UInt64(bucket.count), to: &pendingCapacityElementVisitCount)
+        let mergedGroups = groups.reduce(0) { $0 + ($1.size > 1 ? 1 : 0) }
+        guard mergedGroups > 0 else { return (0, 0) }
+
+        var folded: [PendingStep] = []
+        folded.reserveCapacity(bucket.count)
+        for (index, entry) in bucket.enumerated() {
+            let groupIndex = groupOfEntry[index]
+            guard groupIndex >= 0, groups[groupIndex].size > 1 else {
+                folded.append(entry)
+                continue
+            }
+            let group = groups[groupIndex]
+            guard index == group.last else { continue }
+            let representative = bucket[group.representative]
+            folded.append(Self.weightedPending(
+                PendingStep(
+                    step: representative.step,
+                    matched: representative.matched,
+                    arrivedAt: group.latestArrival,
+                    checkpointWeight: 0,
+                    foldKey: representative.foldKey
+                ),
+                ruleId: ruleId,
+                rule: rule
+            ))
+        }
+        Self.addSaturating(UInt64(bucket.count), to: &pendingCapacityElementVisitCount)
+        setPendingBucket(folded, for: ruleId, removedDisposition: .completed)
+        return (bucket.count - folded.count, mergedGroups)
+    }
+
+    /// One fold-key group during a fold pass: member count, representative
+    /// and last member indices, and the latest member arrival.
+    private struct PendingFoldGroup {
+        var size: Int
+        var representative: Int
+        var last: Int
+        var latestArrival: Date
+    }
+
+    /// One throttled fold attempt; returns entries removed. Called only from
+    /// relievePendingPressure and enforceCheckpointStateWeightBudget, after
+    /// their expiry sweep and before any shed. An attempt that removes fewer
+    /// than pendingFoldRetryAdmissions entries blocks the rule's next attempt
+    /// for that many unique admissions.
+    private func foldPendingBucketIfDue(ruleId: String) -> Int {
+        guard let rule = rules[ruleId], let stepID = Self.pendingFoldStepID(for: rule) else { return 0 }
+        if let until = pendingFoldBlockedUntilSerial[ruleId], pendingAdmissionSerial < until { return 0 }
+        Self.incrementSaturating(&pendingFoldAttemptsTotal)
+        let (removed, groups) = foldPendingBucket(ruleId: ruleId, rule: rule)
+        if UInt64(removed) < Self.pendingFoldRetryAdmissions {
+            pendingFoldBlockedUntilSerial[ruleId] = pendingAdmissionSerial &+ Self.pendingFoldRetryAdmissions
+        } else {
+            pendingFoldBlockedUntilSerial.removeValue(forKey: ruleId)
+        }
+        if removed > 0 {
+            Self.addSaturating(UInt64(removed), to: &pendingFoldedStepsTotal)
+            lastPendingFold = PendingFoldSnapshot(
+                observedAt: Date(), ruleID: ruleId, stepID: stepID,
+                removedPendingSteps: UInt64(removed), foldedGroups: groups
+            )
+            markCheckpointStateMutation()
+        }
+        return removed
+    }
+
+    /// The single later step whose same-writer duplicates may be folded at
+    /// capacity, or nil. Shape half of the fold eligibility; the event half is
+    /// the ES audit identity (pendingFoldKey). Pure over the rule definition.
+    /// Not cached in installRule: reloadRules replaces `rules` wholesale
+    /// without calling it, so such a cache would go stale.
+    static func pendingFoldStepID(for rule: SequenceRule) -> String? {
+        guard rule.ordered, rule.steps.count >= 2,
+              rule.correlationType == .processLineage || rule.correlationType == .none else { return nil }
+        let seed = rule.steps[0]
+        let folded = rule.steps[1]
+        guard folded.processRelation == ProcessRelationSpec(relation: .descendant, relativeToStep: seed.id),
+              rule.steps.lazy.filter({ $0.logsourceCategory == folded.logsourceCategory }).count == 1
+        else { return nil }
+        // Later steps must never depend on WHICH entry bound the folded step.
+        for later in rule.steps.dropFirst(2) {
+            if let relation = later.processRelation {
+                guard relation.relativeToStep == seed.id else { return nil }
+            } else if rule.correlationType == .processLineage {
+                return nil
+            }
+        }
+        return folded.id
+    }
+
+    /// The event half of the fold eligibility: an ES audit identity for the
+    /// matched process itself. Without one, pid reuse could merge two
+    /// different writers, so the entry is never folded.
+    static func pendingFoldKey(
+        stepID: String,
+        matched: MatchedStep,
+        identity: AuditIdentity?
+    ) -> PendingFoldKey? {
+        guard let identity, identity.pid == matched.processPid else { return nil }
+        return PendingFoldKey(
+            stepID: stepID,
+            pid: matched.processPid,
+            pidVersion: identity.pidversion,
+            parentPid: matched.processParentPid,
+            parentWasTracked: matched.processParentWasTracked,
+            ancestorPids: matched.processAncestorPids
+        )
     }
 
     /// Replay retained out-of-order later steps for `ruleId` against the rule's

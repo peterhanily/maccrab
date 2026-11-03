@@ -14,12 +14,14 @@ struct SequencePendingFairnessTests {
     // MARK: - Rules
 
     /// Ordered lineage rule: a `/seeder` exec, then a descendant `/writer` file
-    /// write, then a descendant `/writer` connection.
+    /// write, then a descendant `/writer` connection. Its `write` step is the
+    /// one pendingFoldStepID names.
     private func ruleD(id: String = "fairness-lineage",
-                       correlation: CorrelationType = .processLineage) -> SequenceRule {
+                       correlation: CorrelationType = .processLineage,
+                       window: TimeInterval = 3_600) -> SequenceRule {
         SequenceRule(
             id: id, title: "lineage writer fixture", description: "in-memory fixture",
-            level: .low, tags: [], window: 3_600, correlationType: correlation, ordered: true,
+            level: .low, tags: [], window: window, correlationType: correlation, ordered: true,
             steps: [
                 SequenceStep(id: "seed", logsourceCategory: "process_creation",
                              predicates: [Predicate(field: "Image", modifier: .endswith,
@@ -102,24 +104,42 @@ struct SequencePendingFairnessTests {
                      eventAction: "exec", process: process)
     }
 
-    /// A `/writer` file write; it carries an ES audit identity only when
+    /// A `/writer` process; it carries an ES audit identity only when
     /// `pidVersion` is set.
-    private func write(pid: Int32, pidVersion: UInt32? = nil, ppid: Int32 = 1, ancestors: [Int32] = [],
-                       at timestamp: Date, path: String = "/private/tmp/fairness/output") -> Event {
+    private func writerProcess(pid: Int32, pidVersion: UInt32?, ppid: Int32, ancestors: [Int32],
+                               at timestamp: Date) -> MacCrabCore.ProcessInfo {
         let executable = "/usr/local/bin/writer"
         let identity = pidVersion.map {
             AuditIdentity(auid: 501, euid: 501, egid: 20, ruid: 501, rgid: 20,
                           pid: pid, pidversion: $0, asid: 100_001)
         }
-        let process = MacCrabCore.ProcessInfo(
+        return MacCrabCore.ProcessInfo(
             pid: pid, ppid: ppid, rpid: pid, name: "writer", executable: executable,
             commandLine: executable, args: [executable], workingDirectory: "/private/tmp",
             userId: 501, userName: "fixture", groupId: 20, startTime: timestamp,
             ancestors: ancestors.map { ProcessAncestor(pid: $0, executable: "/bin/sh", name: "sh") },
             auditIdentity: identity
         )
-        return Event(timestamp: timestamp, eventCategory: .file, eventType: .creation,
-                     eventAction: "write", process: process, file: FileInfo(path: path, action: .write))
+    }
+
+    /// A `/writer` file write: the fixture rule's `write` step.
+    private func write(pid: Int32, pidVersion: UInt32? = nil, ppid: Int32 = 1, ancestors: [Int32] = [],
+                       at timestamp: Date, path: String = "/private/tmp/fairness/output") -> Event {
+        Event(timestamp: timestamp, eventCategory: .file, eventType: .creation, eventAction: "write",
+              process: writerProcess(pid: pid, pidVersion: pidVersion, ppid: ppid, ancestors: ancestors,
+                                     at: timestamp),
+              file: FileInfo(path: path, action: .write))
+    }
+
+    /// A `/writer` outbound connection: the fixture rule's `finish` step.
+    private func connection(pid: Int32, pidVersion: UInt32? = nil, ppid: Int32 = 1,
+                            at timestamp: Date) -> Event {
+        Event(timestamp: timestamp, eventCategory: .network, eventType: .creation, eventAction: "connect",
+              process: writerProcess(pid: pid, pidVersion: pidVersion, ppid: ppid, ancestors: [],
+                                     at: timestamp),
+              network: NetworkInfo(sourceIp: "10.0.0.2", sourcePort: 51_000, destinationIp: "93.184.216.34",
+                                   destinationPort: 443, destinationHostname: nil, direction: .outbound,
+                                   transport: "tcp"))
     }
 
     private func wideFileEvent(imageSuffix: String, path: String, at timestamp: Date) -> Event {
@@ -212,10 +232,8 @@ struct SequencePendingFairnessTests {
         return records
     }
 
-    /// Exact weight, journal and pressure accounting, then a capture, which
-    /// proves both global queues exactly cover the live state.
-    @discardableResult
-    private func assertExact(_ engine: SequenceEngine) async throws -> SequenceCheckpointCapture {
+    /// Exact weight, journal and pressure accounting.
+    private func assertAccounting(_ engine: SequenceEngine) async {
         let weight = await engine.checkpointWeightDiagnostics()
         #expect(weight.cachedWeight == weight.recomputedWeight)
         #expect(weight.cachedWeight <= weight.maximumWeight)
@@ -229,7 +247,33 @@ struct SequencePendingFairnessTests {
         let evicted = await engine.pendingStepsEvictedTotal
         #expect(pressure.journalExplicitlyShedTotal == UInt64(evicted))
         #expect(await engine.partialPressureDiagnostics().classificationConserved)
+    }
+
+    /// Exact accounting, then a capture, which proves both global queues
+    /// exactly cover the live state.
+    @discardableResult
+    private func assertExact(_ engine: SequenceEngine) async throws -> SequenceCheckpointCapture {
+        await assertAccounting(engine)
         return try await engine.checkpointCapture()
+    }
+
+    /// Arrival times come from the wall clock, so a step back during a run
+    /// (rare, but possible while the host syncs time) legitimately reorders
+    /// them. Callers assert arrival order only when their own samples, taken
+    /// around every evaluation, never ran backwards.
+    private struct WallClockMonitor {
+        private var last = Date()
+        private(set) var regressed = false
+
+        mutating func sample() {
+            let now = Date()
+            if now < last { regressed = true }
+            last = now
+        }
+    }
+
+    private func nonDecreasing(_ dates: [Date]) -> Bool {
+        zip(dates, dates.dropFirst()).allSatisfy { $0 <= $1 }
     }
 
     // MARK: - Pending fairness
@@ -481,6 +525,495 @@ struct SequencePendingFairnessTests {
         #expect(exactOrder, "the persisted order is the seed order filtered to survivors")
     }
 
+    // MARK: - Folding
+
+    @Test("A burst of repeated writes folds each writer's history instead of shedding it")
+    func writerBurstFoldsWithoutEviction() async throws {
+        let rule = ruleD()
+        let lineage = ProcessLineage()
+        let writers = 6
+        for index in 0..<writers {
+            let seed = Int32(1_000 + index)
+            await lineage.recordProcess(pid: seed, ppid: 1, path: "/usr/local/bin/seeder",
+                                        name: "seeder", startTime: base)
+            await lineage.recordProcess(pid: seed + 1_000, ppid: seed, path: "/usr/local/bin/writer",
+                                        name: "writer", startTime: base)
+        }
+        let engine = SequenceEngine(lineage: lineage, sweepInterval: 3_600)
+        try await engine.addRule(rule)
+        var clock = WallClockMonitor()
+        var writes: [Event] = []
+        for index in 0..<12_000 {
+            let writer = Int32(index % writers)
+            let event = write(pid: 2_000 + writer, pidVersion: 7, ppid: 1_000 + writer,
+                              at: base.addingTimeInterval(10 + Double(index) * 0.001))
+            writes.append(event)
+            clock.sample()
+            _ = await engine.evaluate(event)
+        }
+        clock.sample()
+
+        // The 8,193rd write fills the table past its cap; one fold leaves one
+        // entry per writer and nothing is shed.
+        #expect(await engine.pendingStepsEvictedTotal == 0)
+        #expect(await engine.evictionIsOngoing(within: 300) == false)
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldedStepsTotal == 8_187 && pressure.foldAttemptsTotal == 1)
+        #expect(pressure.lastPressure == nil)
+        let fold = try #require(pressure.lastFold)
+        #expect(fold.ruleID == rule.id && fold.stepID == "write")
+        #expect(fold.removedPendingSteps == 8_187 && fold.foldedGroups == 6)
+        let ledger = await engine.pendingStepConservation()
+        #expect(ledger.offered == 12_000 && ledger.completed == 8_187)
+        #expect(ledger.explicitlyShed == 0 && ledger.queued == 3_813)
+        #expect(await engine.pendingStepConservationByRule()[rule.id] == ledger)
+        let folded = try await assertExact(engine)
+        if !clock.regressed {
+            #expect(nonDecreasing(folded.pendingBuckets.flatMap(\.steps).map(\.arrivedAt)))
+        }
+
+        // Late seeds: each binds its own writer's earliest write.
+        var seeds: [Event] = []
+        for index in 0..<writers {
+            let seed = proc("/usr/local/bin/seeder", pid: Int32(1_000 + index), at: base)
+            seeds.append(seed)
+            _ = await engine.evaluate(seed)
+        }
+        let capture = try await assertExact(engine)
+        let partials = capture.partialBuckets.flatMap(\.partials)
+        #expect(partials.count == writers)
+        for (index, seed) in seeds.enumerated() {
+            let partial = partials.first { $0.matchedSteps.contains { $0.eventID == seed.id } }
+            let bound = partial?.matchedSteps.first { $0.stepID == "write" }?.eventID
+            #expect(bound == writes[index].id, "writer \(index) binds its earliest write")
+        }
+    }
+
+    /// One generated writer of the folded-versus-reference differential.
+    private enum DifferentialMode: CaseIterable {
+        /// Every write after the seed.
+        case normal
+        /// Every write before the seed.
+        case allBefore
+        /// Half before and half after the seed: the accepted fold residual.
+        case straddle
+        /// One pid, two process instances: before the seed, then after it.
+        case pidReuse
+        /// After the seed, but without an ES audit identity.
+        case noIdentity
+        /// After the seed, by a process outside the seed's tree.
+        case unrelated
+    }
+
+    private struct DifferentialWriter {
+        let mode: DifferentialMode
+        let t0: Date
+        let seed: Event
+        let writes: [Event]
+        /// Fold groups of the writer's identity-carrying writes.
+        let groupSizes: [Int]
+        let finish: Event
+    }
+
+    @Test("Folded replay binds what unfolded replay binds, except for the accepted residual")
+    func foldedReplayMatchesReference() async throws {
+        let rule = ruleD()
+        let lineage = ProcessLineage()
+        var rng = SplitMix64(seed: 0x5EED_CAFE_F00D_0001)
+        var scenarios: [[DifferentialWriter]] = []
+        var deliveries: [[Event]] = []
+        for scenario in 0..<50 {
+            var writers: [DifferentialWriter] = []
+            let writerCount = 1 + Int(rng.next() % 3)
+            for index in 0..<writerCount {
+                let seedPID = Int32(100_000 + scenario * 100 + index * 10)
+                let writerPID = seedPID + 1
+                let t0 = base.addingTimeInterval(Double(scenario * 1_000 + index * 100))
+                var mode = DifferentialMode.allCases[Int(rng.next() % 6)]
+                if index == 0, scenario < 3 { mode = [.straddle, .pidReuse, .normal][scenario] }
+                let count = 2 + Int(rng.next() % 11)
+                let before = mode == .allBefore ? count : (mode == .straddle || mode == .pidReuse ? count / 2 : 0)
+                let ppid = mode == .unrelated ? 1 : seedPID
+                await lineage.recordProcess(pid: seedPID, ppid: 1, path: "/usr/local/bin/seeder",
+                                            name: "seeder", startTime: base)
+                await lineage.recordProcess(pid: writerPID, ppid: ppid, path: "/usr/local/bin/writer",
+                                            name: "writer", startTime: base)
+                let writes = (0..<count).map { offset -> Event in
+                    let isBefore = offset < before
+                    let seconds = isBefore ? -Double(offset + 1) : Double(offset - before + 1)
+                    let pidVersion: UInt32? = switch mode {
+                    case .noIdentity: nil
+                    case .pidReuse: isBefore ? 1 : 2
+                    default: 5
+                    }
+                    return write(pid: writerPID, pidVersion: pidVersion, ppid: ppid,
+                                 at: t0.addingTimeInterval(seconds))
+                }
+                let groupSizes: [Int] = switch mode {
+                case .noIdentity: []
+                case .pidReuse: [before, count - before]
+                default: [count]
+                }
+                writers.append(DifferentialWriter(
+                    mode: mode, t0: t0,
+                    seed: proc("/usr/local/bin/seeder", pid: seedPID, at: t0),
+                    writes: writes, groupSizes: groupSizes,
+                    finish: connection(pid: writerPID, ppid: ppid, at: t0.addingTimeInterval(500))
+                ))
+            }
+            var order = writers.flatMap(\.writes)
+            for index in stride(from: order.count - 1, to: 0, by: -1) {
+                order.swapAt(index, Int(rng.next() % UInt64(index + 1)))
+            }
+            scenarios.append(writers)
+            deliveries.append(order)
+        }
+        let scenarioWrites = deliveries.reduce(0) { $0 + $1.count }
+        let capacity = SequenceEngine.maxPendingTotal
+
+        let folded = SequenceEngine(lineage: lineage, sweepInterval: 3_600)
+        let reference = SequenceEngine(lineage: lineage, sweepInterval: 3_600)
+        try await folded.addRule(rule)
+        try await reference.addRule(rule)
+        // One unrelated filler writer brings the folded engine to the cap, so
+        // a single fold also collapses the filler and later replays stay cheap.
+        let filler = (0...(capacity - scenarioWrites)).map {
+            write(pid: 999_000, pidVersion: 1, at: base.addingTimeInterval(-1_000 + Double($0) * 0.001))
+        }
+        for event in filler.dropLast() { _ = await folded.evaluate(event) }
+        for event in deliveries.joined() {
+            _ = await folded.evaluate(event)
+            _ = await reference.evaluate(event)
+        }
+        #expect(await folded.pendingPressureDiagnostics().foldAttemptsTotal == 0)
+        _ = await folded.evaluate(filler[filler.count - 1])
+
+        let groups = scenarios.joined().flatMap(\.groupSizes)
+        let expectedFolded = UInt64(filler.count - 1 + groups.reduce(0) { $0 + $1 - 1 })
+        let foldedPressure = await folded.pendingPressureDiagnostics()
+        #expect(foldedPressure.foldAttemptsTotal == 1)
+        #expect(foldedPressure.foldedStepsTotal == expectedFolded)
+        #expect(await folded.pendingStepsEvictedTotal == 0)
+
+        var referenceMismatches: [String] = []
+        var foldedMismatches: [String] = []
+        var residuals = 0
+        var expectedReferenceFires = 0
+        var expectedFoldedFires = 0
+        var referenceFires = 0
+        var foldedFires = 0
+        for (scenario, writers) in scenarios.enumerated() {
+            for writer in writers {
+                _ = await folded.evaluate(writer.seed)
+                _ = await reference.evaluate(writer.seed)
+            }
+            let foldedBindings = try await writeBindings(folded)
+            let referenceBindings = try await writeBindings(reference)
+            for (index, writer) in writers.enumerated() {
+                let expected = writer.mode == .unrelated ? nil
+                    : writer.writes.filter { $0.timestamp >= writer.t0 }.min { $0.timestamp < $1.timestamp }?.id
+                let expectedAfterFold = writer.mode == .straddle ? nil : expected
+                if expected != expectedAfterFold { residuals += 1 }
+                if expected != nil { expectedReferenceFires += 1 }
+                if expectedAfterFold != nil { expectedFoldedFires += 1 }
+                let label = "scenario \(scenario) writer \(index) (\(writer.mode))"
+                if referenceBindings[writer.seed.id] != .some(expected) { referenceMismatches.append(label) }
+                if foldedBindings[writer.seed.id] != .some(expectedAfterFold) { foldedMismatches.append(label) }
+            }
+            for writer in writers {
+                foldedFires += await folded.evaluate(writer.finish).filter { $0.ruleId == rule.id }.count
+                referenceFires += await reference.evaluate(writer.finish).filter { $0.ruleId == rule.id }.count
+            }
+        }
+        #expect(referenceMismatches.isEmpty, "unfolded replay binds the earliest related write at or after the seed")
+        #expect(foldedMismatches.isEmpty, "folded replay binds the same write, except for a straddling writer")
+        #expect(residuals >= 1, "the generated data includes the accepted residual")
+        #expect(referenceFires == expectedReferenceFires && foldedFires == expectedFoldedFires)
+
+        let referencePressure = await reference.pendingPressureDiagnostics()
+        #expect(referencePressure.foldAttemptsTotal == 0 && referencePressure.foldedStepsTotal == 0)
+        #expect(await reference.pendingStepsEvictedTotal == 0)
+        #expect(await folded.pendingStepsEvictedTotal == 0)
+        try await assertExact(folded)
+        try await assertExact(reference)
+    }
+
+    /// Each live partial's seed event mapped to the event bound to `write`, or
+    /// nil when that step is still unbound.
+    private func writeBindings(_ engine: SequenceEngine) async throws -> [UUID: UUID?] {
+        var bindings: [UUID: UUID?] = [:]
+        for partial in try await engine.checkpointCapture().partialBuckets.flatMap(\.partials) {
+            guard let seed = partial.matchedSteps.first(where: { $0.stepID == "seed" }) else { continue }
+            let bound: UUID? = partial.matchedSteps.first { $0.stepID == "write" }?.eventID
+            // Store an unbound step as a value; assigning nil would remove the key.
+            bindings[seed.eventID] = .some(bound)
+        }
+        return bindings
+    }
+
+    /// Two live admissions into a table one short of its cap. They fold only
+    /// when every part of the key matches.
+    enum FoldEligibilityCase: String, CaseIterable, Sendable {
+        case sameWriter
+        case noIdentity
+        case otherProcessInstance
+        case otherParent
+        case otherAncestry
+        case parentNowTracked
+        case laterStep
+        case ineligibleRule
+    }
+
+    @Test("Only entries with one writer's identity and identical relation evidence fold",
+          arguments: FoldEligibilityCase.allCases)
+    func foldRequiresEqualKeys(_ kind: FoldEligibilityCase) async throws {
+        let rule = kind == .ineligibleRule ? ruleD(correlation: .filePath) : ruleD()
+        let lineage = ProcessLineage()
+        let engine = SequenceEngine(lineage: lineage, sweepInterval: 3_600)
+        let reference = Date()
+        let restored = try await restoreFiller(engine, rule, stepID: "write", count: SequenceEngine.maxPendingTotal - 1,
+                                               arrivedAt: reference, now: reference)
+        let writer: Int32 = 3_001
+        let early = base.addingTimeInterval(20_000)
+        let late = base.addingTimeInterval(20_001)
+        let pair: (Event, Event) = switch kind {
+        case .sameWriter, .ineligibleRule:
+            (write(pid: writer, pidVersion: 7, ppid: 70, at: early), write(pid: writer, pidVersion: 7, ppid: 70, at: late))
+        case .noIdentity:
+            (write(pid: writer, ppid: 70, at: early), write(pid: writer, ppid: 70, at: late))
+        case .otherProcessInstance:
+            (write(pid: writer, pidVersion: 1, ppid: 70, at: early), write(pid: writer, pidVersion: 2, ppid: 70, at: late))
+        case .otherParent:
+            (write(pid: writer, pidVersion: 7, ppid: 70, at: early), write(pid: writer, pidVersion: 7, ppid: 71, at: late))
+        case .otherAncestry:
+            (write(pid: writer, pidVersion: 7, ppid: 70, ancestors: [50], at: early),
+             write(pid: writer, pidVersion: 7, ppid: 70, ancestors: [51], at: late))
+        case .parentNowTracked:
+            // Identical recorded ancestry; only processParentWasTracked differs.
+            (write(pid: writer, pidVersion: 7, ppid: 70, ancestors: [70, 1], at: early),
+             write(pid: writer, pidVersion: 7, ppid: 70, ancestors: [70, 1], at: late))
+        case .laterStep:
+            (connection(pid: writer, pidVersion: 7, ppid: 70, at: early),
+             connection(pid: writer, pidVersion: 7, ppid: 70, at: late))
+        }
+        _ = await engine.evaluate(pair.0)
+        if kind == .parentNowTracked {
+            await lineage.recordProcess(pid: 70, ppid: 1, path: "/bin/sh", name: "sh", startTime: base)
+            await lineage.recordProcess(pid: writer, ppid: 70, path: "/usr/local/bin/writer",
+                                        name: "writer", startTime: base)
+        }
+        _ = await engine.evaluate(pair.1)
+
+        let folds = kind == .sameWriter
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldedStepsTotal == (folds ? 1 : 0))
+        #expect(pressure.foldAttemptsTotal == (kind == .ineligibleRule ? 0 : 1))
+        #expect(await engine.pendingStepsEvictedTotal == (folds ? 0 : 1))
+        let capture = try await assertExact(engine)
+        let retained = Set(capture.pendingBuckets.flatMap(\.steps).map(\.matched.eventID))
+        #expect(retained.contains(pair.0.id), "the earlier event survives either way")
+        #expect(retained.contains(pair.1.id) == !folds)
+        #expect(retained.contains(restored[0].matched.eventID) == folds,
+                "without a fold the oldest restored entry is shed")
+    }
+
+    /// The fixture rule with one dimension changed, for the static fold
+    /// eligibility check. Nothing is installed, so no rule validation applies.
+    private enum FinishShape { case absent, relatedToSeed, relatedToWrite, unrelated }
+
+    private func foldShape(
+        ordered: Bool = true,
+        correlation: CorrelationType = .processLineage,
+        seedCategory: String = "process_creation",
+        writeRelation: ProcessRelation? = .descendant,
+        finish: FinishShape = .relatedToSeed
+    ) -> SequenceRule {
+        func image(_ suffix: String) -> [MacCrabCore.Predicate] {
+            [MacCrabCore.Predicate(field: "Image", modifier: .endswith, values: [suffix], negate: false)]
+        }
+        var steps = [
+            SequenceStep(id: "seed", logsourceCategory: seedCategory, predicates: image("/seeder")),
+            SequenceStep(id: "write", logsourceCategory: "file_event", predicates: image("/writer"),
+                         processRelation: writeRelation.map { ProcessRelationSpec(relation: $0, relativeToStep: "seed") }),
+        ]
+        let finishRelation: ProcessRelationSpec? = switch finish {
+        case .relatedToSeed: ProcessRelationSpec(relation: .descendant, relativeToStep: "seed")
+        case .relatedToWrite: ProcessRelationSpec(relation: .descendant, relativeToStep: "write")
+        case .absent, .unrelated: nil
+        }
+        if finish != .absent {
+            steps.append(SequenceStep(id: "finish", logsourceCategory: "network_connection",
+                                      predicates: image("/writer"), processRelation: finishRelation))
+        }
+        return SequenceRule(id: "fold-shape", title: "fold shape fixture", description: "in-memory fixture",
+                            level: .low, tags: [], window: 3_600, correlationType: correlation, ordered: ordered,
+                            steps: steps, trigger: .allSteps)
+    }
+
+    @Test("Fold eligibility is a descendant second step, alone in its category, that later steps cannot tell apart")
+    func foldEligibilityRuleShapes() {
+        #expect(SequenceEngine.pendingFoldStepID(for: ruleD()) == "write")
+        #expect(SequenceEngine.pendingFoldStepID(for: foldShape(finish: .absent)) == "write")
+        #expect(SequenceEngine.pendingFoldStepID(for: foldShape(correlation: .none, finish: .unrelated)) == "write")
+
+        #expect(SequenceEngine.pendingFoldStepID(for: foldShape(ordered: false)) == nil)
+        let otherRelations: [ProcessRelation?] = [.same, .sameProcess, .ancestor, .sibling, .sameTree, .any, nil]
+        for relation in otherRelations {
+            #expect(SequenceEngine.pendingFoldStepID(for: foldShape(writeRelation: relation)) == nil,
+                    "write relation \(String(describing: relation))")
+        }
+        #expect(SequenceEngine.pendingFoldStepID(for: foldShape(seedCategory: "file_event")) == nil,
+                "another step shares the folded step's category")
+        for correlation in [CorrelationType.filePath, .networkEndpoint, .processSame] {
+            #expect(SequenceEngine.pendingFoldStepID(for: foldShape(correlation: correlation)) == nil,
+                    "correlation \(correlation)")
+        }
+        #expect(SequenceEngine.pendingFoldStepID(for: foldShape(finish: .relatedToWrite)) == nil,
+                "a later step relates to the folded step")
+        #expect(SequenceEngine.pendingFoldStepID(for: foldShape(finish: .unrelated)) == nil,
+                "a later step relies on lineage correlation without its own relation")
+    }
+
+    @Test("Restored history never folds, even with the live writer's own evidence")
+    func restoredHistoryNeverFolds() async throws {
+        let rule = ruleD()
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        let reference = Date()
+        let restored = try await restoreFiller(engine, rule, stepID: "write", count: SequenceEngine.maxPendingTotal,
+                                               pid: 2_001, arrivedAt: reference, now: reference)
+        let live = write(pid: 2_001, pidVersion: 7, ppid: 0, at: base.addingTimeInterval(20_000))
+        _ = await engine.evaluate(live)
+
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldAttemptsTotal == 1 && pressure.foldedStepsTotal == 0)
+        #expect(pressure.perRuleCountShedTotal == 1 && pressure.lastFold == nil)
+        #expect(await engine.pendingStepsEvictedTotal == 1)
+        let capture = try await assertExact(engine)
+        let retained = Set(capture.pendingBuckets.flatMap(\.steps).map(\.matched.eventID))
+        #expect(retained.contains(live.id) && !retained.contains(restored[0].matched.eventID))
+    }
+
+    @Test("Folded history round-trips through a checkpoint, and restored representatives never fold again")
+    func foldedHistoryRoundTrips() async throws {
+        let rule = ruleD()
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        let reference = Date()
+        try await restoreFiller(engine, rule, stepID: "write", count: 8_180, arrivedAt: reference, now: reference)
+        let writerA = (0...6).map { write(pid: 2_001, pidVersion: 3, at: base.addingTimeInterval(20_000 + Double($0))) }
+        let writerB = (0...5).map { write(pid: 2_002, pidVersion: 4, at: base.addingTimeInterval(30_000 + Double($0))) }
+        var clock = WallClockMonitor()
+        // A5...A0 (event times descending) interleaved with B0...B5 (ascending).
+        for index in 0..<6 {
+            clock.sample()
+            _ = await engine.evaluate(writerA[5 - index])
+            clock.sample()
+            _ = await engine.evaluate(writerB[index])
+        }
+        let before = try await assertExact(engine)
+        clock.sample()
+        _ = await engine.evaluate(writerA[6])
+        clock.sample()
+
+        let fold = try #require(await engine.pendingPressureDiagnostics().lastFold)
+        #expect(fold.removedPendingSteps == 11 && fold.foldedGroups == 2)
+        let ledger = await engine.pendingStepConservation()
+        #expect(ledger.offered == 8_193 && ledger.completed == 11 && ledger.explicitlyShed == 0)
+        let after = try await assertExact(engine)
+        let bucket = try #require(after.pendingBuckets.first { $0.ruleID == rule.id }?.steps)
+        #expect(bucket.suffix(2).map(\.matched.eventID) == [writerB[0].id, writerA[0].id],
+                "each representative is its writer's earliest event, at its writer's last position")
+        let writerBIDs = Set(writerB.map(\.id))
+        let latestB = before.pendingBuckets.flatMap(\.steps)
+            .filter { writerBIDs.contains($0.matched.eventID) }.map(\.arrivedAt).max()
+        let representativeB = bucket[bucket.count - 2]
+        #expect(representativeB.arrivedAt == latestB, "a representative takes its group's latest arrival")
+        if !clock.regressed {
+            #expect(bucket.last?.arrivedAt == bucket.map(\.arrivedAt).max())
+            #expect(nonDecreasing(bucket.map(\.arrivedAt)))
+        }
+        let survivors = Set(bucket.map { SequenceCheckpointPendingIdentity(
+            ruleID: rule.id, stepID: $0.stepID, eventID: $0.matched.eventID) })
+        let survivingOrder = before.pendingEvictionOrder.filter { survivors.contains($0) }
+        #expect(after.pendingEvictionOrder == survivingOrder,
+                "a representative keeps its own admission position in the global order")
+
+        let restarted = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        try await restarted.addRule(rule)
+        _ = try await restarted.restoreCheckpoint(try SequenceCheckpointCodec.prepare(after).payload, now: Date())
+        let roundTrip = try await assertExact(restarted)
+        #expect(roundTrip.pendingBuckets == after.pendingBuckets)
+        #expect(roundTrip.pendingEvictionOrder == after.pendingEvictionOrder)
+        let more = (0..<11).map { write(pid: 2_001, pidVersion: 3, at: base.addingTimeInterval(20_100 + Double($0))) }
+        for event in more { _ = await restarted.evaluate(event) }
+        let refold = try #require(await restarted.pendingPressureDiagnostics().lastFold)
+        #expect(refold.removedPendingSteps == 10 && refold.foldedGroups == 1, "only the live writes fold")
+        #expect(await restarted.pendingStepsEvictedTotal == 0)
+        let final = try await assertExact(restarted)
+        let retained = Set(final.pendingBuckets.flatMap(\.steps).map(\.matched.eventID))
+        #expect(retained.contains(writerA[0].id) && retained.contains(writerB[0].id))
+        #expect(retained.contains(more[0].id) && more.dropFirst().allSatisfy { !retained.contains($0.id) })
+    }
+
+    @Test("A foldable burst in a smaller bucket folds before a larger rule's history is shed")
+    func smallerFoldableBurstFoldsBeforeShedding() async throws {
+        let quiet = ruleS(id: "fairness-quiet", seedSuffix: "quiet-seed", laterSuffix: "quiet-later")
+        let burst = ruleD(id: "fairness-burst")
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        let reference = Date()
+        let history = filler(quiet, stepID: "later", count: 5_000, arrivedAt: reference)
+        try await restore(engine, rules: [quiet, burst], pending: history, now: reference)
+        for index in 0..<3_500 {
+            _ = await engine.evaluate(write(pid: 4_001, pidVersion: 2, at: base.addingTimeInterval(Double(index))))
+        }
+
+        // The 3,193rd write passes the global cap while the quiet rule is the
+        // largest bucket; the burst's own fold makes room instead.
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldAttemptsTotal == 1 && pressure.foldedStepsTotal == 3_192)
+        let fold = try #require(pressure.lastFold)
+        #expect(fold.ruleID == burst.id && fold.removedPendingSteps == 3_192 && fold.foldedGroups == 1)
+        #expect(pressure.lastPressure == nil)
+        #expect(await engine.pendingStepsEvictedTotal == 0)
+        let byRule = await engine.pendingStepConservationByRule()
+        #expect(byRule[quiet.id]?.queued == 5_000 && byRule[quiet.id]?.explicitlyShed == 0)
+        #expect(byRule[burst.id]?.queued == 308 && byRule[burst.id]?.completed == 3_192)
+        try await assertExact(engine)
+    }
+
+    @Test("Weight pressure folds a writer's repeats before shedding pending history or partials")
+    func weightPressureFoldsBeforeShedding() async throws {
+        let wide = filePathRule(id: "fairness-wide", imageSuffix: "wide")
+        let rule = ruleD()
+        let path = "/private/tmp/" + String(repeating: "p", count: 8_192)
+        let reference = Date()
+        let itemWeight = SequenceCheckpointCodec.estimatedWeight(of: widePartial(wide, path: path, at: reference))
+        let fixedWeight = SequenceCheckpointCodec.semanticStateBaseWeight
+            + SequenceCheckpointCodec.estimatedBucketOverhead(ruleID: wide.id)
+        // Wide partials fill the semantic-weight budget but for about two
+        // partials' worth, so a few dozen writes reach it far below the count cap.
+        let partialCount = (SequenceCheckpointCodec.maximumSemanticStateWeight - fixedWeight) / itemWeight - 2
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        try await restore(engine, rules: [wide, rule],
+                          partials: (0..<partialCount).map { _ in widePartial(wide, path: path, at: reference) },
+                          now: reference)
+        var writes = 0
+        while await engine.pendingPressureDiagnostics().foldAttemptsTotal == 0, writes < 1_000 {
+            _ = await engine.evaluate(write(pid: 3_001, pidVersion: 5, at: base.addingTimeInterval(Double(writes))))
+            writes += 1
+        }
+
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldAttemptsTotal == 1)
+        let folded = UInt64(writes - 1)
+        #expect(pressure.foldedStepsTotal == folded, "every write folds into the first")
+        #expect(pressure.semanticWeightShedTotal == 0 && pressure.lastPressure == nil)
+        #expect(await engine.pendingStepsEvictedTotal == 0)
+        #expect(await engine.partialsEvictedTotal == 0)
+        let capture = try await assertExact(engine)
+        #expect(capture.pendingBuckets.flatMap(\.steps).count == 1)
+        #expect(capture.partialBuckets.flatMap(\.partials).count == partialCount)
+    }
+
     // MARK: - Saturation cost
 
     @Test("Saturation relief needs no forced compaction and only lazy identity rebuilds")
@@ -505,19 +1038,158 @@ struct SequencePendingFairnessTests {
         #expect(after.forcedQueueCompactions == before.forcedQueueCompactions)
         let rebuilds = after.identityRebuilds - before.identityRebuilds
         #expect(rebuilds == 3, "only the lazy compactions at admissions 257, 514 and 771 rebuild identities")
+        // Every writer is distinct, so each fold attempt merges nothing and
+        // blocks the next one for 256 admissions: attempts at 1, 257, 513, 769.
+        let attempts = after.foldAttempts - before.foldAttempts
+        #expect(attempts == 4)
         // Each over-cap admission scans the full bucket for expiry once and
-        // shifts it once to remove the front: linear, but no hashing.
+        // shifts it once to remove the front, and each fold attempt reads it
+        // once: linear, but no identity hashing.
         let visitsPerAdmission = UInt64(2 * (capacity + 1))
-        let expectedVisits = UInt64(writes) * visitsPerAdmission
+        let expectedVisits = UInt64(writes) * visitsPerAdmission + attempts * UInt64(capacity + 1)
         let visits = after.elementVisits - before.elementVisits
         #expect(visits == expectedVisits)
         let pressure = await engine.pendingPressureDiagnostics()
         #expect(pressure.perRuleCountShedTotal == UInt64(writes))
         #expect(pressure.globalCountShedTotal == 0 && pressure.semanticWeightShedTotal == 0)
+        #expect(pressure.foldedStepsTotal == 0 && pressure.lastFold == nil)
         #expect(await engine.pendingStepsEvictedTotal == writes)
         let capture = try await assertExact(engine)
         let expectedOrder = restored.dropFirst(writes).map { identity($0) } + live.map { identity(rule, "write", $0) }
         let exactOrder = capture.pendingEvictionOrder == expectedOrder
         #expect(exactOrder, "the newest live writes are retained in admission order")
+    }
+
+    @Test("The fold throttle bounds attempts for one heavy writer in a full table")
+    func foldThrottleBoundsHeavyWriter() async throws {
+        let rule = ruleD()
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        let reference = Date()
+        let capacity = SequenceEngine.maxPendingTotal
+        try await restoreFiller(engine, rule, stepID: "write", count: capacity - 1,
+                                arrivedAt: reference, now: reference)
+        let before = await engine.pendingCapacityOperationDiagnostics()
+        for index in 0..<1_024 {
+            _ = await engine.evaluate(write(pid: 3_001, pidVersion: 5,
+                                            at: base.addingTimeInterval(20_000 + Double(index))))
+        }
+        let after = await engine.pendingCapacityOperationDiagnostics()
+
+        // Attempts at admissions 2, 258, 514 and 770. The first merges a single
+        // write, so it blocks the rule for 256 admissions and admissions 3-257
+        // shed the restored front; each later attempt folds 256 writes.
+        let attempts = after.foldAttempts - before.foldAttempts
+        #expect(attempts == 4)
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldedStepsTotal == 769 && pressure.perRuleCountShedTotal == 255)
+        #expect(await engine.pendingStepsEvictedTotal == 255)
+        let queued = UInt64(capacity - 1)
+        #expect(await engine.pendingStepConservation().queued == queued)
+        #expect(after.forcedQueueCompactions == before.forcedQueueCompactions)
+        let rebuilds = after.identityRebuilds - before.identityRebuilds
+        #expect(rebuilds == 6, "four fold commits plus the lazy compactions at admissions 258 and 770")
+        try await assertExact(engine)
+    }
+
+    // MARK: - Randomized
+
+    private enum RandomOperation {
+        /// A write to the foldable rule, by one of 8 identified writers or an
+        /// anonymous process.
+        case write
+        /// A later step of the non-foldable rule.
+        case otherLaterStep
+        case seed
+        case finish
+        /// Disable and re-enable the non-foldable rule, purging its state.
+        case toggleOther
+        case capture
+    }
+
+    @Test("Randomized pressure sequences keep exact accounting")
+    func randomizedPressureStaysExact() async throws {
+        let foldable = ruleD(id: "fairness-random-e", window: 600)
+        let other = ruleS(id: "fairness-random-n", seedSuffix: "random-seed", laterSuffix: "random-later",
+                          window: 600)
+        let lineage = ProcessLineage()
+        for index in 0..<8 {
+            let seed = Int32(60_000 + index)
+            await lineage.recordProcess(pid: seed, ppid: 1, path: "/usr/local/bin/seeder",
+                                        name: "seeder", startTime: base)
+            await lineage.recordProcess(pid: seed + 1_000, ppid: seed, path: "/usr/local/bin/writer",
+                                        name: "writer", startTime: base)
+        }
+        let engine = SequenceEngine(lineage: lineage, sweepInterval: 3_600)
+        let reference = Date()
+        // Restored 200 s earlier, when the oldest 150 entries were still inside
+        // the 600 s window; they have expired by the first operation. The
+        // table starts two entries short of its cap, and the other rule stays
+        // small, so purging it never relieves the pressure for long.
+        let history = filler(foldable, stepID: "write", count: 150, arrivedAt: reference.addingTimeInterval(-700))
+            + filler(foldable, stepID: "write", count: 8_000, arrivedAt: reference.addingTimeInterval(-1))
+            + filler(other, stepID: "later", count: 40, pid: 9_998, arrivedAt: reference.addingTimeInterval(-1))
+        try await restore(engine, rules: [foldable, other], pending: history,
+                          now: reference.addingTimeInterval(-200))
+
+        var rng = SplitMix64(seed: 0x5EED_CAFE_F00D_0017)
+        var clock = WallClockMonitor()
+        var seeds = 0
+        for operation in 0..<600 {
+            let roll = rng.next() % 100
+            let at = base.addingTimeInterval(Double(rng.next() % 600))
+            let writer = Int32(61_000 + Int(rng.next() % 8))
+            // At most 20 seeds: each replays the whole foldable bucket.
+            let kind: RandomOperation = switch roll {
+            case 0..<25: .otherLaterStep
+            case 25..<80: .write
+            case 80..<86: seeds < 20 ? .seed : .write
+            case 86..<91: .finish
+            case 91: .toggleOther
+            default: .capture
+            }
+            clock.sample()
+            switch kind {
+            case .write:
+                if rng.next() % 9 == 0 {
+                    _ = await engine.evaluate(write(pid: 62_000 + Int32(rng.next() % 1_000), at: at))
+                } else {
+                    _ = await engine.evaluate(write(pid: writer, pidVersion: 1, ppid: writer - 1_000, at: at))
+                }
+            case .otherLaterStep:
+                _ = await engine.evaluate(proc("/usr/local/bin/random-later",
+                                               pid: 63_000 + Int32(rng.next() % 100), at: at))
+            case .seed:
+                seeds += 1
+                _ = await engine.evaluate(proc("/usr/local/bin/seeder", pid: writer - 1_000, at: at))
+            case .finish:
+                _ = await engine.evaluate(connection(pid: writer, ppid: writer - 1_000, at: at))
+            case .toggleOther:
+                await engine.setEnabled(other.id, enabled: false)
+                await engine.setEnabled(other.id, enabled: true)
+            case .capture:
+                _ = try await engine.checkpointCapture()
+            }
+            clock.sample()
+            await assertAccounting(engine)
+            if operation % 50 == 49 {
+                let capture = try await engine.checkpointCapture()
+                let live = capture.pendingBuckets.flatMap { bucket in
+                    bucket.steps.map { SequenceCheckpointPendingIdentity(
+                        ruleID: bucket.ruleID, stepID: $0.stepID, eventID: $0.matched.eventID) }
+                }
+                #expect(Set(capture.pendingEvictionOrder).count == capture.pendingEvictionOrder.count)
+                #expect(Set(capture.pendingEvictionOrder) == Set(live))
+                if !clock.regressed {
+                    #expect(capture.pendingBuckets.allSatisfy { nonDecreasing($0.steps.map(\.arrivedAt)) })
+                }
+            }
+        }
+
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldedStepsTotal > 0, "the sequence folded at least once")
+        #expect(await engine.pendingStepsEvictedTotal > 0, "and shed at least once")
+        let completed = await engine.pendingStepConservationByRule()[foldable.id]?.completed ?? 0
+        #expect(completed >= 150, "the expired restored history retired as completed")
+        try await assertExact(engine)
     }
 }
