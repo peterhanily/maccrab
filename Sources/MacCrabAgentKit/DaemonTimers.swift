@@ -33,6 +33,51 @@ enum SequencePartialPressureHeartbeat {
     }
 }
 
+/// The production heartbeat's fixed-schema projection of pending-history
+/// pressure: shed classification, limits, the victim policy, fold totals and
+/// the latest removal and fold. Trusted rule and step IDs only; no event
+/// identities or content.
+enum SequencePendingPressureHeartbeat {
+    static func fields(_ diagnostics: SequenceEngine.PendingPressureDiagnostics) -> [String: Any] {
+        var fields: [String: Any] = [
+            "per_rule_count_shed_steps_total": diagnostics.perRuleCountShedTotal,
+            "global_count_shed_steps_total": diagnostics.globalCountShedTotal,
+            "semantic_weight_shed_steps_total": diagnostics.semanticWeightShedTotal,
+            "journal_explicitly_shed_total": diagnostics.journalExplicitlyShedTotal,
+            "classification_conserved": diagnostics.classificationConserved,
+            "per_rule_count_limit": diagnostics.perRuleCountLimit,
+            "global_count_limit": diagnostics.globalCountLimit,
+            "state_weight_limit_bytes": diagnostics.stateWeightLimitBytes,
+            "victim_policy": diagnostics.victimPolicy,
+            "folded_steps_total": diagnostics.foldedStepsTotal,
+            "fold_attempts_total": diagnostics.foldAttemptsTotal,
+        ]
+        if let pressure = diagnostics.lastPressure {
+            fields["last_pressure"] = [
+                "reason": pressure.reason.rawValue,
+                "observed_at_unix": pressure.observedAt.timeIntervalSince1970,
+                "pending_count_before": pressure.pendingCountBefore,
+                "partial_count_before": pressure.partialCountBefore,
+                "rule_pending_count_before": pressure.rulePendingCountBefore,
+                "state_weight_bytes_before": pressure.stateWeightBytesBefore,
+                "removed_pending_steps": pressure.removedPendingSteps,
+                "representative_fifo_victim_rule_id": pressure.representativeVictimRuleID,
+                "representative_fifo_victim_step_id": pressure.representativeVictimStepID,
+            ] as [String: Any]
+        }
+        if let fold = diagnostics.lastFold {
+            fields["last_fold"] = [
+                "observed_at_unix": fold.observedAt.timeIntervalSince1970,
+                "rule_id": fold.ruleID,
+                "step_id": fold.stepID,
+                "removed": fold.removedPendingSteps,
+                "groups": fold.foldedGroups,
+            ] as [String: Any]
+        }
+        return fields
+    }
+}
+
 /// Fixed-schema, read-only connection/controller diagnostics. These separately
 /// awaited snapshots are not cross-store atomic and are not per-file write-byte
 /// measurements. Attached schemas remain part of their owning controller's
@@ -4154,10 +4199,14 @@ enum DaemonTimers {
             let sequencePartialPressure = await state.sequenceEngine.partialPressureDiagnostics()
             let sequencePartialsEvicted = sequencePartialPressure.totalShed
             let sequencePartialPressureDict = SequencePartialPressureHeartbeat.fields(sequencePartialPressure)
-            let sequencePendingStepsEvicted = await state.sequenceEngine.pendingStepsEvictedTotal
-            let sequenceJournalConservation = await state.sequenceEngine.pendingStepConservation()
-            let sequenceJournalByRule = await state.sequenceEngine
-                .pendingStepConservationByRule()
+            // One actor read for every pending-history value: an evaluation
+            // can run between separate awaits, which would let the journal's
+            // queued count miss sequence_pending_steps_current (and its shed
+            // total the eviction counter) in the same heartbeat.
+            let sequencePendingHistory = await state.sequenceEngine.pendingHistoryDiagnostics()
+            let sequencePendingStepsEvicted = sequencePendingHistory.evictedTotal
+            let sequenceJournalConservation = sequencePendingHistory.journal
+            let sequenceJournalByRule = sequencePendingHistory.journalByRule
             let sequenceJournalByRuleDict: [String: [String: UInt64]] =
                 sequenceJournalByRule.mapValues { ledger in
                     [
@@ -4168,31 +4217,8 @@ enum DaemonTimers {
                         "explicitly_shed": ledger.explicitlyShed,
                     ]
                 }
-            let sequenceWeight = await state.sequenceEngine.checkpointWeightDiagnostics()
-            let sequencePressure = await state.sequenceEngine.pendingPressureDiagnostics()
-            var sequencePressureDict: [String: Any] = [
-                "per_rule_count_shed_steps_total": sequencePressure.perRuleCountShedTotal,
-                "global_count_shed_steps_total": sequencePressure.globalCountShedTotal,
-                "semantic_weight_shed_steps_total": sequencePressure.semanticWeightShedTotal,
-                "journal_explicitly_shed_total": sequencePressure.journalExplicitlyShedTotal,
-                "classification_conserved": sequencePressure.classificationConserved,
-                "per_rule_count_limit": sequencePressure.perRuleCountLimit,
-                "global_count_limit": sequencePressure.globalCountLimit,
-                "state_weight_limit_bytes": sequencePressure.stateWeightLimitBytes,
-            ]
-            if let pressure = sequencePressure.lastPressure {
-                sequencePressureDict["last_pressure"] = [
-                    "reason": pressure.reason.rawValue,
-                    "observed_at_unix": pressure.observedAt.timeIntervalSince1970,
-                    "pending_count_before": pressure.pendingCountBefore,
-                    "partial_count_before": pressure.partialCountBefore,
-                    "rule_pending_count_before": pressure.rulePendingCountBefore,
-                    "state_weight_bytes_before": pressure.stateWeightBytesBefore,
-                    "removed_pending_steps": pressure.removedPendingSteps,
-                    "representative_fifo_victim_rule_id": pressure.representativeVictimRuleID,
-                    "representative_fifo_victim_step_id": pressure.representativeVictimStepID,
-                ] as [String: Any]
-            }
+            let sequenceWeight = sequencePendingHistory.weight
+            let sequencePressureDict = SequencePendingPressureHeartbeat.fields(sequencePendingHistory.pressure)
             let sequencePartialsInFlight = sequenceWeight.partialCount
             let sequencePendingStepsCurrent = sequenceWeight.pendingCount
             let sequenceStateContinuityMaintained: Bool

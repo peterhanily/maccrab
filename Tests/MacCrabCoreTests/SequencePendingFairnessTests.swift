@@ -1,11 +1,13 @@
 import Foundation
 import Testing
 @testable import MacCrabCore
+@testable import MacCrabAgentKit
 
 /// In-memory synthetic process and file events only: no files, processes,
 /// daemon or collectors. Event times are fixed. Arrival ages come from
 /// restoring checkpoint history at a chosen instant, and every engine sweeps
 /// periodically only once an hour, so only the pressure path retires history.
+/// The heartbeat wiring check reads one source file of this repository.
 /// Serialized because several cases drive a full 8,192-entry table.
 @Suite("Sequence capacity: fairness, folding and saturation cost", .serialized)
 struct SequencePendingFairnessTests {
@@ -1089,6 +1091,97 @@ struct SequencePendingFairnessTests {
         let rebuilds = after.identityRebuilds - before.identityRebuilds
         #expect(rebuilds == 6, "four fold commits plus the lazy compactions at admissions 258 and 770")
         try await assertExact(engine)
+    }
+
+    // MARK: - Heartbeat
+
+    /// A table one short of its cap. One writer's second write folds into its
+    /// first; a different writer's write, arriving while that fold attempt
+    /// blocks the next, sheds the oldest restored entry.
+    private func foldThenShed(
+        _ engine: SequenceEngine, rule: SequenceRule
+    ) async throws -> (restored: [SequenceCheckpointPendingStep], writes: [Event]) {
+        let reference = Date()
+        let restored = try await restoreFiller(engine, rule, stepID: "write",
+                                               count: SequenceEngine.maxPendingTotal - 1,
+                                               arrivedAt: reference, now: reference)
+        let writes = [
+            write(pid: 3_001, pidVersion: 5, at: base.addingTimeInterval(20_000)),
+            write(pid: 3_001, pidVersion: 5, at: base.addingTimeInterval(20_001)),
+            write(pid: 3_002, pidVersion: 5, at: base.addingTimeInterval(20_002)),
+        ]
+        for event in writes { _ = await engine.evaluate(event) }
+        return (restored, writes)
+    }
+
+    @Test("The heartbeat's pending-pressure projection is fixed-schema and carries no event identities")
+    func pendingPressureHeartbeatFields() async throws {
+        let rule = ruleD()
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        let baseKeys: Set<String> = [
+            "per_rule_count_shed_steps_total", "global_count_shed_steps_total", "semantic_weight_shed_steps_total",
+            "journal_explicitly_shed_total", "classification_conserved", "per_rule_count_limit",
+            "global_count_limit", "state_weight_limit_bytes", "victim_policy", "folded_steps_total",
+            "fold_attempts_total",
+        ]
+        let idle = SequencePendingPressureHeartbeat.fields(await engine.pendingPressureDiagnostics())
+        #expect(Set(idle.keys) == baseKeys, "no removal or fold boundary has happened yet")
+        let (restored, writes) = try await foldThenShed(engine, rule: rule)
+
+        let fields = SequencePendingPressureHeartbeat.fields(await engine.pendingPressureDiagnostics())
+        #expect(Set(fields.keys) == baseKeys.union(["last_pressure", "last_fold"]))
+        #expect(fields["victim_policy"] as? String == "largest_bucket_oldest_first")
+        #expect(fields["folded_steps_total"] as? UInt64 == 1 && fields["fold_attempts_total"] as? UInt64 == 1)
+        #expect(fields["per_rule_count_shed_steps_total"] as? UInt64 == 1)
+        let pressure = try #require(fields["last_pressure"] as? [String: Any])
+        #expect(Set(pressure.keys) == [
+            "reason", "observed_at_unix", "pending_count_before", "partial_count_before",
+            "rule_pending_count_before", "state_weight_bytes_before", "removed_pending_steps",
+            "representative_fifo_victim_rule_id", "representative_fifo_victim_step_id",
+        ])
+        #expect(pressure["reason"] as? String == "per_rule_count")
+        let fold = try #require(fields["last_fold"] as? [String: Any])
+        #expect(Set(fold.keys) == ["observed_at_unix", "rule_id", "step_id", "removed", "groups"])
+        #expect(fold["rule_id"] as? String == rule.id && fold["step_id"] as? String == "write")
+        #expect(fold["removed"] as? UInt64 == 1 && fold["groups"] as? Int == 1)
+        let encoded = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
+        let json = try #require(String(data: encoded, encoding: .utf8))
+        #expect(!json.contains("/private/tmp"))
+        for event in writes { #expect(!json.contains(event.id.uuidString)) }
+        #expect(!json.contains(restored[0].matched.eventID.uuidString))
+        #expect(encoded.count < 2_048, "the projection stays constant-size whatever the events carried")
+    }
+
+    @Test("The heartbeat reads pending history in one actor call, so its cross-checked pairs agree")
+    func heartbeatReadsPendingHistoryOnce() async throws {
+        let rule = ruleD()
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        _ = try await foldThenShed(engine, rule: rule)
+        let history = await engine.pendingHistoryDiagnostics()
+        #expect(history.journal.queued == UInt64(history.weight.pendingCount))
+        #expect(history.evictedTotal == 1 && history.journal.explicitlyShed == UInt64(history.evictedTotal))
+        #expect(history.pressure.journalExplicitlyShedTotal == history.journal.explicitlyShed)
+        #expect(history.pressure.foldedStepsTotal == 1)
+        #expect(history.journalByRule[rule.id] == history.journal)
+        #expect(history.weight.cachedWeight == history.weight.recomputedWeight)
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let timers = try String(contentsOf: root.appendingPathComponent("Sources/MacCrabAgentKit/DaemonTimers.swift"),
+                                encoding: .utf8)
+        let snapshotReads = timers.components(separatedBy: "await state.sequenceEngine.pendingHistoryDiagnostics()")
+        #expect(snapshotReads.count == 2, "exactly one snapshot read")
+        for separateRead in ["pendingStepConservation(", "pendingStepConservationByRule(",
+                             "checkpointWeightDiagnostics(", "pendingPressureDiagnostics(",
+                             "pendingStepsEvictedTotal"] {
+            #expect(!timers.contains(separateRead), "\(separateRead) would be a second, separately timed read")
+        }
+        for derived in ["let sequencePendingStepsEvicted = sequencePendingHistory.evictedTotal",
+                        "let sequenceJournalConservation = sequencePendingHistory.journal",
+                        "let sequenceWeight = sequencePendingHistory.weight",
+                        "let sequencePendingStepsCurrent = sequenceWeight.pendingCount"] {
+            #expect(timers.contains(derived), "\(derived)")
+        }
     }
 
     // MARK: - Randomized

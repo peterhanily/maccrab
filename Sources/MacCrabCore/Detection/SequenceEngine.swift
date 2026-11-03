@@ -1079,6 +1079,30 @@ public actor SequenceEngine {
         )
     }
 
+    /// Every pending-history value the heartbeat publishes, plus the
+    /// checkpoint weight, read in one actor call. Separately awaited reads let
+    /// an evaluation run between them, so the journal's queued count could
+    /// disagree with the pending-steps gauge, and its shed total with the
+    /// eviction counter, although the qualification recorder requires each
+    /// pair to match exactly.
+    public struct PendingHistoryDiagnostics: Sendable {
+        public let journal: SequenceConservationTelemetry
+        public let journalByRule: [String: SequenceConservationTelemetry]
+        public let evictedTotal: Int
+        public let weight: CheckpointWeightDiagnostics
+        public let pressure: PendingPressureDiagnostics
+    }
+
+    public func pendingHistoryDiagnostics() -> PendingHistoryDiagnostics {
+        PendingHistoryDiagnostics(
+            journal: pendingStepConservation(),
+            journalByRule: pendingStepConservationByRule(),
+            evictedTotal: evictedPendingStepCount,
+            weight: checkpointWeightDiagnostics(),
+            pressure: pendingPressureDiagnostics()
+        )
+    }
+
     /// Saturation-path operation counts, so tests can pin the cost of capacity
     /// relief: identity rebuilds (setPendingBucket calls plus queue rebuilds
     /// that actually run), forced queue compactions, element visits (see
