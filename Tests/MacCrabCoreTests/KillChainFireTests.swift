@@ -371,7 +371,7 @@ struct KillChainFireTests {
         let foldEligible = Set(await engine.listRules()
             .filter { SequenceEngine.pendingFoldStepID(for: $0) != nil }.map(\.id))
         let foldableBuckets = await engine.pendingStepConservationByRule()
-            .filter { foldEligible.contains($0.key) && $0.value.queued > 0 }.count
+            .filter { foldEligible.contains($0.key) && $0.value.queued >= 2 }.count
         let flood = 1_000
         let completedBefore = await engine.pendingStepConservation().completed
         for index in 0..<flood {
@@ -401,8 +401,10 @@ struct KillChainFireTests {
         #expect(pressure.lastPressure?.representativeVictimRuleID == npmRat)
         #expect(pressure.foldedStepsTotal == 0, "distinct writers have nothing to fold")
         // Before each shed, relief tries every fold-eligible bucket holding
-        // history. Every attempt here removes nothing, so each bucket is tried
-        // at most once per 256 admissions.
+        // at least two entries; a single entry has nothing to merge, and no
+        // bucket but npm_postinstall_to_rat's grows during the flood. Every
+        // attempt here removes nothing, so each bucket is tried at most once
+        // per 256 admissions.
         let attemptBound = UInt64(foldableBuckets * ((flood + 255) / 256))
         #expect(pressure.foldAttemptsTotal <= attemptBound, "low-yield attempts are throttled")
         // 9c2d052b (5 s window), 0007 (10 s) and 0021 (30 s) are checked only

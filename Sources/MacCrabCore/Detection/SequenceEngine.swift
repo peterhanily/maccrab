@@ -310,8 +310,19 @@ public actor SequenceEngine {
 
     // MARK: - State
 
-    /// All loaded sequence rules keyed by rule ID.
-    private var rules: [String: SequenceRule] = [:]
+    /// All loaded sequence rules keyed by rule ID. Changed only by
+    /// installRule, reloadRules and setEnabled, never per event, so the
+    /// whole-map rebuild below stays off the event path. loadRules installs
+    /// one rule at a time, so loading N rules rebuilds it N times.
+    private var rules: [String: SequenceRule] = [:] {
+        didSet { pendingFoldStepIDByRule = rules.compactMapValues(Self.pendingFoldStepID(for:)) }
+    }
+
+    /// pendingFoldStepID(for:) of every loaded rule that has one, keyed by
+    /// rule ID, so admission and pressure relief read fold eligibility with
+    /// one lookup instead of walking the rule's steps. Rebuilt from `rules`
+    /// on every change, so it cannot go stale.
+    private(set) var pendingFoldStepIDByRule: [String: String] = [:]
 
     /// Rule-ID -> step-ID -> fixed heavyweight evidence dependency. Populated
     /// with rule definitions so covered events do no condition-tree traversal
@@ -2266,11 +2277,12 @@ public actor SequenceEngine {
     /// event mutation is still in progress. Pending replay history is shed
     /// before live partials; within each kind the victim is the oldest entry
     /// of the bucket with the most semantic weight; both losses are explicit
-    /// telemetry. Before any pending entry is shed, the victim bucket and then
-    /// every other fold-eligible one (foldOtherPendingBucket) get at most one
-    /// throttled fold attempt per call. Bucket weights are summed once per
-    /// call and then adjusted per removal, so no identity map is built; each
-    /// partial removal still copies its bucket once.
+    /// telemetry. Before any pending entry is shed, every fold-eligible
+    /// bucket holding at least two entries gets at most one throttled fold
+    /// attempt per call: the victim first, then the others through
+    /// foldOtherPendingBucket. Bucket weights are summed once per call and
+    /// then adjusted per removal, so no identity map is built; each partial
+    /// removal still copies its bucket once.
     private func enforceCheckpointStateWeightBudget() {
         let limit = SequenceCheckpointCodec.maximumSemanticStateWeight
         guard checkpointStateWeight > limit else { return }
@@ -3029,7 +3041,7 @@ public actor SequenceEngine {
             // for silent sequence false negatives.
             if rule.ordered {
                 let initialStepId = rule.steps.first?.id
-                let foldStepID = Self.pendingFoldStepID(for: rule)
+                let foldStepID = pendingFoldStepIDByRule[ruleId]
                 for step in matchingSteps where step.id != initialStepId {
                     let matched = eventMatchedStep(step)
                     let foldKey = step.id == foldStepID
@@ -3656,22 +3668,30 @@ public actor SequenceEngine {
     ///     Max-min fair: the largest bucket pays. A flooding rule pays with its
     ///     own history once its bucket is the largest; until then each of its
     ///     over-cap admissions trims the largest bucket toward an equal share.
-    ///  3. Before any shed, give each fold-eligible bucket at most one
-    ///     throttled fold attempt per call (foldPendingBucketIfDue; fold
-    ///     removals are completed): the victim, then the admitting rule, then
-    ///     every other non-empty one through foldOtherPendingBucket, stopping
-    ///     at the first attempt that removes entries. So, throttle permitting,
-    ///     duplicates in any bucket are folded before a live entry is shed,
-    ///     whichever order one event's rule plans run in.
+    ///  3. Before any shed, give each fold-eligible bucket holding at least
+    ///     two entries at most one throttled fold attempt per call
+    ///     (foldPendingBucketIfDue; fold removals are completed): the victim,
+    ///     then the admitting rule, then every other one through
+    ///     foldOtherPendingBucket, stopping at the first attempt that removes
+    ///     entries. So, throttle permitting, duplicates in any bucket are
+    ///     folded before a live entry is shed, whichever order one event's
+    ///     rule plans run in.
     ///  4. Otherwise shed the victim's front (oldest admission) as
     ///     explicitly_shed. One pressure record per call; the first live
     ///     victim is the representative.
     /// Each call follows a single append, so it sheds at most one live entry.
-    /// The work left per over-cap admission is linear and, apart from a due
-    /// fold attempt, hashes no entry: the admission's dedupe scan of its own
-    /// bucket, the compare-only sweep over all retained state, one pass over
-    /// the rule buckets to order the other fold candidates, and the shift of
-    /// the victim bucket.
+    /// Work per over-cap admission besides fold attempts: the admission's
+    /// dedupe scan of its own bucket, the compare-only sweep over all retained
+    /// state, the shift of the victim bucket, and foldOtherPendingBucket's
+    /// pass over the rule buckets (a throttle lookup for each bucket holding
+    /// at least two entries, an eligibility lookup for each that is not
+    /// blocked, then a sort of the due fold-eligible ones). A fold attempt
+    /// reads its bucket, twice when it merges, and hashes each keyed entry
+    /// once. One call can attempt every due fold-eligible bucket, as when
+    /// their throttles lapse together, but each attempt either removes at
+    /// least 256 entries, which earlier admissions added, or blocks its rule
+    /// for the next 256 admissions, so fold work averages O(capacity / 256)
+    /// entry reads per admission.
     private func relievePendingPressure(admittingRuleID: String) {
         func overLimit() -> Bool {
             totalPendingStepCount > Self.maxPendingTotal
@@ -3888,11 +3908,17 @@ public actor SequenceEngine {
     /// One throttled fold attempt; returns entries removed. Called only from
     /// relievePendingPressure and enforceCheckpointStateWeightBudget, directly
     /// or through foldOtherPendingBucket, after their expiry sweep and before
-    /// any shed. An attempt that removes fewer than pendingFoldRetryAdmissions
-    /// entries blocks the rule's next attempt for that many unique admissions.
+    /// any shed. A blocked rule, a rule that is not fold-eligible and a bucket
+    /// holding fewer than two entries (nothing to merge) return 0 without
+    /// counting an attempt or touching the throttle; the throttle is read
+    /// first, so a blocked rule costs one lookup. An attempt that removes
+    /// fewer than pendingFoldRetryAdmissions entries blocks the rule's next
+    /// attempt for that many unique admissions.
     private func foldPendingBucketIfDue(ruleId: String) -> Int {
-        guard let rule = rules[ruleId], let stepID = Self.pendingFoldStepID(for: rule) else { return 0 }
         if let until = pendingFoldBlockedUntilSerial[ruleId], pendingAdmissionSerial < until { return 0 }
+        guard let stepID = pendingFoldStepIDByRule[ruleId],
+              (pendingLaterSteps[ruleId]?.count ?? 0) >= 2,
+              let rule = rules[ruleId] else { return 0 }
         Self.incrementSaturating(&pendingFoldAttemptsTotal)
         let (removed, groups) = foldPendingBucket(ruleId: ruleId, rule: rule)
         if UInt64(removed) < Self.pendingFoldRetryAdmissions {
@@ -3912,16 +3938,21 @@ public actor SequenceEngine {
     }
 
     /// The last fold step before a relief path sheds live history: one
-    /// throttled attempt on each fold-eligible, non-empty bucket not yet in
-    /// `tried`, most entries first and then the smaller rule ID, so neither
-    /// Dictionary order nor the order of one event's rule plans decides
-    /// whether duplicates elsewhere are folded or a live entry is shed. Each
-    /// bucket it tries joins `tried`. Stops at the first attempt that removes
-    /// entries and returns that rule.
+    /// throttled attempt on each fold-eligible bucket that holds at least two
+    /// entries, is not blocked and is not yet in `tried`, most entries first
+    /// and then the smaller rule ID, so neither Dictionary order nor the
+    /// order of one event's rule plans decides whether duplicates elsewhere
+    /// are folded or a live entry is shed. Each bucket it tries joins
+    /// `tried`. Stops at the first attempt that removes entries and returns
+    /// that rule.
     private func foldOtherPendingBucket(tried: inout Set<String>) -> String? {
         var candidates: [(ruleId: String, count: Int)] = []
-        for (ruleId, bucket) in pendingLaterSteps where !bucket.isEmpty && !tried.contains(ruleId) {
-            guard let rule = rules[ruleId], Self.pendingFoldStepID(for: rule) != nil else { continue }
+        for (ruleId, bucket) in pendingLaterSteps where bucket.count >= 2 {
+            // The throttle first: a blocked rule costs one lookup. It stays
+            // blocked for the whole call, since the serial advances only on
+            // admission.
+            if let until = pendingFoldBlockedUntilSerial[ruleId], pendingAdmissionSerial < until { continue }
+            guard !tried.contains(ruleId), pendingFoldStepIDByRule[ruleId] != nil else { continue }
             candidates.append((ruleId, bucket.count))
         }
         candidates.sort { $0.count != $1.count ? $0.count > $1.count : $0.ruleId < $1.ruleId }
@@ -3935,8 +3966,8 @@ public actor SequenceEngine {
     /// The single later step whose same-writer duplicates may be folded at
     /// capacity, or nil. Shape half of the fold eligibility; the event half is
     /// the ES audit identity (pendingFoldKey). Pure over the rule definition.
-    /// Not cached in installRule: reloadRules replaces `rules` wholesale
-    /// without calling it, so such a cache would go stale.
+    /// The single definition of the shape half: the engine reads it through
+    /// pendingFoldStepIDByRule, which every change to `rules` rebuilds.
     static func pendingFoldStepID(for rule: SequenceRule) -> String? {
         guard rule.ordered, rule.steps.count >= 2,
               rule.correlationType == .processLineage || rule.correlationType == .none else { return nil }

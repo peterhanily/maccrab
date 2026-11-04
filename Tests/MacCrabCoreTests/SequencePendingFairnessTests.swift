@@ -3,11 +3,13 @@ import Testing
 @testable import MacCrabCore
 @testable import MacCrabAgentKit
 
-/// In-memory synthetic process and file events only: no files, processes,
-/// daemon or collectors. Event times are fixed. Arrival ages come from
-/// restoring checkpoint history at a chosen instant, and every engine sweeps
+/// In-memory synthetic process and file events only: no processes, daemon or
+/// collectors. Event times are fixed. Arrival ages come from restoring
+/// checkpoint history at a chosen instant, and every engine sweeps
 /// periodically only once an hour, so only the pressure path retires history.
-/// The heartbeat wiring check reads one source file of this repository.
+/// Two cases touch files: the heartbeat wiring check reads one source file of
+/// this repository, and the fold-eligibility map check reloads two rule files
+/// it writes to a temporary directory.
 /// Serialized because several cases drive a full 8,192-entry table.
 @Suite("Sequence capacity: fairness, folding and saturation cost", .serialized)
 struct SequencePendingFairnessTests {
@@ -897,6 +899,60 @@ struct SequencePendingFairnessTests {
                 "a later step relies on lineage correlation without its own relation")
     }
 
+    @Test("The fold-eligibility map follows rule installs, disables and reloads")
+    func foldEligibilityMapFollowsRuleChanges() async throws {
+        let eligible = ruleD(id: "fairness-map")
+        let ineligible = ruleD(id: "fairness-map", correlation: .filePath)
+        let folds = [eligible.id: "write"]
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sequence-fold-map-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let eligibleFolder = root.appendingPathComponent("eligible")
+        let ineligibleFolder = root.appendingPathComponent("ineligible")
+        for (rule, folder) in [(eligible, eligibleFolder), (ineligible, ineligibleFolder)] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try JSONEncoder().encode(rule).write(to: folder.appendingPathComponent("rule.json"))
+        }
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+
+        try await engine.addRule(eligible)
+        #expect(await engine.pendingFoldStepIDByRule == folds, "install")
+        // Eligibility belongs to the definition; a disabled rule holds no history.
+        await engine.setEnabled(eligible.id, enabled: false)
+        #expect(await engine.pendingFoldStepIDByRule == folds, "disable")
+        await engine.setEnabled(eligible.id, enabled: true)
+        #expect(await engine.pendingFoldStepIDByRule == folds, "enable")
+        #expect(try await engine.reloadRules(from: ineligibleFolder) == 1)
+        #expect(await engine.pendingFoldStepIDByRule.isEmpty, "reload: eligible to ineligible")
+        #expect(try await engine.reloadRules(from: eligibleFolder) == 1)
+        #expect(await engine.pendingFoldStepIDByRule == folds, "reload: ineligible to eligible")
+        try await engine.addRule(ineligible)
+        #expect(await engine.pendingFoldStepIDByRule.isEmpty, "install over the same ID")
+        #expect(try await engine.reloadRules(from: eligibleFolder) == 1)
+        #expect(await engine.pendingFoldStepIDByRule == folds, "reload: ineligible to eligible again")
+
+        // Relief reads the map the last reload rebuilt: in a table one short
+        // of its cap, one writer's second write folds into its first.
+        let reference = Date()
+        let records = filler(eligible, stepID: "write", count: SequenceEngine.maxPendingTotal - 1,
+                             arrivedAt: reference)
+        let payload = SequenceCheckpointPayload(
+            schemaVersion: SequenceCheckpointPayload.currentSchemaVersion, capturedAt: reference,
+            ruleFingerprint: try SequenceCheckpointCodec.ruleFingerprint(await engine.listRules()),
+            sourceGeneration: 1, partialBuckets: [],
+            pendingBuckets: [SequenceCheckpointPendingBucket(ruleID: eligible.id, steps: records)],
+            evictionOrder: [], pendingEvictionOrder: records.map { identity($0) }
+        )
+        _ = try await engine.restoreCheckpoint(payload, now: reference)
+        for offset in 0..<2 {
+            _ = await engine.evaluate(write(pid: 3_001, pidVersion: 5, at: base.addingTimeInterval(20_000 + Double(offset))))
+        }
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldAttemptsTotal == 1 && pressure.foldedStepsTotal == 1)
+        #expect(await engine.pendingStepsEvictedTotal == 0)
+        try await assertExact(engine)
+    }
+
     @Test("Restored history never folds, even with the live writer's own evidence")
     func restoredHistoryNeverFolds() async throws {
         let rule = ruleD()
@@ -1094,6 +1150,57 @@ struct SequencePendingFairnessTests {
                                           largeQueued: UInt64(capacity - 2), foldableQueued: 2)
         #expect(outcomes[true] == expected, "the larger rule's plan ran first")
         #expect(outcomes[false] == expected, "the foldable rule's plan ran first")
+    }
+
+    /// The relief step that first meets a fold-eligible bucket holding one
+    /// entry: the writer's own first over-cap write, or another rule's
+    /// over-cap admission.
+    enum SingleEntryCase: String, CaseIterable, Sendable {
+        case admittingRule
+        case otherRule
+    }
+
+    @Test("A bucket holding one entry is never tried, so its writer's next write still folds",
+          arguments: SingleEntryCase.allCases)
+    func singleEntryBucketIsNotTried(_ kind: SingleEntryCase) async throws {
+        let quiet = ruleS(id: "fairness-quiet", seedSuffix: "quiet-seed", laterSuffix: "quiet-later")
+        let burst = ruleD(id: "fairness-burst")
+        let third = ruleS(id: "fairness-third", seedSuffix: "third-seed", laterSuffix: "third-later")
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        let reference = Date()
+        let capacity = SequenceEngine.maxPendingTotal
+        // The writer's first write passes the cap, or fills the table for a
+        // third rule's admission to pass it.
+        let history = filler(quiet, stepID: "later", count: kind == .admittingRule ? capacity : capacity - 1,
+                             arrivedAt: reference)
+        try await restore(engine, rules: [quiet, burst, third], pending: history, now: reference)
+        let first = write(pid: 4_001, pidVersion: 2, at: base.addingTimeInterval(20_000))
+        _ = await engine.evaluate(first)
+        if kind == .otherRule {
+            _ = await engine.evaluate(proc("/usr/local/bin/third-later", pid: 20_000,
+                                           at: base.addingTimeInterval(20_001)))
+        }
+        // Neither the quiet rule (the largest bucket) nor the third rule can
+        // fold, and one write has nothing to merge: no attempt, one shed.
+        #expect(await engine.pendingPressureDiagnostics().foldAttemptsTotal == 0)
+        #expect(await engine.pendingStepsEvictedTotal == 1)
+
+        // Nothing blocks the burst rule, so its writer's next write passes the
+        // cap again and the admitting rule's fold merges the pair.
+        let second = write(pid: 4_001, pidVersion: 2, at: base.addingTimeInterval(20_002))
+        _ = await engine.evaluate(second)
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldAttemptsTotal == 1 && pressure.foldedStepsTotal == 1)
+        let fold = try #require(pressure.lastFold)
+        #expect(fold.ruleID == burst.id && fold.removedPendingSteps == 1 && fold.foldedGroups == 1)
+        #expect(await engine.pendingStepsEvictedTotal == 1)
+        let byRule = await engine.pendingStepConservationByRule()
+        #expect(byRule[quiet.id]?.explicitlyShed == 1)
+        #expect(byRule[burst.id]?.queued == 1 && byRule[burst.id]?.completed == 1)
+        let capture = try await assertExact(engine)
+        let retained = Set(capture.pendingBuckets.flatMap(\.steps).map(\.matched.eventID))
+        #expect(retained.contains(first.id) && !retained.contains(second.id),
+                "the earlier write represents the pair")
     }
 
     @Test("Weight pressure folds a writer's repeats before shedding pending history or partials")
