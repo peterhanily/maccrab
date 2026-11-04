@@ -204,4 +204,98 @@ struct RuleEngineReloadTests {
         #expect(inIndex.count == 1, "the dispatch index must hold exactly one copy of an overridden rule, got \(inIndex.count)")
         #expect(inIndex.first?.level.rawValue == overrideLevel, "the override severity must win, not the bundled default")
     }
+
+    /// The stable iodine_dns_tunnel rule (Image|endswith '/iodine'), and an
+    /// exec it matches.
+    private let iodineRuleID = "d1a2b3c4-0246-4000-a000-000000000246"
+    private let iodineRuleFile = "iodine_dns_tunnel.json"
+
+    private func iodineExec() -> Event {
+        let p = MacCrabCore.ProcessInfo(
+            pid: 4401, ppid: 1, rpid: 1, name: "iodine",
+            executable: "/usr/local/bin/iodine",
+            commandLine: "iodine -f 192.0.2.1 t.example.com",
+            args: ["/usr/local/bin/iodine"], workingDirectory: "/tmp",
+            userId: 501, userName: "t", groupId: 20, startTime: Date(),
+            codeSignature: nil,
+            ancestors: [ProcessAncestor(pid: 1, executable: "/bin/bash", name: "bash")],
+            architecture: "arm64", isPlatformBinary: false)
+        return Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: p)
+    }
+
+    /// Sets the `enabled` key of the rule file at `url`, as the dashboard's
+    /// disable override and `maccrabctl rule enable|disable` do.
+    private func setEnabledKey(_ enabled: Bool, in url: URL) throws {
+        var obj = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        obj["enabled"] = enabled
+        try JSONSerialization.data(withJSONObject: obj).write(to: url, options: .atomic)
+    }
+
+    // The dashboard's Disable installs user_rules/<id>.json with enabled:false.
+    // Its Enable, MCP delete_rule and `maccrabctl rule delete` delete that file,
+    // and the daemon then reloads compiled_rules and loads the overlay again.
+    // The reload used to carry disabled flags across, so with the override gone
+    // the bundled rule stayed disabled until the engine restarted.
+    @Test("deleting a disable override re-enables the bundled rule on the next reload")
+    func deletedOverrideReenablesOnReload() async throws {
+        try ensureRulesCompiled()
+        let base = compiledRulesDirectory
+        let overlay = FileManager.default.temporaryDirectory
+            .appendingPathComponent("overlay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: overlay, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: overlay) }
+        let override = overlay.appendingPathComponent("\(iodineRuleID).json")
+        try FileManager.default.copyItem(at: base.appendingPathComponent(iodineRuleFile), to: override)
+        try setEnabledKey(false, in: override)
+
+        // Boot order: the base under the stable profile, then the overlay.
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: base, enabledStatuses: ["stable"])
+        let enabledAtBoot = await engine.enabledRuleCount
+        let bundled = try #require(await engine.listRules().first { $0.id == iodineRuleID })
+        #expect(bundled.status == "stable")
+        #expect(bundled.enabled)
+        _ = try await engine.loadRules(from: overlay, requireOwnerUID: geteuid())
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == false)
+        #expect(await engine.enabledRuleCount == enabledAtBoot - 1)
+        #expect(!(await engine.evaluate(iodineExec()).contains { $0.ruleId == iodineRuleID }))
+
+        // Enable deletes the override; then the reload order.
+        try FileManager.default.removeItem(at: override)
+        _ = try await engine.reloadRules(from: base)
+        _ = try await engine.loadRules(from: overlay, requireOwnerUID: geteuid())
+
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == true,
+                "with its override deleted, the bundled rule must load enabled again")
+        #expect(await engine.enabledRuleCount == enabledAtBoot)
+        #expect(await engine.evaluate(iodineExec()).contains { $0.ruleId == iodineRuleID })
+    }
+
+    // `maccrabctl rule disable|enable` sets the `enabled` key in the compiled
+    // rule file and asks for `rules reload`, which raises SIGHUP. The reload
+    // used to keep a rule disabled after its file was set back to enabled:true.
+    @Test("a reload takes a compiled rule's enabled key from its file")
+    func reloadTakesEnabledFromFile() async throws {
+        try ensureRulesCompiled()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reload-enabled-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent(iodineRuleFile)
+        try FileManager.default.copyItem(at: compiledRulesDirectory.appendingPathComponent(iodineRuleFile), to: file)
+
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: dir, enabledStatuses: ["stable"])
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == true)
+
+        try setEnabledKey(false, in: file)
+        _ = try await engine.reloadRules(from: dir)
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == false)
+
+        try setEnabledKey(true, in: file)
+        _ = try await engine.reloadRules(from: dir)
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == true,
+                "a file set back to enabled:true must load enabled")
+        #expect(await engine.evaluate(iodineExec()).contains { $0.ruleId == iodineRuleID })
+    }
 }

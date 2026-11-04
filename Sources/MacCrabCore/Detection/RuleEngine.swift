@@ -659,6 +659,12 @@ public actor RuleEngine {
     /// Rules auto-disabled at runtime for exceeding the eval budget (suspected
     /// pathological / ReDoS patterns). Exposed for health/visibility.
     public private(set) var autoDisabledRules: Set<String> = []
+    /// Rules disabled through `setEnabled`, including the guard's disables.
+    /// A `reloadRules` that succeeds disables them again, except the ones in
+    /// `autoDisabledRules`, and drops the ids it no longer holds. It carries
+    /// no other disabled state over: its load re-applies each file's own
+    /// `enabled` and the stored status profile.
+    private var runtimeDisabledRuleIDs: Set<String> = []
 
     /// v1.18: a RELOAD that cleanly decodes but yields fewer than this fraction
     /// of the prior ruleset is rejected as a suspected truncated/partial content
@@ -997,9 +1003,6 @@ public actor RuleEngine {
     /// Returns the number of rules loaded after the reload.
     @discardableResult
     public func reloadRules(from directory: URL) throws -> Int {
-        // Preserve enabled/disabled state for rules that still exist after reload.
-        let previousEnabledState = allRules.mapValues { $0.enabled }
-
         // Snapshot current state so we can roll back if the load fails.
         let snapshotIndex  = ruleIndex
         let snapshotRules  = allRules
@@ -1086,24 +1089,30 @@ public actor RuleEngine {
         // it auto-disabled (suspected pathological/ReDoS) get a fresh start.
         // Without this, a rule the guard silenced under transient load stayed
         // disabled forever (the reload restore below re-applied its false
-        // `enabled == false`), so even a SIGHUP couldn't recover it. Operator-
-        // or profile-disabled rules are NOT in `autoDisabledRules`, so they are
-        // still honored by the restore loop.
+        // `enabled == false`), so even a SIGHUP couldn't recover it. The loop
+        // below still re-applies the other `setEnabled` disables, the ones
+        // whose rules are not in `autoDisabledRules`.
         let previouslyAutoDisabled = autoDisabledRules
         ruleBudgetBreaches.removeAll()
         autoDisabledRules.removeAll()
 
-        // Restore enabled state for rules that were previously disabled — except
-        // ones the runtime guard auto-disabled, which are being given a clean slate.
-        for (ruleId, wasEnabled) in previousEnabledState {
-            if var rule = allRules[ruleId], !wasEnabled, !previouslyAutoDisabled.contains(ruleId) {
-                rule.enabled = false
-                allRules[ruleId] = rule
-                // Update in index as well.
-                let category = rule.logsource.category
-                if let idx = ruleIndex[category]?.firstIndex(where: { $0.id == ruleId }) {
-                    ruleIndex[category]?[idx] = rule
-                }
+        // Disable again the rules disabled through `setEnabled`, except those
+        // in `previouslyAutoDisabled`, which are being given a clean slate,
+        // and drop the ids this load no longer holds. Disabled state that
+        // came from rule content is not carried over, so a deleted user_rules
+        // override or a file set back to enabled:true no longer keeps a rule
+        // disabled.
+        runtimeDisabledRuleIDs = runtimeDisabledRuleIDs
+            .subtracting(previouslyAutoDisabled)
+            .filter { allRules[$0] != nil }
+        for ruleId in runtimeDisabledRuleIDs {
+            guard var rule = allRules[ruleId] else { continue }
+            rule.enabled = false
+            allRules[ruleId] = rule
+            // Update in index as well.
+            let category = rule.logsource.category
+            if let idx = ruleIndex[category]?.firstIndex(where: { $0.id == ruleId }) {
+                ruleIndex[category]?[idx] = rule
             }
         }
 
@@ -1293,6 +1302,11 @@ public actor RuleEngine {
 
         rule.enabled = enabled
         allRules[ruleId] = rule
+        if enabled {
+            runtimeDisabledRuleIDs.remove(ruleId)
+        } else {
+            runtimeDisabledRuleIDs.insert(ruleId)
+        }
 
         let category = rule.logsource.category
         if let idx = ruleIndex[category]?.firstIndex(where: { $0.id == ruleId }) {
