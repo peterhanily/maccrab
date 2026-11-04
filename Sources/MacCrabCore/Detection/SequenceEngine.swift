@@ -310,18 +310,15 @@ public actor SequenceEngine {
 
     // MARK: - State
 
-    /// All loaded sequence rules keyed by rule ID. Changed only by
-    /// installRule, reloadRules and setEnabled, never per event, so the
-    /// whole-map rebuild below stays off the event path. loadRules installs
-    /// one rule at a time, so loading N rules rebuilds it N times.
-    private var rules: [String: SequenceRule] = [:] {
-        didSet { pendingFoldStepIDByRule = rules.compactMapValues(Self.pendingFoldStepID(for:)) }
-    }
+    /// All loaded sequence rules keyed by rule ID.
+    private var rules: [String: SequenceRule] = [:]
 
     /// pendingFoldStepID(for:) of every loaded rule that has one, keyed by
     /// rule ID, so admission and pressure relief read fold eligibility with
-    /// one lookup instead of walking the rule's steps. Rebuilt from `rules`
-    /// on every change, so it cannot go stale.
+    /// one lookup instead of walking the rule's steps. installRule and
+    /// reloadRules set it wherever they set `rules`, as they do
+    /// heavyDependencyMasks. setEnabled leaves it alone: eligibility ignores
+    /// `enabled`, and a disabled rule has no bucket to fold.
     private(set) var pendingFoldStepIDByRule: [String: String] = [:]
 
     /// Rule-ID -> step-ID -> fixed heavyweight evidence dependency. Populated
@@ -841,6 +838,7 @@ public actor SequenceEngine {
             removeRuleFromIndex(rule.id)
         }
         rules[rule.id] = rule
+        pendingFoldStepIDByRule[rule.id] = Self.pendingFoldStepID(for: rule)
         ruleSetGeneration &+= 1
         heavyDependencyMasks[rule.id] = Dictionary(
             uniqueKeysWithValues: rule.steps.map { step in
@@ -1542,6 +1540,7 @@ public actor SequenceEngine {
         var nextRules: [String: SequenceRule] = [:]
         var nextIndex: [String: Set<String>] = [:]
         var nextHeavyDependencies: [String: [String: HeavyEnrichmentDependencyMask]] = [:]
+        var nextFoldStepIDs: [String: String] = [:]
         for stagedRule in batch.rules {
             var rule = stagedRule
             // A successful reload replaces rule CONTENT, but an explicit runtime
@@ -1563,6 +1562,7 @@ public actor SequenceEngine {
                 }
             }
             nextRules[rule.id] = rule
+            nextFoldStepIDs[rule.id] = Self.pendingFoldStepID(for: rule)
             nextHeavyDependencies[rule.id] = Dictionary(
                 uniqueKeysWithValues: rule.steps.map { step in
                     (step.id, HeavyEnrichmentRuleCoverage.dependencyMask(
@@ -1579,6 +1579,7 @@ public actor SequenceEngine {
         let ruleFingerprintStateChanged = prevRules != nextRules
         try validateCheckpointableRuleCorpus(Array(nextRules.values))
         rules = nextRules
+        pendingFoldStepIDByRule = nextFoldStepIDs
         ruleIndex = nextIndex
         heavyDependencyMasks = nextHeavyDependencies
         ruleSetGeneration &+= 1
@@ -3975,7 +3976,7 @@ public actor SequenceEngine {
     /// capacity, or nil. Shape half of the fold eligibility; the event half is
     /// the ES audit identity (pendingFoldKey). Pure over the rule definition.
     /// The single definition of the shape half: the engine reads it through
-    /// pendingFoldStepIDByRule, which every change to `rules` rebuilds.
+    /// pendingFoldStepIDByRule, which installRule and reloadRules fill from it.
     static func pendingFoldStepID(for rule: SequenceRule) -> String? {
         guard rule.ordered, rule.steps.count >= 2,
               rule.correlationType == .processLineage || rule.correlationType == .none else { return nil }
