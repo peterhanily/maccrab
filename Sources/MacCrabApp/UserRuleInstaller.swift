@@ -10,8 +10,10 @@
 //   1. compile the supplied YAML in an unprivileged temporary directory using
 //      the bundled compiler + vendored PyYAML,
 //   2. place one owner-bound request in the daemon's sticky inbox,
-//   3. let the root engine validate and atomically install both source and JSON
-//      in its root-owned user_rules directory, then trigger a reload.
+//   3. let the root engine check the request's owner and size, write the source
+//      and the JSON into its root-owned user_rules directory, each as a new file
+//      it owns with mode 0644 that replaces any existing one, then trigger a
+//      reload.
 //
 // user_rules/ survives Sparkle updates — signed-corpus self-sync never touches it.
 

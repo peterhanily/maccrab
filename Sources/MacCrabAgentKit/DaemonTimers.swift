@@ -6845,6 +6845,33 @@ enum DaemonTimers {
         return s
     }
 
+    /// Write one user_rules file as a new inode owned by this process's euid,
+    /// mode 0644. The engine loads a user_rules file only when the daemon's
+    /// euid owns it, and rewriting an existing file in place keeps its owner,
+    /// so a re-saved override owned by uid 501 stayed refused.
+    /// SecureFileIO.atomicReplace writes a new file in the same folder and
+    /// renames it over the name, but refuses to replace an entry that is not a
+    /// single-link regular file this euid owns. Such an entry (a symlink, a
+    /// hard link, or a file another uid owns) is unlinked first: unlinkat
+    /// removes the entry itself, never what a symlink points to.
+    static func writeUserRuleFile(_ data: Data, toPath path: String) throws {
+        let folder = (path as NSString).deletingLastPathComponent
+        let name = (path as NSString).lastPathComponent
+        let folderDescriptor = open(folder, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard folderDescriptor >= 0 else {
+            throw SecureFileIO.Error.openFailed(path: folder, errno: errno)
+        }
+        defer { close(folderDescriptor) }
+        var existing = stat()
+        if fstatat(folderDescriptor, name, &existing, AT_SYMLINK_NOFOLLOW) == 0,
+           existing.st_mode & S_IFMT != S_IFREG || existing.st_nlink != 1 || existing.st_uid != geteuid() {
+            guard unlinkat(folderDescriptor, name, 0) == 0 else {
+                throw SecureFileIO.Error.writeFailed(path: path, errno: errno)
+            }
+        }
+        try SecureFileIO.atomicReplace(at: path, data: data, mode: 0o644)
+    }
+
     private static func handleInstallRuleRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
@@ -6883,9 +6910,9 @@ enum DaemonTimers {
                 // in place on the next install.
                 try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: userRulesDir)
                 if !yaml.isEmpty {
-                    try yaml.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/\(ruleId).yml"))
+                    try writeUserRuleFile(Data(yaml.utf8), toPath: userRulesDir + "/\(ruleId).yml")
                 }
-                try jsonText.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/\(ruleId).json"))
+                try writeUserRuleFile(Data(jsonText.utf8), toPath: userRulesDir + "/\(ruleId).json")
                 let tick = "\(Date().timeIntervalSince1970)\n"
                 try? tick.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/.reload_tick"))
                 auditLogInbox(state: state, prefix: "install-rule", id: sanitizeAuditField(ruleId), uid: uid, result: "installed")
