@@ -374,7 +374,9 @@ struct CompiledRuleFileIndexTests {
         #expect(fresh.rule(id: "new.id", in: compiled)?["title"] as? String == "user rule")
     }
 
-    @Test("trust follows the engine's directory and file checks")
+    // MacCrabCoreTests' UserRuleOverlayTrustParityTests runs these checks
+    // against the engine's own gates.
+    @Test("UserRuleOverlayTrust's folder and file decisions, and the index's calls to them")
     func trustMatchesTheEngine() {
         typealias Trust = UserRuleOverlayTrust
         #expect(Trust.trustsDirectory(owner: 0, mode: 0o40755, isSymlink: false, engineUID: 0))
