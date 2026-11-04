@@ -235,9 +235,20 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     /// removes or renames files, which moves a directory's mtime. A chmod or
     /// chown of user_rules, which decides whether the engine trusts the
     /// overlay, leaves its mtime alone, so its ctime, mode and owner count too.
+    /// A rule file edited in place moves none of these; its FileStamp does.
     private struct Stamp: Equatable {
         let bundled: [Time?]
         let user: UserRulesState?
+    }
+
+    /// lstat metadata of one rule file. An edit in place moves the file's mtime
+    /// and ctime but not its directory's; a replacement changes its inode.
+    private struct FileStamp: Equatable {
+        let path: String
+        let inode: UInt64
+        let size: Int64
+        let modified: Time
+        let changed: Time
     }
 
     private struct Time: Equatable {
@@ -303,8 +314,16 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     private let lock = NSLock()
     private var directory: String?
     private var stamp: Stamp?
+    private var files: [FileStamp] = []
     private var paths: [String: String] = [:]
     private var duplicateUserRuleIDs: Set<String> = []
+    private var builds = 0
+
+    /// Index builds so far. Tests use it to show that a miss opens no rule file.
+    var rebuildCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return builds
+    }
 
     func rule(id: String, in compiledDir: String) -> [String: Any]? {
         rule(id: id, in: compiledDir, engineUID: Self.engineUID(forCompiledDir: compiledDir))
@@ -325,17 +344,20 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
             return (json?["id"] as? String) == id ? json : nil
         }
         // The server lives for a whole agent session, while the engine installs
-        // overrides and an operator may fix user_rules' mode: an entry is used
-        // only while the directories are as they were when it was indexed.
+        // overrides and an operator may fix user_rules' mode or edit a rule in
+        // place: an entry is used only while the directories and their rule
+        // files are as they were when it was indexed.
         let current = Self.stamp(compiledDir)
         let unchanged = isCurrent(compiledDir, stamp: current)
+            && filesUnchanged(Self.fileStamps(compiledDir, engineUID: engineUID))
         let cached = cachedPath(id: id, in: compiledDir)
         if unchanged, let cached, let json = resolve(cached) {
             return json
         }
         // A stale entry means the rules changed: rebuild. An id with no entry
-        // rebuilds only when the directories changed, so an alert whose rule
-        // is no longer in the corpus does not reopen every file on each call.
+        // rebuilds only when the directories or their files changed, so an
+        // alert whose rule is no longer in the corpus does not reopen every
+        // file on each call.
         guard cached != nil || !unchanged else { return nil }
         rebuild(compiledDir, stamp: current, engineUID: engineUID)
         return cachedPath(id: id, in: compiledDir).flatMap(resolve)
@@ -358,7 +380,15 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return directory == compiledDir && stamp == current
     }
 
+    private func filesUnchanged(_ current: [FileStamp]) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return files == current
+    }
+
     private func rebuild(_ compiledDir: String, stamp current: Stamp, engineUID: uid_t) {
+        // Stamped before they are read: a file that changes during the build
+        // no longer matches its stamp, so the next lookup rebuilds again.
+        let currentFiles = Self.fileStamps(compiledDir, engineUID: engineUID)
         var next: [String: String] = [:]
         for dir in Self.bundledDirectories(compiledDir) {
             for path in Self.ruleFiles(in: dir) {
@@ -390,8 +420,10 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         lock.lock()
         directory = compiledDir
         stamp = current
+        files = currentFiles
         paths = next
         duplicateUserRuleIDs = duplicated
+        builds += 1
         lock.unlock()
     }
 
@@ -415,6 +447,23 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
                              mode: st.st_mode, owner: st.st_uid)
             : nil
         return Stamp(bundled: bundled, user: user)
+    }
+
+    /// The rule files the index reads: those of the bundled directories and,
+    /// while the engine trusts it, of user_rules. Listing and lstat only: no
+    /// rule file is opened.
+    private static func fileStamps(_ compiledDir: String, engineUID: uid_t) -> [FileStamp] {
+        var directories = bundledDirectories(compiledDir)
+        let userDir = userRulesDirectory(compiledDir)
+        if userRulesTrusted(userDir, engineUID: engineUID) { directories.append(userDir) }
+        return directories.flatMap { ruleFiles(in: $0) }.map { path in
+            var st = stat()
+            guard lstat(path, &st) == 0 else {
+                return FileStamp(path: path, inode: 0, size: -1, modified: Time(timespec()), changed: Time(timespec()))
+            }
+            return FileStamp(path: path, inode: UInt64(st.st_ino), size: Int64(st.st_size),
+                             modified: Time(st.st_mtimespec), changed: Time(st.st_ctimespec))
+        }
     }
 
     /// A regular file only, read through the bounded reader: a FIFO or a

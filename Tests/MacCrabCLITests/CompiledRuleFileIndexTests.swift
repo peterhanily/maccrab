@@ -9,14 +9,28 @@ import Testing
 struct CompiledRuleFileIndexTests {
     /// A rule file the engine decodes, as every user rule it loads must.
     private func write(_ id: String, to path: String, title: String? = nil) throws {
-        let json = try JSONSerialization.data(withJSONObject: [
+        try ruleData(id, title: title).write(to: URL(fileURLWithPath: path))
+    }
+
+    /// The bytes `write` puts in a rule file. Keys are sorted, so two ids of
+    /// one length give files of one size.
+    private func ruleData(_ id: String, title: String? = nil) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
             "id": id, "title": title ?? id, "description": "rule index fixture", "level": "low",
             "tags": ["attack.discovery"], "logsource": ["category": "file_event", "product": "macos"],
             "predicates": [["field": "file.path", "modifier": "contains",
                             "values": ["/maccrab-rule-index-fixture/"], "negate": false]],
             "condition": "all_of", "falsepositives": ["test fixture"], "enabled": true, "status": "stable",
-        ])
-        try json.write(to: URL(fileURLWithPath: path))
+        ], options: [.sortedKeys])
+    }
+
+    /// Rewrites an existing file through its own inode, as an editor that saves
+    /// in place does: the directory's entries, mtime and ctime stay as they were.
+    private func overwriteInPlace(_ path: String, with data: Data) throws {
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: data)
     }
 
     /// Moves a directory's mtime on, as any change to its entries would.
@@ -53,17 +67,19 @@ struct CompiledRuleFileIndexTests {
             #expect(index.rule(id: id, in: dir)?["id"] as? String == id, "\(id)")
         }
 
-        // Add a file, then restore the directory's exact mtime: an id with no
-        // entry must not rebuild while the directories look unchanged.
+        // Add a file, then restore the directory's exact mtime. The directory
+        // stamps look unchanged, but the file listing does not, so the miss
+        // rebuilds and finds the new rule.
         var before = stat()
         #expect(stat(dir, &before) == 0)
         #expect(index.rule(id: "rule.missing", in: dir) == nil)
         try write("rule.c", to: dir + "/c.json")
         var times = [before.st_atimespec, before.st_mtimespec]
         #expect(utimensat(AT_FDCWD, dir, &times, 0) == 0)
-        #expect(index.rule(id: "rule.c", in: dir) == nil, "no rebuild while the directories are unchanged")
+        #expect(index.rule(id: "rule.c", in: dir)?["id"] as? String == "rule.c",
+                "a file added without moving the directory mtime is found")
 
-        // A compile changes the directory: the next miss rebuilds.
+        // A compile changes the directory: the next lookup rebuilds.
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: dir)
         #expect(index.rule(id: "rule.c", in: dir)?["id"] as? String == "rule.c")
     }
@@ -210,6 +226,72 @@ struct CompiledRuleFileIndexTests {
         try FileManager.default.removeItem(atPath: user + "/c.json")
         #expect(index.rule(id: "rule.dup", in: compiled)?["title"] as? String == "first")
         #expect(!index.hasDuplicateUserRules(id: "rule.dup", in: compiled))
+    }
+
+    @Test("an in-place id edit is found with every directory stamp unchanged, and the old id misses")
+    func inPlaceIDEditIsFound() throws {
+        let (root, compiled, _) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let path = compiled + "/x.json"
+        try ruleData("rule.old").write(to: URL(fileURLWithPath: path))
+        let index = CompiledRuleFileIndex()
+        #expect(index.rule(id: "rule.old", in: compiled)?["id"] as? String == "rule.old")
+        var dirBefore = stat(), fileBefore = stat()
+        #expect(stat(compiled, &dirBefore) == 0)
+        #expect(lstat(path, &fileBefore) == 0)
+        // Same inode and size, and the file's mtime is put back, so only its
+        // ctime moves.
+        try overwriteInPlace(path, with: ruleData("rule.new"))
+        var times = [fileBefore.st_atimespec, fileBefore.st_mtimespec]
+        #expect(utimensat(AT_FDCWD, path, &times, AT_SYMLINK_NOFOLLOW) == 0)
+        var dirAfter = stat(), fileAfter = stat()
+        #expect(stat(compiled, &dirAfter) == 0)
+        #expect(lstat(path, &fileAfter) == 0)
+        #expect(fileAfter.st_ino == fileBefore.st_ino && fileAfter.st_size == fileBefore.st_size)
+        #expect(fileAfter.st_mtimespec.tv_sec == fileBefore.st_mtimespec.tv_sec
+            && fileAfter.st_mtimespec.tv_nsec == fileBefore.st_mtimespec.tv_nsec)
+        #expect(dirAfter.st_mtimespec.tv_sec == dirBefore.st_mtimespec.tv_sec
+            && dirAfter.st_mtimespec.tv_nsec == dirBefore.st_mtimespec.tv_nsec)
+        #expect(index.rule(id: "rule.new", in: compiled)?["id"] as? String == "rule.new")
+        #expect(index.rule(id: "rule.old", in: compiled) == nil)
+    }
+
+    @Test("a true miss rebuilds nothing, so it opens no rule file")
+    func trueMissDoesNotRebuild() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write("rule.a", to: compiled + "/a.json")
+        try write("user.u", to: user + "/u.json")
+        let index = CompiledRuleFileIndex()
+        #expect(index.rule(id: "rule.a", in: compiled) != nil)
+        #expect(index.rebuildCount == 1)
+        // Rule files are read only while building and when a cached entry is
+        // used, and a miss has no entry.
+        for _ in 0..<3 { #expect(index.rule(id: "rule.missing", in: compiled) == nil) }
+        #expect(index.rule(id: "user.u", in: compiled) != nil)
+        #expect(index.rebuildCount == 1)
+    }
+
+    @Test("an override made in place is shown for an id already resolved to its bundled rule")
+    func inPlaceOverrideOfAResolvedID() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        try write("user.y", to: user + "/y.json", title: "user rule")
+        let index = CompiledRuleFileIndex()
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "bundled")
+        var before = stat()
+        #expect(lstat(user, &before) == 0)
+        // y.json is saved in place with the bundled rule's id, which the
+        // engine then applies; user_rules' entries, mtime and ctime stay.
+        try overwriteInPlace(user + "/y.json", with: ruleData("rule.x", title: "user override"))
+        var after = stat()
+        #expect(lstat(user, &after) == 0)
+        #expect(after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec
+            && after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec)
+        #expect(after.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec
+            && after.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec)
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "user override")
     }
 
     @Test("an id resolves single-event, then sequence, then graph; user rules override single-event ids only")
