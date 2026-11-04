@@ -330,10 +330,12 @@ struct SequenceReplayOnAdvanceCorpusTests {
     @Test("A lagged seed stretches the event-time span replay on advance completes by exactly its lag")
     func laggedSeedStretchesTheCompletedSpan() async throws {
         let chain = axiosChain()
-        let reference = Date()
         let drop = write(chain.setup, "/Library/Caches/com.apple.act.mond", at: 90)
 
         let replayed = try await stableEngine(chain.processes)
+        // Taken after the first engine is built, which may wait for the
+        // one-time rule compile, so the windows measure only engine work.
+        let reference = Date()
         try await restoreSeed(replayed, script: chain.script, seedAt: 0, createdAt: reference.addingTimeInterval(-30),
                               callbacks: [retainedCallback(chain, at: 95, arrivedAt: reference.addingTimeInterval(-34))],
                               now: reference.addingTimeInterval(-30))
@@ -363,8 +365,10 @@ struct SequenceReplayOnAdvanceCorpusTests {
     @Test("A callback past its window at the drop is skipped, not retired, and completes nothing")
     func expiredCallbackIsSkipped() async throws {
         let chain = axiosChain()
-        let reference = Date()
         let engine = try await stableEngine(chain.processes)
+        // After the build, as above: a slow compile must not expire the
+        // partial and skip the case under test.
+        let reference = Date()
         let callback = retainedCallback(chain, at: 2, arrivedAt: reference.addingTimeInterval(-70))
         try await restoreSeed(engine, script: chain.script, seedAt: 0, createdAt: reference.addingTimeInterval(-30),
                               callbacks: [callback], now: reference.addingTimeInterval(-30))

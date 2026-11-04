@@ -465,10 +465,12 @@ public actor SequenceEngine {
     private var pendingCapacityElementVisitCount: UInt64 = 0
 
     /// Replay on advance (replayPendingStepsAfterAdvance): scans of a rule's
-    /// pending history, and the later-step bindings and completions they made.
-    /// Process-lifetime diagnostics; the replay never changes pending history,
-    /// so none of them is a journal key.
+    /// pending history, the retained entries they took as candidates, and the
+    /// later-step bindings and completions they made. Process-lifetime
+    /// diagnostics; the replay never changes pending history, so none of them
+    /// is a journal key.
     private var advanceReplayScansTotal: UInt64 = 0
+    private var advanceReplayCandidatesTotal: UInt64 = 0
     private var advanceReplayBindingsTotal: UInt64 = 0
     private var advanceReplayCompletionsTotal: UInt64 = 0
 
@@ -1149,6 +1151,14 @@ public actor SequenceEngine {
     /// PendingPressureDiagnostics.
     func advanceReplayScanCount() -> UInt64 {
         advanceReplayScansTotal
+    }
+
+    /// Retained entries the replay-on-advance scans took as candidates:
+    /// in-window entries for steps after the lowest newly bound one. Lets
+    /// tests pin that a scan never considers the bound step's own (possibly
+    /// folded) history.
+    func advanceReplayCandidateCount() -> UInt64 {
+        advanceReplayCandidatesTotal
     }
 
     private func pendingPressureSnapshot(
@@ -4121,6 +4131,7 @@ public actor SequenceEngine {
             return lhsIndex < rhsIndex
         }
         guard !candidates.isEmpty else { return [] }
+        Self.addSaturating(UInt64(candidates.count), to: &advanceReplayCandidatesTotal)
         var partials = partialMatches[ruleId] ?? []
         let targets = partials.indices.filter { advancedStepIndexByPartial[partials[$0].id] != nil }
         guard !targets.isEmpty else { return [] }

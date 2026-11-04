@@ -585,7 +585,7 @@ struct SequenceReplayOnAdvanceTests {
 
     // MARK: - Composition with capacity relief
 
-    @Test("Replay on advance never reads folded middle-step history")
+    @Test("Replay on advance takes only later-step entries as candidates, never folded middle-step history")
     func replayNeverReadsFoldedHistory() async throws {
         let rule = threeStepRule()
         #expect(SequenceEngine.pendingFoldStepID(for: rule) == "middle")
@@ -601,12 +601,17 @@ struct SequenceReplayOnAdvanceTests {
         #expect(await fires(writes, on: engine, rule: rule) == [0, 0, 0, 0, 0])
         let folded = await engine.pendingPressureDiagnostics()
         #expect(folded.foldedStepsTotal == 4 && folded.foldAttemptsTotal == 1)
+        let candidatesBefore = await engine.advanceReplayCandidateCount()
 
         #expect(await fires([seed(at: 0), finish(pid: 102, at: 2), middle(pid: 101, at: 1)],
                             on: engine, rule: rule) == [0, 0, 1])
         let replayed = await engine.pendingPressureDiagnostics()
         let bindings = replayed.advanceReplayBindingsTotal - folded.advanceReplayBindingsTotal
         #expect(bindings == 1, "only the finish, step index 2, was replayed")
+        // The bucket then held the finish and 8,189 middle-step entries,
+        // the folded representative among them.
+        let candidates = await engine.advanceReplayCandidateCount() - candidatesBefore
+        #expect(candidates == 1, "the scan took only the finish as a candidate")
         let capture = try await engine.checkpointCapture()
         let writerHistory = capture.pendingBuckets.flatMap(\.steps).filter { $0.matched.processPID == 201 }
         #expect(writerHistory.map(\.matched.eventID) == [writes[0].id], "the folded representative is untouched")

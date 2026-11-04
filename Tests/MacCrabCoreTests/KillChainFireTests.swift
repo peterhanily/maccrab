@@ -98,8 +98,9 @@ struct KillChainFireTests {
     private let worm = "e1f2a3b4-0040-4000-b000-000000000040"
 
     /// The default (stable) profile over the same lineage as fires(_:_:).
-    /// The periodic sweep runs only once an hour, so a slow debug run cannot
-    /// retire history mid-test.
+    /// The periodic sweep runs only once an hour, but every over-cap admission
+    /// still retires history past its rule's processing-time window, so on a
+    /// slow run short-window entries can retire mid-test.
     private func stableEngine() async throws -> SequenceEngine {
         try ensureRulesCompiled()
         let lineage = ProcessLineage()
@@ -308,13 +309,19 @@ struct KillChainFireTests {
         #expect(await engine.evictionIsOngoing(within: 300) == false)
         #expect(await engine.pendingStepConservationByRule().values.allSatisfy { $0.explicitlyShed == 0 })
         // One fold, when the burst passes the cap: every drop so far, less one
-        // representative per node writer.
-        let expectedFolded = UInt64(SequenceEngine.maxPendingTotal + 1) - preBurst - 4
+        // representative per node writer. On a slow run the cap crossing can
+        // first retire pre-burst history past its window (reverse_shell_chain's
+        // is 10 s) as completed, and each retired entry lets one more drop in
+        // before the fold. Until the seed below, folds and those retirements
+        // are the only completions.
         let pressure = await engine.pendingPressureDiagnostics()
+        let retired = await engine.pendingStepConservation().completed - pressure.foldedStepsTotal
+        let expectedFolded = UInt64(SequenceEngine.maxPendingTotal + 1) - preBurst - 4 + retired
         #expect(pressure.foldAttemptsTotal == 1 && pressure.foldedStepsTotal == expectedFolded)
         #expect(pressure.foldedStepsTotal >= 8_000 && pressure.lastPressure == nil)
         let fold = try #require(pressure.lastFold)
         #expect(fold.ruleID == npmRat && fold.stepID == "drop_payload" && fold.foldedGroups == 4)
+        #expect(fold.removedPendingSteps == pressure.foldedStepsTotal)
         let capture = try await engine.checkpointCapture()
         let retained = Set(capture.pendingBuckets.first { $0.ruleID == supplyChain }?.steps.map(\.matched.eventID) ?? [])
         #expect(retained == [persist.id, exfil.id])
@@ -366,10 +373,13 @@ struct KillChainFireTests {
         let foldableBuckets = await engine.pendingStepConservationByRule()
             .filter { foldEligible.contains($0.key) && $0.value.queued > 0 }.count
         let flood = 1_000
+        let completedBefore = await engine.pendingStepConservation().completed
         for index in 0..<flood {
             _ = await engine.evaluate(bashWrite("/private/tmp/flood/\(index)", pid: 30_000 + Int32(index),
                                                 at: 10 + Double(index) / 1_000))
         }
+        // Read before the seeds: their full replays also retire expired history.
+        let retired = Int(await engine.pendingStepConservation().completed - completedBefore)
         let installSeed = proc("/usr/local/bin/npm", cmd: "npm install evil", at: 0)
         let wormSeed = proc("/tmp/stage", parent: "/usr/local/bin/npm", at: 0)
         let pipSeed = proc("/usr/bin/pip3", cmd: "pip3 install requests", at: 0)
@@ -379,7 +389,9 @@ struct KillChainFireTests {
 
         let byRule = await engine.pendingStepConservationByRule()
         let evicted = await engine.pendingStepsEvictedTotal
-        #expect(evicted == flood, "every flood write displaces one entry")
+        // Nothing folds, so each flood write's relief sheds one entry, or
+        // instead retires history whose window lapsed, as completed.
+        #expect(evicted + retired == flood, "every flood write displaces one entry or retires expired history")
         #expect(byRule[npmRat]?.explicitlyShed == UInt64(evicted))
         for (ruleID, ledger) in byRule where ruleID != npmRat {
             #expect(ledger.explicitlyShed == 0, "\(ruleID) keeps its history")
@@ -393,8 +405,10 @@ struct KillChainFireTests {
         // at most once per 256 admissions.
         let attemptBound = UInt64(foldableBuckets * ((flood + 255) / 256))
         #expect(pressure.foldAttemptsTotal <= attemptBound, "low-yield attempts are throttled")
-        // 0021 (30 s window) and 9c2d052b (5 s) are checked only for shed
-        // history above: their processing-time windows can lapse on a slow host.
+        // 9c2d052b (5 s window), 0007 (10 s) and 0021 (30 s) are checked only
+        // for shed history above: their processing-time windows can lapse on a
+        // slow host, and a lapsed entry is retired as completed instead of
+        // being shed.
         #expect(installMatches.contains { $0.ruleId == supplyChain })
         #expect(wormMatches.contains { $0.ruleId == worm })
         #expect(await engine.pendingStepConservation().conservationMaintained)
