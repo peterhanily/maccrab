@@ -224,6 +224,30 @@ struct WhyCommandTests {
         #expect(chmod(users.path, 0o755) == 0)
         #expect(lookup() == override)
         #expect(!scan().unreadable)
+
+        // A rule only user_rules has. When this user cannot list the folder,
+        // no rule file is found, and the note says the daemon may load it.
+        let newID = "d1a2b3c4-0032-4000-a000-0000000000ff"
+        let newRule = try write(Self.flatRule.replacingOccurrences(of: singleID, with: newID), users, "b.json")
+        let alertID = "00000000-0000-0000-0000-00000000003f"
+        func notFound(_ ruleID: String) -> [String] {
+            MacCrabCtl.whyNoRuleFileLines(forRuleID: ruleID, in: dirs, hasDescription: false, alertID: alertID)
+        }
+        #expect(MacCrabCtl.findRuleFile(forRuleID: newID, in: dirs) == newRule)
+        #expect(chmod(users.path, 0o300) == 0)
+        #expect(MacCrabCtl.findRuleFile(forRuleID: newID, in: dirs) == nil)
+        #expect(notFound(newID) == [
+            "No rule file with the id \(newID) was found in user_rules or compiled_rules.",
+            "Built-in detectors have no rule file.",
+            "Note: user_rules has files this user cannot read. The daemon runs as root when installed,",
+            "so this alert's rule may be one of them. To check, run `sudo maccrabctl why \(alertID)`.",
+        ])
+        #expect(chmod(users.path, 0o755) == 0)
+        // With every file readable, an id no file has gets no note.
+        #expect(notFound("unknown-id") == [
+            "No rule file with the id unknown-id was found in user_rules or compiled_rules.",
+            "Built-in detectors have no rule file.",
+        ])
     }
 
     @Test("the user-rule notes say the daemon applies the rule shown only for one claim with nothing unreadable")

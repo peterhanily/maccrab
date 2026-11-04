@@ -95,10 +95,10 @@ extension MacCrabCtl {
             NSHomeDirectory() + "/Library/Application Support/MacCrab",
         ])
         guard let rulePath = findRuleFile(forRuleID: alert.ruleId, in: searchDirs) else {
-            print("No rule file with the id \(alert.ruleId) was found in user_rules or compiled_rules.")
-            print(alert.description != nil
-                ? "Built-in detectors have no rule file; for their alerts, the description printed above is what was captured."
-                : "Built-in detectors have no rule file.")
+            for line in whyNoRuleFileLines(forRuleID: alert.ruleId, in: searchDirs,
+                                           hasDescription: alert.description != nil, alertID: alert.id) {
+                print(line)
+            }
             exit(1)
         }
         let ruleDir = (rulePath as NSString).deletingLastPathComponent
@@ -181,6 +181,29 @@ extension MacCrabCtl {
             }
         }
         return nil
+    }
+
+    /// What `why` prints when no folder in `directories` has a rule file for
+    /// `ruleID`. A user rule this user cannot read may still be one the
+    /// daemon loads for it, so a note says how to check.
+    static func whyNoRuleFileLines(forRuleID ruleID: String, in directories: [String],
+                                   hasDescription: Bool, alertID: String) -> [String] {
+        var lines = [
+            "No rule file with the id \(ruleID) was found in user_rules or compiled_rules.",
+            hasDescription
+                ? "Built-in detectors have no rule file; for their alerts, the description printed above is what was captured."
+                : "Built-in detectors have no rule file.",
+        ]
+        let unreadable = directories.contains { dir in
+            dir.hasSuffix("/user_rules") && loadableUserRuleFiles(forRuleID: ruleID, inUserRules: dir).unreadable
+        }
+        if unreadable {
+            lines += [
+                "Note: user_rules has files this user cannot read. The daemon runs as root when installed,",
+                "so this alert's rule may be one of them. To check, run `sudo maccrabctl why \(alertID)`.",
+            ]
+        }
+        return lines
     }
 
     /// The files in a user_rules folder that the daemon would load for
