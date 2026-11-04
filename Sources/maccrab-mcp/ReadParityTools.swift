@@ -119,7 +119,10 @@ func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, duplicat
     }
     if let desc = rule["description"] as? String { lines.append("  description: \(desc)") }
     if let status = rule["status"] as? String { lines.append("  status: \(status)") }
-    if let ls = rule["logsource"] { lines.append("  logsource: \(ls)") }
+    if let ls = rule["logsource"] as? [String: Any] {
+        let pairs: [String] = ls.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+        lines.append("  logsource: " + pairs.joined(separator: ", "))
+    }
     lines.append("  matching logic: run `maccrabctl why \(alertID)` on this Mac; it prints the rule's predicates and how they combine (long value lists are shortened).")
     return lines
 }
@@ -242,12 +245,13 @@ func handleGetBrowserExtensions(_ args: [String: Any]) -> Any {
 }
 
 /// Rule id -> compiled file. Built on first use, then rebuilt when a rule
-/// directory's or rule file's lstat stamp changes (checked on every lookup)
-/// or a cached entry stops resolving. Every explain_alert call used to open
-/// and parse each compiled rule (about 480 files) to find one id. Launched by
-/// an AI agent, this server is an attributed agent child, so each of those
-/// opens was admitted, journaled and scanned as agent activity: MacCrab
-/// amplifying itself.
+/// directory's stamp (the bundled folders: stat mtime; user_rules: lstat
+/// mtime, ctime, mode and owner) or a rule file's lstat stamp changes
+/// (checked on every lookup), or a cached entry stops resolving. Every
+/// explain_alert call used to open and parse each compiled rule (about 480
+/// files) to find one id. Launched by an AI agent, this server is an
+/// attributed agent child, so each of those opens was admitted, journaled and
+/// scanned as agent activity: MacCrab amplifying itself.
 final class CompiledRuleFileIndex: @unchecked Sendable {
     static let shared = CompiledRuleFileIndex()
 

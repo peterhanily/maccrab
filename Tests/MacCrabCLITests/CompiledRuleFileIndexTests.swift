@@ -69,8 +69,8 @@ struct CompiledRuleFileIndexTests {
         #expect(index.rebuildCount == 1)
 
         // Add a file, then restore the directory's exact mtime. The directory
-        // stamps look unchanged, but the file listing does not, so the miss
-        // rebuilds and finds the new rule.
+        // stamps (mtime only for the bundled folders) look unchanged, but the
+        // file listing does not, so the miss rebuilds and finds the new rule.
         var before = stat()
         #expect(stat(dir, &before) == 0)
         #expect(index.rule(id: "rule.missing", in: dir) == nil)
@@ -312,8 +312,10 @@ struct CompiledRuleFileIndexTests {
         let pointer = "  matching logic: run `maccrabctl why \(alertID)` on this Mac; it prints the rule's predicates and how they combine (long value lists are shortened)."
 
         let lines = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: false, unreadableUserRules: false)
-        #expect(Array(lines.prefix(3)) == ["Rule definition:", "  description: rule index fixture", "  status: stable"])
-        #expect(lines.last == pointer)
+        #expect(lines == [
+            "Rule definition:", "  description: rule index fixture", "  status: stable",
+            "  logsource: category=file_event, product=macos", pointer,
+        ])
         // No predicate value and no logic key reaches the text. The pointer
         // names predicates only as what `why` prints, so the keys are looked
         // for in the lines above it.
