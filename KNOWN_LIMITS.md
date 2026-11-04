@@ -24,7 +24,7 @@ measured number, in the same commit that accepts it.**
 
 ## v1.22.6
 
-These functional limits are accepted for v1.22.6 and scheduled for v1.22.7.
+The limits below are accepted for v1.22.6 and scheduled for v1.22.7.
 
 Most of the items below are functional limits rather than resource costs. Each says what
 it affects, its bound or reach, and how to see it.
@@ -183,8 +183,8 @@ the heartbeat). The bounds:
   until the engine restarts.** They edit the bundled rule's file in `compiled_rules`.
   After `maccrabctl rules reload` the engine applies the change, but when it starts it
   replaces edited rule files with its signed copies, and the change is lost. Both commands
-  say this when they save a change. For a lasting change, use Disable rule or Enable rule
-  in Detection › Rules, which saves an override in `user_rules`. When a rule has a file in
+  say this when they save a change. For a lasting disable, use Disable rule in
+  Detection › Rules, which saves an override in `user_rules`. When a rule has a file in
   `user_rules`, the commands change nothing and point to Detection › Rules instead.
 - **Re-enabling a rule can keep a severity from before an update.** When you disable a
   bundled rule, its override records the rule's severity at that time. If an update then
