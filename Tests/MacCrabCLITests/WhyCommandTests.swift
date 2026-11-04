@@ -326,8 +326,8 @@ struct WhyCommandTests {
         // no rule file is found, and the note says the daemon may load it.
         let newID = "d1a2b3c4-0032-4000-a000-0000000000ff"
         let newRule = try write(Self.flatRule.replacingOccurrences(of: singleID, with: newID), users, "b.json")
-        func notFound(_ ruleID: String) -> [String] {
-            MacCrabCtl.whyNoRuleFileLines(forRuleID: ruleID, in: dirs, hasDescription: false, alertID: alertID)
+        func notFound(_ ruleID: String, hasDescription: Bool = false) -> [String] {
+            MacCrabCtl.whyNoRuleFileLines(forRuleID: ruleID, in: dirs, hasDescription: hasDescription, alertID: alertID)
         }
         #expect(MacCrabCtl.findRuleFile(forRuleID: newID, in: dirs) == newRule)
         #expect(chmod(users.path, 0o300) == 0)
@@ -340,11 +340,24 @@ struct WhyCommandTests {
             "this alert's rule may be a user rule there. To check, run",
             "`sudo maccrabctl why \(alertID)`.",
         ])
+        // For an alert with a description, the second line points to it.
+        #expect(notFound(newID, hasDescription: true) == [
+            "No rule file with the id \(newID) was found in compiled_rules or among the user rules the daemon would load.",
+            "Built-in detectors have no rule file; for their alerts, the description printed above is what was captured.",
+            "Note: this user cannot read all of user_rules (the folder cannot be listed or inspected, or",
+            "a file in it cannot be inspected or opened). The daemon runs as root when installed, so",
+            "this alert's rule may be a user rule there. To check, run",
+            "`sudo maccrabctl why \(alertID)`.",
+        ])
         #expect(chmod(users.path, 0o755) == 0)
         // With every file readable, an id no file has gets no note.
         #expect(notFound("unknown-id") == [
             "No rule file with the id unknown-id was found in compiled_rules or among the user rules the daemon would load.",
             "Built-in detectors have no rule file.",
+        ])
+        #expect(notFound("unknown-id", hasDescription: true) == [
+            "No rule file with the id unknown-id was found in compiled_rules or among the user rules the daemon would load.",
+            "Built-in detectors have no rule file; for their alerts, the description printed above is what was captured.",
         ])
         // Nor does it in a support dir that has no user_rules.
         #expect(MacCrabCtl.whyNoRuleFileLines(
