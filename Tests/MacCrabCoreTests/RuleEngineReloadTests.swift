@@ -405,4 +405,104 @@ struct RuleEngineReloadTests {
         #expect(reloaded.overlay == nil)
         #expect(await engine.ruleCount == 18)
     }
+
+    /// Writes into `folder` `count` rules whose ids no compiled rule has, like
+    /// the rules MCP create_rule and the rule wizard add: copies of the iodine
+    /// rule, each with a new id.
+    private func writeUserOnlyRules(_ count: Int, into folder: URL) throws {
+        try ensureRulesCompiled()
+        let template = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: compiledRulesDirectory.appendingPathComponent(iodineRuleFile))) as! [String: Any]
+        for _ in 0..<count {
+            let id = UUID().uuidString.lowercased()
+            var rule = template
+            rule["id"] = id
+            try JSONSerialization.data(withJSONObject: rule)
+                .write(to: folder.appendingPathComponent("\(id).json"))
+        }
+    }
+
+    // The count guard compares a reload's base load with the last successful
+    // base load. It used to compare with the number of rules the engine held
+    // before the reload, the overlay's user-only rules included, so on the
+    // 438-rule corpus 188 user-only rules made every reload fail as a
+    // truncated bundle.
+    @Test("a reload with 200 user-only overlay rules passes the count guard")
+    func userOnlyOverlayRulesPassCountGuard() async throws {
+        let base = try makeRulesDir(count: 20)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let overlay = FileManager.default.temporaryDirectory
+            .appendingPathComponent("overlay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: overlay, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: overlay) }
+        try writeUserOnlyRules(200, into: overlay)
+
+        // Boot order: the base, then the overlay.
+        let engine = RuleEngine()
+        #expect(try await engine.loadRules(from: base) == 20)
+        #expect(try await engine.loadRules(from: overlay, requireOwnerUID: geteuid()) == 200)
+        #expect(await engine.ruleCount == 220)
+
+        let reloaded = try await engine.reloadRules(from: base, overlay: overlay, requireOwnerUID: geteuid())
+        #expect(reloaded.base == 20)
+        #expect(reloaded.overlay == 200)
+        #expect(await engine.ruleCount == 220)
+    }
+
+    @Test("with 200 user-only overlay rules, a reload from a truncated base is still rejected")
+    func truncatedBaseRejectedWithUserOnlyOverlay() async throws {
+        let base = try makeRulesDir(count: 20)
+        let truncated = try makeRulesDir(count: 10)   // 10 < 70% of 20
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: truncated)
+        }
+        let overlay = FileManager.default.temporaryDirectory
+            .appendingPathComponent("overlay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: overlay, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: overlay) }
+        try writeUserOnlyRules(200, into: overlay)
+
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: base)
+        _ = try await engine.loadRules(from: overlay, requireOwnerUID: geteuid())
+        _ = try await engine.reloadRules(from: base, overlay: overlay, requireOwnerUID: geteuid())
+
+        let error = await #expect(throws: RuleEngineError.self) {
+            _ = try await engine.reloadRules(from: truncated, overlay: overlay, requireOwnerUID: geteuid())
+        }
+        guard case .ruleCountRegression(let loaded, let previous)? = error else {
+            Issue.record("expected a count regression, got \(String(describing: error))")
+            return
+        }
+        #expect(loaded == 10)
+        #expect(previous == 20, "the guard compares with the last base load, not with the 220 rules the engine held")
+        #expect(await engine.ruleCount == 220, "last-known-good must be preserved on a count regression")
+    }
+
+    // A rejected reload restores the recorded base count with the rest of its
+    // snapshot. Otherwise the rejected load's own count would become the bar,
+    // and a second attempt with the same truncated base would pass.
+    @Test("a rejected reload leaves the count the next reload is compared with unchanged")
+    func rejectedReloadKeepsComparedCount() async throws {
+        let base = try makeRulesDir(count: 20)
+        let truncated = try makeRulesDir(count: 10)   // 10 < 70% of 20
+        let corrupt = try makeRulesDir(count: 10)
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: truncated)
+            try? FileManager.default.removeItem(at: corrupt)
+        }
+        try Data("{ this is not valid json".utf8).write(to: corrupt.appendingPathComponent("corrupt.json"))
+
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: base)
+        // Two count rejections, then a decode rejection, then a count one.
+        for (step, attempt) in [truncated, truncated, corrupt, truncated].enumerated() {
+            await #expect(throws: RuleEngineError.self, "reload \(step + 1) must be rejected") {
+                _ = try await engine.reloadRules(from: attempt)
+            }
+            #expect(await engine.ruleCount == 20, "reload \(step + 1) must leave last-known-good in place")
+        }
+    }
 }

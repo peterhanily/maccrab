@@ -666,10 +666,16 @@ public actor RuleEngine {
     /// each file's own `enabled`, and the base load the stored status profile.
     private var runtimeDisabledRuleIDs: Set<String> = [] // bounded: ids of loaded rules only (setEnabled skips unknown ids; reloadRules prunes)
 
-    /// v1.18: a RELOAD that cleanly decodes but yields fewer than this fraction
-    /// of the prior ruleset is rejected as a suspected truncated/partial content
-    /// bundle (the Channel-File-291 COUNT class) — see reloadRules.
+    /// v1.18: a RELOAD whose base load cleanly decodes but yields fewer than
+    /// this fraction of `lastBaseLoadCount` is rejected as a suspected
+    /// truncated/partial content bundle (the Channel-File-291 COUNT class) —
+    /// see reloadRules.
     private let reloadMinCountFraction: Double
+    /// The number of rules the last successful base load loaded: a
+    /// `loadRules` call without `requireOwnerUID`, or the base load of a
+    /// `reloadRules` call that passed its guards. Loads with
+    /// `requireOwnerUID`, such as the user_rules overlay, leave it unchanged.
+    private var lastBaseLoadCount = 0
     /// Test-only opt-in is injectable, but every shipping initializer inherits
     /// the single disabled production gate from RuleChannelPolicy.
     private let allowPushedRules: Bool
@@ -906,6 +912,9 @@ public actor RuleEngine {
         }
         lastLoadFailedCount = failed
         lastLoadSkippedByOwnerCount = skippedByOwner
+        if requireOwnerUID == nil {
+            lastBaseLoadCount = loaded
+        }
         if skippedByOwner > 0 {
             // v1.19.1 (audit): make the owner-gate skip VISIBLE in aggregate —
             // legacy operator-authored overrides (uid != daemon) silently stop
@@ -1028,6 +1037,7 @@ public actor RuleEngine {
         let snapshotRegexSeq = regexAccessSeq
         let snapshotRegexCounter = regexAccessCounter
         let snapshotPushed = pushedRuleIDs
+        let snapshotBaseCount = lastBaseLoadCount
 
         // This method does not suspend, so no evaluate() call runs during
         // the reload. The rules are cleared below before the load; the
@@ -1060,6 +1070,7 @@ public actor RuleEngine {
             regexAccessSeq  = snapshotRegexSeq
             regexAccessCounter = snapshotRegexCounter
             pushedRuleIDs   = snapshotPushed
+            lastBaseLoadCount = snapshotBaseCount
             logger.error("Rule reload failed, previous rules restored: \(error)")
             throw error
         }
@@ -1080,6 +1091,7 @@ public actor RuleEngine {
             regexAccessSeq     = snapshotRegexSeq
             regexAccessCounter = snapshotRegexCounter
             pushedRuleIDs      = snapshotPushed
+            lastBaseLoadCount  = snapshotBaseCount
             logger.error("Rule reload rejected: \(failed) file(s) failed to decode; restored \(snapshotRules.count) last-known-good rules")
             throw RuleEngineError.partialLoadFailure(failed: failed, loaded: count)
         }
@@ -1087,10 +1099,13 @@ public actor RuleEngine {
         // v1.18: rule-COUNT regression guard (Channel-File-291 count class).
         // Even when every file decodes cleanly, a drastically smaller incoming
         // set — a truncated/partial bundle, a half-synced content dir — collapses
-        // detection silently. Reject a reload that drops below the configured
-        // fraction of the prior set and restore last-known-good. (Skipped when
-        // there was no meaningful prior set, e.g. an empty engine.)
-        if !snapshotRules.isEmpty && Double(count) < Double(snapshotRules.count) * reloadMinCountFraction {
+        // detection silently. Reject a reload whose base load drops below the
+        // configured fraction of the last successful base load, and restore
+        // last-known-good. The comparison is base with base: the rules the
+        // overlay adds are not in `count`, and when they counted toward the
+        // prior total, enough user-only rules made every reload fail.
+        // (Skipped while no base load has loaded a rule, e.g. an empty engine.)
+        if snapshotBaseCount > 0 && Double(count) < Double(snapshotBaseCount) * reloadMinCountFraction {
             ruleIndex          = snapshotIndex
             allRules           = snapshotRules
             heavyDependencyMasks = snapshotHeavyDependencies
@@ -1098,8 +1113,9 @@ public actor RuleEngine {
             regexAccessSeq     = snapshotRegexSeq
             regexAccessCounter = snapshotRegexCounter
             pushedRuleIDs      = snapshotPushed
-            logger.fault("Rule reload rejected: incoming \(count) rules is below \(Int(self.reloadMinCountFraction * 100))% of the prior \(snapshotRules.count); restored last-known-good (suspected truncated content bundle)")
-            throw RuleEngineError.ruleCountRegression(loaded: count, previous: snapshotRules.count)
+            lastBaseLoadCount  = snapshotBaseCount
+            logger.fault("Rule reload rejected: incoming \(count) rules is below \(Int(self.reloadMinCountFraction * 100))% of the \(snapshotBaseCount) the last base load loaded; restored last-known-good (suspected truncated content bundle)")
+            throw RuleEngineError.ruleCountRegression(loaded: count, previous: snapshotBaseCount)
         }
 
         // v1.21.4 (corr-detection #276): a successful reload is the operator's
