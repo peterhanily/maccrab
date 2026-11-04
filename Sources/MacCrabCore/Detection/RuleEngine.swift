@@ -664,7 +664,7 @@ public actor RuleEngine {
     /// except the ones in `autoDisabledRules`, and drops the ids it no longer
     /// holds. It carries no other disabled state over: its loads re-apply
     /// each file's own `enabled`, and the base load the stored status profile.
-    private var runtimeDisabledRuleIDs: Set<String> = []
+    private var runtimeDisabledRuleIDs: Set<String> = [] // bounded: ids of loaded rules only (setEnabled skips unknown ids; reloadRules prunes)
 
     /// v1.18: a RELOAD that cleanly decodes but yields fewer than this fraction
     /// of the prior ruleset is rejected as a suspected truncated/partial content
