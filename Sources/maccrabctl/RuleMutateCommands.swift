@@ -169,19 +169,48 @@ private func ruleSeverityBuiltin(ruleId: String, levelRaw: String, clearing: Boo
     print("The engine applies it within ~5 s; detection still runs as before.")
 }
 
-/// User-rule path — read the rule's compiled JSON, refuse sequence/graph,
-/// set its `level`, and re-install via the `install-rule` inbox verb
-/// (json-only is accepted by the daemon's install handler).
+/// User-rule path — re-install the rule JSON from `ruleSeverityPlan` via the
+/// `install-rule` inbox verb (json-only is accepted by the daemon's install
+/// handler).
 private func ruleSeverityUser(ruleId: String, level: String) {
+    switch ruleSeverityPlan(ruleId: ruleId, level: level, supportDir: maccrabDataDir()) {
+    case .refuse(let lines):
+        lines.forEach { print($0) }
+        exit(1)
+    case .install(let jsonText, let previous):
+        // Re-install via the privileged inbox (json-only). The daemon overwrites
+        // user_rules/<basename>.json and bumps the reload tick.
+        let payload: [String: Any] = ["ruleId": ruleId, "json": jsonText]
+        if let err = dropCtlInboxRequest(verb: "install-rule", payload: payload) {
+            print("Could not queue severity change: \(err)")
+            exit(1)
+        }
+        print("Queued severity change for user rule \(ruleId): \(previous) → \(level).")
+        print("The engine reloads it within ~5 s.")
+    }
+}
+
+/// What `rule severity` does with a rule id that is not a built-in.
+enum RuleSeverityPlan: Equatable {
+    /// Print these lines and exit 1, queueing nothing.
+    case refuse([String])
+    /// Queue install-rule with this rule JSON; `previous` is its old level.
+    case install(json: String, previous: String)
+}
+
+/// Read the rule's JSON, refuse sequence/graph, and set its `level`. A copy
+/// of a compiled_rules rule also gets "enabled": false when the engine's
+/// base load leaves that rule disabled, because the engine never applies the
+/// rule profile to a user_rules file it loads. A user_rules file keeps its
+/// own "enabled".
+func ruleSeverityPlan(ruleId: String, level: String, supportDir: String) -> RuleSeverityPlan {
     let fm = FileManager.default
-    let supportDir = maccrabDataDir()
 
     // The daemon sanitizes the install/remove id to a [a-z0-9-_] basename
     // (DaemonTimers.safeRuleBasename); the on-disk file is named accordingly.
     let basename = safeUserRuleBasename(ruleId)
     guard let basename else {
-        print("Invalid user rule id.")
-        exit(1)
+        return .refuse(["Invalid user rule id."])
     }
 
     // Locate the rule JSON: user_rules/<basename>.json (where the engine
@@ -194,44 +223,50 @@ private func ruleSeverityUser(ruleId: String, level: String) {
             ?? locateRuleJSON(byId: ruleId, inDir: supportDir + "/user_rules")
     }
     guard let jsonPath else {
-        print("User rule '\(ruleId)' not found under \(supportDir)/user_rules or compiled_rules.")
-        print("Use `maccrabctl rules list` to find the rule id. (Built-in maccrab.* rules use the same command.)")
-        exit(1)
+        return .refuse([
+            "User rule '\(ruleId)' not found under \(supportDir)/user_rules or compiled_rules.",
+            "Use `maccrabctl rules list` to find the rule id. (Built-in maccrab.* rules use the same command.)",
+        ])
     }
 
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: jsonPath)),
           var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-        print("Could not read rule JSON at \(jsonPath).")
-        exit(1)
+        return .refuse(["Could not read rule JSON at \(jsonPath)."])
     }
 
     // Refuse multi-step (sequence) and multi-entity (graph) rules — they are
     // not single-event `level` rules; severity is set in their own YAML.
     if isSequenceOrGraphRule(json) {
-        print("Rule '\(ruleId)' is a sequence or graph rule — its severity can't be set with this command.")
-        print("Edit the rule's YAML in Rules/sequences or Rules/graph and recompile.")
-        exit(1)
+        return .refuse([
+            "Rule '\(ruleId)' is a sequence or graph rule — its severity can't be set with this command.",
+            "Edit the rule's YAML in Rules/sequences or Rules/graph and recompile.",
+        ])
     }
 
     let previous = (json["level"] as? String) ?? "?"
     json["level"] = level
+    if jsonPath.hasPrefix(supportDir + "/compiled_rules/"),
+       !baseLoadEnablesRule(json, ruleProfile: MacCrabCtl.ruleProfileFromConfig(supportDir: supportDir)) {
+        json["enabled"] = false
+    }
 
     guard JSONSerialization.isValidJSONObject(json),
           let rewritten = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]),
           let jsonText = String(data: rewritten, encoding: .utf8) else {
-        print("Could not serialize updated rule JSON.")
-        exit(1)
+        return .refuse(["Could not serialize updated rule JSON."])
     }
+    return .install(json: jsonText, previous: previous)
+}
 
-    // Re-install via the privileged inbox (json-only). The daemon overwrites
-    // user_rules/<basename>.json and bumps the reload tick.
-    let payload: [String: Any] = ["ruleId": ruleId, "json": jsonText]
-    if let err = dropCtlInboxRequest(verb: "install-rule", payload: payload) {
-        print("Could not queue severity change: \(err)")
-        exit(1)
-    }
-    print("Queued severity change for user rule \(ruleId): \(previous) → \(level).")
-    print("The engine reloads it within ~5 s.")
+/// Whether the engine's base load of compiled_rules leaves `rule` enabled.
+/// RuleEngine.loadRules keeps a rule's "enabled": false, and disables a rule
+/// whose "status" (absent counts as "experimental") is outside the statuses
+/// DaemonConfig.enabledRuleStatuses gives for the profile: every status for
+/// "all", and only "stable" for any other value.
+private func baseLoadEnablesRule(_ rule: [String: Any], ruleProfile: String) -> Bool {
+    if (rule["enabled"] as? Bool) == false { return false }
+    if ruleProfile.lowercased() == "all" { return true }
+    return ((rule["status"] as? String) ?? "experimental").lowercased() == "stable"
 }
 
 // MARK: - helpers
