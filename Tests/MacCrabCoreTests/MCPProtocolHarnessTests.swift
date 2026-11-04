@@ -592,7 +592,7 @@ struct MCPProtocolHarnessTests {
         #expect(text.contains("Intent posterior crossed threshold"), "rule title missing: \(text)")
     }
 
-    @Test("explain_alert finds an alert by its id, also one older than the 2000 newest")
+    @Test("explain_alert finds an alert by its id, also one older than the 2000 newest, and for a rule id with no rule file points to the detail above only when it printed one")
     func explainAlertLooksUpByID() async throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-mcp-explain-\(ProcessInfo.processInfo.globallyUniqueString)",
@@ -601,19 +601,24 @@ struct MCPProtocolHarnessTests {
         try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
 
-        // 2001 alerts a second apart: the oldest is not among the 2000 newest,
-        // the only alerts explain_alert used to search.
+        // 2001 alerts a second apart, with no description, and a newer alert
+        // with one: the oldest is not among the 2000 newest, the only alerts
+        // explain_alert used to search.
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         let alerts = (0...2000).map { offset in
             Alert(timestamp: start.addingTimeInterval(Double(offset)), ruleId: "fixture.explain",
                   ruleTitle: offset == 0 ? "Oldest explain fixture" : "Newer explain fixture",
                   severity: .low, eventId: "explain-fixture-event-\(offset)")
         }
+        let detailed = Alert(timestamp: start.addingTimeInterval(2001), ruleId: "fixture.explain",
+                             ruleTitle: "Detailed explain fixture", severity: .low,
+                             eventId: "explain-fixture-event-detail", description: "fixture detail text")
         let alertStore = try AlertStore(directory: dataDir.path)
-        #expect(try await alertStore.insert(alerts: alerts).count == alerts.count)
+        #expect(try await alertStore.insert(alerts: alerts + [detailed]).count == alerts.count + 1)
         let objs = drive([
             #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"explain_alert","arguments":{"alert_id":"\#(alerts[0].id)"}}}"#,
             #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"explain_alert","arguments":{"alert_id":"no-such-alert"}}}"#,
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"explain_alert","arguments":{"alert_id":"\#(detailed.id)"}}}"#,
         ], home: home)
         let found = try #require(byId(objs, 1)?["result"] as? [String: Any])
         #expect(found["isError"] as? Bool != true)
@@ -622,6 +627,21 @@ struct MCPProtocolHarnessTests {
         let missing = try #require(byId(objs, 2)?["result"] as? [String: Any])
         #expect(missing["isError"] as? Bool == true)
         #expect(resultText(objs, 2) == "No alert with id 'no-such-alert' in alerts.db.")
+
+        // This data dir has no compiled_rules or user_rules, so both replies
+        // end with the two lines saying that no rule file was found and that
+        // built-in detectors have none. The second line points to the detail
+        // above only in the reply that printed one.
+        let noRuleFile = "\n\nThis process found no rule file with the id fixture.explain in compiled_rules or among "
+            + "the user rules the engine would load.\nBuilt-in detectors, such as the process-lineage baseline "
+            + "(baseline-anomaly), have no rule file"
+        #expect(!resultText(objs, 1).contains("\n  detail:"), "\(resultText(objs, 1))")
+        #expect(resultText(objs, 1).hasSuffix(noRuleFile + "."), "\(resultText(objs, 1))")
+        let described = try #require(byId(objs, 3)?["result"] as? [String: Any])
+        #expect(described["isError"] as? Bool != true)
+        #expect(resultText(objs, 3).contains("\n  detail:  fixture detail text\n"), "\(resultText(objs, 3))")
+        #expect(resultText(objs, 3).hasSuffix(noRuleFile + "; for their alerts, the detail above is what was captured."),
+                "\(resultText(objs, 3))")
     }
 
     @Test("empty AI/campaign results and clean text scans never claim safety")
