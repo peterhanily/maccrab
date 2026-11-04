@@ -224,7 +224,7 @@ private func isSequenceOrGraphRule(_ json: [String: Any]) -> Bool {
 
 /// Mirror DaemonTimers.safeRuleBasename: lowercased, [a-z0-9-_] only,
 /// non-empty, ≤128. Returns nil if nothing survives.
-private func safeUserRuleBasename(_ raw: String) -> String? {
+func safeUserRuleBasename(_ raw: String) -> String? {
     let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-_")
     let s = String(raw.lowercased().filter { allowed.contains($0) })
     guard !s.isEmpty, s.count <= 128 else { return nil }

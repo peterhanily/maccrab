@@ -121,9 +121,11 @@ struct MacCrabCtl {
                 let category = args.count >= 4 ? args[3] : "process_creation"
                 createRuleTemplate(category: category)
             } else if args.count >= 4 && (args[2] == "enable" || args[2] == "disable") {
-                // Persist the enable/disable state on disk so the change
-                // survives SIGHUP rule reload and sysext restarts. The
-                // RuleEngine respects this on load.
+                // Sets "enabled" in the bundled rule's compiled_rules file,
+                // which the RuleEngine reads on its next rule reload. On a
+                // release install the engine replaces edited rule files with
+                // its signed copies when it starts, so the change lasts until
+                // the engine restarts. It refuses an id with a user_rules file.
                 setRuleEnabled(ruleId: args[3], enabled: args[2] == "enable")
             } else if args.count >= 3 && (args[2] == "delete" || args[2] == "severity") {
                 // PARITY-04: rule delete / severity-override (CLI parity with the

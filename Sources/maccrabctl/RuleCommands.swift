@@ -49,33 +49,58 @@ extension MacCrabCtl {
         cliFailure("The CLI does not include a Sigma compiler. From the repository, run Python Compiler/compile_rules.py with --input-dir and --output-dir. No rules were compiled.")
     }
 
-    /// Flip a rule's `enabled` flag on disk inside its compiled JSON. The
-    /// detection engine reads the flag on load — a SIGHUP or sysext
-    /// restart after running this picks up the change. Lets a user park
-    /// a noisy rule without deleting the source YAML or recompiling.
-    ///
-    /// Writes to compiled_rules/<file>.json directly; falls back to
-    /// scanning the dir for a matching rule id when no filename is given.
+    /// `rule enable|disable`: prints the lines from `setCompiledRuleEnabled`
+    /// for the support directory, or exits 1 with its error.
     static func setRuleEnabled(ruleId: String, enabled: Bool) {
-        let directory = maccrabDataDir()
         do {
-            _ = try RuleInventoryDocument.read(directory: directory)
-            let root = URL(fileURLWithPath: directory + "/compiled_rules")
-            let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
-                .filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
-            for file in files {
-                let data = try Data(contentsOf: file)
-                guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      object["id"] as? String == ruleId else { continue }
-                object["enabled"] = enabled
-                let output = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
-                try output.write(to: file, options: .atomic)
-                print("Saved enabled=\(enabled) for compiled rule \(ruleId). Runtime application is pending.")
-                print("Run maccrabctl rules reload, then inspect the returned request ID with config status.")
-                return
-            }
-            throw RuntimeConfigContractError("Rule '\(ruleId)' was not found in the compiled corpus")
+            try setCompiledRuleEnabled(ruleId: ruleId, enabled: enabled, directory: maccrabDataDir())
+                .forEach { print($0) }
         } catch { cliFailure("rule \(enabled ? "enable" : "disable"): \(error.localizedDescription)") }
+    }
+
+    /// Sets "enabled" in the top-level compiled_rules/*.json file whose "id"
+    /// is `ruleId` and returns the lines to print. The engine reads the flag
+    /// on its next rule reload. On a release install the engine replaces
+    /// edited rule files with its signed copies when it starts, so the change
+    /// lasts until the engine restarts.
+    ///
+    /// Throws without editing a file when user_rules/<basename>.json exists
+    /// for the id: when the engine loads that file, its rule replaces a
+    /// bundled rule with the same id. Also throws when no compiled rule has
+    /// the id.
+    static func setCompiledRuleEnabled(ruleId: String, enabled: Bool, directory: String) throws -> [String] {
+        if let basename = safeUserRuleBasename(ruleId),
+           FileManager.default.fileExists(atPath: directory + "/user_rules/\(basename).json") {
+            throw RuntimeConfigContractError(
+                "user_rules/\(basename).json exists for \(ruleId), so the bundled rule file was not edited."
+                    + " When the engine loads that file, its rule replaces a bundled rule with the same id."
+                    + " Use Disable rule or Enable rule in the dashboard's Detection › Rules,"
+                    + " or remove the user rule with: maccrabctl rule delete \(ruleId)")
+        }
+        _ = try RuleInventoryDocument.read(directory: directory)
+        let root = URL(fileURLWithPath: directory + "/compiled_rules")
+        let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
+        for file in files {
+            let data = try Data(contentsOf: file)
+            guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["id"] as? String == ruleId else { continue }
+            object["enabled"] = enabled
+            let output = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+            try output.write(to: file, options: .atomic)
+            var lines = [
+                "Saved enabled=\(enabled) for compiled rule \(ruleId). Runtime application is pending.",
+                "Run maccrabctl rules reload, then inspect the returned request ID with config status.",
+                "On a release install the engine replaces edited rule files with its signed copies"
+                    + " when it starts, so this change lasts until the engine restarts.",
+            ]
+            if !enabled {
+                lines.append("For a disable that lasts, use Disable rule in the dashboard's Detection › Rules"
+                    + " instead of this command.")
+            }
+            return lines
+        }
+        throw RuntimeConfigContractError("Rule '\(ruleId)' was not found in the compiled corpus")
     }
 
     static func createRuleTemplate(category: String) {

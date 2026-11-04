@@ -179,7 +179,12 @@ Two independent channels; roll back the right one:
   ```
 
   A user-authored rule that's misfiring can instead be disabled without
-  deleting it: `maccrabctl rule disable <id>` (survives reload/restart).
+  deleting it: use **Disable rule** in the dashboard's Detection › Rules,
+  which saves the change in the rule's `user_rules` file.
+  `maccrabctl rule disable <id>` refuses a rule that has a `user_rules` file.
+  It edits only a bundled rule's file in `compiled_rules`, and on a release
+  install the engine replaces edited rule files with its signed copies when it
+  starts, so that change lasts until the engine restarts.
 
 - **Bad app release (a whole build).** Sparkle cannot auto-downgrade an
   already-installed client — rollback is "stop the bleeding" (halt
