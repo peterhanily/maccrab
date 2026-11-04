@@ -1122,7 +1122,7 @@ struct SequencePendingFairnessTests {
             "per_rule_count_shed_steps_total", "global_count_shed_steps_total", "semantic_weight_shed_steps_total",
             "journal_explicitly_shed_total", "classification_conserved", "per_rule_count_limit",
             "global_count_limit", "state_weight_limit_bytes", "victim_policy", "folded_steps_total",
-            "fold_attempts_total",
+            "fold_attempts_total", "advance_replay_bindings_total", "advance_replay_completions_total",
         ]
         let idle = SequencePendingPressureHeartbeat.fields(await engine.pendingPressureDiagnostics())
         #expect(Set(idle.keys) == baseKeys, "no removal or fold boundary has happened yet")
@@ -1132,6 +1132,8 @@ struct SequencePendingFairnessTests {
         #expect(Set(fields.keys) == baseKeys.union(["last_pressure", "last_fold"]))
         #expect(fields["victim_policy"] as? String == "largest_bucket_oldest_first")
         #expect(fields["folded_steps_total"] as? UInt64 == 1 && fields["fold_attempts_total"] as? UInt64 == 1)
+        #expect(fields["advance_replay_bindings_total"] as? UInt64 == 0
+                    && fields["advance_replay_completions_total"] as? UInt64 == 0, "no partial was ever advanced")
         #expect(fields["per_rule_count_shed_steps_total"] as? UInt64 == 1)
         let pressure = try #require(fields["last_pressure"] as? [String: Any])
         #expect(Set(pressure.keys) == [

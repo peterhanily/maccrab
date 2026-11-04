@@ -34,9 +34,9 @@ enum SequencePartialPressureHeartbeat {
 }
 
 /// The production heartbeat's fixed-schema projection of pending-history
-/// pressure: shed classification, limits, the victim policy, fold totals and
-/// the latest removal and fold. Trusted rule and step IDs only; no event
-/// identities or content.
+/// pressure: shed classification, limits, the victim policy, fold totals,
+/// replay-on-advance totals and the latest removal and fold. Trusted rule and
+/// step IDs only; no event identities or content.
 enum SequencePendingPressureHeartbeat {
     static func fields(_ diagnostics: SequenceEngine.PendingPressureDiagnostics) -> [String: Any] {
         var fields: [String: Any] = [
@@ -51,6 +51,8 @@ enum SequencePendingPressureHeartbeat {
             "victim_policy": diagnostics.victimPolicy,
             "folded_steps_total": diagnostics.foldedStepsTotal,
             "fold_attempts_total": diagnostics.foldAttemptsTotal,
+            "advance_replay_bindings_total": diagnostics.advanceReplayBindingsTotal,
+            "advance_replay_completions_total": diagnostics.advanceReplayCompletionsTotal,
         ]
         if let pressure = diagnostics.lastPressure {
             fields["last_pressure"] = [
