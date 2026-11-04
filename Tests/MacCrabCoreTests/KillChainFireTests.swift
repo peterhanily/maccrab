@@ -18,7 +18,8 @@ import Testing
 import Foundation
 @testable import MacCrabCore
 
-@Suite("Phase 3 (10): kill-chain sequence true-positive fire-tests")
+// Serialized: two capacity cases drive a full 8,192-entry pending table.
+@Suite("Phase 3 (10): kill-chain sequence true-positive fire-tests", .serialized)
 struct KillChainFireTests {
 
     private let seqDir = compiledRulesDirectory.appendingPathComponent("sequences").path
@@ -90,6 +91,48 @@ struct KillChainFireTests {
             if matches.contains(where: { $0.ruleId == ruleId }) { fired = true }
         }
         return fired
+    }
+
+    private let npmRat = "e1f2a3b4-0020-4000-b000-000000000020"
+    private let supplyChain = "e1f2a3b4-0023-4000-b000-000000000023"
+    private let worm = "e1f2a3b4-0040-4000-b000-000000000040"
+
+    /// The default (stable) profile over the same lineage as fires(_:_:).
+    /// The periodic sweep runs only once an hour, so a slow debug run cannot
+    /// retire history mid-test.
+    private func stableEngine() async throws -> SequenceEngine {
+        try ensureRulesCompiled()
+        let lineage = ProcessLineage()
+        await lineage.recordProcess(pid: rootPid, ppid: 1, path: "/bin/root", name: "root", startTime: base)
+        await lineage.recordProcess(pid: childPid, ppid: rootPid, path: "/tmp/child", name: "child", startTime: base)
+        let engine = SequenceEngine(lineage: lineage, sweepInterval: 3_600)
+        _ = try await engine.loadRules(from: URL(fileURLWithPath: seqDir), enabledStatuses: ["stable"])
+        return engine
+    }
+
+    /// A file event by a process carrying an ES audit identity, so one
+    /// writer's repeated writes share a fold key.
+    private func identifiedWrite(_ path: String, actor: String, pid: Int32, pidVersion: UInt32,
+                                 action: FileAction, at offset: TimeInterval) -> Event {
+        let process = MacCrabCore.ProcessInfo(
+            pid: pid, ppid: 1, rpid: 1, name: (actor as NSString).lastPathComponent,
+            executable: actor, commandLine: actor, args: [actor], workingDirectory: "/tmp",
+            userId: 501, userName: "t", groupId: 20, startTime: base,
+            auditIdentity: AuditIdentity(auid: 501, euid: 501, egid: 20, ruid: 501, rgid: 20,
+                                         pid: pid, pidversion: pidVersion, asid: 100_001))
+        return Event(timestamp: base.addingTimeInterval(offset), eventCategory: .file,
+                     eventType: .creation, eventAction: "file", process: process,
+                     file: FileInfo(path: path, action: action))
+    }
+
+    /// A toolchain node, as a Playwright browser download runs it.
+    private func nodeWrite(_ path: String, pid: Int32, action: FileAction, at offset: TimeInterval) -> Event {
+        identifiedWrite(path, actor: "/private/tmp/tc-toolchain/bin/node", pid: pid, pidVersion: 9,
+                        action: action, at: offset)
+    }
+
+    private func bashWrite(_ path: String, pid: Int32, at offset: TimeInterval) -> Event {
+        identifiedWrite(path, actor: "/bin/bash", pid: pid, pidVersion: 1, action: .write, at: offset)
     }
 
     // MARK: - The kill chains
@@ -223,5 +266,156 @@ struct KillChainFireTests {
                  parentCmd: "npm install evil-pkg", at: 0),   // install_spawn wants parent cmdline "install"
             net(hostname: "api.github.com", at: 1),
         ]))
+    }
+
+    // MARK: - Capacity on the shipped profile
+
+    @Test("npm_postinstall_to_rat fires when its seed is evaluated after the drop and the callback")
+    func npmPostinstallToRatSeedLate() async throws {
+        let engine = try await stableEngine()
+        _ = await engine.evaluate(file("/tmp/rat", actor: "/bin/sh", at: 1))
+        _ = await engine.evaluate(net(at: 2))
+        let matches = await engine.evaluate(proc("/bin/sh", parent: "/usr/local/bin/npm", at: 0))
+        #expect(matches.contains { $0.ruleId == npmRat })
+    }
+
+    @Test("npm_postinstall_to_rat fires on a later callback after an early callback and a late drop")
+    func npmPostinstallToRatLaterCallback() async throws {
+        let engine = try await stableEngine()
+        var fired = false
+        for event in [proc("/bin/sh", parent: "/usr/local/bin/npm", at: 0), net(at: 2),
+                      file("/tmp/rat", actor: "/bin/sh", at: 1), net(at: 3)] {
+            if await engine.evaluate(event).contains(where: { $0.ruleId == npmRat }) { fired = true }
+        }
+        #expect(fired)
+    }
+
+    @Test("A Playwright-like install burst folds instead of shedding any rule's history")
+    func installBurstFoldsWithoutLoss() async throws {
+        let engine = try await stableEngine()
+        let persist = file("/Users/t/Library/LaunchAgents/sc.plist", at: 1)
+        let exfil = net(at: 2)
+        _ = await engine.evaluate(persist)
+        _ = await engine.evaluate(exfil)
+        let preBurst = await engine.pendingStepConservation().offered
+        let actions: [FileAction] = [.create, .write, .close]
+        for index in 0..<10_000 {
+            _ = await engine.evaluate(nodeWrite("/private/tmp/pw-browsers/\(index)", pid: 201 + Int32(index % 4),
+                                                action: actions[index % 3], at: 10 + Double(index) / 1_000))
+        }
+
+        #expect(await engine.pendingStepsEvictedTotal == 0)
+        #expect(await engine.evictionIsOngoing(within: 300) == false)
+        #expect(await engine.pendingStepConservationByRule().values.allSatisfy { $0.explicitlyShed == 0 })
+        // One fold, when the burst passes the cap: every drop so far, less one
+        // representative per node writer.
+        let expectedFolded = UInt64(SequenceEngine.maxPendingTotal + 1) - preBurst - 4
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldAttemptsTotal == 1 && pressure.foldedStepsTotal == expectedFolded)
+        #expect(pressure.foldedStepsTotal >= 8_000 && pressure.lastPressure == nil)
+        let fold = try #require(pressure.lastFold)
+        #expect(fold.ruleID == npmRat && fold.stepID == "drop_payload" && fold.foldedGroups == 4)
+        let capture = try await engine.checkpointCapture()
+        let retained = Set(capture.pendingBuckets.first { $0.ruleID == supplyChain }?.steps.map(\.matched.eventID) ?? [])
+        #expect(retained == [persist.id, exfil.id])
+        let matches = await engine.evaluate(proc("/usr/local/bin/npm", cmd: "npm install evil", at: 0))
+        #expect(matches.contains { $0.ruleId == supplyChain })
+    }
+
+    @Test("A flood of distinct writers sheds only npm_postinstall_to_rat's own history")
+    func distinctWriterFloodShedsOnlyItsRule() async throws {
+        let preFlood = [
+            file("/Users/t/.ssh/id_rsa", action: .open, at: 1),
+            file("/Users/t/Library/LaunchAgents/sc.plist", at: 1),
+            net(at: 2),
+            net(hostname: "registry.npmjs.org", at: 2),
+        ]
+        // Restored drop history fills the table so that it is exactly full
+        // when the flood starts: count what the pre-flood events admit.
+        let probe = try await stableEngine()
+        for event in preFlood { _ = await probe.evaluate(event) }
+        let preFloodAdmissions = Int(await probe.pendingStepConservation().offered)
+        let engine = try await stableEngine()
+        let reference = Date()
+        let drops = (0..<(SequenceEngine.maxPendingTotal - preFloodAdmissions)).map { index in
+            SequenceCheckpointPendingStep(
+                ruleID: npmRat, stepID: "drop_payload",
+                matched: SequenceCheckpointMatchedStep(
+                    stepID: "drop_payload", eventID: UUID(), timestamp: base.addingTimeInterval(Double(index) / 1_000),
+                    processPID: 9_999, processParentPID: 0, processParentWasTracked: false,
+                    processAncestorPIDs: [], filePath: nil, networkDestination: nil
+                ), arrivedAt: reference
+            )
+        }
+        let payload = SequenceCheckpointPayload(
+            schemaVersion: SequenceCheckpointPayload.currentSchemaVersion, capturedAt: reference,
+            ruleFingerprint: try SequenceCheckpointCodec.ruleFingerprint(await engine.listRules()),
+            sourceGeneration: 1, partialBuckets: [],
+            pendingBuckets: [SequenceCheckpointPendingBucket(ruleID: npmRat, steps: drops)],
+            evictionOrder: [],
+            pendingEvictionOrder: drops.map {
+                SequenceCheckpointPendingIdentity(ruleID: npmRat, stepID: "drop_payload", eventID: $0.matched.eventID)
+            }
+        )
+        _ = try await engine.restoreCheckpoint(payload, now: reference)
+        for event in preFlood { _ = await engine.evaluate(event) }
+        let capacity = UInt64(SequenceEngine.maxPendingTotal)
+        #expect(await engine.pendingStepConservation().queued == capacity)
+        let flood = 1_000
+        for index in 0..<flood {
+            _ = await engine.evaluate(bashWrite("/private/tmp/flood/\(index)", pid: 30_000 + Int32(index),
+                                                at: 10 + Double(index) / 1_000))
+        }
+        let installSeed = proc("/usr/local/bin/npm", cmd: "npm install evil", at: 0)
+        let wormSeed = proc("/tmp/stage", parent: "/usr/local/bin/npm", at: 0)
+        let pipSeed = proc("/usr/bin/pip3", cmd: "pip3 install requests", at: 0)
+        let installMatches = await engine.evaluate(installSeed)
+        let wormMatches = await engine.evaluate(wormSeed)
+        _ = await engine.evaluate(pipSeed)
+
+        let byRule = await engine.pendingStepConservationByRule()
+        let evicted = await engine.pendingStepsEvictedTotal
+        #expect(evicted == flood, "every flood write displaces one entry")
+        #expect(byRule[npmRat]?.explicitlyShed == UInt64(evicted))
+        for (ruleID, ledger) in byRule where ruleID != npmRat {
+            #expect(ledger.explicitlyShed == 0, "\(ruleID) keeps its history")
+        }
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.journalExplicitlyShedTotal == UInt64(evicted))
+        #expect(pressure.lastPressure?.representativeVictimRuleID == npmRat)
+        #expect(pressure.foldedStepsTotal == 0, "distinct writers have nothing to fold")
+        let attemptBound = UInt64(flood / 256 + 2)
+        #expect(pressure.foldAttemptsTotal <= attemptBound, "low-yield attempts are throttled")
+        // 0021 (30 s window) and 9c2d052b (5 s) are checked only for shed
+        // history above: their processing-time windows can lapse on a slow host.
+        #expect(installMatches.contains { $0.ruleId == supplyChain })
+        #expect(wormMatches.contains { $0.ruleId == worm })
+        #expect(await engine.pendingStepConservation().conservationMaintained)
+    }
+
+    @Test("The stable profile's fold-eligible steps are the reviewed set")
+    func stableFoldEligibility() async throws {
+        let rules = try await stableEngine().listRules()
+        let eligible = Dictionary(uniqueKeysWithValues: rules.compactMap { rule in
+            SequenceEngine.pendingFoldStepID(for: rule).map { (rule.id, $0) }
+        })
+        #expect(eligible == [
+            "e1f2a3b4-0011-4000-b000-000000000011": "persist",
+            npmRat: "drop_payload",
+            "e1f2a3b4-0021-4000-b000-000000000021": "cred_access",
+            supplyChain: "persist",
+            "e1f2a3b4-0032-4000-b000-000000000032": "network_callhome",
+            worm: "cred_read",
+            "9c2d052b-a8ce-43fc-a1a9-5ee9c86f0682": "cred_read",
+            "14b34c1b-0487-4cdf-b11d-f37a3591c791": "github_api_poll",
+        ])
+        // Every other stable rule is reviewed as ineligible; a new stable rule
+        // must be added to one of the two sets.
+        let ineligible: Set<String> = [
+            "e1f2a3b4-0006-4000-b000-000000000006",
+            "e1f2a3b4-0007-4000-b000-000000000007",
+            "e1f2a3b4-0016-4000-b000-000000000016",
+        ]
+        #expect(Set(rules.map(\.id)) == Set(eligible.keys).union(ineligible))
     }
 }

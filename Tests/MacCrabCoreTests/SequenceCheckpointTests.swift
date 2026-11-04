@@ -1098,6 +1098,71 @@ struct SequenceCheckpointTests {
         #expect(repaired.crashRPOBoundCurrentlyMaintained)
     }
 
+    @Test("a legacy carrier written for other rules is rejected, then recovered by the first write")
+    func foreignLegacyCarrierRecovers() async throws {
+        let fixture = try temporaryCheckpoint()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let definition = rule()
+        let now = Date()
+        func matched(_ stepID: String) -> SequenceCheckpointMatchedStep {
+            SequenceCheckpointMatchedStep(
+                stepID: stepID, eventID: UUID(), timestamp: now, processPID: 202,
+                processParentPID: 0, processParentWasTracked: false, processAncestorPIDs: [],
+                filePath: nil, networkDestination: nil
+            )
+        }
+        // The v1.22.5 shape: schema v1, a processSame partial keyed by its PID,
+        // one pending later step, and a fingerprint of a different rule corpus.
+        let partial = SequenceCheckpointPartial(
+            id: UUID(), ruleID: definition.id, createdAt: now,
+            matchedSteps: [matched("download")], correlationKey: "202"
+        )
+        let pending = SequenceCheckpointPendingStep(
+            ruleID: definition.id, stepID: "execute", matched: matched("execute"), arrivedAt: now
+        )
+        let legacy = SequenceCheckpointPayload(
+            schemaVersion: SequenceCheckpointPayload.legacySchemaVersion, capturedAt: now,
+            ruleFingerprint: String(repeating: "a", count: 64), sourceGeneration: 1,
+            partialBuckets: [SequenceCheckpointPartialBucket(ruleID: definition.id, partials: [partial])],
+            pendingBuckets: [SequenceCheckpointPendingBucket(ruleID: definition.id, steps: [pending])],
+            evictionOrder: [partial.id],
+            pendingEvictionOrder: [SequenceCheckpointPendingIdentity(
+                ruleID: definition.id, stepID: "execute", eventID: pending.matched.eventID
+            )]
+        )
+        try SecureFileIO.atomicReplace(
+            at: fixture.file.path,
+            data: try SequenceCheckpointCodec.encode(legacy),
+            mode: 0o600
+        )
+        let engine = SequenceEngine(lineage: ProcessLineage())
+        try await engine.addRule(definition)
+        let coordinator = SequenceCheckpointCoordinator(checkpointURL: fixture.file)
+        guard case .rejected = await coordinator.restore(into: engine) else {
+            Issue.record("legacy carrier for a different rule corpus was not rejected")
+            return
+        }
+        let rejection = await coordinator.telemetry()
+        #expect(rejection.restoreStatus == .rejected)
+        #expect(rejection.lastCarrierInvalidationReason == .semanticMismatch)
+        #expect(rejection.restoreDetail != nil)
+        let weight = await engine.checkpointWeightDiagnostics()
+        #expect(weight.partialCount == 0 && weight.pendingCount == 0)
+
+        // The rejection is not fatal: the next seed still starts a partial.
+        _ = await engine.evaluate(event("/usr/bin/curl", pid: 202, timestamp: now))
+        #expect(await engine.activePartialMatchCount == 1)
+        guard case .written = await coordinator.forceFlush(engine: engine) else {
+            Issue.record("rejected legacy carrier was not replaced")
+            return
+        }
+        let repaired = await coordinator.telemetry()
+        #expect(repaired.restoreStatus == .recovered)
+        #expect(repaired.restoreDetail == rejection.restoreDetail)
+        #expect(repaired.carrierInvalidationsTotal == 1)
+        #expect(repaired.durableCarrierValid)
+    }
+
     @Test("fresh absent startup writes before returning and establishes the RPO")
     func periodicStartSeedsImmediately() async throws {
         let fixture = try temporaryCheckpoint()
