@@ -44,8 +44,9 @@ func handleListRules(_ args: [String: Any]) -> Any {
 /// CompiledRuleFileIndex resolves it: a user rule the engine would load, else
 /// the bundled rule. Of that rule it shows the description, status and
 /// logsource, not the matching logic; a closing line points to
-/// `maccrabctl why <alert id>`, which prints the rule's predicates and how they
-/// combine on this Mac (long value lists are shortened). A user rule is
+/// `maccrabctl why <alert id>`, which prints on this Mac a single-event rule's
+/// predicates and how they combine, a sequence rule's steps, or a graph rule's
+/// nodes and edges (long value lists are shortened). A user rule is
 /// marked `source: user_rules`, and one with "enabled": false gets a line
 /// saying the engine raises no alerts for the id when it applies that rule.
 /// When this process cannot read all of user_rules, a note says the engine,
@@ -135,10 +136,11 @@ func explainRuleSectionLines(ruleID: String, alertID: String, hasDetail: Bool, c
 /// rule, its source and, when it has "enabled": false, a line saying the
 /// engine raises no alerts for this id while it applies the rule, or if it
 /// applies the rule when a note says it may apply another. The matching
-/// logic is left to `maccrabctl why`, which prints the rule's predicates and
-/// how they combine on this Mac (long value lists are shortened); this
-/// server's responses pass through the privacy sanitizer, which rewrites
-/// paths, host names and addresses in rule values.
+/// logic is left to `maccrabctl why`, which prints on this Mac a
+/// single-event rule's predicates and how they combine, a sequence rule's
+/// steps, or a graph rule's nodes and edges (long value lists are
+/// shortened); this server's responses pass through the privacy sanitizer,
+/// which rewrites paths, host names and addresses in rule values.
 func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, isUserRule: Bool,
                                 duplicateUserRules: Bool, unreadableUserRules: Bool) -> [String] {
     var lines = ["Rule definition:"]
@@ -167,7 +169,7 @@ func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, isUserRu
         let pairs: [String] = ls.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
         lines.append("  logsource: " + pairs.joined(separator: ", "))
     }
-    lines.append("  matching logic: run `maccrabctl why \(alertID)` on this Mac; it prints the rule's predicates and how they combine (long value lists are shortened).")
+    lines.append("  matching logic: run `maccrabctl why \(alertID)` on this Mac; it prints a single-event rule's predicates and how they combine, a sequence rule's steps, or a graph rule's nodes and edges (long value lists are shortened).")
     return lines
 }
 

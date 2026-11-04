@@ -242,10 +242,20 @@ struct CompiledRuleFileIndexTests {
         try write("rule.dup", to: user + "/c.json", title: "second")
         try write("rule.single", to: user + "/d.json", title: "single")
         let index = CompiledRuleFileIndex()
+        // explain_alert's rule section is the first lookup on this index, and
+        // again the first after c.json goes, so the flag it shows comes from
+        // the build that lookup makes.
+        let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2e"
+        func head() -> [String] {
+            Array(explainRuleSectionLines(ruleID: "rule.dup", alertID: alertID, hasDetail: true,
+                                          compiledDir: compiled, index: index).prefix(3))
+        }
+        #expect(head() == ["Rule definition:", Self.duplicateNote, Self.userSource])
         #expect(index.rule(id: "rule.dup", in: compiled)?["title"] as? String == "first")
         #expect(index.hasDuplicateUserRules(id: "rule.dup", in: compiled))
         #expect(!index.hasDuplicateUserRules(id: "rule.single", in: compiled))
         try FileManager.default.removeItem(atPath: user + "/c.json")
+        #expect(head() == ["Rule definition:", Self.userSource, "  description: rule index fixture"])
         #expect(index.rule(id: "rule.dup", in: compiled)?["title"] as? String == "first")
         #expect(!index.hasDuplicateUserRules(id: "rule.dup", in: compiled))
     }
@@ -327,7 +337,9 @@ struct CompiledRuleFileIndexTests {
         rule["edges"] = [["from": "shell", "to": "shell", "relation": "spawned"]]
         rule["detection"] = ["selection": ["file.path|contains": "/maccrab-rule-index-fixture/"]]
         let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2c"
-        let pointer = "  matching logic: run `maccrabctl why \(alertID)` on this Mac; it prints the rule's predicates and how they combine (long value lists are shortened)."
+        let pointer = "  matching logic: run `maccrabctl why \(alertID)` on this Mac; it prints a single-event rule's "
+            + "predicates and how they combine, a sequence rule's steps, or a graph rule's nodes and edges (long value "
+            + "lists are shortened)."
 
         let lines = explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: false, duplicateUserRules: false, unreadableUserRules: false)
         #expect(lines == [
@@ -335,8 +347,8 @@ struct CompiledRuleFileIndexTests {
             "  logsource: category=file_event, product=macos", pointer,
         ])
         // No predicate value and no logic key reaches the text. The pointer
-        // names predicates only as what `why` prints, so the keys are looked
-        // for in the lines above it.
+        // names predicates, steps, nodes and edges only as what `why` prints,
+        // so the keys are looked for in the lines above it.
         let text = lines.joined(separator: "\n")
         #expect(!text.contains("/maccrab-rule-index-fixture/"))
         let definition = lines.dropLast().joined(separator: "\n")
