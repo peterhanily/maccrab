@@ -324,6 +324,61 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   which applies the stable profile to user rules although the engine does
   not, so a severity change on a rule made with the wizard wrote
   "enabled": false. The rule's own override file now decides.
+- **Rule reloads no longer fail once enough rules exist only in user_rules.**
+  A reload is rejected when its load of compiled_rules returns fewer than 70%
+  of the previous count, so a truncated rule bundle cannot replace the loaded
+  rules. The previous count included rules that only user_rules provides,
+  such as those made with the rule wizard or MCP `create_rule`, and the new
+  count did not. With the 438 bundled rules, 188 or more such rules made every
+  reload fail: Disable, Enable and severity changes in the dashboard, MCP
+  `delete_rule` and `maccrabctl rules reload` did not take effect, and SIGHUP
+  stopped before reloading sequence and graph rules and storage settings. A
+  restart loaded the current files, but the next reload failed again. The
+  check now uses the count of the last compiled_rules load that succeeded.
+- **`maccrabctl rule enable` and `maccrabctl rule disable` say how long a
+  change lasts.** They set "enabled" in the bundled rule's file in
+  compiled_rules. On a release install the engine replaces edited rule files
+  with its signed copies when it starts, so the change lasts until the engine
+  restarts, although `docs/INCIDENT_RESPONSE.md` said it survived restarts.
+  The commands now say so, and a disable points to Disable rule in
+  Detection › Rules for one that lasts. When a user_rules file exists for the
+  id, they exit 1 without editing any file, because the rule in that file
+  replaces the bundled one when the engine loads it. Before, they reported
+  success while that file still decided whether the rule ran.
+- **Deleting a rule no longer reports success when nothing can be deleted.**
+  MCP `delete_rule` and `maccrabctl rule delete` queued a removal for any id
+  and replied that the engine would drop the rule, but the engine removes only
+  user_rules files, so a bundled rule without one kept running. When there is
+  no user_rules JSON file for the id, they now queue nothing: `delete_rule`
+  returns a tool error and the command exits 1, saying that bundled rules
+  cannot be deleted and pointing to Disable rule in Detection › Rules. When
+  the user rule has the id of a bundled rule, the reply says the engine uses
+  the bundled rule after the next reload.
+- **`maccrabctl rule severity` no longer turns on a rule that the rule
+  profile turns off.** For a bundled rule without a user_rules file, it
+  installs a copy with the new level as a user rule, and the engine does not
+  apply the rule profile to user rules. Under the default stable profile,
+  changing an experimental rule's severity therefore started running that
+  rule while Detection › Rules still showed it as disabled. The copy now has
+  "enabled": false when the engine's load of compiled_rules leaves the rule
+  disabled: when its file disables it, or when the profile is not `all` and
+  its status is not `stable` (no status counts as experimental). A rule with a
+  user_rules file keeps that file's setting.
+- **`maccrabctl status` no longer attributes every disabled rule to the rule
+  profile.** It printed the gap between loaded and active rules as "disabled
+  by rule profile — set rule_profile: all to enable", but the gap also counts
+  rules with "enabled": false in their file, such as the 11 deprecated rules,
+  which stay off under `rule_profile: all`, and rules the engine's slow-rule
+  guard turned off. The line now names all three causes.
+- **Installing a rule no longer changes the mode of a folder that user_rules
+  links to.** The rule-install handler, which the dashboard, `maccrabctl` and
+  MCP use, set user_rules to mode 0755 through a symlink, so the folder it
+  pointed to became 0755, and the install then failed. When user_rules is a
+  symlink or anything else that is not a folder, the handler now changes
+  nothing, logs a warning and records `rejected_unsafe_dir` in
+  `dashboard_audit.log`. After a user_rules reload, the engine's log now says
+  how many rule files it loaded from compiled_rules and from user_rules,
+  instead of calling their total active rules.
 - **Stalled user-name lookups no longer occupy every heavy-enrichment
   worker.** Directory lookups run outside the user-name cache lock in a
   bounded lane, including after a deadline. An unavailable result is retried

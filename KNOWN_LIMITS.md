@@ -24,6 +24,8 @@ measured number, in the same commit that accepts it.**
 
 ## v1.22.6
 
+These functional limits are accepted for v1.22.6 and scheduled for v1.22.7.
+
 Most of the items below are functional limits rather than resource costs. Each says what
 it affects, its bound or reach, and how to see it.
 
@@ -74,7 +76,7 @@ two of four 30-second intervals, or any loss during a spike in file activity, ma
 sensor as degraded in the app's System workspace and in `maccrabctl status` and raises a
 Sensor Degraded alert.
 
-**Owner:** engine · **Target:** not yet scheduled.
+**Owner:** engine · **Target:** v1.22.7.
 
 ### Sequence rules at capacity
 
@@ -117,7 +119,7 @@ The bounds:
 - **Exact timestamp ties.** When two processes' entries have exactly the same timestamp,
   an alert may cite either one as evidence. Whether the rule fires does not change.
 
-**Owner:** engine · **Target:** not yet scheduled.
+**Owner:** engine · **Target:** v1.22.7.
 
 ### Sequence chains completed on a late middle step
 
@@ -145,7 +147,7 @@ the heartbeat). The bounds:
   response action configured for the rule use the middle step's process and file, not the
   last step's.
 
-**Owner:** engine · **Target:** not yet scheduled.
+**Owner:** engine · **Target:** v1.22.7.
 
 ### Detection › Rules and rule overrides
 
@@ -177,18 +179,20 @@ the heartbeat). The bounds:
   - MCP `explain_alert` can show a rule from `compiled_rules/auto_generated`, which holds
     generated rule candidates the engine does not load, when no rule the engine loads has
     the alert's id.
-- **`maccrabctl rule enable` and `maccrabctl rule disable` do not last.** They edit the
-  bundled rule's file in `compiled_rules`. After `maccrabctl rules reload` the engine
-  applies the change, but at its next start it reinstalls the bundled rules from the app,
-  and the change is lost. For a lasting change, use Disable rule or Enable rule in
-  Detection › Rules, which saves an override in `user_rules`.
+- **On a release install, `maccrabctl rule enable` and `maccrabctl rule disable` last
+  until the engine restarts.** They edit the bundled rule's file in `compiled_rules`.
+  After `maccrabctl rules reload` the engine applies the change, but when it starts it
+  replaces edited rule files with its signed copies, and the change is lost. Both commands
+  say this when they save a change. For a lasting change, use Disable rule or Enable rule
+  in Detection › Rules, which saves an override in `user_rules`. When a rule has a file in
+  `user_rules`, the commands change nothing and point to Detection › Rules instead.
 - **Re-enabling a rule can keep a severity from before an update.** When you disable a
   bundled rule, its override records the rule's severity at that time. If an update then
   changes that rule's default severity, Enable cannot tell the recorded severity from one
   you chose, so it re-enables the rule at the recorded severity. Choose Default in the
   rule's severity control to return to the current default.
 
-**Owner:** app and CLI · **Target:** not yet scheduled.
+**Owner:** app and CLI · **Target:** v1.22.7.
 
 ### Other detection limits
 
@@ -198,7 +202,7 @@ the heartbeat). The bounds:
   started it, such as a forked subshell or a program the shell runs in a new process,
   does not complete the reverse-shell sequence rule.
 
-**Owner:** engine · **Target:** not yet scheduled.
+**Owner:** engine · **Target:** v1.22.7.
 
 ---
 
