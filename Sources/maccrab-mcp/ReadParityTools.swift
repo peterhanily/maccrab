@@ -48,9 +48,11 @@ func handleListRules(_ args: [String: Any]) -> Any {
 /// combine on this Mac (long value lists are shortened). When this process
 /// cannot read all of user_rules, a note says the engine, which runs as root
 /// when installed, may apply a user rule from there instead, unless the rule
-/// is a sequence or graph rule, which user rules do not replace. The rule
-/// definition is shown only when the rule JSON is readable; when it is not,
-/// this says so rather than implying the alert had no rule behind it.
+/// is a sequence or graph rule, which user rules do not replace. When the
+/// index maps no rule file to the id, this says so and that built-in
+/// detectors, such as the process-lineage baseline (baseline-anomaly), have
+/// none; a note then says the alert's rule may be a user rule this process
+/// cannot read, when the index's last build could not read all of user_rules.
 func handleExplainAlert(_ args: [String: Any]) async -> Any {
     guard let alertId = args["alert_id"] as? String, !alertId.isEmpty else {
         return toolError("'alert_id' is required (get it from get_alerts).")
@@ -84,7 +86,7 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
         // Sigma rule: show the definition of the rule the engine applies for
         // this id.
         lines.append("")
-        lines += explainRuleSectionLines(ruleID: alert.ruleId, alertID: alert.id,
+        lines += explainRuleSectionLines(ruleID: alert.ruleId, alertID: alert.id, hasDetail: alert.description != nil,
                                          compiledDir: dataDir + "/compiled_rules", index: .shared)
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
@@ -95,15 +97,25 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
 /// The rule part of explain_alert for a Sigma rule's id: the definition of
 /// the rule the engine applies for it, as `index` resolves it in
 /// `compiledDir`, with notes on duplicate and unreadable user rules from the
-/// index's flags, or two lines saying the rule JSON is not readable from this
-/// process.
-func explainRuleSectionLines(ruleID: String, alertID: String, compiledDir: String,
+/// index's flags. When the index maps no file to the id, it is instead two
+/// lines saying that no rule file with the id was found and that built-in
+/// detectors have none, the second pointing to the alert's detail when
+/// `hasDetail` says explain_alert printed one, then a note when the index's
+/// last build could not read all of user_rules.
+func explainRuleSectionLines(ruleID: String, alertID: String, hasDetail: Bool, compiledDir: String,
                              index: CompiledRuleFileIndex) -> [String] {
     guard let ruleJSON = index.rule(id: ruleID, in: compiledDir) else {
-        return [
-            "The compiled rule for \(ruleID) is not readable from this process, so its",
-            "definition cannot be shown. The alert itself is unaffected.",
+        var lines = [
+            "This process found no rule file with the id \(ruleID) in compiled_rules or among the user rules the engine would load.",
+            hasDetail
+                ? "Built-in detectors, such as the process-lineage baseline (baseline-anomaly), have no rule file; for their alerts, the detail above is what was captured."
+                : "Built-in detectors, such as the process-lineage baseline (baseline-anomaly), have no rule file.",
         ]
+        // Read after rule(id:in:), like the flags below.
+        if index.lastBuildFoundUnreadableUserRules(in: compiledDir) {
+            lines.append("Note: this process cannot read all of user_rules (the folder cannot be listed or inspected, or a file in it cannot be inspected or opened). The engine runs as root when installed, so this alert's rule may be a user rule there; to check, run `sudo maccrabctl why \(alertID)` on this Mac.")
+        }
+        return lines
     }
     // rule(id:in:) may rebuild the index, and the flags describe the last
     // build, so they are read after it.
@@ -258,7 +270,8 @@ func handleGetBrowserExtensions(_ args: [String: Any]) -> Any {
 
 /// Rule id -> compiled file. Built on first use, then rebuilt when a rule
 /// directory's stamp (the bundled folders: stat mtime; user_rules: lstat
-/// mtime, ctime, mode and owner) or a rule file's lstat stamp changes
+/// mtime, ctime, mode and owner, or whether lstat of it was refused) or a
+/// rule file's lstat stamp changes
 /// (checked on every lookup), or a cached entry stops resolving. Every
 /// explain_alert call used to open and parse each compiled rule (about 480
 /// files) to find one id. Launched by an AI agent, this server is an
@@ -271,11 +284,16 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     /// removes or renames files, which moves a directory's mtime. A chmod or
     /// chown of user_rules, which decides whether the engine trusts the
     /// overlay and whether this process can list it, leaves its mtime alone,
-    /// so its ctime, mode and owner count too. A rule file edited in place
-    /// moves none of these; its FileStamp does.
+    /// so its ctime, mode and owner count too. When lstat of user_rules fails,
+    /// whether it was refused (EACCES or EPERM, as under an ACL entry that
+    /// denies this process readattr) counts too: a refused user_rules is noted
+    /// as unreadable and a missing one is not, though neither has lstat
+    /// metadata. A rule file edited in place moves none of these; its
+    /// FileStamp does.
     private struct Stamp: Equatable {
         let bundled: [Time?]
         let user: UserRulesState?
+        let userRefused: Bool
     }
 
     /// lstat metadata of one rule file. An edit in place moves the file's mtime
@@ -392,6 +410,16 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return !path.hasPrefix(compiledDir + "/sequences/") && !path.hasPrefix(compiledDir + "/graph/")
     }
 
+    /// Whether, at the last build, this process was refused lstat of
+    /// user_rules or of a file in it, could not list user_rules, or could not
+    /// open a file in it that the engine's uid owns. Unlike
+    /// hasUnreadableUserRules, it does not depend on the id: for an id the
+    /// index maps no file to, the engine may still load a rule from there.
+    func lastBuildFoundUnreadableUserRules(in compiledDir: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return directory == compiledDir && unreadableUserRules
+    }
+
     private func cachedPath(id: String, in compiledDir: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         guard directory == compiledDir else { return nil }
@@ -486,12 +514,15 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
             return stat(path, &st) == 0 ? Time(st.st_mtimespec) : nil
         }
         // lstat, as the trust check does: a symlink swapped in changes it.
+        // errno is read straight after it, as lstatIsRefused reads it.
         var st = stat()
-        let user = lstat(userRulesDirectory(compiledDir), &st) == 0
-            ? UserRulesState(modified: Time(st.st_mtimespec), changed: Time(st.st_ctimespec),
+        let failed = lstat(userRulesDirectory(compiledDir), &st) != 0
+        let code = errno
+        let user = failed
+            ? nil
+            : UserRulesState(modified: Time(st.st_mtimespec), changed: Time(st.st_ctimespec),
                              mode: st.st_mode, owner: st.st_uid)
-            : nil
-        return Stamp(bundled: bundled, user: user)
+        return Stamp(bundled: bundled, user: user, userRefused: failed && (code == EACCES || code == EPERM))
     }
 
     /// The rule files the index reads: those of the bundled directories and,

@@ -516,7 +516,7 @@ struct CompiledRuleFileIndexTests {
         #expect(chmod(user, 0o300) == 0)
         let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2d"
         func section(_ id: String) -> [String] {
-            explainRuleSectionLines(ruleID: id, alertID: alertID, compiledDir: compiled, index: index)
+            explainRuleSectionLines(ruleID: id, alertID: alertID, hasDetail: true, compiledDir: compiled, index: index)
         }
         #expect(Array(section("rule.x").prefix(2)) == ["Rule definition:", Self.unreadableNote(alertID)])
         #expect(section("seq.s").first == "Rule definition:")
@@ -548,5 +548,115 @@ struct CompiledRuleFileIndexTests {
         try FileManager.default.removeItem(atPath: user)
         #expect(shown() == "bundled")
         #expect(!index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+    }
+
+    @Test("a user_rules this process may not lstat is told from a missing one, though neither has lstat metadata",
+          .enabled(if: geteuid() != 0, "root is not held to an ACL entry"))
+    func refusedAndMissingUserRulesAreTold() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer {
+            _ = try? chmodACL(["-N", user])
+            try? FileManager.default.removeItem(atPath: root)
+        }
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        try write("rule.x", to: user + "/x.json", title: "user override")
+        let denyReadattr = "user:\(NSUserName()) deny readattr"
+        let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b31"
+        func noted(_ index: CompiledRuleFileIndex) -> Bool {
+            explainRuleSectionLines(ruleID: "rule.x", alertID: alertID, hasDetail: true, compiledDir: compiled, index: index)
+                .contains(Self.unreadableNote(alertID))
+        }
+
+        // Refused, then missing, with no lookup in between. Each transition
+        // has an index of its own, built in the state before it.
+        #expect(try chmodACL(["+a", denyReadattr, user]) == 0)
+        #expect(UserRuleOverlayTrust.lstatIsRefused(atPath: user))
+        let refusedFirst = CompiledRuleFileIndex()
+        #expect(noted(refusedFirst))
+        #expect(try chmodACL(["-N", user]) == 0)
+        try FileManager.default.removeItem(atPath: user)
+        #expect(!UserRuleOverlayTrust.lstatIsRefused(atPath: user))
+        #expect(!noted(refusedFirst))
+        #expect(refusedFirst.rebuildCount == 2)
+
+        // Missing, then refused, with no lookup in between: the install
+        // handler creates user_rules at 0755 and writes an override, and an
+        // ACL entry then denies this process readattr.
+        let missingFirst = CompiledRuleFileIndex()
+        #expect(!noted(missingFirst))
+        try FileManager.default.createDirectory(atPath: user, withIntermediateDirectories: false)
+        #expect(chmod(user, 0o755) == 0)
+        try write("rule.x", to: user + "/x.json", title: "user override")
+        #expect(try chmodACL(["+a", denyReadattr, user]) == 0)
+        #expect(UserRuleOverlayTrust.lstatIsRefused(atPath: user))
+        #expect(noted(missingFirst))
+        #expect(missingFirst.rebuildCount == 2)
+    }
+
+    @Test("an id the index maps no file to gets lines saying no rule file was found and built-in detectors have none, with no note while user_rules is readable")
+    func idWithoutRuleFile() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        try write("rule.x", to: user + "/x.json", title: "user override")
+        // A user rule this process can read but the engine would not load,
+        // because it does not decode.
+        try JSONSerialization.data(withJSONObject: ["id": "user.refused", "title": "refused rule"])
+            .write(to: URL(fileURLWithPath: user + "/y.json"))
+        let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2f"
+        let index = CompiledRuleFileIndex()
+        for id in ["baseline-anomaly", "user.refused"] {
+            for hasDetail in [true, false] {
+                #expect(explainRuleSectionLines(ruleID: id, alertID: alertID, hasDetail: hasDetail,
+                                                compiledDir: compiled, index: index)
+                    == Self.noRuleFileLines(id, hasDetail: hasDetail), "\(id), detail: \(hasDetail)")
+            }
+        }
+    }
+
+    @Test("an id the index maps no file to also gets a note when the index's last build could not read all of user_rules",
+          .enabled(if: geteuid() != 0, "root lists a mode-300 folder"))
+    func idWithoutRuleFileAndUnreadableUserRules() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer {
+            chmod(user, 0o755)
+            try? FileManager.default.removeItem(atPath: root)
+        }
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        try write("rule.x", to: user + "/x.json", title: "user override")
+        // A folder the engine trusts that this process cannot list, from
+        // before the index's first lookup, so the note comes from the build
+        // that lookup makes.
+        #expect(chmod(user, 0o300) == 0)
+        let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b30"
+        let index = CompiledRuleFileIndex()
+        func section() -> [String] {
+            explainRuleSectionLines(ruleID: "baseline-anomaly", alertID: alertID, hasDetail: true,
+                                    compiledDir: compiled, index: index)
+        }
+        let notFound = Self.noRuleFileLines("baseline-anomaly", hasDetail: true)
+        #expect(section() == notFound + [Self.unreadableNotFoundNote(alertID)])
+        #expect(chmod(user, 0o755) == 0)
+        #expect(section() == notFound)
+    }
+
+    /// What explain_alert prints for an id the rule index maps no file to.
+    private static func noRuleFileLines(_ ruleID: String, hasDetail: Bool) -> [String] {
+        [
+            "This process found no rule file with the id \(ruleID) in compiled_rules or among the user rules the "
+                + "engine would load.",
+            hasDetail
+                ? "Built-in detectors, such as the process-lineage baseline (baseline-anomaly), have no rule file; "
+                    + "for their alerts, the detail above is what was captured."
+                : "Built-in detectors, such as the process-lineage baseline (baseline-anomaly), have no rule file.",
+        ]
+    }
+
+    /// The note explain_alert adds after those lines when this process
+    /// cannot read all of user_rules.
+    private static func unreadableNotFoundNote(_ alertID: String) -> String {
+        "Note: this process cannot read all of user_rules (the folder cannot be listed or inspected, or a file in it "
+            + "cannot be inspected or opened). The engine runs as root when installed, so this alert's rule may be a "
+            + "user rule there; to check, run `sudo maccrabctl why \(alertID)` on this Mac."
     }
 }
