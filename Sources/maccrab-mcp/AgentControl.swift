@@ -468,8 +468,56 @@ func handleDeleteRule(_ args: [String: Any]) -> Any {
         return toolError("'rule_id' is required (the id of a user-authored rule; built-in maccrab.* rules are tuned with set_builtin_rule_setting, not deleted)")
     }
     auditLog("delete_rule", details: "rule_id=\(ruleId) ppid=\(getppid())")
-    if let err = dropInboxRequest(verb: "remove-rule", payload: ["ruleId": ruleId]) { return toolError(err) }
-    return ["content": [["type": "text", "text": "Queued removal of user rule \(ruleId). The engine drops it on the next reload."]]]
+    switch deleteRulePlan(ruleId: ruleId, supportDir: dataDir) {
+    case .refuse(let message):
+        return toolError(message)
+    case .queue(let reply):
+        if let err = dropInboxRequest(verb: "remove-rule", payload: ["ruleId": ruleId]) { return toolError(err) }
+        return ["content": [["type": "text", "text": reply]]]
+    }
+}
+
+/// What delete_rule does with an id that passed its argument checks.
+enum DeleteRulePlan: Equatable {
+    /// Return this tool error, queueing nothing.
+    case refuse(String)
+    /// Queue remove-rule, then reply with this text.
+    case queue(String)
+}
+
+/// The engine's remove-rule handler deletes user_rules/<basename>.yml and
+/// user_rules/<basename>.json, with the basename sanitized as
+/// DaemonTimers.safeRuleBasename does, so without that JSON file nothing is
+/// queued. When a top-level compiled_rules rule has the "id" of that file's
+/// rule (or `ruleId`, if the file has none), the reply says the engine uses
+/// that bundled rule after the reload.
+func deleteRulePlan(ruleId: String, supportDir: String) -> DeleteRulePlan {
+    let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-_")
+    let basename = String(ruleId.lowercased().filter { allowed.contains($0) })
+    let validBasename = !basename.isEmpty && basename.count <= 128
+    let userRulePath = supportDir + "/user_rules/\(basename).json"
+    guard validBasename, FileManager.default.fileExists(atPath: userRulePath) else {
+        return .refuse("No user rule has the id \(ruleId)"
+            + (validBasename ? " (there is no user_rules/\(basename).json)" : "")
+            + ", so nothing was queued. Bundled rules cannot be deleted; a person can turn one off with"
+            + " Disable rule in the MacCrab dashboard's Detection › Rules. Built-in maccrab.* detections"
+            + " are tuned with set_builtin_rule_setting.")
+    }
+    func ruleID(atPath path: String) -> String? {
+        (try? Data(contentsOf: URL(fileURLWithPath: path)))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["id"] as? String
+    }
+    // The engine replaces the bundled rule whose id is the user rule's "id".
+    let id = ruleID(atPath: userRulePath) ?? ruleId
+    let compiledDir = supportDir + "/compiled_rules"
+    let compiledFiles = (try? FileManager.default.contentsOfDirectory(atPath: compiledDir)) ?? []
+    if compiledFiles.contains(where: {
+        $0.hasSuffix(".json") && $0 != "manifest.json" && ruleID(atPath: compiledDir + "/" + $0) == id
+    }) {
+        return .queue("Queued removal of user rule \(ruleId), which has the same id as a bundled rule."
+            + " After the next reload the engine uses the bundled rule instead.")
+    }
+    return .queue("Queued removal of user rule \(ruleId). The engine drops it on the next reload.")
 }
 
 private enum CompileOutcome { case success(String); case failure(String) }

@@ -70,12 +70,52 @@ private func ruleDelete(args: [String]) {
         print("  maccrabctl rule disable \(ruleId)")
         exit(1)
     }
-    if let err = dropCtlInboxRequest(verb: "remove-rule", payload: ["ruleId": ruleId]) {
-        print("Could not queue rule removal: \(err)")
-        print("(The engine may not be running, or this shell can't write its inbox.)")
+    switch ruleDeletePlan(ruleId: ruleId, supportDir: maccrabDataDir()) {
+    case .refuse(let lines):
+        lines.forEach { print($0) }
         exit(1)
+    case .queue(let reply):
+        if let err = dropCtlInboxRequest(verb: "remove-rule", payload: ["ruleId": ruleId]) {
+            print("Could not queue rule removal: \(err)")
+            print("(The engine may not be running, or this shell can't write its inbox.)")
+            exit(1)
+        }
+        print(reply)
     }
-    print("Queued removal of user rule \(ruleId). The engine drops it on the next reload (~5 s).")
+}
+
+/// What `rule delete` does with an id that passed its argument checks.
+enum RuleDeletePlan: Equatable {
+    /// Print these lines and exit 1, queueing nothing.
+    case refuse([String])
+    /// Queue remove-rule, then print this line.
+    case queue(String)
+}
+
+/// The engine's remove-rule handler deletes user_rules/<basename>.yml and
+/// user_rules/<basename>.json, so without that JSON file nothing is queued.
+/// When a top-level compiled_rules rule has the "id" of that file's rule (or
+/// `ruleId`, if the file has none), the reply says the engine uses that
+/// bundled rule after the reload.
+func ruleDeletePlan(ruleId: String, supportDir: String) -> RuleDeletePlan {
+    let userRuleFile = safeUserRuleBasename(ruleId).map { "user_rules/\($0).json" }
+    guard let userRuleFile, FileManager.default.fileExists(atPath: supportDir + "/" + userRuleFile) else {
+        return .refuse([
+            "No user rule has the id \(ruleId)" + (userRuleFile.map { " (there is no \($0))" } ?? "")
+                + ", so nothing was queued.",
+            "Bundled rules cannot be deleted. To turn one off, use Disable rule in the dashboard's"
+                + " Detection › Rules, or maccrabctl rule disable \(ruleId), which on a release install"
+                + " lasts until the engine restarts.",
+        ])
+    }
+    // The engine replaces the bundled rule whose id is the user rule's "id".
+    let userRuleID = (try? Data(contentsOf: URL(fileURLWithPath: supportDir + "/" + userRuleFile)))
+        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["id"] as? String
+    if locateRuleJSON(byId: userRuleID ?? ruleId, inDir: supportDir + "/compiled_rules") != nil {
+        return .queue("Queued removal of user rule \(ruleId), which has the same id as a bundled rule."
+            + " After the next reload (~5 s) the engine uses the bundled rule instead.")
+    }
+    return .queue("Queued removal of user rule \(ruleId). The engine drops it on the next reload (~5 s).")
 }
 
 // MARK: - rule severity
