@@ -10,6 +10,7 @@
 // and sudoers_modification.yml.
 
 import Foundation
+import MacCrabCore
 import Testing
 @testable import maccrabctl
 
@@ -250,6 +251,34 @@ struct WhyCommandTests {
                          as: UTF8.self)
         #expect(Array(tree.dropFirst(8)) == ["Condition AST:"] + ast.split(separator: "\n").map { "  \($0)" })
         #expect(tree.contains(#"    "type" : "or","#))
+    }
+
+    @Test("a null condition_tree counts as no tree: why does not abort, and a step shows its flat condition")
+    func nullConditionTree() throws {
+        // The engine decodes "condition_tree": null as no tree, loads the rule
+        // and evaluates its flat condition.
+        var single = try #require(try JSONSerialization.jsonObject(with: Data(Self.flatRule.utf8)) as? [String: Any])
+        single["condition_tree"] = NSNull()
+        let data = try JSONSerialization.data(withJSONObject: single)
+        #expect(try RuleEngine.decodeLoadableRule(data).conditionTree == nil)
+        let (lines, _) = try Self.render(String(decoding: data, as: UTF8.self), path: "user_rules/ssh_key_access.json")
+        #expect(lines.contains("Predicates (4):"))
+        #expect(!lines.contains("Condition AST:"))
+
+        // The package_install step's tree is null, so it shows its flat any_of.
+        var sequence = try #require(try JSONSerialization.jsonObject(with: Data(Self.sequenceRule.utf8)) as? [String: Any])
+        var steps = try #require(sequence["steps"] as? [[String: Any]])
+        steps[0]["condition_tree"] = NSNull()
+        sequence["steps"] = steps
+        let (stepLines, _) = try Self.render(
+            String(decoding: try JSONSerialization.data(withJSONObject: sequence), as: UTF8.self),
+            path: "compiled_rules/sequences/supply_chain_full_kill_chain.json")
+        #expect(stepLines.filter { $0 == "  Condition AST:" }.count == 1)
+        #expect(stepLines.contains("  Condition:   any_of"))
+
+        // A tree JSONSerialization cannot write prints nothing rather than raising.
+        single["condition_tree"] = "any_of"
+        #expect(!MacCrabCtl.whyRuleLines(single, rulePath: "x.json").contains("Condition AST:"))
     }
 
     /// Parses a fixture the way `runWhy` parses a rule file, then renders it.

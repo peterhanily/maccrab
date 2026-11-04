@@ -242,8 +242,9 @@ extension MacCrabCtl {
             lines += whyPredicateLines(predicates)
         }
         // The condition expression: the Boolean combinator the rule used
-        // ("selection and not filter_a and not filter_b").
-        if let conditionTree = rule["condition_tree"] {
+        // ("selection and not filter_a and not filter_b"). A null tree is no
+        // tree, as the engine decodes it.
+        if let conditionTree = rule["condition_tree"], !(conditionTree is NSNull) {
             lines += whyConditionASTLines(conditionTree)
         }
         return lines
@@ -264,9 +265,12 @@ extension MacCrabCtl {
         return lines
     }
 
-    /// "Condition AST:" and the tree as indented JSON.
+    /// "Condition AST:" and the tree as indented JSON. JSONSerialization
+    /// raises, rather than throws, on a value it cannot write, such as null or
+    /// a string, so anything but an array or an object prints nothing.
     private static func whyConditionASTLines(_ conditionTree: Any) -> [String] {
-        guard let conditionData = try? JSONSerialization.data(withJSONObject: conditionTree, options: .prettyPrinted),
+        guard JSONSerialization.isValidJSONObject(conditionTree),
+              let conditionData = try? JSONSerialization.data(withJSONObject: conditionTree, options: .prettyPrinted),
               let conditionStr = String(data: conditionData, encoding: .utf8) else { return [] }
         return ["Condition AST:"] + conditionStr.split(separator: "\n").map { "  \($0)" }
     }
@@ -294,7 +298,7 @@ extension MacCrabCtl {
                 body.append("Process relation: \(kind) (relative to step \(other))")
             }
             body += whyPredicateLines((step["predicates"] as? [[String: Any]]) ?? [])
-            if let conditionTree = step["condition_tree"] {
+            if let conditionTree = step["condition_tree"], !(conditionTree is NSNull) {
                 body += whyConditionASTLines(conditionTree)
             } else {
                 body.append("Condition:   \((step["condition"] as? String) ?? "?")")
