@@ -3672,10 +3672,16 @@ public actor SequenceEngine {
     ///     two entries at most one throttled fold attempt per call
     ///     (foldPendingBucketIfDue; fold removals are completed): the victim,
     ///     then the admitting rule, then every other one through
-    ///     foldOtherPendingBucket, stopping at the first attempt that removes
-    ///     entries. So, throttle permitting, duplicates in any bucket are
-    ///     folded before a live entry is shed, whichever order one event's
-    ///     rule plans run in.
+    ///     foldOtherPendingBucket, most entries first and then the smaller
+    ///     rule ID, stopping at the first attempt that removes entries.
+    ///     Within a call that order is fixed, so Dictionary order cannot
+    ///     decide it, and, throttle permitting, duplicates in any bucket are
+    ///     folded before a live entry is shed. Across one event's rule plans,
+    ///     which run in the hashed Set order of ruleIndex, an earlier plan's
+    ///     relief can fold and throttle a bucket before this event's own
+    ///     entry reaches it, so whether the event sheds (within the accepted
+    ///     residual of up to 255 sheds after a low-yield attempt) and which
+    ///     bucket folds can still depend on plan order.
     ///  4. Otherwise shed the victim's front (oldest admission) as
     ///     explicitly_shed. One pressure record per call; the first live
     ///     victim is the representative.
@@ -3940,11 +3946,13 @@ public actor SequenceEngine {
     /// The last fold step before a relief path sheds live history: one
     /// throttled attempt on each fold-eligible bucket that holds at least two
     /// entries, is not blocked and is not yet in `tried`, most entries first
-    /// and then the smaller rule ID, so neither Dictionary order nor the
-    /// order of one event's rule plans decides whether duplicates elsewhere
-    /// are folded or a live entry is shed. Each bucket it tries joins
-    /// `tried`. Stops at the first attempt that removes entries and returns
-    /// that rule.
+    /// and then the smaller rule ID. Each bucket it tries joins `tried`.
+    /// Stops at the first attempt that removes entries and returns that rule.
+    /// The order is total, so Dictionary order cannot decide which bucket a
+    /// call folds or whether the call sheds. The order of one event's rule
+    /// plans still can: an earlier plan's relief may fold and throttle a
+    /// bucket before this event's own entry reaches it (relievePendingPressure,
+    /// step 3).
     private func foldOtherPendingBucket(tried: inout Set<String>) -> String? {
         var candidates: [(ruleId: String, count: Int)] = []
         for (ruleId, bucket) in pendingLaterSteps where bucket.count >= 2 {
