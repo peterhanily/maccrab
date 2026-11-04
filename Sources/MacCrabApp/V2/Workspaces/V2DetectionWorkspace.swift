@@ -311,9 +311,10 @@ public struct V2DetectionWorkspace: View {
         selectedRule = fresh
     }
 
-    /// Toggle a rule between bundled-default and user-override disabled.
-    /// The dashboard queues an owner-bound inbox request; the root engine owns
-    /// and updates the secure override directory without a password dialog.
+    /// Disable or re-enable a rule. A single-event rule is changed through its
+    /// user_rules override. The dashboard queues an owner-bound inbox request;
+    /// the root engine owns and updates the secure override directory without
+    /// a password dialog.
     private func toggleRuleDisabled(_ rule: V2MockRule) async {
         guard presentation.isCurrent(for: presentationIdentity) else { return }
         guard state.ruleChanges.canSubmit(ruleID: rule.id) else { return }
@@ -342,8 +343,8 @@ public struct V2DetectionWorkspace: View {
             return
         }
         if userDisabledRuleIDs.contains(rule.id) {
-            // A real user override exists on disk — removing it re-enables.
-            await removeUserOverride(rule: rule)
+            // A user override on disk disables the rule.
+            await enableUserOverride(rule: rule)
         } else if !rule.isEnabled {
             // Disabled by the bundle/engine, not by a user override (deprecated
             // content ships disabled; the engine can also auto-disable a rule at
@@ -441,6 +442,47 @@ public struct V2DetectionWorkspace: View {
         }
     }
 
+    /// Whether user_rules/<id>.yml may exist. remove-rule deletes it with the
+    /// JSON, so anything but a definite "no such file" counts as present.
+    private func userRuleSourceMayExist(id: String) -> Bool {
+        var st = stat()
+        return lstat(userRulesDir + "/\(id).yml", &st) == 0 || errno != ENOENT
+    }
+
+    /// Enable undoes Disable without deleting what the user wrote: it removes
+    /// the override only when the override is a pure disable copy of a bundled
+    /// rule, and otherwise re-installs its JSON with "enabled": true. The
+    /// request carries no YAML, so the engine leaves user_rules/<id>.yml as it
+    /// is (see V2RuleOverridePlanner.enabledOverride).
+    private func enableUserOverride(rule: V2MockRule) async {
+        guard let data = existingUserOverrideData(id: rule.id),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            state.showToast(V2Toast(kind: .error, title: "Couldn't re-enable rule",
+                                    detail: "Couldn't read user_rules/\(rule.id).json as a JSON object."))
+            return
+        }
+        let bundled = bundledCompiledRuleData(id: rule.id)
+            .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        guard let enabled = V2RuleOverridePlanner.enabledOverride(
+            obj, bundled: bundled, hasSourceYAML: userRuleSourceMayExist(id: rule.id)) else {
+            await removeUserOverride(rule: rule)
+            return
+        }
+        guard let out = try? JSONSerialization.data(withJSONObject: enabled, options: [.prettyPrinted, .sortedKeys]),
+              let json = String(data: out, encoding: .utf8) else {
+            state.showToast(V2Toast(kind: .error, title: "Couldn't encode override", detail: rule.id))
+            return
+        }
+        let result = UserRuleInstaller.dropInboxRequest(
+            verb: "install-rule", payload: ["ruleId": rule.id, "json": json])
+        switch result {
+        case .success:
+            recordRuleChange(rule, expected: .enabled(true), accepted: true)
+        case .failure(let msg):
+            state.showToast(V2Toast(kind: .error, title: "Couldn't re-enable rule", detail: msg))
+        }
+    }
+
     private func removeUserOverride(rule: V2MockRule) async {
         // Route the removal through the daemon's remove-rule inbox verb (same
         // reason — the app can't mutate the root-owned user_rules dir).
@@ -494,8 +536,11 @@ public struct V2DetectionWorkspace: View {
         if let severityRaw {
             obj["level"] = severityRaw
         } else {
-            // Revert to the bundled default. If the rule is also disabled,
-            // keep a disable-only override; otherwise drop the override file.
+            // Revert the level to the bundled rule's and keep the rest of the
+            // override, including a disable. The override file is dropped only
+            // when the rule does not stay disabled, no .yml is beside it, and
+            // the result equals the bundled rule apart from "enabled"
+            // (see V2RuleOverridePlanner.severityRevertedOverride).
             guard let bundled = bundledCompiledRuleData(id: rule.id),
                   let bundledObj = (try? JSONSerialization.jsonObject(with: bundled)) as? [String: Any] else {
                 // User-installed rule: there is no bundled default to revert to.
@@ -506,7 +551,9 @@ public struct V2DetectionWorkspace: View {
                 ))
                 return
             }
-            if !wasDisabled {
+            guard let reverted = V2RuleOverridePlanner.severityRevertedOverride(
+                obj, bundled: bundledObj, hasSourceYAML: userRuleSourceMayExist(id: rule.id),
+                keepsDisabled: wasDisabled) else {
                 let result = UserRuleInstaller.dropInboxRequest(
                     verb: "remove-rule", payload: ["ruleId": rule.id])
                 switch result {
@@ -517,7 +564,7 @@ public struct V2DetectionWorkspace: View {
                 }
                 return
             }
-            obj = bundledObj
+            obj = reverted
         }
         if wasDisabled { obj["enabled"] = false }
         guard let out = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
@@ -1130,7 +1177,7 @@ public struct V2DetectionWorkspace: View {
                                 style: .secondary,
                                 fullWidth: true,
                                 tooltip: isDisabled
-                                    ? "Re-enable this rule (removes the user override)"
+                                    ? "Re-enable this rule. A user override that only disables a bundled rule is removed; any other override is kept, with its YAML, and set to enabled."
                                     : "Disable this rule without editing the bundled YAML. The engine applies the secure override in about five seconds; no password dialog is required."
                             ) {
                                 Task { await toggleRuleDisabled(r) }

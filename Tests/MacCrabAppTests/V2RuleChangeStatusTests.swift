@@ -51,6 +51,30 @@ struct V2RuleChangeStatusTests {
         #expect(removal.savedStateMatches(directory: directory.path) == nil)
     }
 
+    @Test("an enable request is confirmed by the re-installed override's enabled flag")
+    func enabledOverrideConfirmation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("maccrab-rule-change-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let overrides = directory.appendingPathComponent("user_rules")
+        try FileManager.default.createDirectory(at: overrides, withIntermediateDirectories: true)
+        let id = "c35c7b49-0000-4000-a000-000000000001"
+        let file = overrides.appendingPathComponent(id + ".json")
+        try JSONEncoder().encode(CompiledRule(id: id, title: "Fixture", description: "Inert fixture",
+            level: .medium, tags: [], logsource: LogSource(category: "file_event", product: "macos"),
+            predicates: [], condition: .allOf, falsepositives: [], enabled: false, status: "experimental"))
+            .write(to: file)
+        var tracker = V2RuleChangeTracker()
+        tracker.queued(ruleID: id, title: "Fixture", builtin: false, expected: .enabled(true))
+        let request = try #require(tracker.pending.first)
+        #expect(request.savedStateMatches(directory: directory.path) == false)
+        // The JSON Enable queues for a rule with no bundled counterpart, as the
+        // engine writes it.
+        let override = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        let enabled = try #require(V2RuleOverridePlanner.enabledOverride(override, bundled: nil, hasSourceYAML: true))
+        try JSONSerialization.data(withJSONObject: enabled, options: [.prettyPrinted, .sortedKeys]).write(to: file)
+        #expect(request.savedStateMatches(directory: directory.path) == true)
+    }
+
     @Test("unconfirmed requests expire without being reported saved")
     func boundedConfirmation() throws {
         let now = Date()
