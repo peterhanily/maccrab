@@ -165,12 +165,8 @@ extension MacCrabCtl {
             // daemon isn't running (no fresh heartbeat) or on an older daemon
             // build that doesn't publish the keys.
             if daemonRunning, let hb = ruleCoverageFromHeartbeat(supportDir: supportDir), hb.loaded > 0 {
-                if hb.active < hb.loaded {
-                    print("Rules:           \(hb.active) active / \(hb.loaded) loaded standard, \(seqLabel)")
-                    print("                 \(hb.loaded - hb.active) disabled by rule profile — set rule_profile: all to enable")
-                } else {
-                    print("Rules:           \(hb.active) standard, \(seqLabel)")
-                }
+                heartbeatRuleLines(active: hb.active, loaded: hb.loaded, sequenceLabel: seqLabel)
+                    .forEach { print($0) }
             } else {
                 print("Rules:           \(ruleCount) standard, \(seqLabel)")
             }
@@ -338,6 +334,19 @@ extension MacCrabCtl {
             if loadAll || status == "stable" { active += 1 }
         }
         return (active, files.count)
+    }
+
+    /// The Rules lines `status` prints from the heartbeat's single-event
+    /// counts. A loaded rule is disabled by the rule profile, by "enabled":
+    /// false in its rule file (deprecated rules ship that way), or by the
+    /// engine's slow-rule guard, and the heartbeat does not say which.
+    static func heartbeatRuleLines(active: Int, loaded: Int, sequenceLabel: String) -> [String] {
+        guard active < loaded else { return ["Rules:           \(active) standard, \(sequenceLabel)"] }
+        return [
+            "Rules:           \(active) active / \(loaded) loaded standard, \(sequenceLabel)",
+            "                 \(loaded - active) disabled (by the rule profile, by \"enabled\": false"
+                + " in the rule's file, or by the engine's slow-rule guard)",
+        ]
     }
 
     /// v1.21.4 (F3): read the daemon's live single-event rule coverage from the

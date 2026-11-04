@@ -889,6 +889,19 @@ struct MacCrabCtlUnitTests {
         #expect(MacCrabCtl.traceStoreStorageStatusLines(supportDir: dir.path)
             == ["Agent Trace DB:  Receiver disabled"])
     }
+
+    @Test("status names every cause the heartbeat's disabled single-event rule count covers")
+    func disabledRuleCountCauses() {
+        let sequences = "11 active / 41 shipped sequence rule(s) (30 disabled by rule profile)"
+        #expect(MacCrabCtl.heartbeatRuleLines(active: 98, loaded: 438, sequenceLabel: sequences) == [
+            "Rules:           98 active / 438 loaded standard, \(sequences)",
+            "                 340 disabled (by the rule profile, by \"enabled\": false in the rule's file,"
+                + " or by the engine's slow-rule guard)",
+        ])
+        #expect(MacCrabCtl.heartbeatRuleLines(active: 438, loaded: 438, sequenceLabel: sequences) == [
+            "Rules:           438 standard, \(sequences)",
+        ])
+    }
 }
 
 @Suite("maccrab-mcp: unit")
