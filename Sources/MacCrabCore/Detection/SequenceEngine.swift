@@ -1088,7 +1088,7 @@ public actor SequenceEngine {
 
     /// One actor snapshot prevents interleaved evaluations from making the new
     /// reason totals appear inconsistent with a separately sampled journal.
-    public func pendingPressureDiagnostics() -> PendingPressureDiagnostics {
+    func pendingPressureDiagnostics() -> PendingPressureDiagnostics {
         var classified = pendingPerRuleCountShedTotal
         Self.addSaturating(pendingGlobalCountShedTotal, to: &classified)
         Self.addSaturating(pendingSemanticWeightShedTotal, to: &classified)
@@ -1834,7 +1834,7 @@ public actor SequenceEngine {
     /// Producer-owned conservation boundary for out-of-order sequence history.
     /// Mutations are synchronous on this actor, so there is no unclassified
     /// in-flight state between admission and a terminal/queued disposition.
-    public func pendingStepConservation() -> SequenceConservationTelemetry {
+    func pendingStepConservation() -> SequenceConservationTelemetry {
         SequenceConservationTelemetry(
             offered: pendingStepsOfferedTotal,
             completed: pendingStepsCompletedTotal,
@@ -1847,7 +1847,7 @@ public actor SequenceEngine {
     /// Trusted rule IDs are the only labels. Retain cumulative entries after a
     /// reload/removal so the rule responsible for an earlier shed episode does
     /// not disappear from the next diagnostic heartbeat.
-    public func pendingStepConservationByRule() -> [String: SequenceConservationTelemetry] {
+    func pendingStepConservationByRule() -> [String: SequenceConservationTelemetry] {
         let keys = Set(pendingStepsOfferedByRule.keys)
             .union(pendingStepsCompletedByRule.keys)
             .union(pendingStepsExplicitlyShedByRule.keys)
@@ -2002,7 +2002,7 @@ public actor SequenceEngine {
         )
     }
 
-    public func checkpointWeightDiagnostics() -> CheckpointWeightDiagnostics {
+    func checkpointWeightDiagnostics() -> CheckpointWeightDiagnostics {
         CheckpointWeightDiagnostics(
             cachedWeight: checkpointStateWeight,
             // The heartbeat calls this every 30 seconds on the detection
