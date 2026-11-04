@@ -361,6 +361,10 @@ struct KillChainFireTests {
         for event in preFlood { _ = await engine.evaluate(event) }
         let capacity = UInt64(SequenceEngine.maxPendingTotal)
         #expect(await engine.pendingStepConservation().queued == capacity)
+        let foldEligible = Set(await engine.listRules()
+            .filter { SequenceEngine.pendingFoldStepID(for: $0) != nil }.map(\.id))
+        let foldableBuckets = await engine.pendingStepConservationByRule()
+            .filter { foldEligible.contains($0.key) && $0.value.queued > 0 }.count
         let flood = 1_000
         for index in 0..<flood {
             _ = await engine.evaluate(bashWrite("/private/tmp/flood/\(index)", pid: 30_000 + Int32(index),
@@ -384,7 +388,10 @@ struct KillChainFireTests {
         #expect(pressure.journalExplicitlyShedTotal == UInt64(evicted))
         #expect(pressure.lastPressure?.representativeVictimRuleID == npmRat)
         #expect(pressure.foldedStepsTotal == 0, "distinct writers have nothing to fold")
-        let attemptBound = UInt64(flood / 256 + 2)
+        // Before each shed, relief tries every fold-eligible bucket holding
+        // history. Every attempt here removes nothing, so each bucket is tried
+        // at most once per 256 admissions.
+        let attemptBound = UInt64(foldableBuckets * ((flood + 255) / 256))
         #expect(pressure.foldAttemptsTotal <= attemptBound, "low-yield attempts are throttled")
         // 0021 (30 s window) and 9c2d052b (5 s) are checked only for shed
         // history above: their processing-time windows can lapse on a slow host.

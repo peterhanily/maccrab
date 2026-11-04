@@ -58,6 +58,27 @@ struct SequencePendingFairnessTests {
         )
     }
 
+    /// Ordered `.processSame` rule whose later step is a `/writer` write to a
+    /// path ending `/co-admitted`: such a write is also ruleD's `write` step,
+    /// so one event is admitted into both rules. Never fold-eligible.
+    private func sharedWriteRule(id: String) -> SequenceRule {
+        SequenceRule(
+            id: id, title: "shared write fixture", description: "in-memory fixture",
+            level: .low, tags: [], window: 3_600, correlationType: .processSame, ordered: true,
+            steps: [
+                SequenceStep(id: "seed", logsourceCategory: "process_creation",
+                             predicates: [Predicate(field: "Image", modifier: .endswith,
+                                                    values: ["/shared-seed"], negate: false)]),
+                SequenceStep(id: "later", logsourceCategory: "file_event",
+                             predicates: [Predicate(field: "Image", modifier: .endswith,
+                                                    values: ["/writer"], negate: false),
+                                          Predicate(field: "TargetFilename", modifier: .endswith,
+                                                    values: ["/co-admitted"], negate: false)],
+                             afterStep: "seed"),
+            ], trigger: .allSteps
+        )
+    }
+
     /// Ordered, uncorrelated seed and finish execs, for the partial pool.
     private func seedFinishRule(id: String, prefix: String) -> SequenceRule {
         SequenceRule(
@@ -982,6 +1003,99 @@ struct SequencePendingFairnessTests {
         try await assertExact(engine)
     }
 
+    @Test("Duplicates in a bucket that is neither the victim nor the admitting rule fold before any shed")
+    func thirdBucketFoldsBeforeShedding() async throws {
+        let quiet = ruleS(id: "fairness-quiet", seedSuffix: "quiet-seed", laterSuffix: "quiet-later")
+        let burst = ruleD(id: "fairness-burst")
+        let third = ruleS(id: "fairness-third", seedSuffix: "third-seed", laterSuffix: "third-later")
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        let reference = Date()
+        let history = filler(quiet, stepID: "later", count: 5_000, arrivedAt: reference)
+        try await restore(engine, rules: [quiet, burst, third], pending: history, now: reference)
+        // One writer's 3,000 writes leave the table 192 short of its cap.
+        for index in 0..<3_000 {
+            _ = await engine.evaluate(write(pid: 4_001, pidVersion: 2, at: base.addingTimeInterval(Double(index))))
+        }
+        #expect(await engine.pendingPressureDiagnostics().foldAttemptsTotal == 0)
+        for index in 0..<1_000 {
+            _ = await engine.evaluate(proc("/usr/local/bin/third-later", pid: 20_000 + Int32(index),
+                                           at: base.addingTimeInterval(Double(index))))
+        }
+
+        // The third rule's 193rd admission passes the cap. The quiet rule is
+        // the largest bucket and neither it nor the admitting rule can fold,
+        // so the burst's duplicates fold instead of live history being shed.
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldAttemptsTotal == 1 && pressure.foldedStepsTotal == 2_999)
+        let fold = try #require(pressure.lastFold)
+        #expect(fold.ruleID == burst.id && fold.removedPendingSteps == 2_999 && fold.foldedGroups == 1)
+        #expect(pressure.lastPressure == nil)
+        #expect(await engine.pendingStepsEvictedTotal == 0)
+        let byRule = await engine.pendingStepConservationByRule()
+        #expect(byRule[quiet.id]?.queued == 5_000 && byRule[quiet.id]?.explicitlyShed == 0)
+        #expect(byRule[third.id]?.queued == 1_000 && byRule[third.id]?.explicitlyShed == 0)
+        #expect(byRule[burst.id]?.queued == 1 && byRule[burst.id]?.completed == 2_999)
+        try await assertExact(engine)
+    }
+
+    /// What relief left after one co-admitted write.
+    private struct CoAdmissionOutcome: Equatable {
+        let shed: Int
+        let foldAttempts: UInt64
+        let folded: UInt64
+        /// The last fold was the foldable rule's.
+        let foldedFoldableRule: Bool
+        let largeQueued: UInt64?
+        let foldableQueued: UInt64?
+    }
+
+    @Test("A write admitted into two rules folds the same duplicates whichever rule's plan runs first")
+    func coAdmissionFoldsWhicheverPlanRunsFirst() async throws {
+        // One event's rule plans run in the hashed order of the rule index,
+        // which a test cannot set but which differs between rule-ID pairs.
+        // Fresh pairs run until both orders have been seen; alternate pairs
+        // swap which name sorts first, so a sorted plan order yields both too.
+        let capacity = SequenceEngine.maxPendingTotal
+        var outcomes: [Bool: CoAdmissionOutcome] = [:]
+        for pair in 0..<64 where outcomes.count < 2 {
+            let names = ["fairness-co-\(pair)-a", "fairness-co-\(pair)-b"]
+            let large = sharedWriteRule(id: names[pair % 2])
+            let foldable = ruleD(id: names[1 - pair % 2])
+            let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+            let reference = Date()
+            try await restore(engine, rules: [large, foldable],
+                              pending: filler(large, stepID: "later", count: capacity - 3, arrivedAt: reference),
+                              now: reference)
+            // Three writes by one writer fill the table to its cap.
+            for index in 0..<3 {
+                _ = await engine.evaluate(write(pid: 3_001, pidVersion: 5,
+                                                at: base.addingTimeInterval(20_000 + Double(index))))
+            }
+            let shared = write(pid: 3_100, at: base.addingTimeInterval(20_010),
+                               path: "/private/tmp/fairness/co-admitted")
+            _ = await engine.evaluate(shared)
+
+            let capture = try await assertExact(engine)
+            let admitted = capture.pendingEvictionOrder.filter { $0.eventID == shared.id }
+            try #require(admitted.count == 2, "both rules retain the shared write")
+            let pressure = await engine.pendingPressureDiagnostics()
+            let byRule = await engine.pendingStepConservationByRule()
+            outcomes[admitted[0].ruleID == large.id] = CoAdmissionOutcome(
+                shed: await engine.pendingStepsEvictedTotal, foldAttempts: pressure.foldAttemptsTotal,
+                folded: pressure.foldedStepsTotal, foldedFoldableRule: pressure.lastFold?.ruleID == foldable.id,
+                largeQueued: byRule[large.id]?.queued, foldableQueued: byRule[foldable.id]?.queued
+            )
+        }
+
+        #expect(outcomes.count == 2, "both plan orders ran")
+        // The first admission passes the cap and folds the writer's three
+        // entries into one; the second fits.
+        let expected = CoAdmissionOutcome(shed: 0, foldAttempts: 1, folded: 2, foldedFoldableRule: true,
+                                          largeQueued: UInt64(capacity - 2), foldableQueued: 2)
+        #expect(outcomes[true] == expected, "the larger rule's plan ran first")
+        #expect(outcomes[false] == expected, "the foldable rule's plan ran first")
+    }
+
     @Test("Weight pressure folds a writer's repeats before shedding pending history or partials")
     func weightPressureFoldsBeforeShedding() async throws {
         let wide = filePathRule(id: "fairness-wide", imageSuffix: "wide")
@@ -1014,6 +1128,48 @@ struct SequencePendingFairnessTests {
         let capture = try await assertExact(engine)
         #expect(capture.pendingBuckets.flatMap(\.steps).count == 1)
         #expect(capture.partialBuckets.flatMap(\.partials).count == partialCount)
+    }
+
+    @Test("Weight pressure folds a lighter bucket's repeats before shedding the heaviest bucket's history")
+    func weightPressureFoldsAnotherBucketFirst() async throws {
+        let wide = filePathRule(id: "fairness-wide", imageSuffix: "wide")
+        let rule = ruleD()
+        let path = "/private/tmp/" + String(repeating: "p", count: 8_192)
+        let reference = Date()
+        func wideEntry() -> SequenceCheckpointPendingStep {
+            SequenceCheckpointPendingStep(
+                ruleID: wide.id, stepID: "written",
+                matched: SequenceCheckpointMatchedStep(
+                    stepID: "written", eventID: UUID(), timestamp: base, processPID: 41,
+                    processParentPID: 0, processParentWasTracked: false, processAncestorPIDs: [],
+                    filePath: path, networkDestination: nil
+                ), arrivedAt: reference
+            )
+        }
+        let itemWeight = SequenceCheckpointCodec.estimatedWeight(of: wideEntry())
+        let fixedWeight = SequenceCheckpointCodec.semanticStateBaseWeight
+            + SequenceCheckpointCodec.estimatedBucketOverhead(ruleID: wide.id)
+        // The wide rule's history fills the semantic-weight budget but for
+        // about two entries' worth, so its bucket stays the heaviest, and its
+        // file-path correlation means it can never fold.
+        let wideCount = (SequenceCheckpointCodec.maximumSemanticStateWeight - fixedWeight) / itemWeight - 2
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        try await restore(engine, rules: [wide, rule], pending: (0..<wideCount).map { _ in wideEntry() },
+                          now: reference)
+        var writes = 0
+        while await engine.pendingPressureDiagnostics().foldAttemptsTotal == 0, writes < 1_000 {
+            _ = await engine.evaluate(write(pid: 3_001, pidVersion: 5, at: base.addingTimeInterval(Double(writes))))
+            writes += 1
+        }
+
+        let pressure = await engine.pendingPressureDiagnostics()
+        #expect(pressure.foldAttemptsTotal == 1 && pressure.lastFold?.ruleID == rule.id)
+        #expect(pressure.foldedStepsTotal == UInt64(writes - 1), "every write folds into the first")
+        #expect(pressure.semanticWeightShedTotal == 0 && pressure.lastPressure == nil)
+        #expect(await engine.pendingStepsEvictedTotal == 0)
+        let byRule = await engine.pendingStepConservationByRule()
+        #expect(byRule[wide.id]?.queued == UInt64(wideCount) && byRule[wide.id]?.explicitlyShed == 0)
+        try await assertExact(engine)
     }
 
     // MARK: - Saturation cost
