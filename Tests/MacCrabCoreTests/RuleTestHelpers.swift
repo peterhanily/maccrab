@@ -18,6 +18,15 @@ private enum RuleCompilationFixture {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
+        // The folder's name holds a UUID this process made. Before it writes
+        // rules, the compiler copies the folder's contents (compiler.log) into
+        // <folder>.archive. Remove both when the process exits normally. This
+        // is registered before compiling because a failed compile removes the
+        // folder but not the .archive copy.
+        atexit {
+            try? FileManager.default.removeItem(at: compiledRulesDirectory)
+            try? FileManager.default.removeItem(atPath: compiledRulesDirectory.path + ".archive")
+        }
         return try compileRuleFixture(
             projectDirectory: projectDirectory,
             outputDirectory: compiledRulesDirectory

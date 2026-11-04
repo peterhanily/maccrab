@@ -71,11 +71,13 @@ struct MCPProtocolHarnessTests {
     /// location with CFFIXED_USER_HOME. HOME alone does not redirect either
     /// Foundation lookup on macOS. Preparing the fixture stores before launch
     /// keeps the protocol checks independent of installed database contents.
+    /// The folder is removed when the test process exits normally.
     static let hermeticHome: URL = {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-mcp-harness-\(ProcessInfo.processInfo.globallyUniqueString)",
                                     isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        atexit { try? FileManager.default.removeItem(at: MCPProtocolHarnessTests.hermeticHome) }
         return dir
     }()
 
