@@ -3911,8 +3911,9 @@ func reapOrphanUserDomainDBs(logger: os.Logger) {
 }
 
 /// Secure-directory check for the user_rules override overlay, usable from
-/// detached Tasks (the per-setup `isSecureDirectory` closure isn't in their
-/// scope). Rejects symlinks and any group- or world-writable dir; requires
+/// code outside `initialize()`, such as the SIGHUP handler, which cannot
+/// reach the `isSecureDirectory` nested there; the .reload_tick watcher in
+/// `initialize()` calls it too. Rejects symlinks and any group- or world-writable dir; requires
 /// owner uid 0 or the current uid. Mirrors the inline gate in `initialize()`.
 /// A rule-override overlay can DISABLE detection, so it must not be writable
 /// by a non-root admin. A top-level free function lets detached Tasks call it
