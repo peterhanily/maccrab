@@ -222,4 +222,40 @@ struct RuleConditionTreeBoundaryTests {
         #expect(try await largeSequence.loadRules(from: sequenceLargeDir) == 0)
         #expect(await largeSequence.ruleCount == 0)
     }
+
+    @Test("decodeLoadableRule accepts exactly the single-event rules loadRules loads")
+    func sharedDecodeMatchesLoadRules() async throws {
+        let cases: [(tree: [String: Any], loadable: Bool)] = [
+            (["type": "predicate", "index": 0], true),
+            (["type": "not", "operands": [["type": "predicate", "index": 0]]], true),
+            (["type": "predicate", "index": 99], false),
+            (["type": "predicate", "index": -1], false),
+            (["type": "group", "rangeStart": 0, "rangeEnd": 2, "mode": "all_of"], false),
+            (["type": "and", "operands": []], false),
+            (["type": "xor", "operands": []], false),
+        ]
+        let root = try scratch("shared-decode")
+        defer { try? FileManager.default.removeItem(at: root) }
+        for (index, entry) in cases.enumerated() {
+            let directory = root.appendingPathComponent("case-\(index)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            try writeSingleRule(tree: entry.tree, to: directory)
+            let data = try Data(contentsOf: directory.appendingPathComponent("rule.json"))
+            let expectedLoads: Int = entry.loadable ? 1 : 0
+            #expect(((try? RuleEngine.decodeLoadableRule(data)) != nil) == entry.loadable, "case \(index)")
+            #expect(try await RuleEngine().loadRules(from: directory) == expectedLoads, "case \(index)")
+        }
+
+        // The shipped single-event corpus: the API accepts the files loadRules
+        // loads, and no others.
+        let corpus = try ensureRulesCompiled()
+        let files = try FileManager.default.contentsOfDirectory(
+            at: corpus, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
+        let accepted = Set(files.compactMap { try? RuleEngine.decodeLoadableRule(Data(contentsOf: $0)).id })
+        #expect(!accepted.isEmpty)
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: corpus)
+        #expect(Set(await engine.listRules().map(\.id)) == accepted)
+    }
 }

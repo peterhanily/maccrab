@@ -774,6 +774,18 @@ public actor RuleEngine {
         }
     }
 
+    /// The content check `loadRules` applies to each compiled single-event rule
+    /// file before the rule can enter the engine: decode as `CompiledRule`, then
+    /// validate its condition tree. The MCP rule index and `maccrabctl why` use
+    /// it, so an explanation never shows a user rule the engine refuses. File
+    /// selection, the no-follow 4 MiB read, file and directory ownership and the
+    /// status profile stay with the caller.
+    public nonisolated static func decodeLoadableRule(_ data: Data) throws -> CompiledRule {
+        let rule = try JSONDecoder().decode(CompiledRule.self, from: data)
+        try validateConditionTree(in: rule)
+        return rule
+    }
+
     /// Active rule-status profile filter (F-04). When non-nil, only rules whose
     /// Sigma `status` is in this set ship enabled from the BUNDLED base load
     /// (operator overlays via `requireOwnerUID` are explicit intent and are never
@@ -824,7 +836,6 @@ public actor RuleEngine {
             logger.warning("No .json rule files found in \(directory.path)")
         }
 
-        let decoder = JSONDecoder()
         var loaded = 0
         var failed = 0
         var skippedByOwner = 0
@@ -849,8 +860,7 @@ public actor RuleEngine {
             }
             do {
                 let data = try RuleFileLoadingPolicy.read(file)
-                var rule = try decoder.decode(CompiledRule.self, from: data)
-                try Self.validateConditionTree(in: rule)
+                var rule = try Self.decodeLoadableRule(data)
                 // F-04 stable-profile gate: a rule whose Sigma status falls outside
                 // the active profile ships disabled (deprecated is already
                 // enabled=false). nil profile = every non-deprecated rule enabled.

@@ -86,9 +86,9 @@ extension MacCrabCtl {
         // 4. Load the rule JSON. Rule ID is a UUID (a slug for graph rules);
         //    the file name is the slug. In each support dir, the top level of
         //    user_rules comes first: the daemon overlays single-event rules
-        //    from there after the bundled rules, so a user rule replaces the
-        //    bundled one with the same id. compiled_rules follows, with its
-        //    sequences/ and graph/ folders.
+        //    from there after the bundled rules, so a user rule it would load
+        //    replaces the bundled one with the same id. compiled_rules
+        //    follows, with its sequences/ and graph/ folders.
         let searchDirs = whySearchDirs(supportDirs: [
             dataDir,
             "/Library/Application Support/MacCrab",
@@ -101,7 +101,14 @@ extension MacCrabCtl {
                 : "Built-in detectors have no rule file.")
             exit(1)
         }
-        guard let ruleData = try? Data(contentsOf: URL(fileURLWithPath: rulePath)),
+        let ruleDir = (rulePath as NSString).deletingLastPathComponent
+        let isUserRule = ruleDir.hasSuffix("/user_rules")
+        // A user rule is read again the way the daemon reads it: without
+        // following a link, and at most 4 MiB.
+        let ruleData = isUserRule
+            ? BoundedRegularFileReader.read(at: rulePath, maximumBytes: 4 * 1024 * 1024)
+            : (try? Data(contentsOf: URL(fileURLWithPath: rulePath)))
+        guard let ruleData,
               let ruleJSON = try? JSONSerialization.jsonObject(with: ruleData) as? [String: Any] else {
             print("Failed to parse compiled rule at \(rulePath)")
             exit(1)
@@ -115,9 +122,14 @@ extension MacCrabCtl {
         }
         // The daemon skips an override it doesn't trust (DaemonSetup's
         // overlay gate and RuleEngine's per-file owner check).
-        if (rulePath as NSString).deletingLastPathComponent.hasSuffix("/user_rules") {
+        if isUserRule {
             print("Note: this is a user rule. The daemon skips user rules that root does not own")
             print("or whose folder others can write to; the bundled rule with this id then applies.")
+            let claims = loadableUserRuleFiles(forRuleID: alert.ruleId, inUserRules: ruleDir)
+            if claims.count > 1 {
+                print("Note: \(claims.count) user rules have this id. The daemon applies one of them, in an order")
+                print("MacCrab does not define; this is the first by file name.")
+            }
         }
 
         // 6. Next steps.
@@ -130,8 +142,9 @@ extension MacCrabCtl {
 
     /// The folders `why` searches, in order. For each support dir: the top
     /// level of user_rules, where the daemon overlays single-event rules
-    /// after the bundled ones (so a user rule replaces a bundled rule with the
-    /// same id), then compiled_rules and its sequences/ and graph/ folders.
+    /// after the bundled ones (so a user rule it would load replaces a bundled
+    /// rule with the same id), then compiled_rules and its sequences/ and
+    /// graph/ folders.
     static func whySearchDirs(supportDirs: [String]) -> [String] {
         supportDirs.flatMap { dir -> [String] in
             let compiled = dir + "/compiled_rules"
@@ -139,13 +152,24 @@ extension MacCrabCtl {
         }
     }
 
-    /// The path of the first rule file, in `directories` order, whose "id"
-    /// is `ruleID`. Only the top level of each folder is read.
+    /// The path of the first rule file, in `directories` order and then by file
+    /// name, whose "id" is `ruleID`. Only the top level of each folder is read.
+    /// A user_rules file counts only if the daemon would load it, and not for a
+    /// sequence or graph rule's id: the daemon overlays user rules on
+    /// single-event rules, and the MCP index resolves those ids the same way.
     static func findRuleFile(forRuleID ruleID: String, in directories: [String]) -> String? {
         let fm = FileManager.default
         for dir in directories {
+            if dir.hasSuffix("/user_rules") {
+                let compiled = (dir as NSString).deletingLastPathComponent + "/compiled_rules"
+                guard let path = loadableUserRuleFiles(forRuleID: ruleID, inUserRules: dir).first,
+                      findRuleFile(forRuleID: ruleID, in: [compiled]) != nil
+                        || findRuleFile(forRuleID: ruleID, in: [compiled + "/sequences", compiled + "/graph"]) == nil
+                else { continue }
+                return path
+            }
             guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
-            for file in files where file.hasSuffix(".json") {
+            for file in files.sorted() where file.hasSuffix(".json") {
                 let path = dir + "/" + file
                 guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -154,6 +178,24 @@ extension MacCrabCtl {
             }
         }
         return nil
+    }
+
+    /// The files in a user_rules folder that the daemon would load for
+    /// `ruleID`, by file name: top-level `.json`, not hidden, not the
+    /// manifest, read without following a link and at most 4 MiB, and
+    /// accepted by RuleEngine.decodeLoadableRule. File and folder ownership
+    /// are not checked; `why` prints a note about them instead. With more
+    /// than one, the daemon applies one of them, in an order MacCrab does not
+    /// define.
+    static func loadableUserRuleFiles(forRuleID ruleID: String, inUserRules dir: String) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).sorted()
+            .filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") && $0 != "manifest.json" }
+            .map { dir + "/" + $0 }
+            .filter { path in
+                guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024),
+                      let rule = try? RuleEngine.decodeLoadableRule(data) else { return false }
+                return rule.id == ruleID
+            }
     }
 
     /// The compiled-rule part of `why`, one string per printed line: the

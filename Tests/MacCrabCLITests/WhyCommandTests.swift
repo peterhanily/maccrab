@@ -54,6 +54,54 @@ struct WhyCommandTests {
         #expect(lookup("e1f2a3b4-0023-4000-b000-000000000023") == sequence)
     }
 
+    @Test("user rules the daemon would not load are skipped; a user rule never stands in for a sequence or graph rule")
+    func userRulesFollowTheDaemonsLoadCheck() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-why-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let rules = dir.appendingPathComponent("compiled_rules")
+        let users = dir.appendingPathComponent("user_rules")
+        func write(_ json: String, _ folder: URL, _ name: String) throws -> String {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let path = folder.appendingPathComponent(name).path
+            try json.write(toFile: path, atomically: true, encoding: .utf8)
+            return path
+        }
+        func variant(_ change: (inout [String: Any]) -> Void) throws -> String {
+            var object = try #require(JSONSerialization.jsonObject(with: Data(Self.flatRule.utf8)) as? [String: Any])
+            change(&object)
+            return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        }
+        let single = try write(Self.flatRule, rules, "ssh_key_access.json")
+        let sequence = try write(Self.sequenceRule, rules.appendingPathComponent("sequences"), "supply_chain_full_kill_chain.json")
+        let graph = try write(Self.graphRule, rules.appendingPathComponent("graph"), "maccrab_agent_associated_shell_writes_to_login_item.json")
+        let dirs = MacCrabCtl.whySearchDirs(supportDirs: [dir.path])
+        func lookup(_ id: String) -> String? { MacCrabCtl.findRuleFile(forRuleID: id, in: dirs) }
+        let singleID = "d1a2b3c4-0032-4000-a000-000000000032"
+
+        // Same id, but the tree names predicate 99 of 4: the daemon refuses it.
+        _ = try write(try variant { $0["condition_tree"] = ["type": "predicate", "index": 99] }, users, "ssh_key_access.json")
+        // A hidden copy and a symlinked copy of a valid override are not loaded either.
+        _ = try write(Self.flatRule, users, ".hidden.json")
+        let outside = try write(Self.flatRule, dir, "outside.json")
+        try FileManager.default.createSymbolicLink(atPath: users.appendingPathComponent("linked.json").path,
+                                                   withDestinationPath: outside)
+        #expect(lookup(singleID) == single)
+        #expect(MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path).isEmpty)
+
+        // A loadable user rule with a sequence or graph rule's id does not replace it.
+        _ = try write(try variant { $0["id"] = "e1f2a3b4-0023-4000-b000-000000000023" }, users, "seq.json")
+        _ = try write(try variant { $0["id"] = "maccrab_agent_associated_shell_writes_to_login_item" }, users, "graph.json")
+        #expect(lookup("e1f2a3b4-0023-4000-b000-000000000023") == sequence)
+        #expect(lookup("maccrab_agent_associated_shell_writes_to_login_item") == graph)
+
+        // Two loadable overrides: the first by name is shown, and both are listed.
+        let first = try write(Self.flatRule, users, "a-override.json")
+        let second = try write(Self.flatRule, users, "b-override.json")
+        #expect(lookup(singleID) == first)
+        #expect(MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path) == [first, second])
+    }
+
     @Test("a sequence rule shows its window, correlation, ordering, trigger and every step")
     func sequenceRendering() throws {
         let (lines, _) = try Self.render(

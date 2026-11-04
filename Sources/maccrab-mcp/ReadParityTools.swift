@@ -88,6 +88,9 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
             return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
         }
         lines.append("Rule definition:")
+        if CompiledRuleFileIndex.shared.hasDuplicateUserRules(id: alert.ruleId, in: compiledDir) {
+            lines.append("  note: several user rules have this id. The engine applies one of them, in an order MacCrab does not define; this is the first by file name.")
+        }
         if let desc = ruleJSON["description"] as? String { lines.append("  description: \(desc)") }
         if let status = ruleJSON["status"] as? String { lines.append("  status: \(status)") }
         if let ls = ruleJSON["logsource"] { lines.append("  logsource: \(ls)") }
@@ -301,6 +304,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     private var directory: String?
     private var stamp: Stamp?
     private var paths: [String: String] = [:]
+    private var duplicateUserRuleIDs: Set<String> = []
 
     func rule(id: String, in compiledDir: String) -> [String: Any]? {
         rule(id: id, in: compiledDir, engineUID: Self.engineUID(forCompiledDir: compiledDir))
@@ -337,6 +341,12 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return cachedPath(id: id, in: compiledDir).flatMap(resolve)
     }
 
+    /// Whether more than one loadable user rule claims `id` in the current index.
+    func hasDuplicateUserRules(id: String, in compiledDir: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return directory == compiledDir && duplicateUserRuleIDs.contains(id)
+    }
+
     private func cachedPath(id: String, in compiledDir: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         guard directory == compiledDir else { return nil }
@@ -357,16 +367,21 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
                 }
             }
         }
-        // The engine overlays user rules on its single-event rules, and only
-        // the files it decodes: one replaces a single-event id or adds a new
-        // one, never a sequence or graph id, which other engines run from
-        // their own files.
+        // The engine overlays the user rules it would load on its single-event
+        // rules: one replaces a single-event id or adds a new one. A user file
+        // with a sequence or graph id does not replace that rule. The
+        // single-event engine loads it next to that rule, and the index keeps
+        // showing the sequence or graph definition.
         let userDir = Self.userRulesDirectory(compiledDir)
+        var duplicated: Set<String> = []
         if Self.userRulesTrusted(userDir, engineUID: engineUID) {
             let otherEngines = [compiledDir + "/sequences/", compiledDir + "/graph/"]
             var overridden: Set<String> = []
             for path in Self.ruleFiles(in: userDir) where Self.userRuleTrusted(path, engineUID: engineUID) {
-                guard let id = Self.loadUserRule(path)?["id"] as? String, !overridden.contains(id) else { continue }
+                guard let id = Self.loadUserRule(path)?["id"] as? String else { continue }
+                // The engine loads each of these and keeps the last it enumerates,
+                // an order it does not define: show the first by name, note the rest.
+                if overridden.contains(id) { duplicated.insert(id); continue }
                 if let bundled = next[id], otherEngines.contains(where: { bundled.hasPrefix($0) }) { continue }
                 next[id] = path
                 overridden.insert(id)
@@ -376,6 +391,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         directory = compiledDir
         stamp = current
         paths = next
+        duplicateUserRuleIDs = duplicated
         lock.unlock()
     }
 
@@ -408,12 +424,11 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
-    /// A user rule only if it decodes as a compiled rule, as the engine
-    /// requires before applying it. The engine's condition-tree validation
-    /// is internal to MacCrabCore and is not repeated here.
+    /// A user rule only if the engine would load it: RuleEngine.decodeLoadableRule,
+    /// the decode and condition-tree validation loadRules applies.
     private static func loadUserRule(_ path: String) -> [String: Any]? {
         guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024),
-              (try? JSONDecoder().decode(CompiledRule.self, from: data)) != nil else { return nil }
+              (try? RuleEngine.decodeLoadableRule(data)) != nil else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 }

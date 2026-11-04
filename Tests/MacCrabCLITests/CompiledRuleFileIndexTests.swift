@@ -1,4 +1,5 @@
 import Foundation
+import MacCrabCore
 import Testing
 @testable import maccrab_mcp
 
@@ -170,6 +171,45 @@ struct CompiledRuleFileIndexTests {
         let index = CompiledRuleFileIndex()
         #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "bundled")
         #expect(index.rule(id: "user.refused", in: compiled) == nil)
+    }
+
+    @Test("a user override whose condition tree the engine rejects leaves the bundled rule in place")
+    func structurallyInvalidOverrideIsIgnored() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        // One predicate and a tree that names predicate 99: it decodes, but
+        // RuleEngine.loadRules refuses it and keeps the bundled rule.
+        var override = try #require(JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: compiled + "/x.json"))) as? [String: Any])
+        override["title"] = "invalid override"
+        override["condition_tree"] = ["type": "predicate", "index": 99]
+        let invalid = try JSONSerialization.data(withJSONObject: override)
+        try invalid.write(to: URL(fileURLWithPath: user + "/x.json"))
+        #expect(throws: RuleEngineError.self) { _ = try RuleEngine.decodeLoadableRule(invalid) }
+        #expect(CompiledRuleFileIndex().rule(id: "rule.x", in: compiled)?["title"] as? String == "bundled")
+        // The same override with an in-range reference is the one the engine applies.
+        override["title"] = "valid override"
+        override["condition_tree"] = ["type": "predicate", "index": 0]
+        try JSONSerialization.data(withJSONObject: override).write(to: URL(fileURLWithPath: user + "/x.json"))
+        #expect(CompiledRuleFileIndex().rule(id: "rule.x", in: compiled)?["title"] as? String == "valid override")
+    }
+
+    @Test("duplicate user rules for one id show the first by name and are reported")
+    func duplicateUserRulesAreReported() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write("rule.dup", to: compiled + "/a.json", title: "bundled")
+        try write("rule.dup", to: user + "/b.json", title: "first")
+        try write("rule.dup", to: user + "/c.json", title: "second")
+        try write("rule.single", to: user + "/d.json", title: "single")
+        let index = CompiledRuleFileIndex()
+        #expect(index.rule(id: "rule.dup", in: compiled)?["title"] as? String == "first")
+        #expect(index.hasDuplicateUserRules(id: "rule.dup", in: compiled))
+        #expect(!index.hasDuplicateUserRules(id: "rule.single", in: compiled))
+        try FileManager.default.removeItem(atPath: user + "/c.json")
+        #expect(index.rule(id: "rule.dup", in: compiled)?["title"] as? String == "first")
+        #expect(!index.hasDuplicateUserRules(id: "rule.dup", in: compiled))
     }
 
     @Test("an id resolves single-event, then sequence, then graph; user rules override single-event ids only")
