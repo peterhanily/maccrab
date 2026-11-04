@@ -231,9 +231,20 @@ struct RuleEngineReloadTests {
         try JSONSerialization.data(withJSONObject: obj).write(to: url, options: .atomic)
     }
 
+    /// Writes into `folder` an override of the iodine rule: its compiled file
+    /// with `changes` applied, as the dashboard's disable and severity
+    /// overrides are.
+    private func writeIodineOverride(_ changes: [String: Any], into folder: URL) throws {
+        var obj = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: compiledRulesDirectory.appendingPathComponent(iodineRuleFile))) as! [String: Any]
+        obj.merge(changes) { $1 }
+        try JSONSerialization.data(withJSONObject: obj)
+            .write(to: folder.appendingPathComponent("\(iodineRuleID).json"))
+    }
+
     // The dashboard's Disable installs user_rules/<id>.json with enabled:false.
     // Its Enable, MCP delete_rule and `maccrabctl rule delete` delete that file,
-    // and the daemon then reloads compiled_rules and loads the overlay again.
+    // and the daemon then reloads compiled_rules and the overlay in one call.
     // The reload used to carry disabled flags across, so with the override gone
     // the bundled rule stayed disabled until the engine restarted.
     @Test("deleting a disable override re-enables the bundled rule on the next reload")
@@ -260,10 +271,9 @@ struct RuleEngineReloadTests {
         #expect(await engine.enabledRuleCount == enabledAtBoot - 1)
         #expect(!(await engine.evaluate(iodineExec()).contains { $0.ruleId == iodineRuleID }))
 
-        // Enable deletes the override; then the reload order.
+        // Enable deletes the override; then the daemon's reload.
         try FileManager.default.removeItem(at: override)
-        _ = try await engine.reloadRules(from: base)
-        _ = try await engine.loadRules(from: overlay, requireOwnerUID: geteuid())
+        _ = try await engine.reloadRules(from: base, overlay: overlay, requireOwnerUID: geteuid())
 
         #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == true,
                 "with its override deleted, the bundled rule must load enabled again")
@@ -297,5 +307,102 @@ struct RuleEngineReloadTests {
         #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == true,
                 "a file set back to enabled:true must load enabled")
         #expect(await engine.evaluate(iodineExec()).contains { $0.ruleId == iodineRuleID })
+    }
+
+    // The .reload_tick watcher and SIGHUP reload compiled_rules and the
+    // user_rules overlay in one call. As two calls, an evaluation queued during
+    // the reload could run before the overlay load, against the bundled copy
+    // of each rule an override replaces: a disabled rule could fire, and a
+    // rule could fire with its bundled severity.
+    @Test("a reload with the overlay applies a disable override before it returns")
+    func reloadWithOverlayKeepsDisableOverride() async throws {
+        try ensureRulesCompiled()
+        let base = compiledRulesDirectory
+        let overlay = FileManager.default.temporaryDirectory
+            .appendingPathComponent("overlay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: overlay, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: overlay) }
+        try writeIodineOverride(["enabled": false], into: overlay)
+
+        // Boot order: the base under the stable profile, then the overlay.
+        let engine = RuleEngine()
+        let baseAtBoot = try await engine.loadRules(from: base, enabledStatuses: ["stable"])
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == true)
+        _ = try await engine.loadRules(from: overlay, requireOwnerUID: geteuid())
+        let enabledAtBoot = await engine.enabledRuleCount
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == false)
+
+        let reloaded = try await engine.reloadRules(from: base, overlay: overlay, requireOwnerUID: geteuid())
+        #expect(reloaded.base == baseAtBoot)
+        #expect(reloaded.overlay == 1)
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.enabled == false,
+                "the override's disable must hold when the reload returns")
+        #expect(await engine.enabledRuleCount == enabledAtBoot)
+        #expect(!(await engine.evaluate(iodineExec()).contains { $0.ruleId == iodineRuleID }))
+    }
+
+    @Test("a reload with the overlay applies a severity override before it returns")
+    func reloadWithOverlayKeepsSeverityOverride() async throws {
+        try ensureRulesCompiled()
+        let base = compiledRulesDirectory
+        let overlay = FileManager.default.temporaryDirectory
+            .appendingPathComponent("overlay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: overlay, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: overlay) }
+        try writeIodineOverride(["level": Severity.low.rawValue], into: overlay)
+
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: base, enabledStatuses: ["stable"])
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.level != .low)
+        _ = try await engine.loadRules(from: overlay, requireOwnerUID: geteuid())
+
+        _ = try await engine.reloadRules(from: base, overlay: overlay, requireOwnerUID: geteuid())
+        #expect(await engine.listRules().first { $0.id == iodineRuleID }?.level == .low,
+                "the override's severity must hold when the reload returns")
+        let match = await engine.evaluate(iodineExec()).first { $0.ruleId == iodineRuleID }
+        #expect(match?.severity == .low)
+    }
+
+    // A setEnabled disable that a reload keeps is applied after the overlay,
+    // so it holds when an override replaces the rule.
+    @Test("a reload with the overlay keeps a setEnabled disable of a rule the overlay replaces")
+    func reloadWithOverlayKeepsSetEnabledDisable() async throws {
+        try ensureRulesCompiled()
+        let base = compiledRulesDirectory
+        let overlay = FileManager.default.temporaryDirectory
+            .appendingPathComponent("overlay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: overlay, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: overlay) }
+        try writeIodineOverride(["level": Severity.low.rawValue], into: overlay)
+
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: base, enabledStatuses: ["stable"])
+        _ = try await engine.loadRules(from: overlay, requireOwnerUID: geteuid())
+        await engine.setEnabled(iodineRuleID, enabled: false)
+
+        _ = try await engine.reloadRules(from: base, overlay: overlay, requireOwnerUID: geteuid())
+        let rule = try #require(await engine.listRules().first { $0.id == iodineRuleID })
+        #expect(rule.level == .low, "the loaded rule is the override")
+        #expect(!rule.enabled, "the setEnabled disable must hold for the override")
+        #expect(!(await engine.evaluate(iodineExec()).contains { $0.ruleId == iodineRuleID }))
+    }
+
+    @Test("an overlay that fails to load neither fails nor rolls back the reload")
+    func reloadWithFailedOverlayStands() async throws {
+        let big = try makeRulesDir(count: 20)
+        let slightly = try makeRulesDir(count: 18)
+        defer {
+            try? FileManager.default.removeItem(at: big)
+            try? FileManager.default.removeItem(at: slightly)
+        }
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-\(UUID().uuidString)")
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: big)
+
+        let reloaded = try await engine.reloadRules(from: slightly, overlay: missing, requireOwnerUID: geteuid())
+        #expect(reloaded.base == 18)
+        #expect(reloaded.overlay == nil)
+        #expect(await engine.ruleCount == 18)
     }
 }

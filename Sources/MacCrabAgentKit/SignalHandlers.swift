@@ -40,16 +40,22 @@ enum SignalHandlers {
                 do {
                     try Task.checkCancellation()
                     print("[SIGHUP] Reloading rules from: \(state.rulesURL.path)")
-                    let singleCount = try await state.ruleEngine.reloadRules(from: state.rulesURL)
-                    print("[SIGHUP] Single-event rules: \(singleCount)")
                     // v1.19.1 (rc.9 review): re-apply the user_rules override overlay
-                    // after the base reload. reloadRules() FULLY REPLACES the ruleset,
+                    // with the base reload. reloadRules() FULLY REPLACES the ruleset,
                     // so without this a `pkill -HUP` (the documented reload path) would
                     // DROP operator overrides until the next file-watch tick / restart.
+                    // The engine loads the overlay in the same call as the base, so no
+                    // event is evaluated between the two.
                     // Same per-file daemon-owner gate as the startup + watcher load.
                     let overlayDir = state.supportDir + "/user_rules"
-                    if FileManager.default.fileExists(atPath: overlayDir), isOverlayDirSecure(overlayDir),
-                       let overlaid = try? await state.ruleEngine.loadRules(from: URL(fileURLWithPath: overlayDir), requireOwnerUID: geteuid()), overlaid > 0 {
+                    var overlay: URL?
+                    if FileManager.default.fileExists(atPath: overlayDir), isOverlayDirSecure(overlayDir) {
+                        overlay = URL(fileURLWithPath: overlayDir)
+                    }
+                    let reloaded = try await state.ruleEngine.reloadRules(from: state.rulesURL, overlay: overlay, requireOwnerUID: geteuid())
+                    let singleCount = reloaded.base
+                    print("[SIGHUP] Single-event rules: \(singleCount)")
+                    if let overlaid = reloaded.overlay, overlaid > 0 {
                         print("[SIGHUP] Re-applied \(overlaid) user rule override(s)")
                     }
                     // The out-of-band rule channel is release-disabled. Preserve

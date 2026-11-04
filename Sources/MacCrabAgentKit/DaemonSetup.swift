@@ -2949,23 +2949,24 @@ enum DaemonSetup {
                 lastSeen = mtime
                 logger.notice("user_rules .reload_tick fired — reloading rules")
                 do {
-                    let baseCount = try await ruleEngine.reloadRules(from: liveCompiledRulesURL)
-                    var total = baseCount
                     // v1.17.2 security: same gate as the initial load — only
                     // overlay overrides from a non-symlinked, root/owner-owned,
                     // non-group/world-writable dir. Inlined because the
                     // isSecureDirectory closure isn't in this detached Task's
                     // scope. An override that can be written by a non-root admin
                     // could silently disable detection.
+                    var overlay: URL?
                     if FileManager.default.fileExists(atPath: userOverridesDirForWatcher),
                        isOverlayDirSecure(userOverridesDirForWatcher) {
-                        // v1.19.1 (audit): per-file ownership gate on the live-reload
-                        // path too — only daemon-owned override files may shadow a
-                        // bundled rule.
-                        if let overlayed = try? await ruleEngine.loadRules(from: URL(fileURLWithPath: userOverridesDirForWatcher), requireOwnerUID: geteuid()) {
-                            total += overlayed
-                        }
+                        overlay = URL(fileURLWithPath: userOverridesDirForWatcher)
                     }
+                    // The engine loads the overlay in the same call as the
+                    // compiled rules, so no event is evaluated between the two.
+                    // v1.19.1 (audit): per-file ownership gate on the live-reload
+                    // path too — only daemon-owned override files may shadow a
+                    // bundled rule.
+                    let reloaded = try await ruleEngine.reloadRules(from: liveCompiledRulesURL, overlay: overlay, requireOwnerUID: geteuid())
+                    let total = reloaded.base + (reloaded.overlay ?? 0)
                     // The release-disabled out-of-band channel leaves any pushed
                     // corpus on disk but never re-applies it after this base reload.
                     await responseEngine.setDetectionOnlyRuleIDs([])

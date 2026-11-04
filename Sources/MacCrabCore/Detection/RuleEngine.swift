@@ -660,10 +660,10 @@ public actor RuleEngine {
     /// pathological / ReDoS patterns). Exposed for health/visibility.
     public private(set) var autoDisabledRules: Set<String> = []
     /// Rules disabled through `setEnabled`, including the guard's disables.
-    /// A `reloadRules` that succeeds disables them again, except the ones in
-    /// `autoDisabledRules`, and drops the ids it no longer holds. It carries
-    /// no other disabled state over: its load re-applies each file's own
-    /// `enabled` and the stored status profile.
+    /// A `reloadRules` that succeeds disables them again after its loads,
+    /// except the ones in `autoDisabledRules`, and drops the ids it no longer
+    /// holds. It carries no other disabled state over: its loads re-apply
+    /// each file's own `enabled`, and the base load the stored status profile.
     private var runtimeDisabledRuleIDs: Set<String> = []
 
     /// v1.18: a RELOAD that cleanly decodes but yields fewer than this fraction
@@ -1003,6 +1003,23 @@ public actor RuleEngine {
     /// Returns the number of rules loaded after the reload.
     @discardableResult
     public func reloadRules(from directory: URL) throws -> Int {
+        try reloadRules(from: directory, overlay: nil, requireOwnerUID: nil).base
+    }
+
+    /// Reloads `directory` as `reloadRules(from:)` does and, when `overlay` is
+    /// given, loads it with `loadRules(from:requireOwnerUID:)` in the same
+    /// call. The call does not suspend, so no evaluation runs between the two
+    /// loads. The overlay loads only after the reload's guards pass, and an
+    /// overlay that fails to load neither throws nor rolls the reload back.
+    /// The `setEnabled` disables the reload keeps (see
+    /// `runtimeDisabledRuleIDs`) are applied after the overlay, so they hold
+    /// for a rule the overlay replaces.
+    ///
+    /// Returns the number of rules loaded from `directory`, and the number
+    /// loaded from `overlay`, which is nil when no overlay is given or its
+    /// load throws.
+    @discardableResult
+    public func reloadRules(from directory: URL, overlay: URL?, requireOwnerUID: uid_t?) throws -> (base: Int, overlay: Int?) {
         // Snapshot current state so we can roll back if the load fails.
         let snapshotIndex  = ruleIndex
         let snapshotRules  = allRules
@@ -1096,9 +1113,19 @@ public actor RuleEngine {
         ruleBudgetBreaches.removeAll()
         autoDisabledRules.removeAll()
 
+        // The overlay loads after the guards above, so a file in it that
+        // fails to decode does not roll the reload back, and before the loop
+        // below, so that when it replaces a rule the loop disables, the loop
+        // disables the overlay's copy. If its load throws, the error is
+        // dropped and the reload stands.
+        var overlayCount: Int?
+        if let overlay {
+            overlayCount = try? loadRules(from: overlay, requireOwnerUID: requireOwnerUID)
+        }
+
         // Disable again the rules disabled through `setEnabled`, except those
         // in `previouslyAutoDisabled`, which are being given a clean slate,
-        // and drop the ids this load no longer holds. Disabled state that
+        // and drop the ids that are no longer loaded. Disabled state that
         // came from rule content is not carried over, so a deleted user_rules
         // override or a file set back to enabled:true no longer keeps a rule
         // disabled.
@@ -1117,7 +1144,7 @@ public actor RuleEngine {
         }
 
         logger.info("Reloaded rules: \(count) total")
-        return count
+        return (base: count, overlay: overlayCount)
     }
 
     // MARK: Evaluation
