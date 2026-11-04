@@ -15,41 +15,51 @@ enum V2RuleOverridePlanner {
 
     /// The override Enable installs, or nil when Enable removes the file.
     /// The remove-rule handler deletes user_rules/<id>.yml with the JSON, so
-    /// Enable removes the override only when it is a pure disable copy of a
-    /// bundled rule: a bundled rule with the id exists, no <id>.yml exists,
-    /// and the two are equal apart from "enabled". Any other override (a rule
-    /// the user made, an Edit YAML or a severity change) is returned with
-    /// "enabled": true and every other field as it was.
+    /// an override with a .yml beside it, or one whose id no bundled rule has
+    /// (a rule the user made), is returned with "enabled": true and every
+    /// other field as it was.
+    ///
+    /// Any other override is a JSON-only override of a bundled rule. Its
+    /// writers (the Detection workspace's Disable, Enable and severity
+    /// writes, and `maccrabctl rule severity`) copy the bundled rule or the
+    /// existing override and change only "enabled" and "level", and the copy
+    /// may be of an earlier version of the bundled rule. So Enable keeps only
+    /// the override's level: when its "level" is a string other than the
+    /// bundled rule's, the current bundled rule is returned with that level
+    /// and "enabled": true, and otherwise nil.
     static func enabledOverride(_ override: [String: Any], bundled: [String: Any]?,
                                 hasSourceYAML: Bool) -> [String: Any]? {
-        if let bundled, !hasSourceYAML, equalApartFromEnabled(override, bundled) { return nil }
-        var enabled = override
-        enabled["enabled"] = true
-        return enabled
+        guard let bundled, !hasSourceYAML else {
+            var enabled = override
+            enabled["enabled"] = true
+            return enabled
+        }
+        guard let level = override["level"] as? String, level != (bundled["level"] as? String) else { return nil }
+        var current = bundled
+        current["level"] = level
+        current["enabled"] = true
+        return current
     }
 
     /// The override a severity revert installs, or nil when the revert
-    /// removes the file. The revert sets "level" back to the bundled rule's
-    /// and keeps every other field, with "enabled": false while the rule stays
-    /// disabled. It removes the file only when the rule does not stay
-    /// disabled, no <id>.yml exists, and the result equals the bundled rule
-    /// apart from "enabled".
+    /// removes the file. With a .yml beside the override, the revert sets
+    /// "level" back to the bundled rule's and keeps every other field, with
+    /// "enabled": false while the rule stays disabled. Without one, only the
+    /// override's "enabled" and "level" can be the user's (see
+    /// enabledOverride), so the revert removes the file, or returns the
+    /// current bundled rule with "enabled": false while the rule stays
+    /// disabled.
     static func severityRevertedOverride(_ rule: [String: Any], bundled: [String: Any],
                                          hasSourceYAML: Bool, keepsDisabled: Bool) -> [String: Any]? {
+        guard hasSourceYAML else {
+            guard keepsDisabled else { return nil }
+            var current = bundled
+            current["enabled"] = false
+            return current
+        }
         var reverted = rule
         reverted["level"] = bundled["level"]
-        if !keepsDisabled, !hasSourceYAML, equalApartFromEnabled(reverted, bundled) { return nil }
         if keepsDisabled { reverted["enabled"] = false }
         return reverted
-    }
-
-    /// Compares the parsed JSON objects, so key order and formatting do not
-    /// count: Disable writes its copy with sorted keys and pretty-printed,
-    /// unlike the compiler's output.
-    private static func equalApartFromEnabled(_ lhs: [String: Any], _ rhs: [String: Any]) -> Bool {
-        var lhs = lhs, rhs = rhs
-        lhs.removeValue(forKey: "enabled")
-        rhs.removeValue(forKey: "enabled")
-        return NSDictionary(dictionary: lhs).isEqual(to: rhs)
     }
 }

@@ -449,11 +449,12 @@ public struct V2DetectionWorkspace: View {
         return lstat(userRulesDir + "/\(id).yml", &st) == 0 || errno != ENOENT
     }
 
-    /// Enable undoes Disable without deleting what the user wrote: it removes
-    /// the override only when the override is a pure disable copy of a bundled
-    /// rule, and otherwise re-installs its JSON with "enabled": true. The
-    /// request carries no YAML, so the engine leaves user_rules/<id>.yml as it
-    /// is (see V2RuleOverridePlanner.enabledOverride).
+    /// Enable undoes Disable without deleting what the user wrote. A JSON-only
+    /// override of a bundled rule is removed, unless its "level" differs from
+    /// the bundled rule's: then the current bundled rule is installed with
+    /// that level and "enabled": true. Any other override is re-installed
+    /// with "enabled": true. The request carries no YAML, so the engine leaves
+    /// user_rules/<id>.yml as it is (see V2RuleOverridePlanner.enabledOverride).
     private func enableUserOverride(rule: V2MockRule) async {
         guard let data = existingUserOverrideData(id: rule.id),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -536,10 +537,10 @@ public struct V2DetectionWorkspace: View {
         if let severityRaw {
             obj["level"] = severityRaw
         } else {
-            // Revert the level to the bundled rule's and keep the rest of the
-            // override, including a disable. The override file is dropped only
-            // when the rule does not stay disabled, no .yml is beside it, and
-            // the result equals the bundled rule apart from "enabled"
+            // Revert the level to the bundled rule's, keeping a disable. An
+            // override with a .yml beside it keeps its other fields. One
+            // without is removed, or replaced by the current bundled rule with
+            // "enabled": false while the rule stays disabled
             // (see V2RuleOverridePlanner.severityRevertedOverride).
             guard let bundled = bundledCompiledRuleData(id: rule.id),
                   let bundledObj = (try? JSONSerialization.jsonObject(with: bundled)) as? [String: Any] else {
@@ -1177,7 +1178,7 @@ public struct V2DetectionWorkspace: View {
                                 style: .secondary,
                                 fullWidth: true,
                                 tooltip: isDisabled
-                                    ? "Re-enable this rule. A user override that only disables a bundled rule is removed; any other override is kept, with its YAML, and set to enabled."
+                                    ? "Re-enable this rule. A bundled rule's user override without YAML is removed; if its severity differs from the bundled rule's, the current bundled rule is installed at that severity instead. Any other override is kept, with its YAML, and set to enabled."
                                     : "Disable this rule without editing the bundled YAML. The engine applies the secure override in about five seconds; no password dialog is required."
                             ) {
                                 Task { await toggleRuleDisabled(r) }

@@ -76,6 +76,18 @@ struct V2RuleOverridePlannerTests {
         try object(try ruleData(id: "d1a2b3c4-0449-4000-a000-000000000449", level: .high, status: "stable"))
     }
 
+    /// The same bundled rule as an earlier release compiled it: before
+    /// compiled rules carried "status", and with a predicate the current
+    /// rule no longer has.
+    private func earlierBundledRule() throws -> [String: Any] {
+        var earlier = try bundledRule()
+        earlier.removeValue(forKey: "status")
+        let predicate: [String: Any] = ["field": "file.path", "modifier": "contains",
+                                        "values": ["/earlier-release/"], "negate": false]
+        earlier["predicates"] = [predicate]
+        return earlier
+    }
+
     private func with(_ rule: [String: Any], _ key: String, _ value: Any) -> [String: Any] {
         var copy = rule
         copy[key] = value
@@ -94,16 +106,30 @@ struct V2RuleOverridePlannerTests {
                       with(custom, "enabled", true)))
     }
 
-    @Test("Enable removes a pure disable copy of a bundled rule, and only that")
+    @Test("Enable removes a disable copy of a bundled rule, also one that differs in a field other than its level")
     func enableRemovesPureDisableCopy() throws {
         let bundled = try bundledRule()
         let copy = with(bundled, "enabled", false)
         #expect(V2RuleOverridePlanner.enabledOverride(copy, bundled: bundled, hasSourceYAML: false) == nil)
-        // A copy that differs in any other field, such as one taken from an
-        // earlier version of the bundled rule, is kept.
+        // A copy that differs in another field, such as one taken from an
+        // earlier version of the bundled rule, is removed too.
         let earlier = with(copy, "description", "Earlier bundled description")
-        #expect(equal(V2RuleOverridePlanner.enabledOverride(earlier, bundled: bundled, hasSourceYAML: false),
-                      with(earlier, "enabled", true)))
+        #expect(V2RuleOverridePlanner.enabledOverride(earlier, bundled: bundled, hasSourceYAML: false) == nil)
+    }
+
+    @Test("Enable removes a disable copy taken from an earlier version of the bundled rule")
+    func enableRemovesStaleDisableCopy() throws {
+        // The current bundled rule has a key the copy lacks and other predicates.
+        let copy = with(try earlierBundledRule(), "enabled", false)
+        #expect(V2RuleOverridePlanner.enabledOverride(copy, bundled: try bundledRule(), hasSourceYAML: false) == nil)
+    }
+
+    @Test("Enable on a severity copy of an earlier version installs the current bundled rule at the copy's level")
+    func enableRefreshesStaleSeverityCopy() throws {
+        let bundled = try bundledRule()
+        let copy = with(with(try earlierBundledRule(), "level", "low"), "enabled", false)
+        #expect(equal(V2RuleOverridePlanner.enabledOverride(copy, bundled: bundled, hasSourceYAML: false),
+                      with(with(bundled, "level", "low"), "enabled", true)))
     }
 
     @Test("Enable on a disable over a severity change re-installs the override at its level")
@@ -125,7 +151,7 @@ struct V2RuleOverridePlannerTests {
                       with(bundled, "enabled", true)))
     }
 
-    @Test("Enable compares parsed JSON, so key order and pretty-printing do not matter")
+    @Test("Enable reads parsed JSON, so key order and pretty-printing do not matter")
     func enableIgnoresFormatting() throws {
         let compiled = try ruleData(id: "d1a2b3c4-0449-4000-a000-000000000449", level: .high, status: "stable")
         let bundled = try object(compiled)
@@ -135,25 +161,62 @@ struct V2RuleOverridePlannerTests {
         #expect(disabledBytes != compiled)
         let copy = try object(disabledBytes)
         #expect(V2RuleOverridePlanner.enabledOverride(copy, bundled: bundled, hasSourceYAML: false) == nil)
-        // The same formatting with a nested value changed is not a copy.
+        // The same formatting with a nested value changed is removed too:
+        // without a .yml, only a level other than the bundled one is kept.
         var logsource = try #require(copy["logsource"] as? [String: Any])
         logsource["category"] = "process_creation"
         #expect(V2RuleOverridePlanner.enabledOverride(with(copy, "logsource", logsource), bundled: bundled,
-                                                      hasSourceYAML: false) != nil)
+                                                      hasSourceYAML: false) == nil)
     }
 
-    @Test("a severity revert of a tuned rule restores the bundled level and keeps the tuning")
-    func severityRevertKeepsTuning() throws {
+    @Test("a severity revert of a JSON-only override that differs in more than its level removes it, or installs the bundled rule disabled")
+    func severityRevertDropsOtherDifferences() throws {
         let bundled = try bundledRule()
-        // Differs from the bundled rule in more than its level.
+        // Differs from the bundled rule in more than its level. Without a
+        // .yml, MacCrab's writers change only "enabled" and "level", so the
+        // other difference is not one they made, and the revert drops it.
         let tuned = with(with(bundled, "level", "low"), "falsepositives", ["Nightly backup agent"])
-        #expect(equal(V2RuleOverridePlanner.severityRevertedOverride(
-            tuned, bundled: bundled, hasSourceYAML: false, keepsDisabled: false),
-            with(tuned, "level", "high")))
-        // A disabled tuned rule keeps its disable and its tuning.
+        #expect(V2RuleOverridePlanner.severityRevertedOverride(
+            tuned, bundled: bundled, hasSourceYAML: false, keepsDisabled: false) == nil)
+        // A disabled one keeps only its disable.
         #expect(equal(V2RuleOverridePlanner.severityRevertedOverride(
             with(tuned, "enabled", false), bundled: bundled, hasSourceYAML: false, keepsDisabled: true),
-            with(with(tuned, "level", "high"), "enabled", false)))
+            with(bundled, "enabled", false)))
+    }
+
+    @Test("Default on a severity copy of an earlier version removes it, or installs the current bundled rule disabled")
+    func severityRevertRefreshesStaleCopy() throws {
+        let bundled = try bundledRule()
+        let copy = with(try earlierBundledRule(), "level", "low")
+        #expect(V2RuleOverridePlanner.severityRevertedOverride(
+            copy, bundled: bundled, hasSourceYAML: false, keepsDisabled: false) == nil)
+        #expect(equal(V2RuleOverridePlanner.severityRevertedOverride(
+            with(copy, "enabled", false), bundled: bundled, hasSourceYAML: false, keepsDisabled: true),
+            with(bundled, "enabled", false)))
+    }
+
+    @Test("an override with a .yml keeps its fields through Enable and Default, and the same JSON alone does not")
+    func sourceBackedTuningKeepsFields() throws {
+        let bundled = try bundledRule()
+        // An Edit YAML change, then a disable: the user's predicate list and
+        // a lowered level.
+        let predicate: [String: Any] = ["field": "file.path", "modifier": "contains",
+                                        "values": ["/user-tuned/"], "negate": false]
+        var tuned = with(bundled, "predicates", [predicate])
+        tuned["level"] = "low"
+        tuned["enabled"] = false
+        #expect(equal(V2RuleOverridePlanner.enabledOverride(tuned, bundled: bundled, hasSourceYAML: true),
+                      with(tuned, "enabled", true)))
+        #expect(equal(V2RuleOverridePlanner.severityRevertedOverride(
+            tuned, bundled: bundled, hasSourceYAML: true, keepsDisabled: true),
+            with(tuned, "level", "high")))
+        // Without the .yml, the same JSON is taken for a copy MacCrab's
+        // writers made, and the current bundled rule replaces its predicates.
+        #expect(equal(V2RuleOverridePlanner.enabledOverride(tuned, bundled: bundled, hasSourceYAML: false),
+                      with(with(bundled, "level", "low"), "enabled", true)))
+        #expect(equal(V2RuleOverridePlanner.severityRevertedOverride(
+            tuned, bundled: bundled, hasSourceYAML: false, keepsDisabled: true),
+            with(bundled, "enabled", false)))
     }
 
     @Test("a severity revert of a severity-only override removes it unless a .yml is beside it")
