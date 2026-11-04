@@ -114,7 +114,7 @@ struct EventStream: View {
     @ObservedObject var appState: AppState
     @ObservedObject var querySession: EventQuerySession
     @State private var filterText: String
-    @State private var filterCategory: EventCategory? = nil
+    @State private var filterCategory: EventCategory?
 
     /// `initialFilterText` lets a caller pre-populate the FTS filter
     /// when navigating in via "Investigate in Events" from an alert.
@@ -136,6 +136,10 @@ struct EventStream: View {
     let centerHalfWindowSeconds: TimeInterval
     private let intentFilter: String
 
+    /// Seeds filterText, filterCategory, timeRange and isPaused, which have no
+    /// inline default (TN3211): the session's saved controls for the same
+    /// intent, otherwise the caller's filter text, every category, Last 24h
+    /// and not paused.
     init(
         appState: AppState,
         querySession: EventQuerySession,
@@ -170,7 +174,7 @@ struct EventStream: View {
             .filter { seen.insert($0.id).inserted }
     }
 
-    @State private var isPaused: Bool = false
+    @State private var isPaused: Bool
     @State private var selectedEventID: EventViewModel.ID? = nil
     /// Bumped to reload this window's query over a live gap.
     @State private var liveGapReloadTick: UInt64 = 0
@@ -178,10 +182,10 @@ struct EventStream: View {
     /// drill-in (they were previously inert despite the banner telling the
     /// user to "narrow the range for per-event detail"). (#5)
     @State private var selectedAggregateID: EventStream.IdentifiedAggregate.ID? = nil
-    // v1.8.0: default to Last 24h so the user lands in the hot tier on
-    // open — `.all` immediately put them in aggregate mode against an
-    // empty rollup table on a fresh DB, which read as broken.
-    @State private var timeRange: TimeRange = .last24h
+    // v1.8.0: Last 24h by default (seeded in init) so the user lands in the
+    // hot tier on open — `.all` immediately put them in aggregate mode
+    // against an empty rollup table on a fresh DB, which read as broken.
+    @State private var timeRange: TimeRange
     @State private var sortOrder = [KeyPathComparator(\EventViewModel.timestamp, order: .reverse)]
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     /// v1.8.0: Discover-style time histogram toggle. Off by default —
