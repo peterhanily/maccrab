@@ -36,14 +36,17 @@ func handleListRules(_ args: [String: Any]) -> Any {
     mcpRuleInventory(directory: dataDir, arguments: args)
 }
 
-// MARK: - explain_alert  (mirror of `maccrabctl why`)
+// MARK: - explain_alert  (short form of `maccrabctl why`)
 
 /// Explain which rule fired and what is known about the match.
 ///
-/// The CLI's `why` re-reads the rule's compiled predicate and prints the
-/// matched clauses. That detail is only available when the rule JSON is
-/// readable; when it is not, this says so rather than implying the alert had no
-/// rule behind it.
+/// Shows the alert, then the rule the engine applies for its id, as
+/// CompiledRuleFileIndex resolves it: a user rule the engine would load, else
+/// the bundled rule. Of that rule it shows the description, status and
+/// logsource, not the matching logic; a closing line points to
+/// `maccrabctl why <alert id>`, which prints the full compiled rule on this
+/// Mac. The rule definition is shown only when the rule JSON is readable; when
+/// it is not, this says so rather than implying the alert had no rule behind it.
 func handleExplainAlert(_ args: [String: Any]) async -> Any {
     guard let alertId = args["alert_id"] as? String, !alertId.isEmpty else {
         return toolError("'alert_id' is required (get it from get_alerts).")
@@ -77,33 +80,40 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
             return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
         }
 
-        // Sigma rule: surface the compiled predicate so the agent can see what
-        // the match actually required.
+        // Sigma rule: show the definition of the rule the engine applies for
+        // this id.
         let compiledDir = dataDir + "/compiled_rules"
         let ruleJSON = CompiledRuleFileIndex.shared.rule(id: alert.ruleId, in: compiledDir)
         lines.append("")
         guard let ruleJSON else {
-            lines.append("The compiled rule for \(alert.ruleId) is not readable from this process, so the")
-            lines.append("matching predicate cannot be shown. The alert itself is unaffected.")
+            lines.append("The compiled rule for \(alert.ruleId) is not readable from this process, so its")
+            lines.append("definition cannot be shown. The alert itself is unaffected.")
             return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
         }
-        lines.append("Rule definition:")
-        if CompiledRuleFileIndex.shared.hasDuplicateUserRules(id: alert.ruleId, in: compiledDir) {
-            lines.append("  note: several user rules have this id. The engine applies one of them, in an order MacCrab does not define; this is the first by file name.")
-        }
-        if let desc = ruleJSON["description"] as? String { lines.append("  description: \(desc)") }
-        if let status = ruleJSON["status"] as? String { lines.append("  status: \(status)") }
-        if let ls = ruleJSON["logsource"] { lines.append("  logsource: \(ls)") }
-        if let det = ruleJSON["detection"],
-           let data = try? JSONSerialization.data(withJSONObject: det, options: [.prettyPrinted, .sortedKeys]),
-           let text = String(data: data, encoding: .utf8) {
-            lines.append("  detection:")
-            for l in text.components(separatedBy: "\n") { lines.append("    " + l) }
-        }
+        lines += explainRuleDefinitionLines(
+            ruleJSON, alertID: alert.id,
+            duplicateUserRules: CompiledRuleFileIndex.shared.hasDuplicateUserRules(id: alert.ruleId, in: compiledDir))
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
         return toolError("Error reading alerts: \(error.localizedDescription)")
     }
+}
+
+/// The "Rule definition:" part of explain_alert: the rule's description,
+/// status and logsource, then where to see the full compiled rule. The
+/// matching logic is left to `maccrabctl why`, which prints it on this Mac;
+/// this server's responses pass through the privacy sanitizer, which rewrites
+/// paths, host names and addresses in rule values.
+func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, duplicateUserRules: Bool) -> [String] {
+    var lines = ["Rule definition:"]
+    if duplicateUserRules {
+        lines.append("  note: several user rules have this id. The engine applies one of them, in an order MacCrab does not define; this is the first by file name.")
+    }
+    if let desc = rule["description"] as? String { lines.append("  description: \(desc)") }
+    if let status = rule["status"] as? String { lines.append("  status: \(status)") }
+    if let ls = rule["logsource"] { lines.append("  logsource: \(ls)") }
+    lines.append("  full rule: run `maccrabctl why \(alertID)` on this Mac to see what a match requires.")
+    return lines
 }
 
 // MARK: - get_vulns / get_privacy_alerts

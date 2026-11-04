@@ -294,6 +294,36 @@ struct CompiledRuleFileIndexTests {
         #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "user override")
     }
 
+    @Test("explain_alert shows a rule's description, status and logsource, not its matching logic, and points to maccrabctl why")
+    func explainShowsTheDefinitionAndPointsToWhy() throws {
+        // The fixture with each engine's logic added, and the Sigma `detection`
+        // block the handler used to look for.
+        var rule = try #require(JSONSerialization.jsonObject(with: ruleData("rule.x")) as? [String: Any])
+        rule["condition_tree"] = ["type": "predicate", "index": 0]
+        rule["steps"] = [["id": "install", "logsourceCategory": "process_creation"]]
+        rule["nodes"] = ["shell": ["type": "process"]]
+        rule["edges"] = [["from": "shell", "to": "shell", "relation": "spawned"]]
+        rule["detection"] = ["selection": ["file.path|contains": "/maccrab-rule-index-fixture/"]]
+        let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2c"
+        let pointer = "  full rule: run `maccrabctl why \(alertID)` on this Mac to see what a match requires."
+
+        let lines = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: false)
+        #expect(Array(lines.prefix(3)) == ["Rule definition:", "  description: rule index fixture", "  status: stable"])
+        #expect(lines.last == pointer)
+        // No predicate value and no logic key reaches the text.
+        let text = lines.joined(separator: "\n")
+        #expect(!text.contains("/maccrab-rule-index-fixture/"))
+        for key in ["predicates", "condition", "steps", "nodes", "edges", "detection"] {
+            #expect(!text.contains(key), "\(key)")
+        }
+        // The pointer survives the sanitizer every explain_alert response passes through.
+        #expect(LLMSanitizer.sanitize(text).hasSuffix(pointer))
+
+        let noted = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: true)
+        #expect(noted.count == lines.count + 1)
+        #expect(noted[1].hasPrefix("  note: several user rules have this id."))
+    }
+
     @Test("an id resolves single-event, then sequence, then graph; user rules override single-event ids only")
     func precedenceAcrossEngines() throws {
         let (root, compiled, user) = try supportDirectory()

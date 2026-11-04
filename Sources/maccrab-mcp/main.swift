@@ -958,7 +958,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "explain_alert",
-        "description": "Explain a single alert: the rule that fired, its compiled detection predicate, logsource and status. Mirrors `maccrabctl why`. For built-in maccrab.* detections there is no predicate and the tool says so rather than implying one is missing. Read-only.",
+        "description": "Explain a single alert: the rule that fired, with the description, logsource and status of the rule the engine applies for it (a user rule it would load, else the bundled rule). It does not show the rule's matching logic; `maccrabctl why <alert_id>` prints the full compiled rule on this Mac. For built-in maccrab.* detections there is no predicate and the tool says so rather than implying one is missing. Read-only.",
         "inputSchema": [
             "type": "object",
             "properties": ["alert_id": ["type": "string", "description": "alert id from get_alerts"]],
