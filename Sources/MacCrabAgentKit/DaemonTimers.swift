@@ -6872,11 +6872,33 @@ enum DaemonTimers {
         try SecureFileIO.atomicReplace(at: path, data: data, mode: 0o644)
     }
 
+    /// Readies the user_rules folder at `path` for an install: creates it
+    /// when nothing is there, then sets its mode to 0755. Returns false,
+    /// creating and changing nothing, when lstat finds an entry at `path`
+    /// that is not a directory. A symlink is such an entry: the chmod would
+    /// follow it and change the mode of what it points to.
+    static func prepareUserRulesFolder(atPath path: String) throws -> Bool {
+        var existing = stat()
+        if lstat(path, &existing) == 0, existing.st_mode & S_IFMT != S_IFDIR {
+            return false
+        }
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: path, withIntermediateDirectories: true)
+        // v1.18: enforce secure perms (0755, daemon-owned). The engine's
+        // secure-dir gate (DaemonSetup.isSecureDirectory) REFUSES a
+        // group/world-writable rules dir, so a legacy app-created
+        // root:admin 0775 dir meant "rule installed but never loads".
+        // Routing installs through the root install-rule handler + clamping
+        // the dir to 0755 makes the gate accept it — and migrates any legacy
+        // 0775 dir in place on the next install.
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        return true
+    }
+
     private static func handleInstallRuleRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
         guard !names.isEmpty else { return }
-        let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
             defer { removeInboxEntry(at: path) }
@@ -6900,15 +6922,11 @@ enum DaemonTimers {
             let yaml = (json["yaml"] as? String) ?? ""
             let userRulesDir = state.supportDir + "/user_rules"
             do {
-                try fm.createDirectory(atPath: userRulesDir, withIntermediateDirectories: true)
-                // v1.18: enforce secure perms (0755, daemon-owned). The engine's
-                // secure-dir gate (DaemonSetup.isSecureDirectory) REFUSES a
-                // group/world-writable rules dir, so a legacy app-created
-                // root:admin 0775 dir meant "rule installed but never loads".
-                // Routing installs through this root handler + clamping the dir to
-                // 0755 makes the gate accept it — and migrates any legacy 0775 dir
-                // in place on the next install.
-                try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: userRulesDir)
+                guard try prepareUserRulesFolder(atPath: userRulesDir) else {
+                    inboxLogger.warning("Refused install-rule \(ruleId, privacy: .public): \(userRulesDir, privacy: .public) is a symlink or not a directory")
+                    auditLogInbox(state: state, prefix: "install-rule", id: sanitizeAuditField(ruleId), uid: uid, result: "rejected_unsafe_dir")
+                    continue
+                }
                 if !yaml.isEmpty {
                     try writeUserRuleFile(Data(yaml.utf8), toPath: userRulesDir + "/\(ruleId).yml")
                 }

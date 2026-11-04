@@ -2977,7 +2977,7 @@ enum DaemonSetup {
                     // demand gate. Enabling an introspection rule from the
                     // dashboard therefore needs a `pkill -HUP com.maccrab.agent`
                     // before ES starts delivering those events. SIGHUP does it.
-                    logger.notice("Rules reloaded after user-rules tick: \(total) active rule(s)")
+                    logger.notice("Rules reloaded after user-rules tick: \(total) rule file(s) loaded (\(reloaded.base) from compiled_rules, \(reloaded.overlay ?? 0) from user_rules)")
                 } catch {
                     logger.warning("Reload after user-rules tick failed: \(error.localizedDescription)")
                 }

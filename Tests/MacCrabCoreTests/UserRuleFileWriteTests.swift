@@ -7,6 +7,10 @@
 // never write through a symlink. A file owned by another uid takes the same
 // unlink-then-write path as the symlink and hard-link cases below; creating
 // one needs root, so these tests use the cases a normal user can create.
+//
+// Before the writes, the handler readies the user_rules folder. It refuses a
+// folder that lstat finds is not a directory, a symlink included, because the
+// chmod that sets the folder to 0755 would follow a symlink.
 
 import Testing
 import Foundation
@@ -107,5 +111,63 @@ struct UserRuleFileWriteTests {
         #expect(st.st_nlink == 1)
         #expect(st.st_mode & 0o7777 == 0o644)
         #expect(try contents(path) == Data("new".utf8))
+    }
+
+    @Test("a symlinked user_rules folder is refused, and the folder it points to keeps its mode")
+    func refusesSymlinkedFolder() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let target = dir + "/elsewhere"
+        try FileManager.default.createDirectory(atPath: target, withIntermediateDirectories: false)
+        try #require(chmod(target, 0o700) == 0)
+        let folder = dir + "/user_rules"
+        try FileManager.default.createSymbolicLink(atPath: folder, withDestinationPath: target)
+
+        #expect(try DaemonTimers.prepareUserRulesFolder(atPath: folder) == false)
+
+        #expect(try metadata(target).st_mode & 0o7777 == 0o700)
+        #expect(try metadata(folder).st_mode & S_IFMT == S_IFLNK)
+    }
+
+    @Test("a regular file named user_rules is refused and left as it was")
+    func refusesNonDirectory() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let folder = dir + "/user_rules"
+        try Data("not a folder".utf8).write(to: URL(fileURLWithPath: folder))
+        try #require(chmod(folder, 0o600) == 0)
+
+        #expect(try DaemonTimers.prepareUserRulesFolder(atPath: folder) == false)
+
+        let st = try metadata(folder)
+        #expect(st.st_mode & S_IFMT == S_IFREG)
+        #expect(st.st_mode & 0o7777 == 0o600)
+        #expect(try contents(folder) == Data("not a folder".utf8))
+    }
+
+    @Test("a missing user_rules folder is created with mode 0755")
+    func createsMissingFolder() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let folder = dir + "/user_rules"
+
+        #expect(try DaemonTimers.prepareUserRulesFolder(atPath: folder))
+
+        let st = try metadata(folder)
+        #expect(st.st_mode & S_IFMT == S_IFDIR)
+        #expect(st.st_mode & 0o7777 == 0o755)
+    }
+
+    @Test("an existing 0775 user_rules folder is set to 0755")
+    func setsExistingFolderMode() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let folder = dir + "/user_rules"
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: false)
+        try #require(chmod(folder, 0o775) == 0)
+
+        #expect(try DaemonTimers.prepareUserRulesFolder(atPath: folder))
+
+        #expect(try metadata(folder).st_mode & 0o7777 == 0o755)
     }
 }

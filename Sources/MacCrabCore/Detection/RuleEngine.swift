@@ -1361,11 +1361,13 @@ public actor RuleEngine {
             ruleIndex[category]?[idx] = rule
         }
 
-        // v1.21.4 (corr-detection #276): an explicit re-enable is the operator's
-        // (or CLI/MCP's) "this rule is fine again" — fully reset the runtime
-        // eval-budget guard for it so a stale breach count can't immediately
-        // re-trip the auto-disable. Only on enable; the guard itself calls this
-        // with `false` and must not clear its own bookkeeping.
+        // v1.21.4 (corr-detection #276): enabling a rule here also resets its
+        // runtime eval-budget guard state, so a stale breach count can't
+        // immediately re-trip the auto-disable. Only on enable: outside tests
+        // the only caller is the guard in evaluate, which passes `false` and
+        // must not clear its own bookkeeping. No CLI or MCP path calls this
+        // method; a rule the guard disabled stays disabled until a successful
+        // reloadRules clears the guard.
         if enabled {
             ruleBudgetBreaches[ruleId] = nil
             autoDisabledRules.remove(ruleId)
