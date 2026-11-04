@@ -358,24 +358,74 @@ struct CompiledRuleFileIndexTests {
 
     @Test("trust follows the engine's directory and file checks")
     func trustMatchesTheEngine() {
-        typealias Index = CompiledRuleFileIndex
-        #expect(Index.trustsUserRulesDirectory(owner: 0, mode: 0o40755, isSymlink: false, engineUID: 0))
-        #expect(!Index.trustsUserRulesDirectory(owner: 0, mode: 0o40775, isSymlink: false, engineUID: 0))
-        #expect(!Index.trustsUserRulesDirectory(owner: 0, mode: 0o40757, isSymlink: false, engineUID: 0))
-        #expect(!Index.trustsUserRulesDirectory(owner: 501, mode: 0o40755, isSymlink: false, engineUID: 0))
-        #expect(Index.trustsUserRulesDirectory(owner: 501, mode: 0o40755, isSymlink: false, engineUID: 501))
-        #expect(Index.trustsUserRulesDirectory(owner: 0, mode: 0o40755, isSymlink: false, engineUID: 501))
-        #expect(!Index.trustsUserRulesDirectory(owner: 0, mode: 0o120755, isSymlink: true, engineUID: 0))
-        #expect(Index.trustsUserRuleFile(owner: 0, engineUID: 0))
-        #expect(!Index.trustsUserRuleFile(owner: 501, engineUID: 0))
-        #expect(Index.engineUID(forCompiledDir: "/Library/Application Support/MacCrab/compiled_rules") == 0)
-        #expect(Index.engineUID(forCompiledDir: NSTemporaryDirectory() + "x/compiled_rules") == getuid())
+        typealias Trust = UserRuleOverlayTrust
+        #expect(Trust.trustsDirectory(owner: 0, mode: 0o40755, isSymlink: false, engineUID: 0))
+        #expect(!Trust.trustsDirectory(owner: 0, mode: 0o40775, isSymlink: false, engineUID: 0))
+        #expect(!Trust.trustsDirectory(owner: 0, mode: 0o40757, isSymlink: false, engineUID: 0))
+        #expect(!Trust.trustsDirectory(owner: 501, mode: 0o40755, isSymlink: false, engineUID: 0))
+        #expect(Trust.trustsDirectory(owner: 501, mode: 0o40755, isSymlink: false, engineUID: 501))
+        #expect(Trust.trustsDirectory(owner: 0, mode: 0o40755, isSymlink: false, engineUID: 501))
+        #expect(!Trust.trustsDirectory(owner: 0, mode: 0o120755, isSymlink: true, engineUID: 0))
+        #expect(Trust.trustsFile(owner: 0, engineUID: 0))
+        #expect(!Trust.trustsFile(owner: 501, engineUID: 0))
+        #expect(Trust.engineUID(forSupportDirectory: "/Library/Application Support/MacCrab") == 0)
+        #expect(Trust.engineUID(forSupportDirectory: NSTemporaryDirectory() + "x") == getuid())
         // Each user rule file is held to the engine's owner check while the
         // index is built and before a cached one is used.
         let source = (try? String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/maccrab-mcp/ReadParityTools.swift"), encoding: .utf8)) ?? ""
-        #expect(source.contains("for path in Self.ruleFiles(in: userDir) where Self.userRuleTrusted(path, engineUID: engineUID) {"))
-        #expect(source.contains("Self.userRuleTrusted(path, engineUID: engineUID) else { return nil }"))
+        #expect(source.contains(
+            "for path in Self.ruleFiles(in: userDir) where UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) {"))
+        #expect(source.contains("UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else { return nil }"))
+    }
+
+    @Test("on disk, a user rule file is trusted only for its owner's uid, and its folder only while no one else can write it")
+    func trustReadsTheFolderAndFileWithLstat() throws {
+        typealias Trust = UserRuleOverlayTrust
+        let (root, _, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let file = user + "/u.json"
+        try write("user.u", to: file)
+        // A test cannot create a file another uid owns, so the engine's uid is
+        // varied instead: an engine running as root does not load a file this
+        // user wrote, as on a legacy install.
+        let owner = getuid()
+        let other: uid_t = owner == 0 ? 1 : 0
+        #expect(Trust.trustsFile(atPath: file, engineUID: owner))
+        #expect(!Trust.trustsFile(atPath: file, engineUID: other), "a file the engine's uid does not own")
+        #expect(!Trust.trustsFile(atPath: user + "/missing.json", engineUID: owner))
+        #expect(Trust.trustsDirectory(atPath: user, engineUID: owner))
+        // The legacy root:admin 0775 folder, and a world-writable one.
+        for mode: mode_t in [0o775, 0o757] {
+            #expect(chmod(user, mode) == 0)
+            #expect(!Trust.trustsDirectory(atPath: user, engineUID: owner), "mode \(String(mode, radix: 8))")
+        }
+        #expect(chmod(user, 0o755) == 0)
+        #expect(Trust.trustsDirectory(atPath: user, engineUID: owner))
+        try FileManager.default.createSymbolicLink(atPath: root + "/linked_rules", withDestinationPath: user)
+        #expect(!Trust.trustsDirectory(atPath: root + "/linked_rules", engineUID: owner), "a symlinked folder")
+        #expect(!Trust.trustsDirectory(atPath: file, engineUID: owner), "a file is not a folder")
+    }
+
+    @Test("a user rule hidden by the UF_HIDDEN flag is skipped, as the engine skips it")
+    func hiddenFlagIsSkipped() async throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        try write("rule.x", to: user + "/a.json", title: "first")
+        try write("rule.x", to: user + "/b.json", title: "second")
+        #expect(try await RuleEngine().loadRules(from: URL(fileURLWithPath: user), requireOwnerUID: getuid()) == 2)
+        let index = CompiledRuleFileIndex()
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "first")
+        #expect(index.hasDuplicateUserRules(id: "rule.x", in: compiled))
+        // chflags hidden sets the flag, and cp -p and ditto keep it on a copy.
+        // The engine's .skipsHiddenFiles listing then leaves the file out.
+        #expect(chflags(user + "/a.json", UInt32(UF_HIDDEN)) == 0)
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "second")
+        #expect(!index.hasDuplicateUserRules(id: "rule.x", in: compiled))
+        #expect(chflags(user + "/b.json", UInt32(UF_HIDDEN)) == 0)
+        #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "bundled")
+        #expect(try await RuleEngine().loadRules(from: URL(fileURLWithPath: user), requireOwnerUID: getuid()) == 0)
     }
 }

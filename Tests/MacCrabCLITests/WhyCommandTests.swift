@@ -26,6 +26,9 @@ struct WhyCommandTests {
 
         func write(_ json: String, _ folder: URL, _ name: String) throws -> String {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            // As installed: the daemon refuses a group-writable user_rules,
+            // which a umask of 002 would leave.
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
             let path = folder.appendingPathComponent(name).path
             try json.write(toFile: path, atomically: true, encoding: .utf8)
             return path
@@ -63,6 +66,9 @@ struct WhyCommandTests {
         let users = dir.appendingPathComponent("user_rules")
         func write(_ json: String, _ folder: URL, _ name: String) throws -> String {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            // As installed: the daemon refuses a group-writable user_rules,
+            // which a umask of 002 would leave.
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
             let path = folder.appendingPathComponent(name).path
             try json.write(toFile: path, atomically: true, encoding: .utf8)
             return path
@@ -100,6 +106,62 @@ struct WhyCommandTests {
         let second = try write(Self.flatRule, users, "b-override.json")
         #expect(lookup(singleID) == first)
         #expect(MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path) == [first, second])
+    }
+
+    @Test("user rules count only from a folder the daemon trusts, and the duplicate count holds only files it would load")
+    func userRulesFollowTheDaemonsTrustChecks() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-why-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let rules = dir.appendingPathComponent("compiled_rules")
+        let users = dir.appendingPathComponent("user_rules")
+        func write(_ json: String, _ folder: URL, _ name: String) throws -> String {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+            let path = folder.appendingPathComponent(name).path
+            try json.write(toFile: path, atomically: true, encoding: .utf8)
+            return path
+        }
+        let single = try write(Self.flatRule, rules, "ssh_key_access.json")
+        let singleID = "d1a2b3c4-0032-4000-a000-000000000032"
+        let dirs = MacCrabCtl.whySearchDirs(supportDirs: [dir.path])
+        func lookup() -> String? { MacCrabCtl.findRuleFile(forRuleID: singleID, in: dirs) }
+        // What the duplicate note counts.
+        func claims() -> [String] { MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path) }
+
+        let first = try write(Self.flatRule, users, "a.json")
+        let second = try write(Self.flatRule, users, "b.json")
+        // Copies the daemon does not load: hidden by a leading dot or by the
+        // UF_HIDDEN flag (chflags hidden, or a copy made with cp -p or ditto),
+        // the build manifest, and a link to a valid copy.
+        _ = try write(Self.flatRule, users, ".c.json")
+        let flagged = try write(Self.flatRule, users, "d.json")
+        #expect(chflags(flagged, UInt32(UF_HIDDEN)) == 0)
+        _ = try write(Self.flatRule, users, "manifest.json")
+        let outside = try write(Self.flatRule, dir, "outside.json")
+        try FileManager.default.createSymbolicLink(atPath: users.appendingPathComponent("e.json").path,
+                                                   withDestinationPath: outside)
+        #expect(claims() == [first, second])
+        #expect(lookup() == first)
+
+        // Files the daemon's uid does not own are skipped. A test cannot create
+        // a file another uid owns, so the daemon's uid is varied instead: an
+        // engine running as root, as on an installed Mac, loads neither file.
+        let owner = getuid()
+        #expect(MacCrabCtl.loadableUserRuleFiles(
+            forRuleID: singleID, inTrustedUserRules: users.path, engineUID: owner) == [first, second])
+        #expect(MacCrabCtl.loadableUserRuleFiles(
+            forRuleID: singleID, inTrustedUserRules: users.path, engineUID: owner == 0 ? 1 : 0).isEmpty)
+
+        // The legacy root:admin 0775 folder, or a world-writable one: the
+        // daemon refuses the whole overlay and applies the bundled rule.
+        for mode in [0o775, 0o757] {
+            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: users.path)
+            #expect(claims().isEmpty, "mode \(String(mode, radix: 8))")
+            #expect(lookup() == single, "mode \(String(mode, radix: 8))")
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: users.path)
+        #expect(lookup() == first)
     }
 
     @Test("a sequence rule shows its window, correlation, ordering, trigger and every step")

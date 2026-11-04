@@ -288,39 +288,6 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         (compiledDir as NSString).deletingLastPathComponent + "/user_rules"
     }
 
-    /// The uid the engine runs as for this support directory: root for the
-    /// installed engine, this user for a development daemon.
-    static func engineUID(forCompiledDir compiledDir: String) -> uid_t {
-        (compiledDir as NSString).deletingLastPathComponent == "/Library/Application Support/MacCrab" ? 0 : getuid()
-    }
-
-    /// The engine loads user rules only from a directory that is not a
-    /// symlink, is owned by root or the engine's uid and is writable by its
-    /// owner alone (DaemonSetup's `isSecureDirectory`), and only files the
-    /// engine's uid owns (`RuleEngine.loadRules(requireOwnerUID:)`). The index
-    /// applies the same checks, so it shows the definition the engine applies
-    /// and never hands an agent rule text the engine refused.
-    static func trustsUserRulesDirectory(owner: uid_t, mode: mode_t, isSymlink: Bool, engineUID: uid_t) -> Bool {
-        !isSymlink && (owner == 0 || owner == engineUID) && mode & 0o022 == 0
-    }
-
-    static func trustsUserRuleFile(owner: uid_t, engineUID: uid_t) -> Bool { owner == engineUID }
-
-    private static func userRulesTrusted(_ directory: String, engineUID: uid_t) -> Bool {
-        var st = stat()
-        guard lstat(directory, &st) == 0 else { return false }
-        let type = st.st_mode & S_IFMT
-        guard type == S_IFDIR || type == S_IFLNK else { return false }
-        return trustsUserRulesDirectory(owner: st.st_uid, mode: st.st_mode, isSymlink: type == S_IFLNK,
-                                        engineUID: engineUID)
-    }
-
-    private static func userRuleTrusted(_ path: String, engineUID: uid_t) -> Bool {
-        var st = stat()
-        guard lstat(path, &st) == 0 else { return false }
-        return trustsUserRuleFile(owner: st.st_uid, engineUID: engineUID)
-    }
-
     private let lock = NSLock()
     private var directory: String?
     private var stamp: Stamp?
@@ -335,8 +302,13 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return builds
     }
 
+    /// The rule the engine applies for `id`: a user rule only while the engine
+    /// would load it (the UserRuleOverlayTrust checks, then
+    /// RuleEngine.decodeLoadableRule), else the bundled rule, so an agent is
+    /// never handed rule text the engine refused.
     func rule(id: String, in compiledDir: String) -> [String: Any]? {
-        rule(id: id, in: compiledDir, engineUID: Self.engineUID(forCompiledDir: compiledDir))
+        rule(id: id, in: compiledDir, engineUID: UserRuleOverlayTrust.engineUID(
+            forSupportDirectory: (compiledDir as NSString).deletingLastPathComponent))
     }
 
     func rule(id: String, in compiledDir: String, engineUID: uid_t) -> [String: Any]? {
@@ -345,8 +317,8 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         func resolve(_ path: String) -> [String: Any]? {
             let json: [String: Any]?
             if path.hasPrefix(userDir + "/") {
-                guard Self.userRulesTrusted(userDir, engineUID: engineUID),
-                      Self.userRuleTrusted(path, engineUID: engineUID) else { return nil }
+                guard UserRuleOverlayTrust.trustsDirectory(atPath: userDir, engineUID: engineUID),
+                      UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else { return nil }
                 json = Self.loadUserRule(path)
             } else {
                 json = Self.load(path)
@@ -414,10 +386,10 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         // showing the sequence or graph definition.
         let userDir = Self.userRulesDirectory(compiledDir)
         var duplicated: Set<String> = []
-        if Self.userRulesTrusted(userDir, engineUID: engineUID) {
+        if UserRuleOverlayTrust.trustsDirectory(atPath: userDir, engineUID: engineUID) {
             let otherEngines = [compiledDir + "/sequences/", compiledDir + "/graph/"]
             var overridden: Set<String> = []
-            for path in Self.ruleFiles(in: userDir) where Self.userRuleTrusted(path, engineUID: engineUID) {
+            for path in Self.ruleFiles(in: userDir) where UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) {
                 guard let id = Self.loadUserRule(path)?["id"] as? String else { continue }
                 // The engine loads each of these and keeps the last it enumerates,
                 // an order it does not define: show the first by name, note the rest.
@@ -437,12 +409,17 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// A directory's rule files, sorted. The engine skips hidden files and
-    /// the build manifest.
+    /// A directory's rule files, sorted, selected as RuleEngine.loadRules
+    /// selects them: `.json` files other than the build manifest, skipping
+    /// the files .skipsHiddenFiles treats as hidden, a leading dot or the
+    /// UF_HIDDEN flag. The paths are built from `dir`, because the listed URLs
+    /// resolve /tmp and /var to /private and a user rule is recognised by its
+    /// `dir` prefix.
     private static func ruleFiles(in dir: String) -> [String] {
-        ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).sorted()
-            .filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") && $0 != "manifest.json" }
-            .map { dir + "/" + $0 }
+        let listed: [URL] = (try? FileManager.default.contentsOfDirectory(
+            at: URL(fileURLWithPath: dir), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        let jsonFiles: [URL] = listed.filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
+        return jsonFiles.map { dir + "/" + $0.lastPathComponent }.sorted()
     }
 
     private static func stamp(_ compiledDir: String) -> Stamp {
@@ -465,7 +442,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     private static func fileStamps(_ compiledDir: String, engineUID: uid_t) -> [FileStamp] {
         var directories = bundledDirectories(compiledDir)
         let userDir = userRulesDirectory(compiledDir)
-        if userRulesTrusted(userDir, engineUID: engineUID) { directories.append(userDir) }
+        if UserRuleOverlayTrust.trustsDirectory(atPath: userDir, engineUID: engineUID) { directories.append(userDir) }
         return directories.flatMap { ruleFiles(in: $0) }.map { path in
             var st = stat()
             guard lstat(path, &st) == 0 else {

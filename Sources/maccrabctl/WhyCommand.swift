@@ -120,11 +120,12 @@ extension MacCrabCtl {
         for line in whyRuleLines(ruleJSON, rulePath: rulePath) {
             print(line)
         }
-        // The daemon skips an override it doesn't trust (DaemonSetup's
-        // overlay gate and RuleEngine's per-file owner check).
+        // findRuleFile returns a user rule only when the daemon would load it
+        // (loadableUserRuleFiles), so the note states that rather than hedging.
         if isUserRule {
-            print("Note: this is a user rule. The daemon skips user rules that root does not own")
-            print("or whose folder others can write to; the bundled rule with this id then applies.")
+            print("Note: this is a user rule. It passes the daemon's checks on user rules (folder and")
+            print("file ownership, folder permissions, file type and content), so the daemon applies it in")
+            print("place of any bundled rule with this id; a change applies at its next rule reload.")
             let claims = loadableUserRuleFiles(forRuleID: alert.ruleId, inUserRules: ruleDir)
             if claims.count > 1 {
                 print("Note: \(claims.count) user rules have this id. The daemon applies one of them, in an order")
@@ -181,21 +182,38 @@ extension MacCrabCtl {
     }
 
     /// The files in a user_rules folder that the daemon would load for
-    /// `ruleID`, by file name: top-level `.json`, not hidden, not the
-    /// manifest, read without following a link and at most 4 MiB, and
-    /// accepted by RuleEngine.decodeLoadableRule. File and folder ownership
-    /// are not checked; `why` prints a note about them instead. With more
-    /// than one, the daemon applies one of them, in an order MacCrab does not
-    /// define.
+    /// `ruleID`, by file name: none unless the folder passes the daemon's
+    /// overlay gate (UserRuleOverlayTrust), then the files that pass its
+    /// per-file checks. With more than one, the daemon applies one of them,
+    /// in an order MacCrab does not define.
     static func loadableUserRuleFiles(forRuleID ruleID: String, inUserRules dir: String) -> [String] {
-        ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).sorted()
-            .filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") && $0 != "manifest.json" }
-            .map { dir + "/" + $0 }
-            .filter { path in
-                guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024),
-                      let rule = try? RuleEngine.decodeLoadableRule(data) else { return false }
-                return rule.id == ruleID
-            }
+        let engineUID = UserRuleOverlayTrust.engineUID(forSupportDirectory: (dir as NSString).deletingLastPathComponent)
+        guard UserRuleOverlayTrust.trustsDirectory(atPath: dir, engineUID: engineUID) else { return [] }
+        return loadableUserRuleFiles(forRuleID: ruleID, inTrustedUserRules: dir, engineUID: engineUID)
+    }
+
+    /// The daemon's per-file checks on a user_rules folder it trusts, in its
+    /// order: the files RuleEngine.loadRules selects (top-level `.json`, not
+    /// the manifest, and not hidden by a leading dot or the UF_HIDDEN flag),
+    /// owned by `engineUID`, read without following a link and at most 4 MiB,
+    /// and accepted by RuleEngine.decodeLoadableRule.
+    static func loadableUserRuleFiles(forRuleID ruleID: String, inTrustedUserRules dir: String, engineUID: uid_t) -> [String] {
+        // The paths are built from `dir`: the listed URLs resolve /tmp and
+        // /var to /private.
+        let listed: [URL] = (try? FileManager.default.contentsOfDirectory(
+            at: URL(fileURLWithPath: dir), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        let jsonFiles: [URL] = listed.filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
+        let names: [String] = jsonFiles.map(\.lastPathComponent).sorted()
+        var paths: [String] = []
+        for name in names {
+            let path = dir + "/" + name
+            guard UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID),
+                  let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024),
+                  let rule = try? RuleEngine.decodeLoadableRule(data),
+                  rule.id == ruleID else { continue }
+            paths.append(path)
+        }
+        return paths
     }
 
     /// The compiled-rule part of `why`, one string per printed line: the

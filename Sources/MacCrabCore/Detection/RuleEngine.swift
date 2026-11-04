@@ -777,9 +777,10 @@ public actor RuleEngine {
     /// The content check `loadRules` applies to each compiled single-event rule
     /// file before the rule can enter the engine: decode as `CompiledRule`, then
     /// validate its condition tree. The MCP rule index and `maccrabctl why` use
-    /// it, so an explanation never shows a user rule the engine refuses. File
-    /// selection, the no-follow 4 MiB read, file and directory ownership and the
-    /// status profile stay with the caller.
+    /// it, so neither explainer shows a user rule whose content the engine
+    /// refuses. File selection (the engine's .skipsHiddenFiles also skips
+    /// UF_HIDDEN files), the no-follow 4 MiB read, file and directory ownership
+    /// (UserRuleOverlayTrust) and the status profile stay with the caller.
     public nonisolated static func decodeLoadableRule(_ data: Data) throws -> CompiledRule {
         let rule = try JSONDecoder().decode(CompiledRule.self, from: data)
         try validateConditionTree(in: rule)
