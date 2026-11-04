@@ -233,11 +233,13 @@ func handleGetBrowserExtensions(_ args: [String: Any]) -> Any {
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
 
-/// Rule id -> compiled file, built once per server process. Every
-/// get_alert_detail call used to open and parse each compiled rule (about
-/// 480 files) to find one id. Launched by an AI agent, this server is an
-/// attributed agent child, so each of those opens was admitted, journaled
-/// and scanned as agent activity: MacCrab amplifying itself.
+/// Rule id -> compiled file. Built on first use, then rebuilt when a rule
+/// directory's or rule file's lstat stamp changes (checked on every lookup)
+/// or a cached entry stops resolving. Every explain_alert call used to open
+/// and parse each compiled rule (about 480 files) to find one id. Launched by
+/// an AI agent, this server is an attributed agent child, so each of those
+/// opens was admitted, journaled and scanned as agent activity: MacCrab
+/// amplifying itself.
 final class CompiledRuleFileIndex: @unchecked Sendable {
     static let shared = CompiledRuleFileIndex()
 

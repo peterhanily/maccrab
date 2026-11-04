@@ -3,7 +3,7 @@ import MacCrabCore
 import Testing
 @testable import maccrab_mcp
 
-/// get_alert_detail finds a compiled rule by id without reopening the corpus
+/// explain_alert finds a compiled rule by id without reopening the corpus
 /// for every lookup, including lookups for ids the corpus no longer has.
 @Suite("Compiled rule index")
 struct CompiledRuleFileIndexTests {
@@ -66,6 +66,7 @@ struct CompiledRuleFileIndexTests {
         for id in ["rule.a", "seq.b", "graph.g", "auto.x", "user.u"] {
             #expect(index.rule(id: id, in: dir)?["id"] as? String == id, "\(id)")
         }
+        #expect(index.rebuildCount == 1)
 
         // Add a file, then restore the directory's exact mtime. The directory
         // stamps look unchanged, but the file listing does not, so the miss
@@ -73,15 +74,18 @@ struct CompiledRuleFileIndexTests {
         var before = stat()
         #expect(stat(dir, &before) == 0)
         #expect(index.rule(id: "rule.missing", in: dir) == nil)
+        #expect(index.rebuildCount == 1, "a miss with unchanged rules does not rebuild")
         try write("rule.c", to: dir + "/c.json")
         var times = [before.st_atimespec, before.st_mtimespec]
         #expect(utimensat(AT_FDCWD, dir, &times, 0) == 0)
         #expect(index.rule(id: "rule.c", in: dir)?["id"] as? String == "rule.c",
                 "a file added without moving the directory mtime is found")
+        #expect(index.rebuildCount == 2)
 
         // A compile changes the directory: the next lookup rebuilds.
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: dir)
         #expect(index.rule(id: "rule.c", in: dir)?["id"] as? String == "rule.c")
+        #expect(index.rebuildCount == 3, "a directory mtime change rebuilds")
     }
 
     @Test("a trusted user rule replaces the bundled rule with its id, as the engine loads it")
