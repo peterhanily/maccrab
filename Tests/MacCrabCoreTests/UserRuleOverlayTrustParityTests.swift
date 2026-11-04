@@ -129,36 +129,80 @@ struct UserRuleOverlayTrustParityTests {
             return String(source[start.upperBound..<end.lowerBound])
         }
 
+        // A block's code: its lines other than whole-line comments, so that
+        // commenting a line out changes it.
+        func code(_ block: String) -> String {
+            block.split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+                .joined(separator: "\n")
+        }
+
         // The one boot load of user_rules sits inside the block the nested
-        // check gates.
+        // check gates, whose code is exactly what it was when this test was
+        // written, so a refusal added in front of the load fails here.
         let gated = block("        if fm.fileExists(atPath: userOverridesDir), isSecureDirectory(userOverridesDir) {\n")
         let gate = try #require(gated, "\(update)")
-        #expect(gate.contains("ruleEngine.loadRules(from: userOverridesURL, requireOwnerUID: geteuid())"), "\(update)")
+        #expect(code(gate) == Self.bootGatedBlock, "\(update)")
         let bootLoads = occurrences(of: "loadRules(from: userOverridesURL", in: source)
         #expect(bootLoads == 1, "\(update)")
+        // Both overlay loads in this file, the boot load and the .reload_tick
+        // watcher's, pass requireOwnerUID:, so a further load that passes it
+        // changes this count however it names the folder.
+        #expect(occurrences(of: "requireOwnerUID:", in: source) == 2, "\(update)")
 
-        // The nested check, declared once. Like isOverlayDirSecure, it refuses
-        // a symlink, a folder whose attributes it cannot read, an owner other
-        // than root or getuid(), and a group- or world-writable mode. A further
-        // refusal, such as one for an ACL entry, adds a `return false` and
-        // fails here.
+        // The nested check, declared once, with the code it had when this test
+        // was written. Like isOverlayDirSecure, it refuses a symlink, a folder
+        // whose attributes it cannot read, an owner other than root or
+        // getuid(), and a group- or world-writable mode. Relaxing, removing or
+        // commenting out a refusal, or adding one, fails here.
         let declaration = "        func isSecureDirectory(_ path: String) -> Bool {\n"
         let declarations = occurrences(of: declaration, in: source)
         #expect(declarations == 1, "\(update)")
         let nested = block(declaration)
         let body = try #require(nested, "\(update)")
-        for condition in [
-            "resourceValues.isSymbolicLink == true",
-            "guard let attrs = try? fm.attributesOfItem(atPath: path) else {",
-            "let currentUID = getuid()",
-            "guard ownerUID == 0 || ownerUID == currentUID else {",
-            "if posix & 0o022 != 0 {",
-        ] {
-            #expect(body.contains(condition), "\(update): \(condition)")
-        }
-        let refusals = occurrences(of: "return false", in: body)
-        let acceptances = occurrences(of: "return true", in: body)
-        #expect(refusals == 4, "\(update)")
-        #expect(acceptances == 1, "\(update)")
+        #expect(code(body) == Self.bootNestedGateBody, "\(update)")
     }
+
+    /// The code DaemonSetup.initialize() runs when
+    /// isSecureDirectory(userOverridesDir) accepts user_rules, without
+    /// whole-line comments.
+    private static let bootGatedBlock = #"""
+                    do {
+                        let userCount = try await ruleEngine.loadRules(from: userOverridesURL, requireOwnerUID: geteuid())
+                        if userCount > 0 {
+                            logger.info("Loaded \(userCount) user rule override(s) from \(userOverridesDir)")
+                            print("Loaded \(userCount) user rule override(s)")
+                        }
+                    } catch {
+                        logger.warning("user_rules overlay skipped: \(error.localizedDescription)")
+                    }
+        """#
+
+    /// The body of the isSecureDirectory(_:) nested in
+    /// DaemonSetup.initialize(), without whole-line comments.
+    private static let bootNestedGateBody = #"""
+                    let url = URL(fileURLWithPath: path)
+                    if let resourceValues = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+                       resourceValues.isSymbolicLink == true {
+                        logger.warning("Rules directory \(path) is a symlink. Refusing to load rules to prevent symlink injection attacks.")
+                        return false
+                    }
+
+                    guard let attrs = try? fm.attributesOfItem(atPath: path) else {
+                        return false
+                    }
+                    let ownerUID = (attrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+                    let currentUID = getuid()
+                    guard ownerUID == 0 || ownerUID == currentUID else {
+                        logger.warning("Rules directory \(path) is owned by uid \(ownerUID), expected 0 or \(currentUID). Skipping.")
+                        return false
+                    }
+                    if let posix = (attrs[.posixPermissions] as? NSNumber)?.intValue {
+                        if posix & 0o022 != 0 {
+                            logger.warning("Rules directory \(path) is group/world-writable (mode \(String(posix, radix: 8))). Refusing to load rules to prevent non-root rule tampering.")
+                            return false
+                        }
+                    }
+                    return true
+        """#
 }
