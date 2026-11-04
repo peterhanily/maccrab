@@ -45,9 +45,11 @@ func handleListRules(_ args: [String: Any]) -> Any {
 /// the bundled rule. Of that rule it shows the description, status and
 /// logsource, not the matching logic; a closing line points to
 /// `maccrabctl why <alert id>`, which prints the rule's predicates and how they
-/// combine on this Mac (long value lists are shortened). The rule definition is
-/// shown only when the rule JSON is readable; when it is not, this says so
-/// rather than implying the alert had no rule behind it.
+/// combine on this Mac (long value lists are shortened). When user_rules has
+/// files this process cannot read, a note says the engine, which runs as root
+/// when installed, may apply one of them instead. The rule definition is shown
+/// only when the rule JSON is readable; when it is not, this says so rather
+/// than implying the alert had no rule behind it.
 func handleExplainAlert(_ args: [String: Any]) async -> Any {
     guard let alertId = args["alert_id"] as? String, !alertId.isEmpty else {
         return toolError("'alert_id' is required (get it from get_alerts).")
@@ -93,7 +95,8 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
         }
         lines += explainRuleDefinitionLines(
             ruleJSON, alertID: alert.id,
-            duplicateUserRules: CompiledRuleFileIndex.shared.hasDuplicateUserRules(id: alert.ruleId, in: compiledDir))
+            duplicateUserRules: CompiledRuleFileIndex.shared.hasDuplicateUserRules(id: alert.ruleId, in: compiledDir),
+            unreadableUserRules: CompiledRuleFileIndex.shared.hasUnreadableUserRules(id: alert.ruleId, in: compiledDir))
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
         return toolError("Error reading alerts: \(error.localizedDescription)")
@@ -106,10 +109,13 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
 /// combine on this Mac (long value lists are shortened); this server's
 /// responses pass through the privacy sanitizer, which rewrites paths, host
 /// names and addresses in rule values.
-func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, duplicateUserRules: Bool) -> [String] {
+func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, duplicateUserRules: Bool, unreadableUserRules: Bool) -> [String] {
     var lines = ["Rule definition:"]
     if duplicateUserRules {
         lines.append("  note: several user rules have this id. The engine applies one of them, in an order MacCrab does not define; this is the first by file name.")
+    }
+    if unreadableUserRules {
+        lines.append("  note: user_rules has files this process cannot read. The engine runs as root when installed, so it may apply one of them for this id instead of the rule shown; to check, run `sudo maccrabctl why \(alertID)` on this Mac.")
     }
     if let desc = rule["description"] as? String { lines.append("  description: \(desc)") }
     if let status = rule["status"] as? String { lines.append("  status: \(status)") }
@@ -248,15 +254,17 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     /// The rule directories as they were at the last build. A compile adds,
     /// removes or renames files, which moves a directory's mtime. A chmod or
     /// chown of user_rules, which decides whether the engine trusts the
-    /// overlay, leaves its mtime alone, so its ctime, mode and owner count too.
-    /// A rule file edited in place moves none of these; its FileStamp does.
+    /// overlay and whether this process can list it, leaves its mtime alone,
+    /// so its ctime, mode and owner count too. A rule file edited in place
+    /// moves none of these; its FileStamp does.
     private struct Stamp: Equatable {
         let bundled: [Time?]
         let user: UserRulesState?
     }
 
     /// lstat metadata of one rule file. An edit in place moves the file's mtime
-    /// and ctime but not its directory's; a replacement changes its inode.
+    /// and ctime but not its directory's; a replacement changes its inode. A
+    /// chmod, which decides whether this process can open it, moves its ctime.
     private struct FileStamp: Equatable {
         let path: String
         let inode: UInt64
@@ -298,6 +306,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     private var files: [FileStamp] = []
     private var paths: [String: String] = [:]
     private var duplicateUserRuleIDs: Set<String> = []
+    private var unreadableUserRules = false
     private var builds = 0
 
     /// Index builds so far. Tests use it to show that a miss opens no rule file.
@@ -323,7 +332,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
             if path.hasPrefix(userDir + "/") {
                 guard UserRuleOverlayTrust.trustsDirectory(atPath: userDir, engineUID: engineUID),
                       UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else { return nil }
-                json = Self.loadUserRule(path)
+                json = Self.loadUserRule(path).rule
             } else {
                 json = Self.load(path)
             }
@@ -355,6 +364,16 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         return directory == compiledDir && duplicateUserRuleIDs.contains(id)
     }
 
+    /// Whether the engine may apply, for `id`, a user rule this process cannot
+    /// read: at the last build, user_rules could not be listed or held a file
+    /// the engine's uid owns that this process may not open, and `id` is not
+    /// a sequence or graph rule's, which user rules do not replace.
+    func hasUnreadableUserRules(id: String, in compiledDir: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard directory == compiledDir, unreadableUserRules, let path = paths[id] else { return false }
+        return !path.hasPrefix(compiledDir + "/sequences/") && !path.hasPrefix(compiledDir + "/graph/")
+    }
+
     private func cachedPath(id: String, in compiledDir: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         guard directory == compiledDir else { return nil }
@@ -377,7 +396,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         let currentFiles = Self.fileStamps(compiledDir, engineUID: engineUID)
         var next: [String: String] = [:]
         for dir in Self.bundledDirectories(compiledDir) {
-            for path in Self.ruleFiles(in: dir) {
+            for path in Self.ruleFiles(in: dir) ?? [] {
                 if let id = Self.load(path)?["id"] as? String, next[id] == nil {
                     next[id] = path
                 }
@@ -390,11 +409,19 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         // showing the sequence or graph definition.
         let userDir = Self.userRulesDirectory(compiledDir)
         var duplicated: Set<String> = []
+        var unreadable = false
         if UserRuleOverlayTrust.trustsDirectory(atPath: userDir, engineUID: engineUID) {
             let otherEngines = [compiledDir + "/sequences/", compiledDir + "/graph/"]
             var overridden: Set<String> = []
-            for path in Self.ruleFiles(in: userDir) where UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) {
-                guard let id = Self.loadUserRule(path)?["id"] as? String else { continue }
+            // A folder this process cannot list, or a file the engine's uid
+            // owns that it may not open, is not one the engine refuses: an
+            // engine running as root reads them and may load a rule from one.
+            let userFiles = Self.ruleFiles(in: userDir)
+            if userFiles == nil { unreadable = true }
+            for path in userFiles ?? [] where UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) {
+                let (rule, inaccessible) = Self.loadUserRule(path)
+                if inaccessible { unreadable = true }
+                guard let id = rule?["id"] as? String else { continue }
                 // The engine loads each of these and keeps the last it enumerates,
                 // an order it does not define: show the first by name, note the rest.
                 if overridden.contains(id) { duplicated.insert(id); continue }
@@ -409,6 +436,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         files = currentFiles
         paths = next
         duplicateUserRuleIDs = duplicated
+        unreadableUserRules = unreadable
         builds += 1
         lock.unlock()
     }
@@ -418,10 +446,10 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     /// the files .skipsHiddenFiles treats as hidden, a leading dot or the
     /// UF_HIDDEN flag. The paths are built from `dir`, because the listed URLs
     /// resolve /tmp and /var to /private and a user rule is recognised by its
-    /// `dir` prefix.
-    private static func ruleFiles(in dir: String) -> [String] {
-        let listed: [URL] = (try? FileManager.default.contentsOfDirectory(
-            at: URL(fileURLWithPath: dir), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+    /// `dir` prefix. nil when the directory cannot be listed.
+    private static func ruleFiles(in dir: String) -> [String]? {
+        guard let listed: [URL] = try? FileManager.default.contentsOfDirectory(
+            at: URL(fileURLWithPath: dir), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return nil }
         let jsonFiles: [URL] = listed.filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
         return jsonFiles.map { dir + "/" + $0.lastPathComponent }.sorted()
     }
@@ -447,7 +475,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         var directories = bundledDirectories(compiledDir)
         let userDir = userRulesDirectory(compiledDir)
         if UserRuleOverlayTrust.trustsDirectory(atPath: userDir, engineUID: engineUID) { directories.append(userDir) }
-        return directories.flatMap { ruleFiles(in: $0) }.map { path in
+        return directories.flatMap { ruleFiles(in: $0) ?? [] }.map { path in
             var st = stat()
             guard lstat(path, &st) == 0 else {
                 return FileStamp(path: path, inode: 0, size: -1, modified: Time(timespec()), changed: Time(timespec()))
@@ -466,9 +494,13 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
 
     /// A user rule only if the engine would load it: RuleEngine.decodeLoadableRule,
     /// the decode and condition-tree validation loadRules applies.
-    private static func loadUserRule(_ path: String) -> [String: Any]? {
-        guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: RuleEngine.maximumRuleFileBytes),
-              (try? RuleEngine.decodeLoadableRule(data)) != nil else { return nil }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    /// `inaccessible` is whether this process was refused permission to open it.
+    private static func loadUserRule(_ path: String) -> (rule: [String: Any]?, inaccessible: Bool) {
+        let outcome = BoundedRegularFileReader.readOutcome(at: path, maximumBytes: RuleEngine.maximumRuleFileBytes)
+        guard case .success(let snapshot) = outcome,
+              (try? RuleEngine.decodeLoadableRule(snapshot.data)) != nil else {
+            return (nil, outcome == .rejected(.inaccessible))
+        }
+        return (try? JSONSerialization.jsonObject(with: snapshot.data) as? [String: Any], false)
     }
 }

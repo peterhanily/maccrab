@@ -95,7 +95,7 @@ struct WhyCommandTests {
         try FileManager.default.createSymbolicLink(atPath: users.appendingPathComponent("linked.json").path,
                                                    withDestinationPath: outside)
         #expect(lookup(singleID) == single)
-        #expect(MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path).isEmpty)
+        #expect(MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path).paths.isEmpty)
 
         // A loadable user rule with a sequence or graph rule's id does not replace it.
         _ = try write(try variant { $0["id"] = "e1f2a3b4-0023-4000-b000-000000000023" }, users, "seq.json")
@@ -107,7 +107,7 @@ struct WhyCommandTests {
         let first = try write(Self.flatRule, users, "a-override.json")
         let second = try write(Self.flatRule, users, "b-override.json")
         #expect(lookup(singleID) == first)
-        #expect(MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path) == [first, second])
+        #expect(MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path).paths == [first, second])
     }
 
     @Test("user rules count only from a folder the daemon trusts, and the duplicate count holds only files it would load")
@@ -129,7 +129,7 @@ struct WhyCommandTests {
         let dirs = MacCrabCtl.whySearchDirs(supportDirs: [dir.path])
         func lookup() -> String? { MacCrabCtl.findRuleFile(forRuleID: singleID, in: dirs) }
         // What the duplicate note counts.
-        func claims() -> [String] { MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path) }
+        func claims() -> [String] { MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path).paths }
 
         let first = try write(Self.flatRule, users, "a.json")
         let second = try write(Self.flatRule, users, "b.json")
@@ -151,9 +151,9 @@ struct WhyCommandTests {
         // engine running as root, as on an installed Mac, loads neither file.
         let owner = getuid()
         #expect(MacCrabCtl.loadableUserRuleFiles(
-            forRuleID: singleID, inTrustedUserRules: users.path, engineUID: owner) == [first, second])
+            forRuleID: singleID, inTrustedUserRules: users.path, engineUID: owner).paths == [first, second])
         #expect(MacCrabCtl.loadableUserRuleFiles(
-            forRuleID: singleID, inTrustedUserRules: users.path, engineUID: owner == 0 ? 1 : 0).isEmpty)
+            forRuleID: singleID, inTrustedUserRules: users.path, engineUID: owner == 0 ? 1 : 0).paths.isEmpty)
 
         // The legacy root:admin 0775 folder, or a world-writable one: the
         // daemon refuses the whole overlay and applies the bundled rule.
@@ -164,6 +164,101 @@ struct WhyCommandTests {
         }
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: users.path)
         #expect(lookup() == first)
+    }
+
+    @Test("user rules this user cannot read are reported, not taken for rules the daemon refuses",
+          .enabled(if: geteuid() != 0, "root reads a mode-000 file and lists a mode-300 folder"))
+    func unreadableUserRules() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-why-\(UUID().uuidString)", isDirectory: true)
+        let rules = dir.appendingPathComponent("compiled_rules")
+        let users = dir.appendingPathComponent("user_rules")
+        let override = users.appendingPathComponent("a.json").path
+        defer {
+            chmod(users.path, 0o755)
+            chmod(override, 0o644)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        func write(_ json: String, _ folder: URL, _ name: String) throws -> String {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+            let path = folder.appendingPathComponent(name).path
+            try json.write(toFile: path, atomically: true, encoding: .utf8)
+            return path
+        }
+        let single = try write(Self.flatRule, rules, "ssh_key_access.json")
+        _ = try write(Self.flatRule, users, "a.json")
+        let singleID = "d1a2b3c4-0032-4000-a000-000000000032"
+        let dirs = MacCrabCtl.whySearchDirs(supportDirs: [dir.path])
+        func lookup() -> String? { MacCrabCtl.findRuleFile(forRuleID: singleID, in: dirs) }
+        func scan() -> (paths: [String], unreadable: Bool) {
+            MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path)
+        }
+        #expect(lookup() == override)
+        #expect(scan().paths == [override])
+        #expect(!scan().unreadable)
+
+        // A file the daemon's uid owns that this user may not open. A daemon
+        // running as root reads it, so the bundled rule shown may not be the
+        // one it applies.
+        #expect(chmod(override, 0o000) == 0)
+        #expect(lookup() == single)
+        #expect(scan().paths.isEmpty)
+        #expect(scan().unreadable)
+        // The same file for a daemon uid that does not own it is one the
+        // daemon refuses, so nothing is unreadable.
+        let otherUID: uid_t = getuid() == 0 ? 1 : 0
+        #expect(!MacCrabCtl.loadableUserRuleFiles(
+            forRuleID: singleID, inTrustedUserRules: users.path, engineUID: otherUID).unreadable)
+        #expect(chmod(override, 0o644) == 0)
+        #expect(lookup() == override)
+        #expect(!scan().unreadable)
+
+        // A folder the daemon trusts, owned by its uid and writable by no one
+        // else, that this user cannot list.
+        #expect(chmod(users.path, 0o300) == 0)
+        #expect(UserRuleOverlayTrust.trustsDirectory(atPath: users.path, engineUID: getuid()))
+        #expect(lookup() == single)
+        #expect(scan().paths.isEmpty)
+        #expect(scan().unreadable)
+        #expect(chmod(users.path, 0o755) == 0)
+        #expect(lookup() == override)
+        #expect(!scan().unreadable)
+    }
+
+    @Test("the user-rule notes say the daemon applies the rule shown only for one claim with nothing unreadable")
+    func userRuleNotes() {
+        let alertID = "00000000-0000-0000-0000-00000000003e"
+        func notes(_ claimCount: Int, unreadable: Bool = false) -> [String] {
+            MacCrabCtl.whyUserRuleNoteLines(claimCount: claimCount, unreadable: unreadable, alertID: alertID)
+        }
+        // A bundled rule with nothing unreadable has no note.
+        #expect(notes(0).isEmpty)
+        // One claim: the daemon applies the rule shown.
+        #expect(notes(1) == [
+            "Note: this is a user rule. It passes the daemon's checks on user rules (folder and",
+            "file ownership, folder permissions, file type and content), so the daemon applies it in",
+            "place of any bundled rule with this id; a change applies at its next rule reload.",
+        ])
+        // Two claims: the daemon applies one of them, which one is not defined.
+        let hedged = [
+            "Note: this is a user rule. It passes the daemon's checks on user rules (folder and",
+            "file ownership, folder permissions, file type and content), so the daemon applies it or",
+            "another user rule with this id (see below) in place of any bundled rule with this id.",
+        ]
+        #expect(notes(2) == hedged + [
+            "Note: 2 user rules have this id. The daemon applies one of them, in an order",
+            "MacCrab does not define; this is the first by file name.",
+        ])
+        // Files this user cannot read: a daemon running as root may apply one
+        // of them, so the rule shown is never stated as the one applied.
+        let unreadable = [
+            "Note: user_rules has files this user cannot read. The daemon runs as root when installed,",
+            "so it may apply one of them for this id instead of the rule shown. To check, run",
+            "`sudo maccrabctl why \(alertID)`.",
+        ]
+        #expect(notes(0, unreadable: true) == unreadable)
+        #expect(notes(1, unreadable: true) == hedged + unreadable)
     }
 
     @Test("a sequence rule shows its window, correlation, ordering, trigger and every step")

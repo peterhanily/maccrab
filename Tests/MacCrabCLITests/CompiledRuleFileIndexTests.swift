@@ -311,7 +311,7 @@ struct CompiledRuleFileIndexTests {
         let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2c"
         let pointer = "  matching logic: run `maccrabctl why \(alertID)` on this Mac; it prints the rule's predicates and how they combine (long value lists are shortened)."
 
-        let lines = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: false)
+        let lines = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: false, unreadableUserRules: false)
         #expect(Array(lines.prefix(3)) == ["Rule definition:", "  description: rule index fixture", "  status: stable"])
         #expect(lines.last == pointer)
         // No predicate value and no logic key reaches the text. The pointer
@@ -326,9 +326,18 @@ struct CompiledRuleFileIndexTests {
         // The pointer survives the sanitizer every explain_alert response passes through.
         #expect(LLMSanitizer.sanitize(text).hasSuffix(pointer))
 
-        let noted = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: true)
+        let noted = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: true, unreadableUserRules: false)
         #expect(noted.count == lines.count + 1)
         #expect(noted[1].hasPrefix("  note: several user rules have this id."))
+
+        // User rules this process cannot read get one note, which survives the
+        // sanitizer too.
+        let unreadableNote = "  note: user_rules has files this process cannot read. The engine runs as root when "
+            + "installed, so it may apply one of them for this id instead of the rule shown; to check, run "
+            + "`sudo maccrabctl why \(alertID)` on this Mac."
+        let unreadable = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: false, unreadableUserRules: true)
+        #expect(unreadable == Array(lines.prefix(1)) + [unreadableNote] + Array(lines.dropFirst()))
+        #expect(LLMSanitizer.sanitize(unreadable.joined(separator: "\n")).contains(unreadableNote))
     }
 
     @Test("an id resolves single-event, then sequence, then graph; user rules override single-event ids only")
@@ -383,7 +392,7 @@ struct CompiledRuleFileIndexTests {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/maccrab-mcp/ReadParityTools.swift"), encoding: .utf8)) ?? ""
         #expect(source.contains(
-            "for path in Self.ruleFiles(in: userDir) where UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) {"))
+            "for path in userFiles ?? [] where UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) {"))
         #expect(source.contains("UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else { return nil }"))
     }
 
@@ -434,5 +443,45 @@ struct CompiledRuleFileIndexTests {
         #expect(chflags(user + "/b.json", UInt32(UF_HIDDEN)) == 0)
         #expect(index.rule(id: "rule.x", in: compiled)?["title"] as? String == "bundled")
         #expect(try await RuleEngine().loadRules(from: URL(fileURLWithPath: user), requireOwnerUID: getuid()) == 0)
+    }
+
+    @Test("user rules this process cannot read are noted, not taken for rules the engine refuses",
+          .enabled(if: geteuid() != 0, "root reads a mode-000 file and lists a mode-300 folder"))
+    func unreadableUserRulesAreNoted() throws {
+        let (root, compiled, user) = try supportDirectory()
+        defer {
+            chmod(user, 0o755)
+            chmod(user + "/x.json", 0o644)
+            try? FileManager.default.removeItem(atPath: root)
+        }
+        try FileManager.default.createDirectory(atPath: compiled + "/sequences", withIntermediateDirectories: true)
+        try write("rule.x", to: compiled + "/x.json", title: "bundled")
+        try write("seq.s", to: compiled + "/sequences/s.json", title: "sequence")
+        try write("rule.x", to: user + "/x.json", title: "user override")
+        let index = CompiledRuleFileIndex()
+        func shown() -> String? { index.rule(id: "rule.x", in: compiled)?["title"] as? String }
+        #expect(shown() == "user override")
+        #expect(!index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+
+        // A file the engine's uid owns that this process may not open. An
+        // engine running as root reads it, so the bundled rule shown may not be
+        // the one it applies.
+        #expect(chmod(user + "/x.json", 0o000) == 0)
+        #expect(shown() == "bundled")
+        #expect(index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+        // User rules do not replace a sequence rule, so its id gets no note.
+        #expect(index.rule(id: "seq.s", in: compiled)?["title"] as? String == "sequence")
+        #expect(!index.hasUnreadableUserRules(id: "seq.s", in: compiled))
+        #expect(chmod(user + "/x.json", 0o644) == 0)
+        #expect(shown() == "user override")
+        #expect(!index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+
+        // A folder the engine trusts that this process cannot list.
+        #expect(chmod(user, 0o300) == 0)
+        #expect(shown() == "bundled")
+        #expect(index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+        #expect(chmod(user, 0o755) == 0)
+        #expect(shown() == "user override")
+        #expect(!index.hasUnreadableUserRules(id: "rule.x", in: compiled))
     }
 }

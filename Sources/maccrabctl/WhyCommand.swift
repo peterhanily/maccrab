@@ -103,6 +103,14 @@ extension MacCrabCtl {
         }
         let ruleDir = (rulePath as NSString).deletingLastPathComponent
         let isUserRule = ruleDir.hasSuffix("/user_rules")
+        // The user rules that could stand in for this rule, read before the
+        // notes about them are printed: those of its support dir, for a user
+        // rule or a bundled single-event rule. A user rule does not replace a
+        // sequence or graph rule.
+        let userRules = isUserRule || ruleDir.hasSuffix("/compiled_rules")
+            ? loadableUserRuleFiles(forRuleID: alert.ruleId,
+                                    inUserRules: (ruleDir as NSString).deletingLastPathComponent + "/user_rules")
+            : (paths: [], unreadable: false)
         // A user rule is read again the way the daemon reads it: without
         // following a link, and within its rule-file size limit.
         let ruleData = isUserRule
@@ -120,17 +128,11 @@ extension MacCrabCtl {
         for line in whyRuleLines(ruleJSON, rulePath: rulePath) {
             print(line)
         }
-        // findRuleFile returns a user rule only when the daemon would load it
-        // (loadableUserRuleFiles), so the note states that rather than hedging.
-        if isUserRule {
-            print("Note: this is a user rule. It passes the daemon's checks on user rules (folder and")
-            print("file ownership, folder permissions, file type and content), so the daemon applies it in")
-            print("place of any bundled rule with this id; a change applies at its next rule reload.")
-            let claims = loadableUserRuleFiles(forRuleID: alert.ruleId, inUserRules: ruleDir)
-            if claims.count > 1 {
-                print("Note: \(claims.count) user rules have this id. The daemon applies one of them, in an order")
-                print("MacCrab does not define; this is the first by file name.")
-            }
+        // findRuleFile shows the first of these user rules when there is one,
+        // so a bundled rule is shown only when there is none.
+        for line in whyUserRuleNoteLines(claimCount: isUserRule ? userRules.paths.count : 0,
+                                         unreadable: userRules.unreadable, alertID: alert.id) {
+            print(line)
         }
 
         // 6. Next steps.
@@ -163,7 +165,7 @@ extension MacCrabCtl {
         for dir in directories {
             if dir.hasSuffix("/user_rules") {
                 let compiled = (dir as NSString).deletingLastPathComponent + "/compiled_rules"
-                guard let path = loadableUserRuleFiles(forRuleID: ruleID, inUserRules: dir).first,
+                guard let path = loadableUserRuleFiles(forRuleID: ruleID, inUserRules: dir).paths.first,
                       findRuleFile(forRuleID: ruleID, in: [compiled]) != nil
                         || findRuleFile(forRuleID: ruleID, in: [compiled + "/sequences", compiled + "/graph"]) == nil
                 else { continue }
@@ -185,10 +187,11 @@ extension MacCrabCtl {
     /// `ruleID`, by file name: none unless the folder passes the daemon's
     /// overlay gate (UserRuleOverlayTrust), then the files that pass its
     /// per-file checks. With more than one, the daemon applies one of them,
-    /// in an order MacCrab does not define.
-    static func loadableUserRuleFiles(forRuleID ruleID: String, inUserRules dir: String) -> [String] {
+    /// in an order MacCrab does not define. `unreadable` is set when this user
+    /// cannot read all of a trusted folder, as the next function describes.
+    static func loadableUserRuleFiles(forRuleID ruleID: String, inUserRules dir: String) -> (paths: [String], unreadable: Bool) {
         let engineUID = UserRuleOverlayTrust.engineUID(forSupportDirectory: (dir as NSString).deletingLastPathComponent)
-        guard UserRuleOverlayTrust.trustsDirectory(atPath: dir, engineUID: engineUID) else { return [] }
+        guard UserRuleOverlayTrust.trustsDirectory(atPath: dir, engineUID: engineUID) else { return ([], false) }
         return loadableUserRuleFiles(forRuleID: ruleID, inTrustedUserRules: dir, engineUID: engineUID)
     }
 
@@ -197,23 +200,74 @@ extension MacCrabCtl {
     /// the manifest, and not hidden by a leading dot or the UF_HIDDEN flag),
     /// owned by `engineUID`, read without following a link and within the
     /// engine's rule-file size limit, and accepted by RuleEngine.decodeLoadableRule.
-    static func loadableUserRuleFiles(forRuleID ruleID: String, inTrustedUserRules dir: String, engineUID: uid_t) -> [String] {
+    /// `unreadable` is set when this user cannot list the folder or open one
+    /// of the files `engineUID` owns. Those are not files the daemon refuses:
+    /// a daemon running as root reads them and may load one for `ruleID`.
+    static func loadableUserRuleFiles(forRuleID ruleID: String, inTrustedUserRules dir: String, engineUID: uid_t) -> (paths: [String], unreadable: Bool) {
         // The paths are built from `dir`: the listed URLs resolve /tmp and
         // /var to /private.
-        let listed: [URL] = (try? FileManager.default.contentsOfDirectory(
-            at: URL(fileURLWithPath: dir), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        let listed: [URL]
+        do {
+            listed = try FileManager.default.contentsOfDirectory(
+                at: URL(fileURLWithPath: dir), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        } catch {
+            return ([], true)
+        }
         let jsonFiles: [URL] = listed.filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
         let names: [String] = jsonFiles.map(\.lastPathComponent).sorted()
         var paths: [String] = []
+        var unreadable = false
         for name in names {
             let path = dir + "/" + name
-            guard UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID),
-                  let data = BoundedRegularFileReader.read(at: path, maximumBytes: RuleEngine.maximumRuleFileBytes),
-                  let rule = try? RuleEngine.decodeLoadableRule(data),
+            guard UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else { continue }
+            let outcome = BoundedRegularFileReader.readOutcome(at: path, maximumBytes: RuleEngine.maximumRuleFileBytes)
+            if outcome == .rejected(.inaccessible) { unreadable = true }
+            guard case .success(let snapshot) = outcome,
+                  let rule = try? RuleEngine.decodeLoadableRule(snapshot.data),
                   rule.id == ruleID else { continue }
             paths.append(path)
         }
-        return paths
+        return (paths, unreadable)
+    }
+
+    /// The notes `why` prints after a user rule or a bundled single-event
+    /// rule. `claimCount` is how many user rules the daemon would load for the
+    /// id, the first of which is the rule shown, and 0 when the bundled rule
+    /// is shown; `unreadable` is whether this user could not read all of
+    /// user_rules. The daemon loads every claim but applies only the last it
+    /// lists, in an order MacCrab does not define, and a daemon running as
+    /// root also reads the files this user cannot. So the note says the
+    /// daemon applies the rule shown only for exactly one claim with nothing
+    /// unreadable.
+    static func whyUserRuleNoteLines(claimCount: Int, unreadable: Bool, alertID: String) -> [String] {
+        var lines: [String] = []
+        if claimCount == 1 && !unreadable {
+            lines += [
+                "Note: this is a user rule. It passes the daemon's checks on user rules (folder and",
+                "file ownership, folder permissions, file type and content), so the daemon applies it in",
+                "place of any bundled rule with this id; a change applies at its next rule reload.",
+            ]
+        } else if claimCount > 0 {
+            lines += [
+                "Note: this is a user rule. It passes the daemon's checks on user rules (folder and",
+                "file ownership, folder permissions, file type and content), so the daemon applies it or",
+                "another user rule with this id (see below) in place of any bundled rule with this id.",
+            ]
+        }
+        if claimCount > 1 {
+            lines += [
+                "Note: \(claimCount) user rules have this id. The daemon applies one of them, in an order",
+                "MacCrab does not define; this is the first by file name.",
+            ]
+        }
+        if unreadable {
+            lines += [
+                "Note: user_rules has files this user cannot read. The daemon runs as root when installed,",
+                "so it may apply one of them for this id instead of the rule shown. To check, run",
+                "`sudo maccrabctl why \(alertID)`.",
+            ]
+        }
+        return lines
     }
 
     /// The compiled-rule part of `why`, one string per printed line: the
