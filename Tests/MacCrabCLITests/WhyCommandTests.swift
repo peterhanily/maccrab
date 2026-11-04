@@ -166,6 +166,55 @@ struct WhyCommandTests {
         #expect(lookup() == first)
     }
 
+    @Test("a readable user rule the daemon refuses, with an id no bundled rule has, is not found, and the not-found lines have no note")
+    func refusedUserRuleIsNotFound() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-why-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let rules = dir.appendingPathComponent("compiled_rules")
+        let users = dir.appendingPathComponent("user_rules")
+        func write(_ json: String, _ folder: URL, _ name: String) throws -> String {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+            let path = folder.appendingPathComponent(name).path
+            try json.write(toFile: path, atomically: true, encoding: .utf8)
+            return path
+        }
+        _ = try write(Self.flatRule, rules, "ssh_key_access.json")
+        let customID = "d1a2b3c4-0032-4000-a000-0000000000fd"
+        let custom = Self.flatRule.replacingOccurrences(of: "d1a2b3c4-0032-4000-a000-000000000032", with: customID)
+        let alertID = "00000000-0000-0000-0000-000000000040"
+        let dirs = MacCrabCtl.whySearchDirs(supportDirs: [dir.path])
+        func lookup() -> String? { MacCrabCtl.findRuleFile(forRuleID: customID, in: dirs) }
+        func notFound() -> [String] {
+            MacCrabCtl.whyNoRuleFileLines(forRuleID: customID, in: dirs, hasDescription: false, alertID: alertID)
+        }
+        let lines = [
+            "No rule file with the id \(customID) was found in compiled_rules or among the user rules the daemon would load.",
+            "Built-in detectors have no rule file.",
+        ]
+
+        // The custom rule with a tree that names predicate 99 of 4: this user
+        // can read it, and the daemon refuses its content.
+        var invalid = try #require(JSONSerialization.jsonObject(with: Data(custom.utf8)) as? [String: Any])
+        invalid["condition_tree"] = ["type": "predicate", "index": 99]
+        let path = try write(String(decoding: try JSONSerialization.data(withJSONObject: invalid), as: UTF8.self),
+                             users, "custom.json")
+        #expect(FileManager.default.isReadableFile(atPath: path))
+        #expect(lookup() == nil)
+        #expect(notFound() == lines)
+
+        // The rule without that tree is found, but not from a folder at 0775,
+        // the mode of the legacy root:admin user_rules: the daemon refuses a
+        // group-writable folder as a whole.
+        _ = try write(custom, users, "custom.json")
+        #expect(lookup() == path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o775], ofItemAtPath: users.path)
+        #expect(FileManager.default.isReadableFile(atPath: path))
+        #expect(lookup() == nil)
+        #expect(notFound() == lines)
+    }
+
     /// Runs /bin/chmod for the ACL changes chmod(2) cannot make.
     private func chmodACL(_ arguments: [String]) throws -> Int32 {
         let process = Process()
@@ -284,7 +333,7 @@ struct WhyCommandTests {
         #expect(chmod(users.path, 0o300) == 0)
         #expect(MacCrabCtl.findRuleFile(forRuleID: newID, in: dirs) == nil)
         #expect(notFound(newID) == [
-            "No rule file with the id \(newID) was found in user_rules or compiled_rules.",
+            "No rule file with the id \(newID) was found in compiled_rules or among the user rules the daemon would load.",
             "Built-in detectors have no rule file.",
             "Note: this user cannot read all of user_rules (the folder cannot be listed or inspected, or",
             "a file in it cannot be inspected or opened). The daemon runs as root when installed, so",
@@ -294,14 +343,14 @@ struct WhyCommandTests {
         #expect(chmod(users.path, 0o755) == 0)
         // With every file readable, an id no file has gets no note.
         #expect(notFound("unknown-id") == [
-            "No rule file with the id unknown-id was found in user_rules or compiled_rules.",
+            "No rule file with the id unknown-id was found in compiled_rules or among the user rules the daemon would load.",
             "Built-in detectors have no rule file.",
         ])
         // Nor does it in a support dir that has no user_rules.
         #expect(MacCrabCtl.whyNoRuleFileLines(
             forRuleID: "unknown-id", in: MacCrabCtl.whySearchDirs(supportDirs: [dir.appendingPathComponent("missing").path]),
             hasDescription: false, alertID: alertID) == [
-            "No rule file with the id unknown-id was found in user_rules or compiled_rules.",
+            "No rule file with the id unknown-id was found in compiled_rules or among the user rules the daemon would load.",
             "Built-in detectors have no rule file.",
         ])
     }

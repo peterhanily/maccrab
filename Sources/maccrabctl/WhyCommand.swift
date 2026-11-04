@@ -172,14 +172,16 @@ extension MacCrabCtl {
         return nil
     }
 
-    /// What `why` prints when no folder in `directories` has a rule file for
-    /// `ruleID`. When this user cannot read all of a user_rules folder among
-    /// them, a rule there may still be one the daemon loads for `ruleID`, so
-    /// a note says how to check.
+    /// What `why` prints when findRuleFile finds no rule file for `ruleID` in
+    /// `directories`: none in compiled_rules, and none among the user rules
+    /// the daemon would load, though user_rules may hold one it refuses. When
+    /// this user cannot read all of a user_rules folder among them, a rule
+    /// there may still be one the daemon loads for `ruleID`, so a note says
+    /// how to check.
     static func whyNoRuleFileLines(forRuleID ruleID: String, in directories: [String],
                                    hasDescription: Bool, alertID: String) -> [String] {
         var lines = [
-            "No rule file with the id \(ruleID) was found in user_rules or compiled_rules.",
+            "No rule file with the id \(ruleID) was found in compiled_rules or among the user rules the daemon would load.",
             hasDescription
                 ? "Built-in detectors have no rule file; for their alerts, the description printed above is what was captured."
                 : "Built-in detectors have no rule file.",
