@@ -341,7 +341,7 @@ struct CompiledRuleFileIndexTests {
             + "predicates and how they combine, a sequence rule's steps, or a graph rule's nodes and edges (long value "
             + "lists are shortened)."
 
-        let lines = explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: false, duplicateUserRules: false, unreadableUserRules: false)
+        let lines = explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: false, duplicateUserRules: false, disabledDuplicateUserRule: false, unreadableUserRules: false)
         #expect(lines == [
             "Rule definition:", "  description: rule index fixture", "  status: stable",
             "  logsource: category=file_event, product=macos", pointer,
@@ -358,7 +358,7 @@ struct CompiledRuleFileIndexTests {
         // The pointer survives the sanitizer every explain_alert response passes through.
         #expect(LLMSanitizer.sanitize(text).hasSuffix(pointer))
 
-        let noted = explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: false, duplicateUserRules: true, unreadableUserRules: false)
+        let noted = explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: false, duplicateUserRules: true, disabledDuplicateUserRule: false, unreadableUserRules: false)
         #expect(noted == Array(lines.prefix(1)) + [
             "  note: several user rules have this id. The engine applies one of them, in an order MacCrab does not "
                 + "define; this is the first by file name.",
@@ -367,7 +367,7 @@ struct CompiledRuleFileIndexTests {
         // Part of user_rules this process cannot read gets one note, which
         // survives the sanitizer too.
         let unreadableNote = Self.unreadableNote(alertID)
-        let unreadable = explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: false, duplicateUserRules: false, unreadableUserRules: true)
+        let unreadable = explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: false, duplicateUserRules: false, disabledDuplicateUserRule: false, unreadableUserRules: true)
         #expect(unreadable == Array(lines.prefix(1)) + [unreadableNote] + Array(lines.dropFirst()))
         #expect(LLMSanitizer.sanitize(unreadable.joined(separator: "\n")).contains(unreadableNote))
 
@@ -376,7 +376,7 @@ struct CompiledRuleFileIndexTests {
         let bothNote = "  note: at least two user rules have this id. The engine applies one of them or one this "
             + "process cannot read, in an order MacCrab does not define; this is the first by file name of those "
             + "this process can read."
-        let both = explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: false, duplicateUserRules: true, unreadableUserRules: true)
+        let both = explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: false, duplicateUserRules: true, disabledDuplicateUserRule: false, unreadableUserRules: true)
         #expect(both == Array(lines.prefix(1)) + [bothNote, unreadableNote] + Array(lines.dropFirst()))
         #expect(LLMSanitizer.sanitize(both.joined(separator: "\n")).contains(bothNote))
 
@@ -384,10 +384,12 @@ struct CompiledRuleFileIndexTests {
         // raises no alerts for the id while it applies the rule, which a note
         // saying it may apply another makes a condition. A bundled rule's
         // "enabled": false is not shown.
-        func definitionLines(_ rule: [String: Any], isUserRule: Bool,
-                             duplicateUserRules: Bool = false, unreadableUserRules: Bool = false) -> [String] {
+        func definitionLines(_ rule: [String: Any], isUserRule: Bool, duplicateUserRules: Bool = false,
+                             disabledDuplicateUserRule: Bool = false, unreadableUserRules: Bool = false) -> [String] {
             explainRuleDefinitionLines(rule, alertID: alertID, isUserRule: isUserRule,
-                                       duplicateUserRules: duplicateUserRules, unreadableUserRules: unreadableUserRules)
+                                       duplicateUserRules: duplicateUserRules,
+                                       disabledDuplicateUserRule: disabledDuplicateUserRule,
+                                       unreadableUserRules: unreadableUserRules)
         }
         var disabled = rule
         disabled["enabled"] = false
@@ -401,6 +403,22 @@ struct CompiledRuleFileIndexTests {
         #expect(definitionLines(disabled, isUserRule: true, duplicateUserRules: true, unreadableUserRules: true)
             == Array(both.prefix(3)) + [Self.userSource, Self.disabledIfApplied] + fields)
         #expect(definitionLines(disabled, isUserRule: false) == lines)
+
+        // Another user rule with this id has "enabled": false. The engine may
+        // apply it, so a note after the duplicate note says so as a
+        // condition, whether or not the rule shown has it too and whether or
+        // not part of user_rules is unreadable.
+        #expect(definitionLines(rule, isUserRule: true, duplicateUserRules: true, disabledDuplicateUserRule: true)
+            == Array(noted.prefix(2)) + [Self.otherDisabledNote, Self.userSource] + fields)
+        #expect(definitionLines(disabled, isUserRule: true, duplicateUserRules: true, disabledDuplicateUserRule: true)
+            == Array(noted.prefix(2)) + [Self.otherDisabledNote, Self.userSource, Self.disabledIfApplied] + fields)
+        #expect(definitionLines(rule, isUserRule: true, duplicateUserRules: true, disabledDuplicateUserRule: true,
+                                unreadableUserRules: true)
+            == Array(both.prefix(2)) + [Self.otherDisabledNote, unreadableNote, Self.userSource] + fields)
+        #expect(definitionLines(disabled, isUserRule: true, duplicateUserRules: true, disabledDuplicateUserRule: true,
+                                unreadableUserRules: true)
+            == Array(both.prefix(2)) + [Self.otherDisabledNote, unreadableNote, Self.userSource, Self.disabledIfApplied]
+                + fields)
     }
 
     /// The lines explain_alert adds for a user rule, and for one with
@@ -415,7 +433,12 @@ struct CompiledRuleFileIndexTests {
     private static let duplicateNote = "  note: several user rules have this id. The engine applies one of them, "
         + "in an order MacCrab does not define; this is the first by file name."
 
-    @Test("explain_alert's rule section marks a user rule and says when it has \"enabled\": false, and shows neither for a bundled rule")
+    /// The note explain_alert adds after that one when a user rule with the
+    /// id other than the one shown has "enabled": false.
+    private static let otherDisabledNote = "  note: another user rule with this id has \"enabled\": false; if the "
+        + "engine applies that rule, it raises no alerts for this id."
+
+    @Test("explain_alert's rule section marks a user rule and says when it, or another user rule with its id, has \"enabled\": false, and shows neither for a bundled rule")
     func sectionMarksUserRules() throws {
         let (root, compiled, user) = try supportDirectory()
         defer {
@@ -437,8 +460,20 @@ struct CompiledRuleFileIndexTests {
         #expect(head("rule.y") == ["Rule definition:", Self.userSource, description])
         #expect(head("rule.x") == ["Rule definition:", Self.userSource, Self.disabledApplied, description])
         // A second override with this id: the engine applies one of them.
-        try disabledRuleData("rule.x").write(to: URL(fileURLWithPath: user + "/x2.json"))
+        // x.json, the one shown, has "enabled": false; x2.json does not.
+        try write("rule.x", to: user + "/x2.json")
         #expect(head("rule.x") == ["Rule definition:", Self.duplicateNote, Self.userSource, Self.disabledIfApplied, description])
+        #expect(!index.hasDisabledDuplicateUserRule(id: "rule.x", in: compiled))
+        // Both have it, then x2.json only, then neither.
+        try disabledRuleData("rule.x").write(to: URL(fileURLWithPath: user + "/x2.json"))
+        #expect(head("rule.x") == ["Rule definition:", Self.duplicateNote, Self.otherDisabledNote, Self.userSource,
+                                   Self.disabledIfApplied, description])
+        #expect(index.hasDisabledDuplicateUserRule(id: "rule.x", in: compiled))
+        try write("rule.x", to: user + "/x.json")
+        #expect(head("rule.x") == ["Rule definition:", Self.duplicateNote, Self.otherDisabledNote, Self.userSource, description])
+        try write("rule.x", to: user + "/x2.json")
+        #expect(head("rule.x") == ["Rule definition:", Self.duplicateNote, Self.userSource, description])
+        #expect(!index.hasDisabledDuplicateUserRule(id: "rule.x", in: compiled))
         // A user_rules the engine does not trust: the bundled rule, whose
         // "enabled": false is not shown.
         #expect(chmod(user, 0o775) == 0)

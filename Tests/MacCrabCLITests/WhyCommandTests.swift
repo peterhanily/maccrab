@@ -254,7 +254,7 @@ struct WhyCommandTests {
         let alertID = "00000000-0000-0000-0000-00000000003f"
         let dirs = MacCrabCtl.whySearchDirs(supportDirs: [dir.path])
         func lookup() -> String? { MacCrabCtl.findRuleFile(forRuleID: singleID, in: dirs) }
-        func scan() -> (paths: [String], unreadable: Bool) {
+        func scan() -> (paths: [String], disabled: [String], unreadable: Bool) {
             MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: users.path)
         }
         #expect(lookup() == override)
@@ -358,9 +358,10 @@ struct WhyCommandTests {
     @Test("the user-rule notes say the daemon applies the rule shown only for one claim with nothing unreadable, and count claims only as a lower bound when something is unreadable")
     func userRuleNotes() {
         let alertID = "00000000-0000-0000-0000-00000000003e"
-        func notes(_ claimCount: Int, unreadable: Bool = false, disabled: Bool = false) -> [String] {
+        func notes(_ claimCount: Int, unreadable: Bool = false, disabled: Bool = false,
+                   otherDisabled: Bool = false) -> [String] {
             MacCrabCtl.whyUserRuleNoteLines(claimCount: claimCount, unreadable: unreadable, disabled: disabled,
-                                            alertID: alertID)
+                                            otherClaimDisabled: otherDisabled, alertID: alertID)
         }
         // A bundled rule with nothing unreadable has no note.
         #expect(notes(0).isEmpty)
@@ -394,6 +395,19 @@ struct WhyCommandTests {
         // When the bundled rule is shown, no note mentions "enabled".
         #expect(notes(0, disabled: true).isEmpty)
         #expect(notes(0, unreadable: true, disabled: true) == unreadable)
+
+        // Another claim has "enabled": false. The daemon may apply it, so a
+        // sentence after the claim count says so as a condition, whether or
+        // not the rule shown has it too and whether or not something is
+        // unreadable.
+        #expect(notes(2, otherDisabled: true) == Self.hedgedNote + Self.duplicateNote + Self.otherDisabledSentence)
+        #expect(notes(2, disabled: true, otherDisabled: true)
+            == Self.hedgedNote + Self.disabledSentence + Self.duplicateNote + Self.otherDisabledSentence)
+        #expect(notes(2, unreadable: true, otherDisabled: true)
+            == Array(notes(2, unreadable: true).dropLast(unreadable.count)) + Self.otherDisabledSentence + unreadable)
+        #expect(notes(2, unreadable: true, disabled: true, otherDisabled: true)
+            == Array(notes(2, unreadable: true, disabled: true).dropLast(unreadable.count))
+                + Self.otherDisabledSentence + unreadable)
     }
 
     @Test("the notes after a found rule come from the user rules of its support dir")
@@ -438,14 +452,23 @@ struct WhyCommandTests {
         #expect(shown() == first)
         #expect(try notes(first) == Self.hedgedNote + Self.duplicateNote)
 
-        // The same two with "enabled": false, as the dashboard's Disable
-        // writes a copy of a rule into user_rules: if the daemon applies the
-        // one shown, it raises no alerts for the id.
+        // "enabled": false, as the dashboard's Disable writes a copy of a rule
+        // into user_rules, in the one shown only: if the daemon applies it, it
+        // raises no alerts for the id.
         let disabled = try Self.disabledCopy(of: Self.flatRule)
         _ = try write(disabled, users, "a.json")
-        _ = try write(disabled, users, "b.json")
         #expect(shown() == first)
         #expect(try notes(first) == Self.hedgedNote + Self.disabledSentence + Self.duplicateNote)
+        // In the other one only: if the daemon applies that one, it raises none.
+        _ = try write(Self.flatRule, users, "a.json")
+        _ = try write(disabled, users, "b.json")
+        #expect(shown() == first)
+        #expect(try notes(first) == Self.hedgedNote + Self.duplicateNote + Self.otherDisabledSentence)
+        // In both.
+        _ = try write(disabled, users, "a.json")
+        #expect(shown() == first)
+        #expect(try notes(first)
+            == Self.hedgedNote + Self.disabledSentence + Self.duplicateNote + Self.otherDisabledSentence)
         // One: the daemon applies it, and raises no alerts for the id.
         try FileManager.default.removeItem(atPath: users.appendingPathComponent("b.json").path)
         #expect(try notes(first) == Self.definiteDisabledNote)
@@ -492,6 +515,13 @@ struct WhyCommandTests {
     private static let disabledSentence = [
         "The rule shown has \"enabled\": false; if the daemon applies that rule, it raises no",
         "alerts for this id.",
+    ]
+
+    /// What follows the claim count when another user rule the daemon would
+    /// load for the id has "enabled": false.
+    private static let otherDisabledSentence = [
+        "Another user rule with this id has \"enabled\": false; if the daemon applies that rule, it",
+        "raises no alerts for this id.",
     ]
 
     /// A rule's JSON with "enabled" set to false, as the dashboard's Disable

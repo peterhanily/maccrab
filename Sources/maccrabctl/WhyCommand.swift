@@ -204,14 +204,15 @@ extension MacCrabCtl {
     /// `ruleID`, by file name: none unless the folder passes the daemon's
     /// overlay gate (UserRuleOverlayTrust), then the files that pass its
     /// per-file checks. With more than one, the daemon applies one of them,
-    /// in an order MacCrab does not define. `unreadable` is set when this user
+    /// in an order MacCrab does not define. `disabled` lists those of them
+    /// with "enabled": false. `unreadable` is set when this user
     /// may not lstat the folder, so cannot tell whether the daemon trusts it,
     /// or cannot read all of a trusted folder, as the next function describes.
     /// A folder that does not exist is not unreadable.
-    static func loadableUserRuleFiles(forRuleID ruleID: String, inUserRules dir: String) -> (paths: [String], unreadable: Bool) {
+    static func loadableUserRuleFiles(forRuleID ruleID: String, inUserRules dir: String) -> (paths: [String], disabled: [String], unreadable: Bool) {
         let engineUID = UserRuleOverlayTrust.engineUID(forSupportDirectory: (dir as NSString).deletingLastPathComponent)
         guard UserRuleOverlayTrust.trustsDirectory(atPath: dir, engineUID: engineUID) else {
-            return ([], UserRuleOverlayTrust.lstatIsRefused(atPath: dir))
+            return ([], [], UserRuleOverlayTrust.lstatIsRefused(atPath: dir))
         }
         return loadableUserRuleFiles(forRuleID: ruleID, inTrustedUserRules: dir, engineUID: engineUID)
     }
@@ -221,12 +222,14 @@ extension MacCrabCtl {
     /// the manifest, and not hidden by a leading dot or the UF_HIDDEN flag),
     /// owned by `engineUID`, read without following a link and within the
     /// engine's rule-file size limit, and accepted by RuleEngine.decodeLoadableRule.
+    /// `disabled` lists the files that pass whose rule has "enabled": false;
+    /// the daemon loads a user rule's "enabled" as written.
     /// `unreadable` is set when this user cannot list the folder, may not
     /// lstat one of its files, or cannot open one of the files `engineUID`
     /// owns. None of these means the daemon refuses a file: a daemon running
     /// as root is not held to file modes or ACL entries, so it may load a rule
     /// for `ruleID` from one of them.
-    static func loadableUserRuleFiles(forRuleID ruleID: String, inTrustedUserRules dir: String, engineUID: uid_t) -> (paths: [String], unreadable: Bool) {
+    static func loadableUserRuleFiles(forRuleID ruleID: String, inTrustedUserRules dir: String, engineUID: uid_t) -> (paths: [String], disabled: [String], unreadable: Bool) {
         // The paths are built from `dir`: the listed URLs resolve /tmp and
         // /var to /private.
         let listed: [URL]
@@ -234,11 +237,12 @@ extension MacCrabCtl {
             listed = try FileManager.default.contentsOfDirectory(
                 at: URL(fileURLWithPath: dir), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
         } catch {
-            return ([], true)
+            return ([], [], true)
         }
         let jsonFiles: [URL] = listed.filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
         let names: [String] = jsonFiles.map(\.lastPathComponent).sorted()
         var paths: [String] = []
+        var disabled: [String] = []
         var unreadable = false
         for name in names {
             let path = dir + "/" + name
@@ -252,8 +256,9 @@ extension MacCrabCtl {
                   let rule = try? RuleEngine.decodeLoadableRule(snapshot.data),
                   rule.id == ruleID else { continue }
             paths.append(path)
+            if !rule.enabled { disabled.append(path) }
         }
-        return (paths, unreadable)
+        return (paths, disabled, unreadable)
     }
 
     /// The notes `why` prints after the rule file findRuleFile found at
@@ -267,16 +272,20 @@ extension MacCrabCtl {
     /// shown. Whether it has "enabled": false is passed on only for a user
     /// rule: the daemon loads a user rule's "enabled" as written, with no
     /// status profile applied, while whether it runs a bundled rule also
-    /// depends on the profile.
+    /// depends on the profile. So is whether one of the other claims has it.
     static func whyFoundRuleNoteLines(ruleID: String, rulePath: String, rule: [String: Any], alertID: String) -> [String] {
         let ruleDir = (rulePath as NSString).deletingLastPathComponent
         let isUserRule = ruleDir.hasSuffix("/user_rules")
         guard isUserRule || ruleDir.hasSuffix("/compiled_rules") else { return [] }
         let userRules = loadableUserRuleFiles(forRuleID: ruleID,
                                               inUserRules: (ruleDir as NSString).deletingLastPathComponent + "/user_rules")
+        // Whether a claim other than the first, the one findRuleFile shows,
+        // has "enabled": false.
+        let otherClaimDisabled = userRules.disabled.contains { $0 != userRules.paths.first }
         return whyUserRuleNoteLines(claimCount: isUserRule ? userRules.paths.count : 0,
                                     unreadable: userRules.unreadable,
-                                    disabled: isUserRule && (rule["enabled"] as? Bool) == false, alertID: alertID)
+                                    disabled: isUserRule && (rule["enabled"] as? Bool) == false,
+                                    otherClaimDisabled: isUserRule && otherClaimDisabled, alertID: alertID)
     }
 
     /// The notes `why` prints after a user rule or a bundled single-event
@@ -289,10 +298,13 @@ extension MacCrabCtl {
     /// So the notes say the daemon applies the rule shown only for exactly one
     /// claim with nothing unreadable, and with something unreadable give the
     /// claim count only as a lower bound. `disabled` is whether the user rule
-    /// shown has "enabled": false. The daemon raises no alerts for the id
-    /// while it applies such a rule, and the notes say so, as a condition
-    /// where they do not say the daemon applies the rule shown.
-    static func whyUserRuleNoteLines(claimCount: Int, unreadable: Bool, disabled: Bool, alertID: String) -> [String] {
+    /// shown has "enabled": false, and `otherClaimDisabled` whether one of the
+    /// other claims has. The daemon raises no alerts for the id while it
+    /// applies such a rule. The notes say so for the rule shown, as a
+    /// condition where they do not say the daemon applies it, and, with more
+    /// than one claim, for another claim, always as a condition.
+    static func whyUserRuleNoteLines(claimCount: Int, unreadable: Bool, disabled: Bool, otherClaimDisabled: Bool,
+                                     alertID: String) -> [String] {
         var lines: [String] = []
         if claimCount == 1 && !unreadable && disabled {
             lines += [
@@ -330,6 +342,12 @@ extension MacCrabCtl {
                 "Note: at least \(claimCount) user rules have this id. The daemon applies one of them or one this",
                 "user cannot read, in an order MacCrab does not define; this is the first by file name of",
                 "those this user can read.",
+            ]
+        }
+        if claimCount > 1 && otherClaimDisabled {
+            lines += [
+                "Another user rule with this id has \"enabled\": false; if the daemon applies that rule, it",
+                "raises no alerts for this id.",
             ]
         }
         if unreadable {

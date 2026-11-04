@@ -127,27 +127,33 @@ func explainRuleSectionLines(ruleID: String, alertID: String, hasDetail: Bool, c
         ruleJSON, alertID: alertID,
         isUserRule: index.mapsToUserRule(id: ruleID, in: compiledDir),
         duplicateUserRules: index.hasDuplicateUserRules(id: ruleID, in: compiledDir),
+        disabledDuplicateUserRule: index.hasDisabledDuplicateUserRule(id: ruleID, in: compiledDir),
         unreadableUserRules: index.hasUnreadableUserRules(id: ruleID, in: compiledDir))
 }
 
 /// The "Rule definition:" part of explain_alert: the rule's description,
 /// status and logsource, then where to see its matching logic. Before them
-/// come the notes on duplicate and unreadable user rules, then, for a user
-/// rule, its source and, when it has "enabled": false, a line saying the
-/// engine raises no alerts for this id while it applies the rule, or if it
-/// applies the rule when a note says it may apply another. The matching
-/// logic is left to `maccrabctl why`, which prints on this Mac a
-/// single-event rule's predicates and how they combine, a sequence rule's
-/// steps, or a graph rule's nodes and edges (long value lists are
+/// come the notes on duplicate user rules, with one when a user rule with
+/// this id other than the one shown has "enabled": false, and on unreadable
+/// user rules, then, for a user rule, its source and, when it has "enabled":
+/// false, a line saying the engine raises no alerts for this id while it
+/// applies the rule, or if it applies the rule when a note says it may apply
+/// another. The matching logic is left to `maccrabctl why`, which prints on
+/// this Mac a single-event rule's predicates and how they combine, a sequence
+/// rule's steps, or a graph rule's nodes and edges (long value lists are
 /// shortened); this server's responses pass through the privacy sanitizer,
 /// which rewrites paths, host names and addresses in rule values.
 func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, isUserRule: Bool,
-                                duplicateUserRules: Bool, unreadableUserRules: Bool) -> [String] {
+                                duplicateUserRules: Bool, disabledDuplicateUserRule: Bool,
+                                unreadableUserRules: Bool) -> [String] {
     var lines = ["Rule definition:"]
     if duplicateUserRules && !unreadableUserRules {
         lines.append("  note: several user rules have this id. The engine applies one of them, in an order MacCrab does not define; this is the first by file name.")
     } else if duplicateUserRules {
         lines.append("  note: at least two user rules have this id. The engine applies one of them or one this process cannot read, in an order MacCrab does not define; this is the first by file name of those this process can read.")
+    }
+    if duplicateUserRules && disabledDuplicateUserRule {
+        lines.append("  note: another user rule with this id has \"enabled\": false; if the engine applies that rule, it raises no alerts for this id.")
     }
     if unreadableUserRules {
         lines.append("  note: this process cannot read all of user_rules (the folder cannot be listed or inspected, or a file in it cannot be inspected or opened). The engine runs as root when installed, so it may apply a user rule from there for this id instead of the rule shown; to check, run `sudo maccrabctl why \(alertID)` on this Mac.")
@@ -362,6 +368,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     private var files: [FileStamp] = []
     private var paths: [String: String] = [:]
     private var duplicateUserRuleIDs: Set<String> = []
+    private var disabledDuplicateUserRuleIDs: Set<String> = []
     private var unreadableUserRules = false
     private var builds = 0
 
@@ -418,6 +425,14 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     func hasDuplicateUserRules(id: String, in compiledDir: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return directory == compiledDir && duplicateUserRuleIDs.contains(id)
+    }
+
+    /// Whether, in the current index, a loadable user rule claiming `id`
+    /// other than the one the index maps, the first by file name, has
+    /// "enabled": false.
+    func hasDisabledDuplicateUserRule(id: String, in compiledDir: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return directory == compiledDir && disabledDuplicateUserRuleIDs.contains(id)
     }
 
     /// Whether the engine may apply, for `id`, a user rule this process cannot
@@ -485,6 +500,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         // showing the sequence or graph definition.
         let userDir = Self.userRulesDirectory(compiledDir)
         var duplicated: Set<String> = []
+        var disabledDuplicates: Set<String> = []
         var unreadable = false
         // A folder this process may not lstat or cannot list, a file in it
         // that it may not lstat, or a file the engine's uid owns that it may
@@ -505,8 +521,13 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
                 if inaccessible { unreadable = true }
                 guard let id = rule?["id"] as? String else { continue }
                 // The engine loads each of these and keeps the last it enumerates,
-                // an order it does not define: show the first by name, note the rest.
-                if overridden.contains(id) { duplicated.insert(id); continue }
+                // an order it does not define: show the first by name, note the
+                // rest, and note when one of the rest has "enabled": false.
+                if overridden.contains(id) {
+                    duplicated.insert(id)
+                    if (rule?["enabled"] as? Bool) == false { disabledDuplicates.insert(id) }
+                    continue
+                }
                 if let bundled = next[id], otherEngines.contains(where: { bundled.hasPrefix($0) }) { continue }
                 next[id] = path
                 overridden.insert(id)
@@ -520,6 +541,7 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         files = currentFiles
         paths = next
         duplicateUserRuleIDs = duplicated
+        disabledDuplicateUserRuleIDs = disabledDuplicates
         unreadableUserRules = unreadable
         builds += 1
         lock.unlock()
