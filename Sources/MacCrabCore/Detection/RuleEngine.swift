@@ -1029,13 +1029,14 @@ public actor RuleEngine {
         let snapshotRegexCounter = regexAccessCounter
         let snapshotPushed = pushedRuleIDs
 
-        // Pre-fix: cache was wiped BEFORE load. During the (potentially
-        // 100s ms long) loadRules call, concurrent evaluate() calls saw
-        // a cold regex cache and paid recompile cost on the hot path.
-        // Now: keep the existing rules + cache live during the load.
-        // loadRules merges / overrides into ruleIndex + allRules; any
-        // stale regex entries from rules that no longer exist will be
-        // LRU-evicted naturally as the new rules' regexes are accessed.
+        // This method does not suspend, so no evaluate() call runs during
+        // the reload. The rules are cleared below before the load; the
+        // regex cache is not, so the load's pre-compile pass reuses the
+        // patterns still cached and compiles only the others, and an entry
+        // no loaded rule uses stays until LRU eviction. Each rollback below
+        // restores everything snapshotted above, including the regex cache
+        // and its LRU order, so a reload that is rolled back leaves both the
+        // rules and the cache as they were.
         let count: Int
         do {
             // First clear ruleIndex so loadRules rebuilds the per-
@@ -1117,10 +1118,14 @@ public actor RuleEngine {
         // fails to decode does not roll the reload back, and before the loop
         // below, so that when it replaces a rule the loop disables, the loop
         // disables the overlay's copy. If its load throws, the error is
-        // dropped and the reload stands.
+        // logged and the reload stands.
         var overlayCount: Int?
         if let overlay {
-            overlayCount = try? loadRules(from: overlay, requireOwnerUID: requireOwnerUID)
+            do {
+                overlayCount = try loadRules(from: overlay, requireOwnerUID: requireOwnerUID)
+            } catch {
+                logger.warning("Rules reloaded without the overlay \(overlay.path), which failed to load: \(error)")
+            }
         }
 
         // Disable again the rules disabled through `setEnabled`, except those

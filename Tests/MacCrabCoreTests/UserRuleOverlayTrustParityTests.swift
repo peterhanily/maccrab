@@ -22,7 +22,8 @@ import MacCrabCore
 /// only those owners does not fail here. The nested boot gate cannot be
 /// called from a test, so the last test pins its source instead, with each
 /// line in DaemonSetup.swift and SignalHandlers.swift that calls
-/// ruleEngine.loadRules or ruleEngine.reloadRules.
+/// ruleEngine.loadRules or ruleEngine.reloadRules, and the lines there that
+/// decide which overlay each reload passes.
 @Suite("User rule overlay trust matches the engine's gates")
 struct UserRuleOverlayTrustParityTests {
     /// A support directory with an empty user_rules folder.
@@ -112,7 +113,7 @@ struct UserRuleOverlayTrustParityTests {
         #expect(loads == ownerOnly)
     }
 
-    @Test("the boot-time user_rules load is gated by the check nested in DaemonSetup.initialize(), which has isOverlayDirSecure's conditions and no other refusal, and the lines in DaemonSetup.swift and SignalHandlers.swift that call ruleEngine.loadRules or reloadRules are the expected ones")
+    @Test("the boot-time user_rules load is gated by the check nested in DaemonSetup.initialize(), which has isOverlayDirSecure's conditions and no other refusal, and the lines in DaemonSetup.swift and SignalHandlers.swift that call ruleEngine.loadRules or reloadRules, or decide which overlay a reload passes, are the expected ones")
     func bootGateSource() throws {
         let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -151,6 +152,17 @@ struct UserRuleOverlayTrustParityTests {
                 .filter { $0.contains(call) && !$0.hasPrefix("//") }
         }
 
+        // The trimmed lines of `text` from the line `first` up to the next
+        // line that contains `call`, other than whole-line comments.
+        func lines(from first: String, upTo call: String, in text: String) -> [String] {
+            let trimmed = text.split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.hasPrefix("//") }
+            guard let start = trimmed.firstIndex(of: first),
+                  let end = trimmed[start...].firstIndex(where: { $0.contains(call) }) else { return [] }
+            return Array(trimmed[start..<end])
+        }
+
         // The one boot load of user_rules sits inside the block the nested
         // check gates, whose code is exactly what it was when this test was
         // written, so a refusal added in front of the load fails here.
@@ -174,6 +186,22 @@ struct UserRuleOverlayTrustParityTests {
         #expect(lines(calling: "ruleEngine.loadRules(", in: signalHandlers) == [], "\(reloadUpdate)")
         #expect(lines(calling: "ruleEngine.reloadRules(", in: signalHandlers) == [
             "let reloaded = try await state.ruleEngine.reloadRules(from: state.rulesURL, overlay: overlay, requireOwnerUID: geteuid())",
+        ], "\(reloadUpdate)")
+        // The lines that decide that overlay: each reload passes user_rules
+        // only when the folder exists and isOverlayDirSecure accepts it, and
+        // nil otherwise. Dropping or loosening either condition fails here.
+        #expect(lines(from: "var overlay: URL?", upTo: "ruleEngine.reloadRules(", in: source) == [
+            "var overlay: URL?",
+            "if FileManager.default.fileExists(atPath: userOverridesDirForWatcher),",
+            "isOverlayDirSecure(userOverridesDirForWatcher) {",
+            "overlay = URL(fileURLWithPath: userOverridesDirForWatcher)",
+            "}",
+        ], "\(reloadUpdate)")
+        #expect(lines(from: "var overlay: URL?", upTo: "ruleEngine.reloadRules(", in: signalHandlers) == [
+            "var overlay: URL?",
+            "if FileManager.default.fileExists(atPath: overlayDir), isOverlayDirSecure(overlayDir) {",
+            "overlay = URL(fileURLWithPath: overlayDir)",
+            "}",
         ], "\(reloadUpdate)")
 
         // The nested check, declared once, with the code it had when this test

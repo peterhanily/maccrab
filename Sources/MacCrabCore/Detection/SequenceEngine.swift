@@ -1543,13 +1543,17 @@ public actor SequenceEngine {
         var nextFoldStepIDs: [String: String] = [:]
         for stagedRule in batch.rules {
             var rule = stagedRule
-            // A successful reload replaces rule CONTENT, but an explicit runtime
-            // disable is operator state. Preserve it for every surviving ID,
-            // including a changed definition, exactly as RuleEngine does. Apply
-            // it before equivalence testing below so an unchanged disabled rule
-            // remains equal and keeps its telemetry rather than being spuriously
-            // treated as a definition change solely because the loader defaults
-            // every decoded rule to enabled.
+            // A successful reload replaces rule CONTENT, but a rule the
+            // previous set had disabled stays disabled under its ID, even with
+            // a changed definition. Unlike RuleEngine, which disables again
+            // only the rules disabled through its setEnabled, minus its
+            // eval-budget guard's, this carries every previous disable. The
+            // loader enables every rule it loads, and neither setEnabled nor
+            // addRule has a production caller. Apply it before equivalence
+            // testing below so an unchanged disabled rule remains equal and
+            // keeps its telemetry rather than being spuriously treated as a
+            // definition change solely because the loader defaults every
+            // decoded rule to enabled.
             if prevRules[rule.id]?.enabled == false {
                 rule.enabled = false
             }

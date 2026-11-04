@@ -2951,10 +2951,11 @@ enum DaemonSetup {
                 do {
                     // v1.17.2 security: same gate as the initial load — only
                     // overlay overrides from a non-symlinked, root/owner-owned,
-                    // non-group/world-writable dir. Inlined because the
-                    // isSecureDirectory closure isn't in this detached Task's
-                    // scope. An override that can be written by a non-root admin
-                    // could silently disable detection.
+                    // non-group/world-writable dir. The check is the free
+                    // function isOverlayDirSecure, which has the conditions of
+                    // the isSecureDirectory nested in initialize() and logs no
+                    // refusal. An override that can be written by a non-root
+                    // admin could silently disable detection.
                     var overlay: URL?
                     if FileManager.default.fileExists(atPath: userOverridesDirForWatcher),
                        isOverlayDirSecure(userOverridesDirForWatcher) {
