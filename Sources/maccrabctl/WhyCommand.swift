@@ -211,10 +211,14 @@ extension MacCrabCtl {
     /// overlay gate (UserRuleOverlayTrust), then the files that pass its
     /// per-file checks. With more than one, the daemon applies one of them,
     /// in an order MacCrab does not define. `unreadable` is set when this user
-    /// cannot read all of a trusted folder, as the next function describes.
+    /// may not lstat the folder, so cannot tell whether the daemon trusts it,
+    /// or cannot read all of a trusted folder, as the next function describes.
+    /// A folder that does not exist is not unreadable.
     static func loadableUserRuleFiles(forRuleID ruleID: String, inUserRules dir: String) -> (paths: [String], unreadable: Bool) {
         let engineUID = UserRuleOverlayTrust.engineUID(forSupportDirectory: (dir as NSString).deletingLastPathComponent)
-        guard UserRuleOverlayTrust.trustsDirectory(atPath: dir, engineUID: engineUID) else { return ([], false) }
+        guard UserRuleOverlayTrust.trustsDirectory(atPath: dir, engineUID: engineUID) else {
+            return ([], UserRuleOverlayTrust.lstatIsRefused(atPath: dir))
+        }
         return loadableUserRuleFiles(forRuleID: ruleID, inTrustedUserRules: dir, engineUID: engineUID)
     }
 
@@ -223,9 +227,11 @@ extension MacCrabCtl {
     /// the manifest, and not hidden by a leading dot or the UF_HIDDEN flag),
     /// owned by `engineUID`, read without following a link and within the
     /// engine's rule-file size limit, and accepted by RuleEngine.decodeLoadableRule.
-    /// `unreadable` is set when this user cannot list the folder or open one
-    /// of the files `engineUID` owns. Those are not files the daemon refuses:
-    /// a daemon running as root reads them and may load one for `ruleID`.
+    /// `unreadable` is set when this user cannot list the folder, may not
+    /// lstat one of its files, or cannot open one of the files `engineUID`
+    /// owns. None of these means the daemon refuses a file: a daemon running
+    /// as root is not held to file modes or ACL entries, so it may load a rule
+    /// for `ruleID` from one of them.
     static func loadableUserRuleFiles(forRuleID ruleID: String, inTrustedUserRules dir: String, engineUID: uid_t) -> (paths: [String], unreadable: Bool) {
         // The paths are built from `dir`: the listed URLs resolve /tmp and
         // /var to /private.
@@ -242,7 +248,10 @@ extension MacCrabCtl {
         var unreadable = false
         for name in names {
             let path = dir + "/" + name
-            guard UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else { continue }
+            guard UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else {
+                if UserRuleOverlayTrust.lstatIsRefused(atPath: path) { unreadable = true }
+                continue
+            }
             let outcome = BoundedRegularFileReader.readOutcome(at: path, maximumBytes: RuleEngine.maximumRuleFileBytes)
             if outcome == .rejected(.inaccessible) { unreadable = true }
             guard case .success(let snapshot) = outcome,

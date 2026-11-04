@@ -369,9 +369,10 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     }
 
     /// Whether the engine may apply, for `id`, a user rule this process cannot
-    /// read: at the last build, user_rules could not be listed or held a file
-    /// the engine's uid owns that this process may not open, and `id` is not
-    /// a sequence or graph rule's, which user rules do not replace.
+    /// read: at the last build, this process was refused lstat of user_rules
+    /// or of a file in it, could not list user_rules, or could not open a file
+    /// in it that the engine's uid owns, and `id` is not a sequence or graph
+    /// rule's, which user rules do not replace.
     func hasUnreadableUserRules(id: String, in compiledDir: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard directory == compiledDir, unreadableUserRules, let path = paths[id] else { return false }
@@ -414,15 +415,21 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
         let userDir = Self.userRulesDirectory(compiledDir)
         var duplicated: Set<String> = []
         var unreadable = false
+        // A folder this process may not lstat or cannot list, a file in it
+        // that it may not lstat, or a file the engine's uid owns that it may
+        // not open, need not be one the engine refuses: an engine running as
+        // root is not held to file modes or ACL entries, and may load a rule
+        // from there.
         if UserRuleOverlayTrust.trustsDirectory(atPath: userDir, engineUID: engineUID) {
             let otherEngines = [compiledDir + "/sequences/", compiledDir + "/graph/"]
             var overridden: Set<String> = []
-            // A folder this process cannot list, or a file the engine's uid
-            // owns that it may not open, is not one the engine refuses: an
-            // engine running as root reads them and may load a rule from one.
             let userFiles = Self.ruleFiles(in: userDir)
             if userFiles == nil { unreadable = true }
-            for path in userFiles ?? [] where UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) {
+            for path in userFiles ?? [] {
+                guard UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else {
+                    if UserRuleOverlayTrust.lstatIsRefused(atPath: path) { unreadable = true }
+                    continue
+                }
                 let (rule, inaccessible) = Self.loadUserRule(path)
                 if inaccessible { unreadable = true }
                 guard let id = rule?["id"] as? String else { continue }
@@ -433,6 +440,8 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
                 next[id] = path
                 overridden.insert(id)
             }
+        } else if UserRuleOverlayTrust.lstatIsRefused(atPath: userDir) {
+            unreadable = true
         }
         lock.lock()
         directory = compiledDir

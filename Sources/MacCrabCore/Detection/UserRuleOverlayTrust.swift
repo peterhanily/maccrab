@@ -46,4 +46,16 @@ public enum UserRuleOverlayTrust {
         guard lstat(path, &st) == 0 else { return false }
         return trustsFile(owner: st.st_uid, engineUID: engineUID)
     }
+
+    /// Whether lstat of `path` fails for this process with EACCES or EPERM, as
+    /// when an ACL entry denies it readattr. trustsDirectory(atPath:) and
+    /// trustsFile(atPath:) then return false without having read the owner or
+    /// mode, so the engine, which runs as root when installed and is not held
+    /// to such a denial, may still trust the path.
+    public static func lstatIsRefused(atPath path: String) -> Bool {
+        var st = stat()
+        guard lstat(path, &st) != 0 else { return false }
+        let code = errno
+        return code == EACCES || code == EPERM
+    }
 }

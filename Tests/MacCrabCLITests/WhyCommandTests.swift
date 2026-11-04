@@ -166,8 +166,18 @@ struct WhyCommandTests {
         #expect(lookup() == first)
     }
 
+    /// Runs /bin/chmod for the ACL changes chmod(2) cannot make.
+    private func chmodACL(_ arguments: [String]) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        process.arguments = arguments
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+
     @Test("user rules this user cannot read are reported, not taken for rules the daemon refuses",
-          .enabled(if: geteuid() != 0, "root reads a mode-000 file and lists a mode-300 folder"))
+          .enabled(if: geteuid() != 0, "root reads a mode-000 file, lists a mode-300 folder and is not held to an ACL entry"))
     func unreadableUserRules() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrabctl-why-\(UUID().uuidString)", isDirectory: true)
@@ -175,6 +185,8 @@ struct WhyCommandTests {
         let users = dir.appendingPathComponent("user_rules")
         let override = users.appendingPathComponent("a.json").path
         defer {
+            _ = try? chmodACL(["-N", users.path])
+            _ = try? chmodACL(["-N", override])
             chmod(users.path, 0o755)
             chmod(override, 0o644)
             try? FileManager.default.removeItem(at: dir)
@@ -225,6 +237,31 @@ struct WhyCommandTests {
         #expect(lookup() == override)
         #expect(!scan().unreadable)
 
+        // An ACL entry that denies this user readattr, on the file and then on
+        // the folder: lstat fails, so this user cannot read the owner the
+        // daemon checks. A daemon running as root is not held to the entry.
+        let denyReadattr = "user:\(NSUserName()) deny readattr"
+        #expect(try chmodACL(["+a", denyReadattr, override]) == 0)
+        #expect(UserRuleOverlayTrust.lstatIsRefused(atPath: override))
+        #expect(lookup() == single)
+        #expect(scan().paths.isEmpty)
+        #expect(scan().unreadable)
+        #expect(try chmodACL(["-N", override]) == 0)
+        #expect(lookup() == override)
+        #expect(!scan().unreadable)
+        #expect(try chmodACL(["+a", denyReadattr, users.path]) == 0)
+        #expect(UserRuleOverlayTrust.lstatIsRefused(atPath: users.path))
+        #expect(lookup() == single)
+        #expect(scan().paths.isEmpty)
+        #expect(scan().unreadable)
+        #expect(try chmodACL(["-N", users.path]) == 0)
+        #expect(lookup() == override)
+        #expect(!scan().unreadable)
+        // A user_rules that does not exist, the usual case, is not unreadable.
+        let missing = dir.appendingPathComponent("missing/user_rules").path
+        #expect(!UserRuleOverlayTrust.lstatIsRefused(atPath: missing))
+        #expect(!MacCrabCtl.loadableUserRuleFiles(forRuleID: singleID, inUserRules: missing).unreadable)
+
         // A rule only user_rules has. When this user cannot list the folder,
         // no rule file is found, and the note says the daemon may load it.
         let newID = "d1a2b3c4-0032-4000-a000-0000000000ff"
@@ -245,6 +282,13 @@ struct WhyCommandTests {
         #expect(chmod(users.path, 0o755) == 0)
         // With every file readable, an id no file has gets no note.
         #expect(notFound("unknown-id") == [
+            "No rule file with the id unknown-id was found in user_rules or compiled_rules.",
+            "Built-in detectors have no rule file.",
+        ])
+        // Nor does it in a support dir that has no user_rules.
+        #expect(MacCrabCtl.whyNoRuleFileLines(
+            forRuleID: "unknown-id", in: MacCrabCtl.whySearchDirs(supportDirs: [dir.appendingPathComponent("missing").path]),
+            hasDescription: false, alertID: alertID) == [
             "No rule file with the id unknown-id was found in user_rules or compiled_rules.",
             "Built-in detectors have no rule file.",
         ])

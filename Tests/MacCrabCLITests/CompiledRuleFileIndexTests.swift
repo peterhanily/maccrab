@@ -38,6 +38,16 @@ struct CompiledRuleFileIndexTests {
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: path)
     }
 
+    /// Runs /bin/chmod for the ACL changes chmod(2) cannot make.
+    private func chmodACL(_ arguments: [String]) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        process.arguments = arguments
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+
     /// compiled_rules and user_rules under a fresh support directory.
     private func supportDirectory() throws -> (root: String, compiled: String, user: String) {
         let root = NSTemporaryDirectory() + "maccrab-rule-index-\(UUID().uuidString)"
@@ -396,7 +406,7 @@ struct CompiledRuleFileIndexTests {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/maccrab-mcp/ReadParityTools.swift"), encoding: .utf8)) ?? ""
         #expect(source.contains(
-            "for path in userFiles ?? [] where UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) {"))
+            "for path in userFiles ?? [] {\n                guard UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else {"))
         #expect(source.contains("UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID) else { return nil }"))
     }
 
@@ -450,10 +460,12 @@ struct CompiledRuleFileIndexTests {
     }
 
     @Test("user rules this process cannot read are noted, not taken for rules the engine refuses",
-          .enabled(if: geteuid() != 0, "root reads a mode-000 file and lists a mode-300 folder"))
+          .enabled(if: geteuid() != 0, "root reads a mode-000 file, lists a mode-300 folder and is not held to an ACL entry"))
     func unreadableUserRulesAreNoted() throws {
         let (root, compiled, user) = try supportDirectory()
         defer {
+            _ = try? chmodACL(["-N", user])
+            _ = try? chmodACL(["-N", user + "/x.json"])
             chmod(user, 0o755)
             chmod(user + "/x.json", 0o644)
             try? FileManager.default.removeItem(atPath: root)
@@ -486,6 +498,28 @@ struct CompiledRuleFileIndexTests {
         #expect(index.hasUnreadableUserRules(id: "rule.x", in: compiled))
         #expect(chmod(user, 0o755) == 0)
         #expect(shown() == "user override")
+        #expect(!index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+
+        // An ACL entry that denies this process readattr, on the file and then
+        // on the folder: lstat fails, so this process cannot read the owner the
+        // engine checks. An engine running as root is not held to the entry.
+        let denyReadattr = "user:\(NSUserName()) deny readattr"
+        #expect(try chmodACL(["+a", denyReadattr, user + "/x.json"]) == 0)
+        #expect(shown() == "bundled")
+        #expect(index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+        #expect(try chmodACL(["-N", user + "/x.json"]) == 0)
+        #expect(shown() == "user override")
+        #expect(!index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+        #expect(try chmodACL(["+a", denyReadattr, user]) == 0)
+        #expect(shown() == "bundled")
+        #expect(index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+        #expect(try chmodACL(["-N", user]) == 0)
+        #expect(shown() == "user override")
+        #expect(!index.hasUnreadableUserRules(id: "rule.x", in: compiled))
+
+        // A user_rules that does not exist, the usual case, is not unreadable.
+        try FileManager.default.removeItem(atPath: user)
+        #expect(shown() == "bundled")
         #expect(!index.hasUnreadableUserRules(id: "rule.x", in: compiled))
     }
 }
