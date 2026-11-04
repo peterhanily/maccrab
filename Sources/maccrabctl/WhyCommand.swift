@@ -104,9 +104,9 @@ extension MacCrabCtl {
         let ruleDir = (rulePath as NSString).deletingLastPathComponent
         let isUserRule = ruleDir.hasSuffix("/user_rules")
         // A user rule is read again the way the daemon reads it: without
-        // following a link, and at most 4 MiB.
+        // following a link, and within its rule-file size limit.
         let ruleData = isUserRule
-            ? BoundedRegularFileReader.read(at: rulePath, maximumBytes: 4 * 1024 * 1024)
+            ? BoundedRegularFileReader.read(at: rulePath, maximumBytes: RuleEngine.maximumRuleFileBytes)
             : (try? Data(contentsOf: URL(fileURLWithPath: rulePath)))
         guard let ruleData,
               let ruleJSON = try? JSONSerialization.jsonObject(with: ruleData) as? [String: Any] else {
@@ -195,8 +195,8 @@ extension MacCrabCtl {
     /// The daemon's per-file checks on a user_rules folder it trusts, in its
     /// order: the files RuleEngine.loadRules selects (top-level `.json`, not
     /// the manifest, and not hidden by a leading dot or the UF_HIDDEN flag),
-    /// owned by `engineUID`, read without following a link and at most 4 MiB,
-    /// and accepted by RuleEngine.decodeLoadableRule.
+    /// owned by `engineUID`, read without following a link and within the
+    /// engine's rule-file size limit, and accepted by RuleEngine.decodeLoadableRule.
     static func loadableUserRuleFiles(forRuleID ruleID: String, inTrustedUserRules dir: String, engineUID: uid_t) -> [String] {
         // The paths are built from `dir`: the listed URLs resolve /tmp and
         // /var to /private.
@@ -208,7 +208,7 @@ extension MacCrabCtl {
         for name in names {
             let path = dir + "/" + name
             guard UserRuleOverlayTrust.trustsFile(atPath: path, engineUID: engineUID),
-                  let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024),
+                  let data = BoundedRegularFileReader.read(at: path, maximumBytes: RuleEngine.maximumRuleFileBytes),
                   let rule = try? RuleEngine.decodeLoadableRule(data),
                   rule.id == ruleID else { continue }
             paths.append(path)

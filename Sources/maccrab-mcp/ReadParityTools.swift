@@ -458,14 +458,14 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     /// A regular file only, read through the bounded reader: a FIFO or a
     /// symlink planted among the rules is skipped, not followed or waited on.
     private static func load(_ path: String) -> [String: Any]? {
-        guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024) else { return nil }
+        guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: RuleEngine.maximumRuleFileBytes) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     /// A user rule only if the engine would load it: RuleEngine.decodeLoadableRule,
     /// the decode and condition-tree validation loadRules applies.
     private static func loadUserRule(_ path: String) -> [String: Any]? {
-        guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: 4 * 1024 * 1024),
+        guard let data = BoundedRegularFileReader.read(at: path, maximumBytes: RuleEngine.maximumRuleFileBytes),
               (try? RuleEngine.decodeLoadableRule(data)) != nil else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }

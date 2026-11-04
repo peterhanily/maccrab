@@ -787,6 +787,11 @@ public actor RuleEngine {
         return rule
     }
 
+    /// The most bytes `loadRules` reads from one rule file
+    /// (RuleFileLoadingPolicy), for the explainers that read a user rule the
+    /// way the engine does.
+    public nonisolated static let maximumRuleFileBytes = RuleFileLoadingPolicy.maximumBytes
+
     /// Active rule-status profile filter (F-04). When non-nil, only rules whose
     /// Sigma `status` is in this set ship enabled from the BUNDLED base load
     /// (operator overlays via `requireOwnerUID` are explicit intent and are never
