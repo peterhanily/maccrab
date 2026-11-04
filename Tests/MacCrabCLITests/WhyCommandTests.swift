@@ -276,8 +276,10 @@ struct WhyCommandTests {
         #expect(notFound(newID) == [
             "No rule file with the id \(newID) was found in user_rules or compiled_rules.",
             "Built-in detectors have no rule file.",
-            "Note: user_rules has files this user cannot read. The daemon runs as root when installed,",
-            "so this alert's rule may be one of them. To check, run `sudo maccrabctl why \(alertID)`.",
+            "Note: this user cannot read all of user_rules (the folder cannot be listed or inspected, or",
+            "a file in it cannot be inspected or opened). The daemon runs as root when installed, so",
+            "this alert's rule may be a user rule there. To check, run",
+            "`sudo maccrabctl why \(alertID)`.",
         ])
         #expect(chmod(users.path, 0o755) == 0)
         // With every file readable, an id no file has gets no note.
@@ -294,7 +296,7 @@ struct WhyCommandTests {
         ])
     }
 
-    @Test("the user-rule notes say the daemon applies the rule shown only for one claim with nothing unreadable")
+    @Test("the user-rule notes say the daemon applies the rule shown only for one claim with nothing unreadable, and count claims only as a lower bound when something is unreadable")
     func userRuleNotes() {
         let alertID = "00000000-0000-0000-0000-00000000003e"
         func notes(_ claimCount: Int, unreadable: Bool = false) -> [String] {
@@ -318,15 +320,25 @@ struct WhyCommandTests {
             "Note: 2 user rules have this id. The daemon applies one of them, in an order",
             "MacCrab does not define; this is the first by file name.",
         ])
-        // Files this user cannot read: a daemon running as root may apply one
-        // of them, so the rule shown is never stated as the one applied.
+        // Part of user_rules this user cannot read: a daemon running as root
+        // may apply a user rule from there, so the rule shown is never stated
+        // as the one applied, and the note does not say whether any file is
+        // there.
         let unreadable = [
-            "Note: user_rules has files this user cannot read. The daemon runs as root when installed,",
-            "so it may apply one of them for this id instead of the rule shown. To check, run",
+            "Note: this user cannot read all of user_rules (the folder cannot be listed or inspected, or",
+            "a file in it cannot be inspected or opened). The daemon runs as root when installed, so it",
+            "may apply a user rule from there for this id instead of the rule shown. To check, run",
             "`sudo maccrabctl why \(alertID)`.",
         ]
         #expect(notes(0, unreadable: true) == unreadable)
         #expect(notes(1, unreadable: true) == hedged + unreadable)
+        // Two readable claims and something unreadable: a file this user
+        // cannot read may hold another claim, and the daemon may apply it.
+        #expect(notes(2, unreadable: true) == hedged + [
+            "Note: at least 2 user rules have this id. The daemon applies one of them or one this",
+            "user cannot read, in an order MacCrab does not define; this is the first by file name of",
+            "those this user can read.",
+        ] + unreadable)
     }
 
     @Test("a sequence rule shows its window, correlation, ordering, trigger and every step")

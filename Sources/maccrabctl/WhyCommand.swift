@@ -184,8 +184,9 @@ extension MacCrabCtl {
     }
 
     /// What `why` prints when no folder in `directories` has a rule file for
-    /// `ruleID`. A user rule this user cannot read may still be one the
-    /// daemon loads for it, so a note says how to check.
+    /// `ruleID`. When this user cannot read all of a user_rules folder among
+    /// them, a rule there may still be one the daemon loads for `ruleID`, so
+    /// a note says how to check.
     static func whyNoRuleFileLines(forRuleID ruleID: String, in directories: [String],
                                    hasDescription: Bool, alertID: String) -> [String] {
         var lines = [
@@ -199,8 +200,10 @@ extension MacCrabCtl {
         }
         if unreadable {
             lines += [
-                "Note: user_rules has files this user cannot read. The daemon runs as root when installed,",
-                "so this alert's rule may be one of them. To check, run `sudo maccrabctl why \(alertID)`.",
+                "Note: this user cannot read all of user_rules (the folder cannot be listed or inspected, or",
+                "a file in it cannot be inspected or opened). The daemon runs as root when installed, so",
+                "this alert's rule may be a user rule there. To check, run",
+                "`sudo maccrabctl why \(alertID)`.",
             ]
         }
         return lines
@@ -264,13 +267,14 @@ extension MacCrabCtl {
 
     /// The notes `why` prints after a user rule or a bundled single-event
     /// rule. `claimCount` is how many user rules the daemon would load for the
-    /// id, the first of which is the rule shown, and 0 when the bundled rule
-    /// is shown; `unreadable` is whether this user could not read all of
-    /// user_rules. The daemon loads every claim but applies only the last it
-    /// lists, in an order MacCrab does not define, and a daemon running as
-    /// root also reads the files this user cannot. So the note says the
-    /// daemon applies the rule shown only for exactly one claim with nothing
-    /// unreadable.
+    /// id among those this user can read, the first of which is the rule
+    /// shown, and 0 when the bundled rule is shown; `unreadable` is whether
+    /// this user could not read all of user_rules. The daemon loads every
+    /// claim but applies only the last it lists, in an order MacCrab does not
+    /// define, and a daemon running as root also reads what this user cannot.
+    /// So the notes say the daemon applies the rule shown only for exactly one
+    /// claim with nothing unreadable, and with something unreadable give the
+    /// claim count only as a lower bound.
     static func whyUserRuleNoteLines(claimCount: Int, unreadable: Bool, alertID: String) -> [String] {
         var lines: [String] = []
         if claimCount == 1 && !unreadable {
@@ -286,16 +290,23 @@ extension MacCrabCtl {
                 "another user rule with this id (see below) in place of any bundled rule with this id.",
             ]
         }
-        if claimCount > 1 {
+        if claimCount > 1 && !unreadable {
             lines += [
                 "Note: \(claimCount) user rules have this id. The daemon applies one of them, in an order",
                 "MacCrab does not define; this is the first by file name.",
             ]
+        } else if claimCount > 1 {
+            lines += [
+                "Note: at least \(claimCount) user rules have this id. The daemon applies one of them or one this",
+                "user cannot read, in an order MacCrab does not define; this is the first by file name of",
+                "those this user can read.",
+            ]
         }
         if unreadable {
             lines += [
-                "Note: user_rules has files this user cannot read. The daemon runs as root when installed,",
-                "so it may apply one of them for this id instead of the rule shown. To check, run",
+                "Note: this user cannot read all of user_rules (the folder cannot be listed or inspected, or",
+                "a file in it cannot be inspected or opened). The daemon runs as root when installed, so it",
+                "may apply a user rule from there for this id instead of the rule shown. To check, run",
                 "`sudo maccrabctl why \(alertID)`.",
             ]
         }

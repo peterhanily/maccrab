@@ -339,17 +339,34 @@ struct CompiledRuleFileIndexTests {
         #expect(LLMSanitizer.sanitize(text).hasSuffix(pointer))
 
         let noted = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: true, unreadableUserRules: false)
-        #expect(noted.count == lines.count + 1)
-        #expect(noted[1].hasPrefix("  note: several user rules have this id."))
+        #expect(noted == Array(lines.prefix(1)) + [
+            "  note: several user rules have this id. The engine applies one of them, in an order MacCrab does not "
+                + "define; this is the first by file name.",
+        ] + Array(lines.dropFirst()))
 
-        // User rules this process cannot read get one note, which survives the
-        // sanitizer too.
-        let unreadableNote = "  note: user_rules has files this process cannot read. The engine runs as root when "
-            + "installed, so it may apply one of them for this id instead of the rule shown; to check, run "
-            + "`sudo maccrabctl why \(alertID)` on this Mac."
+        // Part of user_rules this process cannot read gets one note, which
+        // survives the sanitizer too.
+        let unreadableNote = Self.unreadableNote(alertID)
         let unreadable = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: false, unreadableUserRules: true)
         #expect(unreadable == Array(lines.prefix(1)) + [unreadableNote] + Array(lines.dropFirst()))
         #expect(LLMSanitizer.sanitize(unreadable.joined(separator: "\n")).contains(unreadableNote))
+
+        // With both, a file this process cannot read may hold another rule
+        // with this id, and the engine may apply it.
+        let bothNote = "  note: at least two user rules have this id. The engine applies one of them or one this "
+            + "process cannot read, in an order MacCrab does not define; this is the first by file name of those "
+            + "this process can read."
+        let both = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: true, unreadableUserRules: true)
+        #expect(both == Array(lines.prefix(1)) + [bothNote, unreadableNote] + Array(lines.dropFirst()))
+        #expect(LLMSanitizer.sanitize(both.joined(separator: "\n")).contains(bothNote))
+    }
+
+    /// The note explain_alert adds when this process cannot read all of user_rules.
+    private static func unreadableNote(_ alertID: String) -> String {
+        "  note: this process cannot read all of user_rules (the folder cannot be listed or inspected, or a file in "
+            + "it cannot be inspected or opened). The engine runs as root when installed, so it may apply a user "
+            + "rule from there for this id instead of the rule shown; to check, run `sudo maccrabctl why \(alertID)` "
+            + "on this Mac."
     }
 
     @Test("an id resolves single-event, then sequence, then graph; user rules override single-event ids only")

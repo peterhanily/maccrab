@@ -45,11 +45,12 @@ func handleListRules(_ args: [String: Any]) -> Any {
 /// the bundled rule. Of that rule it shows the description, status and
 /// logsource, not the matching logic; a closing line points to
 /// `maccrabctl why <alert id>`, which prints the rule's predicates and how they
-/// combine on this Mac (long value lists are shortened). When user_rules has
-/// files this process cannot read, a note says the engine, which runs as root
-/// when installed, may apply one of them instead. The rule definition is shown
-/// only when the rule JSON is readable; when it is not, this says so rather
-/// than implying the alert had no rule behind it.
+/// combine on this Mac (long value lists are shortened). When this process
+/// cannot read all of user_rules, a note says the engine, which runs as root
+/// when installed, may apply a user rule from there instead, unless the rule
+/// is a sequence or graph rule, which user rules do not replace. The rule
+/// definition is shown only when the rule JSON is readable; when it is not,
+/// this says so rather than implying the alert had no rule behind it.
 func handleExplainAlert(_ args: [String: Any]) async -> Any {
     guard let alertId = args["alert_id"] as? String, !alertId.isEmpty else {
         return toolError("'alert_id' is required (get it from get_alerts).")
@@ -111,11 +112,13 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
 /// names and addresses in rule values.
 func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, duplicateUserRules: Bool, unreadableUserRules: Bool) -> [String] {
     var lines = ["Rule definition:"]
-    if duplicateUserRules {
+    if duplicateUserRules && !unreadableUserRules {
         lines.append("  note: several user rules have this id. The engine applies one of them, in an order MacCrab does not define; this is the first by file name.")
+    } else if duplicateUserRules {
+        lines.append("  note: at least two user rules have this id. The engine applies one of them or one this process cannot read, in an order MacCrab does not define; this is the first by file name of those this process can read.")
     }
     if unreadableUserRules {
-        lines.append("  note: user_rules has files this process cannot read. The engine runs as root when installed, so it may apply one of them for this id instead of the rule shown; to check, run `sudo maccrabctl why \(alertID)` on this Mac.")
+        lines.append("  note: this process cannot read all of user_rules (the folder cannot be listed or inspected, or a file in it cannot be inspected or opened). The engine runs as root when installed, so it may apply a user rule from there for this id instead of the rule shown; to check, run `sudo maccrabctl why \(alertID)` on this Mac.")
     }
     if let desc = rule["description"] as? String { lines.append("  description: \(desc)") }
     if let status = rule["status"] as? String { lines.append("  status: \(status)") }
