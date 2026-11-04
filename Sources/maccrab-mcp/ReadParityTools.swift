@@ -57,11 +57,8 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
     }
     do {
         let store = try openMCPAlertStoreForReading(directory: dataDir)
-        // No id-lookup on the store protocol; scan a bounded recent window, the
-        // same way the CLI does.
-        let recent = try await store.alerts(since: Date.distantPast, limit: 2000)
-        guard let alert = recent.first(where: { $0.id == alertId }) else {
-            return toolError("No alert with id '\(alertId)' in the most recent 2000. It may have been pruned by the alert-retention sweep.")
+        guard let alert = try await store.alert(id: alertId) else {
+            return toolError("No alert with id '\(alertId)' in alerts.db.")
         }
 
         var lines: [String] = []
