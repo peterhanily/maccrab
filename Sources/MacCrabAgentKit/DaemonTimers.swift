@@ -4195,16 +4195,19 @@ enum DaemonTimers {
 
             // Sequence-engine partial-match state. The partial cap sheds the
             // oldest partials of the largest rule bucket first, so flooding one
-            // rule's cheap first step sheds that rule's own in-flight state;
-            // publishing cumulative evictions and the current depth keeps any
-            // shedding visible.
+            // rule's cheap first step sheds that rule's own in-flight state once
+            // its bucket is the largest (until then the largest bucket is
+            // trimmed toward an equal share); publishing cumulative evictions
+            // and the current depth keeps any shedding visible.
             let sequencePartialPressure = await state.sequenceEngine.partialPressureDiagnostics()
             let sequencePartialsEvicted = sequencePartialPressure.totalShed
             let sequencePartialPressureDict = SequencePartialPressureHeartbeat.fields(sequencePartialPressure)
-            // One actor read for every pending-history value: an evaluation
-            // can run between separate awaits, which would let the journal's
-            // queued count miss sequence_pending_steps_current (and its shed
-            // total the eviction counter) in the same heartbeat.
+            // One actor read for the pending-history values the recorder
+            // cross-checks: an evaluation can run between separate awaits,
+            // which would let the journal's queued count miss
+            // sequence_pending_steps_current (and its shed total the eviction
+            // counter) in the same heartbeat. The eviction recency behind the
+            // continuity verdict below is a separate, later read.
             let sequencePendingHistory = await state.sequenceEngine.pendingHistoryDiagnostics()
             let sequencePendingStepsEvicted = sequencePendingHistory.evictedTotal
             let sequenceJournalConservation = sequencePendingHistory.journal

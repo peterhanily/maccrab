@@ -380,9 +380,10 @@ public actor SequenceEngine {
     /// known later. Window-pruned and bounded by the shared count and
     /// semantic-weight limits. At a limit, relievePendingPressure retires
     /// expired history, folds one writer's duplicate entries (foldPendingBucket)
-    /// and only then sheds the oldest entry of the largest rule bucket, so a
-    /// broadly matching rule sheds its own history instead of flushing other
-    /// rules'.
+    /// and only then sheds the oldest entry of the largest rule bucket.
+    /// Smaller buckets are never trimmed while a larger one exists. A broadly
+    /// matching rule sheds its own history once its bucket is the largest;
+    /// until then its admissions trim the largest bucket toward an equal share.
     private var pendingLaterSteps: [String: [PendingStep]] = [:]
 
     /// Per-rule cap on buffered out-of-order later steps.
@@ -392,10 +393,10 @@ public actor SequenceEngine {
     /// 510,591 per-rule evictions were observed while the aggregate journal held
     /// only 330 entries. One genuinely hot rule may still use the complete
     /// global allowance while no other rule competes for it; under contention
-    /// the victim is the oldest entry of the largest bucket, so the hot rule
-    /// pays for its own pressure. This expands no resource envelope—the
-    /// independent global count and 7.5 MiB semantic-weight ceilings remain
-    /// authoritative.
+    /// the victim is the oldest entry of the largest bucket, so a hot rule
+    /// pays for its own pressure while it holds the largest bucket. This
+    /// expands no resource envelope—the independent global count and 7.5 MiB
+    /// semantic-weight ceilings remain authoritative.
     static let maxPendingPerRule = SequenceCheckpointLimits.maximumTotalPendingSteps
 
     /// Global cap shared by runtime, capture, and restore. A per-rule bound is
@@ -1097,12 +1098,14 @@ public actor SequenceEngine {
         )
     }
 
-    /// Every pending-history value the heartbeat publishes, plus the
-    /// checkpoint weight, read in one actor call. Separately awaited reads let
-    /// an evaluation run between them, so the journal's queued count could
-    /// disagree with the pending-steps gauge, and its shed total with the
-    /// eviction counter, although the qualification recorder requires each
-    /// pair to match exactly.
+    /// The journal, its by-rule split, the eviction counter, the checkpoint
+    /// weight and the pressure totals, read in one actor call so that the
+    /// pairs the qualification recorder cross-checks agree: the journal's
+    /// queued count with the pending-steps gauge, and its shed total with the
+    /// eviction counter. Separately awaited reads would let an evaluation run
+    /// between them, although the recorder requires each pair to match
+    /// exactly. The eviction recency behind the heartbeat's continuity
+    /// verdict is not part of this snapshot; it is read in a separate call.
     public struct PendingHistoryDiagnostics: Sendable {
         public let journal: SequenceConservationTelemetry
         public let journalByRule: [String: SequenceConservationTelemetry]
@@ -1792,8 +1795,9 @@ public actor SequenceEngine {
     /// Cumulative count of partial matches evicted by the global cap since
     /// start. Victims are the oldest partials of the largest rule bucket (count
     /// or semantic weight), so a flood of one rule's cheap step[0] sheds that
-    /// rule's own in-flight state rather than every rule's. Surfaced as
-    /// `sequence_partials_evicted_total`.
+    /// rule's own in-flight state once its bucket is the largest; until then
+    /// it trims the largest bucket toward an equal share, never every rule's
+    /// oldest state. Surfaced as `sequence_partials_evicted_total`.
     public var partialsEvictedTotal: Int {
         evictedPartialCount
     }
@@ -2979,7 +2983,8 @@ public actor SequenceEngine {
             // Otherwise, if Phase 1 bound a middle step without completing a
             // partial, replay only the retained steps after that step, against
             // only those partials: a later step processed before the middle one
-            // failed its ordering check then, and nothing else revisits it.
+            // failed its ordering check then, and otherwise only a later seed's
+            // full replay revisits it.
             if seededInitial, let buffered = pendingLaterSteps[ruleId], !buffered.isEmpty {
                 completedMatches.append(contentsOf: replayPendingSteps(
                     ruleId: ruleId,
@@ -3560,11 +3565,6 @@ public actor SequenceEngine {
         )
     }
 
-    /// Retain an ordered rule's recent later step for delayed initial events (the
-    /// A2 cross-consumer race — see `pendingLaterSteps`). At capacity the largest
-    /// bucket's oldest entry is shed, after expiry and folding; deduped by
-    /// (eventId, stepId) so the same event cannot occupy the history twice
-    /// across re-evaluations.
     /// Whether the declared step categories expose the intentional slow-file /
     /// fast-priority inversion shape.
     ///
@@ -3600,6 +3600,11 @@ public actor SequenceEngine {
         step.logsourceCategory == "file_event"
     }
 
+    /// Retain an ordered rule's recent later step for delayed initial events (the
+    /// A2 cross-consumer race — see `pendingLaterSteps`). At capacity the largest
+    /// bucket's oldest entry is shed, after expiry and folding; deduped by
+    /// (eventId, stepId) so the same event cannot occupy the history twice
+    /// across re-evaluations.
     private func bufferPendingStep(
         ruleId: String,
         step: SequenceStep,
@@ -3638,7 +3643,9 @@ public actor SequenceEngine {
     ///  1. Retire expired history (compare-only sweep) as completed.
     ///  2. While a count limit is exceeded, pick the victim bucket: the admitting
     ///     rule if it alone exceeds the per-rule cap, else the largest bucket.
-    ///     Max-min fair: a flooding rule pays with its own history.
+    ///     Max-min fair: the largest bucket pays. A flooding rule pays with its
+    ///     own history once its bucket is the largest; until then each of its
+    ///     over-cap admissions trims the largest bucket toward an equal share.
     ///  3. Before any shed, give each fold-eligible bucket at most one
     ///     throttled fold attempt per call (foldPendingBucketIfDue; fold
     ///     removals are completed): the victim, then the admitting rule, then
