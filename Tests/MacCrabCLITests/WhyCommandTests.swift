@@ -308,7 +308,7 @@ struct WhyCommandTests {
             "     1. process.executable               endswith       /npm, /npx, /pip, … (6 total)"
         ))
         #expect(lines.filter { $0 == "  Process relation: descendant (relative to step package_install)" }.count == 2)
-        #expect(lines.filter { $0 == "  Condition AST:" }.count == 2)
+        #expect(lines.filter { $0 == "  " + Self.astHeader }.count == 2)
         // The exfil step has no condition tree, so its flat condition is shown.
         #expect(lines.last == "  Condition:   all_of")
     }
@@ -377,11 +377,12 @@ struct WhyCommandTests {
             "   3. process.executable               endswith       /visudo",
             "   4. SignerType                       equals         apple",
         ])
-        // Then the condition tree, pretty-printed by JSONSerialization and indented two spaces.
+        // Then a header saying the tree counts predicates from 0, and the tree,
+        // pretty-printed by JSONSerialization and indented two spaces.
         let conditionTree = try #require(treeRule["condition_tree"])
         let ast = String(decoding: try JSONSerialization.data(withJSONObject: conditionTree, options: .prettyPrinted),
                          as: UTF8.self)
-        #expect(Array(tree.dropFirst(8)) == ["Condition AST:"] + ast.split(separator: "\n").map { "  \($0)" })
+        #expect(Array(tree.dropFirst(8)) == [Self.astHeader] + ast.split(separator: "\n").map { "  \($0)" })
         #expect(tree.contains(#"    "type" : "or","#))
     }
 
@@ -395,7 +396,7 @@ struct WhyCommandTests {
         #expect(try RuleEngine.decodeLoadableRule(data).conditionTree == nil)
         let (lines, _) = try Self.render(String(decoding: data, as: UTF8.self), path: "user_rules/ssh_key_access.json")
         #expect(lines.contains("Predicates (4):"))
-        #expect(!lines.contains("Condition AST:"))
+        #expect(!lines.contains { $0.hasPrefix("Condition AST") })
         #expect(lines.last == "Condition:   all_of")
 
         // The package_install step's tree is null, so it shows its flat any_of.
@@ -406,13 +407,18 @@ struct WhyCommandTests {
         let (stepLines, _) = try Self.render(
             String(decoding: try JSONSerialization.data(withJSONObject: sequence), as: UTF8.self),
             path: "compiled_rules/sequences/supply_chain_full_kill_chain.json")
-        #expect(stepLines.filter { $0 == "  Condition AST:" }.count == 1)
+        #expect(stepLines.filter { $0 == "  " + Self.astHeader }.count == 1)
         #expect(stepLines.contains("  Condition:   any_of"))
 
         // A tree JSONSerialization cannot write prints nothing rather than raising.
         single["condition_tree"] = "any_of"
-        #expect(!MacCrabCtl.whyRuleLines(single, rulePath: "x.json").contains("Condition AST:"))
+        #expect(!MacCrabCtl.whyRuleLines(single, rulePath: "x.json").contains { $0.hasPrefix("Condition AST") })
     }
+
+    /// The line above a condition tree: its index, rangeStart and rangeEnd
+    /// count predicates from 0, while the predicate list numbers them from 1.
+    private static let astHeader = "Condition AST (index, rangeStart and rangeEnd count predicates from 0, "
+        + "so index 0 is predicate 1; rangeEnd is not included):"
 
     /// Parses a fixture the way `runWhy` parses a rule file, then renders it.
     private static func render(_ json: String, path: String) throws -> (lines: [String], rule: [String: Any]) {

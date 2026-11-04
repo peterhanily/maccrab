@@ -311,10 +311,11 @@ extension MacCrabCtl {
             return lines + whySequenceLines(rule, steps: steps)
         }
 
-        // Single-event rule. Predicates after `condition` in a compiled rule
-        // are flat; the engine walks them using the condition AST. We print
-        // predicate-by-predicate so an analyst can see which fields the rule
-        // is testing without spelunking into the YAML.
+        // Single-event rule. A compiled rule's predicates are a flat list; the
+        // engine combines them with the condition AST when the rule has one,
+        // otherwise with its flat condition. We print predicate-by-predicate
+        // so an analyst can see which fields the rule is testing without
+        // spelunking into the YAML.
         if let predicates = rule["predicates"] as? [[String: Any]] {
             lines += whyPredicateLines(predicates)
         }
@@ -345,14 +346,19 @@ extension MacCrabCtl {
         return lines
     }
 
-    /// "Condition AST:" and the tree as indented JSON. JSONSerialization
-    /// raises, rather than throws, on a value it cannot write, such as null or
-    /// a string, so anything but an array or an object prints nothing.
+    /// A "Condition AST" header, then the tree as indented JSON. The header
+    /// says how to read the tree's index, rangeStart and rangeEnd: the engine
+    /// takes them as positions in `predicates` counted from 0, with rangeEnd
+    /// excluded, while whyPredicateLines numbers predicates from 1.
+    /// JSONSerialization raises, rather than throws, on a value it cannot
+    /// write, such as null or a string, so anything but an array or an object
+    /// prints nothing.
     private static func whyConditionASTLines(_ conditionTree: Any) -> [String] {
         guard JSONSerialization.isValidJSONObject(conditionTree),
               let conditionData = try? JSONSerialization.data(withJSONObject: conditionTree, options: .prettyPrinted),
               let conditionStr = String(data: conditionData, encoding: .utf8) else { return [] }
-        return ["Condition AST:"] + conditionStr.split(separator: "\n").map { "  \($0)" }
+        return ["Condition AST (index, rangeStart and rangeEnd count predicates from 0, so index 0 is predicate 1; rangeEnd is not included):"]
+            + conditionStr.split(separator: "\n").map { "  \($0)" }
     }
 
     /// A sequence rule: window, correlation, ordering and trigger, then each
