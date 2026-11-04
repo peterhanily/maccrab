@@ -386,8 +386,9 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     /// Whether the engine may apply, for `id`, a user rule this process cannot
     /// read: at the last build, this process was refused lstat of user_rules
     /// or of a file in it, could not list user_rules, or could not open a file
-    /// in it that the engine's uid owns, and `id` is not a sequence or graph
-    /// rule's, which user rules do not replace.
+    /// in it that the engine's uid owns, and the index maps `id` to a file
+    /// outside sequences/ and graph/, whose rules user rules do not replace.
+    /// It is false for an id the index does not map.
     func hasUnreadableUserRules(id: String, in compiledDir: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard directory == compiledDir, unreadableUserRules, let path = paths[id] else { return false }

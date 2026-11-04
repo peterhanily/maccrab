@@ -5,11 +5,22 @@ import MacCrabCore
 
 /// `maccrabctl why` and the MCP rule index behind explain_alert decide which
 /// user rule the engine applies with UserRuleOverlayTrust, which repeats the
-/// engine's own gates instead of calling them: the user_rules folder check the
-/// engine's reload paths call (isOverlayDirSecure) and the per-file owner check
-/// in RuleEngine.loadRules(requireOwnerUID:). These run each copy against the
-/// engine's gate on the same folder and file, so a change to one that the
-/// other does not follow fails here.
+/// engine's own gates instead of calling them. The engine has three: the
+/// user_rules folder check its reload paths call (isOverlayDirSecure), an
+/// equivalent check nested in DaemonSetup.initialize() for the boot-time load
+/// (isSecureDirectory), and the per-file owner check in
+/// RuleEngine.loadRules(requireOwnerUID:).
+///
+/// The first two tests run a copy and the engine's gate on the same disk
+/// state: a user_rules folder this user owns, checked with this process's uid
+/// as the engine's, at 0755, 0775, 0757 and 0700, at 0755 with an ACL entry
+/// that lets everyone add and delete files, and a symlink to it; and a rule
+/// file this user owns, loaded with its owner's uid and with another uid as
+/// the engine's. A change that flips either side's verdict for one of these
+/// fails here. A test running as a normal user cannot create a folder or file
+/// that root or another user owns, so in such a run a change that affects
+/// only those owners does not fail here. The nested boot gate cannot be
+/// called from a test, so the last test pins its source instead.
 @Suite("User rule overlay trust matches the engine's gates")
 struct UserRuleOverlayTrustParityTests {
     /// A support directory with an empty user_rules folder.
@@ -20,10 +31,23 @@ struct UserRuleOverlayTrustParityTests {
         return (root, user)
     }
 
-    @Test("the folder check agrees with isOverlayDirSecure for a 0755, 0775, 0757 and 0700 user_rules and a symlink to it")
+    /// Runs /bin/chmod for the ACL changes chmod(2) cannot make.
+    private func chmodACL(_ arguments: [String]) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        process.arguments = arguments
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+
+    @Test("the folder check agrees with isOverlayDirSecure for a 0755, 0775, 0757 and 0700 user_rules, a 0755 one with an ACL entry that lets everyone add and delete files, and a symlink to it")
     func folderParity() throws {
         let (root, user) = try supportDirectory()
-        defer { try? FileManager.default.removeItem(atPath: root) }
+        defer {
+            _ = try? chmodACL(["-N", user])
+            try? FileManager.default.removeItem(atPath: root)
+        }
         func trust(_ path: String) -> Bool { UserRuleOverlayTrust.trustsDirectory(atPath: path, engineUID: getuid()) }
 
         var engine: [mode_t: Bool] = [:]
@@ -37,8 +61,20 @@ struct UserRuleOverlayTrustParityTests {
         let ownerWritableOnly: [mode_t: Bool] = [0o755: true, 0o775: false, 0o757: false, 0o700: true]
         #expect(engine == ownerWritableOnly)
 
-        // A symlink to a folder both accept: both refuse the link.
+        // An ACL entry that lets everyone add and delete files leaves the mode
+        // at 0755. Neither check reads ACL entries, so today both accept the
+        // folder, and a change to either one that refuses it fails here.
         #expect(chmod(user, 0o755) == 0)
+        #expect(try chmodACL(["+a", "group:everyone allow add_file,delete_child", user]) == 0)
+        var st = stat()
+        #expect(lstat(user, &st) == 0)
+        let permissions = st.st_mode & 0o7777
+        #expect(permissions == 0o755)
+        #expect(isOverlayDirSecure(user))
+        #expect(trust(user) == isOverlayDirSecure(user))
+        #expect(try chmodACL(["-N", user]) == 0)
+
+        // A symlink to a folder both accept: both refuse the link.
         let link = root + "/linked_rules"
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: user)
         #expect(!isOverlayDirSecure(link))
@@ -72,5 +108,57 @@ struct UserRuleOverlayTrustParityTests {
         // above covers both outcomes.
         let ownerOnly: [uid_t: Bool] = [owner: true, other: false]
         #expect(loads == ownerOnly)
+    }
+
+    @Test("the boot-time user_rules load is gated by the check nested in DaemonSetup.initialize(), which has isOverlayDirSecure's conditions and no other refusal")
+    func bootGateSource() throws {
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/MacCrabAgentKit/DaemonSetup.swift"), encoding: .utf8)
+        let update = "DaemonSetup's boot-time user_rules gate changed: make UserRuleOverlayTrust and these tests match it"
+        func occurrences(of text: String, in haystack: String) -> Int {
+            haystack.components(separatedBy: text).count - 1
+        }
+        // The text from `opening`, a line indented eight spaces, to the first
+        // closing brace at that indentation, which ends the block it opens.
+        // Found outside #require so that a failure does not print the whole
+        // file.
+        func block(_ opening: String) -> String? {
+            guard let start = source.range(of: opening),
+                  let end = source.range(of: "\n        }\n", range: start.upperBound..<source.endIndex) else { return nil }
+            return String(source[start.upperBound..<end.lowerBound])
+        }
+
+        // The one boot load of user_rules sits inside the block the nested
+        // check gates.
+        let gated = block("        if fm.fileExists(atPath: userOverridesDir), isSecureDirectory(userOverridesDir) {\n")
+        let gate = try #require(gated, "\(update)")
+        #expect(gate.contains("ruleEngine.loadRules(from: userOverridesURL, requireOwnerUID: geteuid())"), "\(update)")
+        let bootLoads = occurrences(of: "loadRules(from: userOverridesURL", in: source)
+        #expect(bootLoads == 1, "\(update)")
+
+        // The nested check, declared once. Like isOverlayDirSecure, it refuses
+        // a symlink, a folder whose attributes it cannot read, an owner other
+        // than root or getuid(), and a group- or world-writable mode. A further
+        // refusal, such as one for an ACL entry, adds a `return false` and
+        // fails here.
+        let declaration = "        func isSecureDirectory(_ path: String) -> Bool {\n"
+        let declarations = occurrences(of: declaration, in: source)
+        #expect(declarations == 1, "\(update)")
+        let nested = block(declaration)
+        let body = try #require(nested, "\(update)")
+        for condition in [
+            "resourceValues.isSymbolicLink == true",
+            "guard let attrs = try? fm.attributesOfItem(atPath: path) else {",
+            "let currentUID = getuid()",
+            "guard ownerUID == 0 || ownerUID == currentUID else {",
+            "if posix & 0o022 != 0 {",
+        ] {
+            #expect(body.contains(condition), "\(update): \(condition)")
+        }
+        let refusals = occurrences(of: "return false", in: body)
+        let acceptances = occurrences(of: "return true", in: body)
+        #expect(refusals == 4, "\(update)")
+        #expect(acceptances == 1, "\(update)")
     }
 }

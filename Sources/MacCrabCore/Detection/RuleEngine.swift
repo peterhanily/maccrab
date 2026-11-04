@@ -779,8 +779,9 @@ public actor RuleEngine {
     /// validate its condition tree. The MCP rule index and `maccrabctl why` use
     /// it, so neither explainer shows a user rule whose content the engine
     /// refuses. File selection (the engine's .skipsHiddenFiles also skips
-    /// UF_HIDDEN files), the no-follow 4 MiB read, file and directory ownership
-    /// (UserRuleOverlayTrust) and the status profile stay with the caller.
+    /// UF_HIDDEN files), the no-follow read within `maximumRuleFileBytes`,
+    /// file and directory ownership (UserRuleOverlayTrust) and the status
+    /// profile stay with the caller.
     public nonisolated static func decodeLoadableRule(_ data: Data) throws -> CompiledRule {
         let rule = try JSONDecoder().decode(CompiledRule.self, from: data)
         try validateConditionTree(in: rule)
