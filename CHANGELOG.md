@@ -3,44 +3,9 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — RC12 source repairs (qualification pending)
-
-### Fixed
-- Prevent stalled username lookups from exhausting heavy-enrichment workers;
-  use reentrant directory calls outside the cache lock, bounded physical
-  lookup admission, retryable unavailable results and terminal-only deferred
-  user-behavior observation.
-- Discard duplicate patches during terminal replay without stranding buffer
-  accounting, and prevent late enrichment from reopening a timed-out component.
-- Correct empty Campaigns, Events histogram coverage, refresh feedback and
-  package-read status; retain visible uncertainty without duplicate notices.
-- Restore the OPEN wiring regression and add independent admission verdicts.
-- Exercise saved storage settings through the authorized daemon consumer and
-  reject persistence overrides in the source guard.
-
-### Changed
-- Bind phase evidence to command, source bytes and explicit test executable;
-  refuse overwritten receipts, changed inputs, zero-test selections and failed
-  framework summaries. Require the tested executable to match its successful
-  build receipt.
-  Inventory changed-file test references before selecting safe local runs.
-- Fail clean CI if execution exits before its final success marker, including
-  Bash 3.2 expansion failures, while preserving staged release artifacts.
-- Refuse legacy detection/campaign simulations before side effects unless the
-  operator explicitly acknowledges a disposable host. Test only copied
-  preflight prefixes with inert endings; this guard does not verify isolation.
-- Document real monitor accesses and opt-in exclusions in the Swift suite;
-  replace the inaccurate claim that every test is safe and confined to `/tmp`.
-- Keep the historical invalid baseline fixture separate from the live policy.
-  Reference remeasurement, full CI and installed qualification remain
-  required; these source changes do not constitute release clearance.
-
-## [1.22.6] — Unreleased
+## [1.22.6] — 2026-11-04
 
 ### Added
-- **Diagnostic coverage checks actual storage bindings and quiet-timer callbacks.**
-  Regression fixtures cover reopen without policy writes, failed saves without
-  reloads, and late enrichment completion replayed once without another event.
 - **Rich heartbeats expose collection latency separately from publication time.**
   Wall time and engine uptime are sampled together at collection start; a
   separate publication timestamp includes delayed health reads without making
@@ -58,9 +23,7 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - **TraceGraph hand-off loss is visible.** The heartbeat reports
   `ingest_queue_loss_total` with a recency verdict (`ingest_queue_loss_recent`
   and `ingest_queue_loss_last_at_unix`). The dashboard's TraceGraph
-  write-health verdict degrades on recent loss at the hand-off queue, and the
-  installed-host qualification gate requires the queue ledger to conserve at
-  every sample and its loss to be zero throughout the epoch.
+  write-health verdict degrades on recent loss at the hand-off queue.
 - **The heartbeat says when a sensor-degraded episode opened.**
   `es_sensor_degraded_since_unix` is present only while the state is open, and
   `es_sensor_loss_fraction_tick` carries the worst of this tick's all-stage and
@@ -90,22 +53,41 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   to lifetime totals for engines without it. Totals stay in the heartbeat and
   `maccrabctl status` adds the time of the last earlier loss. A loss is logged
   at most once a minute per plane, with the count since the previous line.
-- **The release recorder counts work-plane loss.** `work_plane_loss`, the sum of
-  `rejected_handlers_total` on the detection, notarization follow-up and
-  content-scan planes, must stay zero across the runtime epoch.
 - **Security posture distinguishes unknown from healthy.** Missing screen-lock
   preferences and unverified XProtect definition currency no longer receive
   healthy credit. Engine readiness uses fresh matching heartbeat identity and
   native-sensor health, not merely a running process name.
-- **Runtime audit checks bind to their own fixtures.** Workload cleanup requires
-  a successfully created directory identity; telemetry verification uses exact
-  emitted span IDs, bounded requests and read-only queries. Encrypted attributes
-  cannot be mistaken for proof of redaction. Journal recovery checks exact
-  retained identities, and async test gates have bounded cancellation paths.
 - **Sequence pending-step admission avoids repeated whole-bucket copies and
   accounting scans.** Unique appends update their admission ledger and cached
   checkpoint weight directly. Duplicate checks, pressure retirement, ordering
   and independent checkpoint-weight validation are unchanged.
+- **One noisy sequence rule no longer flushes the others' history.** Sequence
+  rules keep recent later-step events so that a chain whose first step is
+  processed late can still complete. That history holds at most 8,192 entries
+  and 7.5 MiB for all rules together. At the limit the engine shed the oldest
+  entry of one queue shared by every rule: in one measured Playwright install
+  burst matching one rule, 2,481 entries were shed, 62 of them from four
+  unrelated rules. Expired entries are still retired first. Next, for the
+  second step of an eligible ordered rule, one process's repeated entries are
+  folded into its earliest. Only then is the oldest entry of the rule holding
+  the most history shed. Partial matches choose their victims the same way. In
+  tests on the shipped rules, 10,000 writes by four processes are folded in
+  one pass with nothing shed, and the late install step still fires
+  `supply_chain_full_kill_chain`. The heartbeat's `sequence_pending_pressure`
+  block reports the victim policy, folded entries, fold attempts and the last
+  fold. KNOWN_LIMITS.md lists the bounds, including the one order of events in
+  which folding can miss a chain.
+- **A sequence chain can complete when its middle step is processed after its
+  last step.** A later step processed before the middle step it follows failed
+  its ordering check and was kept, but only a new first step replayed it, so
+  the chain waited for another live later step. When a middle step now binds
+  without completing a chain, the kept later steps are replayed against that
+  chain, earliest event first, under the same windows, and the alert is raised
+  on the middle step's event. Only an event that can start a chain now
+  requests the process ancestry of the kept history, so a flood of buffered
+  writes no longer makes each later-step event look up the ancestry of every
+  buffered entry. The heartbeat reports `advance_replay_bindings_total` and
+  `advance_replay_completions_total`.
 - **Ordinary events skip an empty deferred-enrichment drain.** A lock-protected
   availability hint avoids unnecessary actor hops; event readiness, the
   unconditional quiet timer and shutdown draining retain their ownership.
@@ -259,9 +241,17 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Passwords given to sshpass, zip, security, ssh-keygen and registry logins
   are redacted in stored arguments, command lines and parent command lines,
   and in OCSF and OpenTelemetry exports.
-- **MCP `explain_alert` follows user-rule precedence and file trust checks.**
-  Semantic-validation and in-place rule-ID edit limits remain in explanations;
-  they do not change the engine's validation or rule authorization.
+- **MCP `explain_alert` shows which rule an alert came from and points to
+  `maccrabctl why` for its logic.** It shows the rule the engine applies for
+  the alert's id: a user rule only when the engine would load it, and
+  otherwise the bundled rule. It prints that rule's description, status and
+  logsource, marks a user rule `source: user_rules`, and adds a line when that
+  rule has "enabled": false. It does not print the rule's matching logic: a
+  closing line points to `maccrabctl why <alert id>`, which prints it on the
+  Mac unaltered by the MCP privacy sanitizer. It finds an alert by its id
+  anywhere in alerts.db, not only among the 2,000 newest, and for an id with no
+  rule file, such as the built-in baseline-anomaly detector's, it says so
+  instead of calling the rule unreadable.
 - **`maccrabctl allow remove` and `sudo maccrabctl unsuppress` remove entries
   through the engine,** so the engine's next save does not undo a removal.
   maccrabctl no longer warns about running as root for `unsuppress`, which
@@ -297,7 +287,58 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   sequences and graph folders. It prints a sequence rule's window, trigger and
   steps, and a graph rule's nodes and edges. When no rule file has the alert's
   id, it says so. Its help no longer claims it marks matched clauses, and it
-  says where alert IDs are shown.
+  says where alert IDs are shown. It shows a user rule only when the engine
+  would load it, applying the engine's folder, ownership, hidden-file and
+  content checks, and says when that rule, or another user rule with its id,
+  has "enabled": false. For a rule without a condition tree it prints how the
+  predicates combine, and a rule with a null `condition_tree` no longer makes
+  it abort.
+- **Re-enabling a rule takes effect at the next reload instead of the next
+  restart.** A rule reload re-applied every disable it had recorded, so a rule
+  re-enabled by removing the override that disabled it (the dashboard's
+  Enable, MCP `delete_rule` or `maccrabctl rule delete`) stayed off until the
+  engine restarted, while the dashboard listed it as enabled. A reload now
+  re-applies only disables made at runtime and takes every other rule's state
+  from the rule files. It also loads the user rule overrides in the same step
+  as the bundled rules, so while a reload runs no event is evaluated against a
+  bundled rule that an override replaces.
+- **Enable in Detection › Rules no longer deletes a custom rule or its
+  tuning.** Enable on a rule that a user override disabled deleted the
+  override's JSON and YAML, which removed a rule made with the wizard or
+  `create_rule`, or a bundled rule's Edit YAML or severity change. Enable now
+  removes only an override that does nothing but disable a bundled rule, and
+  otherwise saves the override again with "enabled": true, keeping its YAML.
+  Enable and the severity control's Default rebuild a JSON-only override of a
+  bundled rule from the current bundled rule, Enable keeping a severity that
+  differs from the bundled one, so an override copied before an update no
+  longer brings back the older rule.
+- **Re-saving a rule override from an earlier version now takes effect.** The
+  engine loads a user rule file only when its own account owns it, and the
+  rule-install handler rewrote existing files in place, keeping their owner.
+  An override that an app before v1.19.1 saved under the user's account
+  therefore stayed refused after every Disable, Edit YAML or severity change,
+  and after the re-save the engine's log advises. The handler now replaces each
+  file with a new one, mode 0644 and owned by the engine.
+- **Changing a running custom rule's severity no longer switches it off.** The
+  severity control took the rule's disabled state from Detection › Rules,
+  which applies the stable profile to user rules although the engine does
+  not, so a severity change on a rule made with the wizard wrote
+  "enabled": false. The rule's own override file now decides.
+- **Stalled user-name lookups no longer occupy every heavy-enrichment
+  worker.** Directory lookups run outside the user-name cache lock in a
+  bounded lane, including after a deadline. An unavailable result is retried
+  instead of cached, and a user name resolved later still reaches rule and
+  sequence replay.
+- **Late enrichment no longer reopens a timed-out event.** A result that
+  arrives after its component timed out is discarded, and duplicate patches
+  during final replay are dropped with their buffer accounting released.
+- **Dashboard read status says what was read.** The Events histogram says when
+  its coverage is incomplete, so missing intervals are not read as zero. An
+  empty Campaigns view says no campaign rows are available and that the read
+  may be incomplete, instead of calling the data unavailable. Alerts shows
+  saved alerts as refreshing during a retry instead of the earlier error, and
+  a Package freshness scan no longer reports itself complete: it says the
+  results cover only the packages returned.
 - **The Agent Traces explainer describes what the tab shows.** It said
   expanding a trace showed tool calls and the causal-graph events that fired
   during the span. Selecting a trace lists its spans with timing, parent
@@ -589,49 +630,12 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   the 14 language folders inside the app's resource bundle, where nothing
   reads them; the app uses the top-level copies. The release build now removes
   the nested copies after checking that each is identical to its top-level
-  twin, which makes the installed app about 2 MB smaller and keeps it inside
-  the fixed installed-size budget.
-- **A deterministic ES ingress storm benchmark.** `ESIngressStormBenchmarkTests`
-  runs an in-process storm covering the callback before and after, the
-  byte-level protected-OPEN classification cost and parity, the hand-off cost,
-  the worker reserve for the write family and protected opens, lane routing by
-  admission class, the coalesce-decision cost and a paced zero-lineage-loss
-  run, printing BENCH-prefixed numbers in the test log.
+  twin, which makes the installed app about 2 MB smaller.
 - **Every release is critical for installs older than 1.22.0.** The appcast
   generator writes Sparkle 2's `<sparkle:criticalUpdate sparkle:version="1.22.0">`
   into each item, so those installs see the update immediately, outside the
   phased rollout, and cannot skip it, while newer installs are updated
-  normally. `MACCRAB_CRITICAL_BELOW=X` raises the floor for one release, and
-  `release.sh` refuses a lower value before it builds anything. The item
-  validator rejects a marker that carries text, children, another attribute or
-  a malformed version, and the release fixtures cover it.
-- **A failed installed-host recording can be retried without moving root-owned
-  files by hand.** A second `record-runtime` attempt died with
-  `FileExistsError` on the first attempt's readiness directory, and its first
-  write would have replaced the failed capture. Before it starts, the recorder
-  now renames the earlier capture sidecar and readiness directory into the
-  next free `<report>.attempts/<n>/`. It never deletes them, and it writes its
-  own evidence so that it can only replace files it created in the same run.
-- **`record-runtime` without sudo now refuses before it moves anything.**
-  Retention used to run before the sudo check. A forgotten `sudo` moved the
-  root-owned capture into a user-owned `<report>.attempts/`, could not move
-  the readiness directory, and blocked every later sudo retry. The sudo check
-  now runs first. Retention also refuses evidence on a different volume from
-  the report, so nothing is left half-moved.
-- **The runtime recorder refuses, within seconds, a TraceGraph store that
-  cannot take the epoch.** An installed engine already at its TraceGraph
-  proactive recovery threshold passed every pre-epoch check, then failed six
-  minutes into the 900-second epoch. The first heartbeat read, before any
-  prewarm, now refuses with a one-line reason when the store is blocked, is
-  not accepting mutations, or has its footprint at or above that threshold.
-- **`release.sh` checks free disk before anything else.** Each phase that runs
-  clean CI now first runs `ci-local.sh --clean --free-space-preflight`. It
-  applies CI's own budget of 14,336 MiB free on the temp and checkout volumes,
-  and credits everything the clean run wipes before it measures (`.build` and
-  the assessment-harness build) in full. Before this change a full disk was
-  found only after the remote checks, the audits, the clean wipe and
-  dependency resolution. After building a candidate, phase 1 also warns when
-  the space left is not enough for phase 2's clean CI.
+  normally.
 
 ## [1.22.5] — 2026-10-04
 

@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
-[![Tests](https://img.shields.io/badge/tests-5962%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-6072%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20shipped%20(stable%20tier%20on%20by%20default)-blueviolet)](#what-runs-on-a-default-install)
 [![Version](https://img.shields.io/badge/version-1.22.6-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
@@ -278,7 +278,7 @@ into your project; it points at the local `.build/debug/maccrab-mcp`.
 | `verify_bundle` | (v1.10) Verify a `.maccrabtrace` bundle (schema, Merkle, signature) |
 | `trace_from_event` | (v1.10) Pivot from an event id to its containing trace |
 | `list_rules` | (v1.21.6) The compiled Sigma corpus, annotated with whether each rule is actually loaded under the active profile and whether it has ever been evaluated |
-| `explain_alert` | (v1.21.6) Why one alert fired: the rule, its compiled predicate, logsource and status |
+| `explain_alert` | (v1.21.6) One alert and the rule it came from: the rule's description, status and logsource, `source: user_rules` for a user rule, and a note when that rule has `"enabled": false`. For the matching logic it points to `maccrabctl why <alert id>` |
 | `get_vulns` | (v1.21.6) Vulnerability findings from the osv.dev lookup (off by default) |
 | `get_privacy_alerts` | (v1.21.6) Privacy-auditor findings: bulk egress, domain spikes, tracker contacts |
 | `get_browser_extensions` | (v1.21.6) Installed extensions with risk score, dangerous permissions and dev-mode status |
@@ -711,13 +711,19 @@ This source tree targets **v1.22.6**. See [CHANGELOG.md](CHANGELOG.md) for the f
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
-- **v1.22.6** — The Endpoint Security sensor no longer loses events during a
-  build storm, and TraceGraph writes leave the detection lanes; TraceGraph no
-  longer fills on AI-agent developer Macs and recovers in minutes when it does; a
-  storage condition at startup no longer puts the engine in a relaunch loop;
-  the plugin store no longer claims installs run fully sandboxed, and the
-  catalog shows each plugin's signed name, description and icon; System Health,
-  MCP and the docs describe what a default install actually does. Installs older
+- **v1.22.6** — agent file reads and unused signal events no longer crowd
+  process events out of the priority detection lane, and TraceGraph writes
+  leave the detection lanes; sequence rules shed history from the rule holding
+  the most, after merging a process's repeated entries; TraceGraph is no longer
+  filled by repeated runs of one unsigned binary, and a full store drains
+  instead of staying paused for hours; a storage condition at startup no longer
+  puts the engine in a relaunch loop; re-enabling a rule takes effect without a
+  restart and keeps custom rules and their tuning; the plugin store no longer
+  claims installs run fully sandboxed, and the catalog shows each plugin's
+  signed name, description and icon; System Health, MCP and the docs describe
+  what a default install actually does. Sustained extreme bursts, such as large
+  package installs during other heavy work, can still drop file events; the
+  drops are counted (see [KNOWN_LIMITS.md](KNOWN_LIMITS.md)). Installs older
   than v1.22.0 see this update as critical.
 - **v1.22.5** — the Homebrew cask installs again on Homebrew 7 (`postflight_steps`);
   a past write failure no longer keeps protection degraded until restart; the
