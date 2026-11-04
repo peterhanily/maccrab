@@ -309,16 +309,19 @@ struct CompiledRuleFileIndexTests {
         rule["edges"] = [["from": "shell", "to": "shell", "relation": "spawned"]]
         rule["detection"] = ["selection": ["file.path|contains": "/maccrab-rule-index-fixture/"]]
         let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2c"
-        let pointer = "  full rule: run `maccrabctl why \(alertID)` on this Mac to see what a match requires."
+        let pointer = "  matching logic: run `maccrabctl why \(alertID)` on this Mac; it prints the rule's predicates and how they combine (long value lists are shortened)."
 
         let lines = explainRuleDefinitionLines(rule, alertID: alertID, duplicateUserRules: false)
         #expect(Array(lines.prefix(3)) == ["Rule definition:", "  description: rule index fixture", "  status: stable"])
         #expect(lines.last == pointer)
-        // No predicate value and no logic key reaches the text.
+        // No predicate value and no logic key reaches the text. The pointer
+        // names predicates only as what `why` prints, so the keys are looked
+        // for in the lines above it.
         let text = lines.joined(separator: "\n")
         #expect(!text.contains("/maccrab-rule-index-fixture/"))
+        let definition = lines.dropLast().joined(separator: "\n")
         for key in ["predicates", "condition", "steps", "nodes", "edges", "detection"] {
-            #expect(!text.contains(key), "\(key)")
+            #expect(!definition.contains(key), "\(key)")
         }
         // The pointer survives the sanitizer every explain_alert response passes through.
         #expect(LLMSanitizer.sanitize(text).hasSuffix(pointer))

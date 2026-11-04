@@ -11,7 +11,7 @@ extension MacCrabCtl {
     /// yourself." This command prints the alert's captured fields, then the
     /// rule that raised it, from user_rules (dashboard-authored rules and
     /// overrides, which replace a bundled rule with the same id) or
-    /// compiled_rules: a single-event rule's predicates and condition AST, a
+    /// compiled_rules: a single-event rule's predicates and condition, a
     /// sequence rule's window, correlation, trigger and steps, or a graph
     /// rule's nodes, edges, scope and constraints. It does not evaluate the
     /// rule against the event, so it does not mark which clauses matched.
@@ -115,8 +115,8 @@ extension MacCrabCtl {
         }
 
         // 5. The rule: its file and summary, then a single-event rule's
-        //    predicates and condition AST, a sequence rule's steps, or a
-        //    graph rule's pattern.
+        //    predicates and condition, a sequence rule's steps, or a graph
+        //    rule's pattern.
         for line in whyRuleLines(ruleJSON, rulePath: rulePath) {
             print(line)
         }
@@ -217,7 +217,7 @@ extension MacCrabCtl {
     }
 
     /// The compiled-rule part of `why`, one string per printed line: the
-    /// rule file and summary, then the predicates and condition AST of a
+    /// rule file and summary, then the predicates and condition of a
     /// single-event rule, the settings and steps of a sequence rule, or the
     /// pattern of a graph rule.
     static func whyRuleLines(_ rule: [String: Any], rulePath: String) -> [String] {
@@ -241,11 +241,14 @@ extension MacCrabCtl {
         if let predicates = rule["predicates"] as? [[String: Any]] {
             lines += whyPredicateLines(predicates)
         }
-        // The condition expression: the Boolean combinator the rule used
-        // ("selection and not filter_a and not filter_b"). A null tree is no
-        // tree, as the engine decodes it.
+        // How the predicates combine: the condition AST of a rule with a tree
+        // ("selection and not filter_a and not filter_b"), else the flat
+        // condition, all_of or any_of, which the engine evaluates instead, as
+        // for a sequence step. A null tree is no tree, as the engine decodes it.
         if let conditionTree = rule["condition_tree"], !(conditionTree is NSNull) {
             lines += whyConditionASTLines(conditionTree)
+        } else {
+            lines.append("Condition:   \((rule["condition"] as? String) ?? "?")")
         }
         return lines
     }

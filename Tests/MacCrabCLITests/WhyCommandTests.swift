@@ -3,11 +3,12 @@
 //
 // `maccrabctl why`: the rule lookup reads the top level of user_rules before
 // compiled_rules and its sequences/ and graph/ folders, sequence and graph
-// rules are rendered, and the single-event rendering keeps its previous form.
+// rules are rendered, and a single-event rule shows its predicates and then
+// its condition tree or flat condition.
 // The fixtures are real compiled rules: the kill-chain sequence
 // supply_chain_full_kill_chain.yml run through Compiler/compile_rules.py, a
-// rule from Rules/graph, and the compiled single-event rules ssh_key_access.yml
-// and sudoers_modification.yml.
+// rule from Rules/graph, and the compiled single-event rules ssh_key_access.yml,
+// sudoers_modification.yml and c2_azurestaticprovider_net.yml.
 
 import Foundation
 import MacCrabCore
@@ -213,7 +214,7 @@ struct WhyCommandTests {
         ])
     }
 
-    @Test("a single-event rule renders exactly as before")
+    @Test("a single-event rule shows its predicates, then its condition tree or its flat all_of or any_of")
     func singleEventRendering() throws {
         let bar = String(repeating: "─", count: 72)
 
@@ -229,6 +230,18 @@ struct WhyCommandTests {
             "   2. file.path                        endswith       /id_rsa, /id_ed25519, /id_ecdsa, /id_dsa",
             "   3. process.executable               NOT endswith   /ssh, /ssh-agent, /ssh-add, … (8 total)",
             "   4. SignerType                       NOT equals     apple",
+            "Condition:   all_of",
+        ])
+
+        // A flat any_of rule fires on any one predicate: here the host name or
+        // the address, not both.
+        let anyOfPath = "compiled_rules/c2_azurestaticprovider_net.json"
+        let (anyOf, _) = try Self.render(Self.anyOfRule, path: anyOfPath)
+        #expect(Array(anyOf.dropFirst(3)) == [
+            "Predicates (2):",
+            "   1. network.destination.hostname     contains       azurestaticprovider.net",
+            "   2. network.destination.ip           equals         37.16.75.69",
+            "Condition:   any_of",
         ])
 
         let treePath = "compiled_rules/sudoers_modification.json"
@@ -253,7 +266,7 @@ struct WhyCommandTests {
         #expect(tree.contains(#"    "type" : "or","#))
     }
 
-    @Test("a null condition_tree counts as no tree: why does not abort, and a step shows its flat condition")
+    @Test("a null condition_tree counts as no tree: why does not abort, and the rule or a step shows its flat condition")
     func nullConditionTree() throws {
         // The engine decodes "condition_tree": null as no tree, loads the rule
         // and evaluates its flat condition.
@@ -264,6 +277,7 @@ struct WhyCommandTests {
         let (lines, _) = try Self.render(String(decoding: data, as: UTF8.self), path: "user_rules/ssh_key_access.json")
         #expect(lines.contains("Predicates (4):"))
         #expect(!lines.contains("Condition AST:"))
+        #expect(lines.last == "Condition:   all_of")
 
         // The package_install step's tree is null, so it shows its flat any_of.
         var sequence = try #require(try JSONSerialization.jsonObject(with: Data(Self.sequenceRule.utf8)) as? [String: Any])
@@ -441,6 +455,42 @@ struct WhyCommandTests {
           "falsepositives": ["Key management tools", "IDE SSH integrations"],
           "enabled": true,
           "status": "experimental"
+        }
+        """#
+
+    // Rules/command_and_control/c2_azurestaticprovider_net.yml, compiled: the
+    // YAML condition `selection_host or selection_ip` becomes a flat any_of.
+    private static let anyOfRule = #"""
+        {
+          "id": "6b2a0325-1901-48ca-9bbf-c4b45cc0d7ab",
+          "title": "C2 Connection to sh.azurestaticprovider.net / 37.16.75.69 (Mini Shai-Hulud)",
+          "description": "Detects a DNS resolution or outbound network connection to the literal C2 host `sh.azurestaticprovider.net` (or its parent `azurestaticprovider.net`) or the associated IP `37.16.75.69`. These are the documented C2 indicators for the Mini Shai-Hulud SAP CAP / PyTorch Lightning / Intercom / TanStack waves (Feb-May 2026). The domain typosquats Microsoft Azure Static Web Apps to evade casual review; the IP is the resolution pinned in the Feb-Mar 2026 waves. Any traffic to either is essentially diagnostic — legitimate macOS hosts have no reason to talk to this typosquat domain.\n",
+          "level": "critical",
+          "suppressible": false,
+          "tags": [
+            "attack.command_and_control",
+            "attack.t1071.001",
+            "attack.t1102",
+            "attack.initial_access",
+            "attack.t1195.001"
+          ],
+          "logsource": {"category": "network_connection", "product": "macos"},
+          "predicates": [
+            {
+              "field": "network.destination.hostname",
+              "modifier": "contains",
+              "values": ["azurestaticprovider.net"],
+              "negate": false
+            },
+            {"field": "network.destination.ip", "modifier": "equals", "values": ["37.16.75.69"], "negate": false}
+          ],
+          "condition": "any_of",
+          "falsepositives": [
+            "A defender or red-team operator running a controlled replay of the IOC on the monitored host — investigate parent lineage; the alert is the correct outcome",
+            "A defender pinning the IP into a local DNS sinkhole for analysis (rare; the network-connection event still fires once the resolution is attempted)"
+          ],
+          "enabled": true,
+          "status": "stable"
         }
         """#
 

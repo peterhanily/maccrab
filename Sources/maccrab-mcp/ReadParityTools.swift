@@ -44,9 +44,10 @@ func handleListRules(_ args: [String: Any]) -> Any {
 /// CompiledRuleFileIndex resolves it: a user rule the engine would load, else
 /// the bundled rule. Of that rule it shows the description, status and
 /// logsource, not the matching logic; a closing line points to
-/// `maccrabctl why <alert id>`, which prints the full compiled rule on this
-/// Mac. The rule definition is shown only when the rule JSON is readable; when
-/// it is not, this says so rather than implying the alert had no rule behind it.
+/// `maccrabctl why <alert id>`, which prints the rule's predicates and how they
+/// combine on this Mac (long value lists are shortened). The rule definition is
+/// shown only when the rule JSON is readable; when it is not, this says so
+/// rather than implying the alert had no rule behind it.
 func handleExplainAlert(_ args: [String: Any]) async -> Any {
     guard let alertId = args["alert_id"] as? String, !alertId.isEmpty else {
         return toolError("'alert_id' is required (get it from get_alerts).")
@@ -100,10 +101,11 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
 }
 
 /// The "Rule definition:" part of explain_alert: the rule's description,
-/// status and logsource, then where to see the full compiled rule. The
-/// matching logic is left to `maccrabctl why`, which prints it on this Mac;
-/// this server's responses pass through the privacy sanitizer, which rewrites
-/// paths, host names and addresses in rule values.
+/// status and logsource, then where to see its matching logic. That is left
+/// to `maccrabctl why`, which prints the rule's predicates and how they
+/// combine on this Mac (long value lists are shortened); this server's
+/// responses pass through the privacy sanitizer, which rewrites paths, host
+/// names and addresses in rule values.
 func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, duplicateUserRules: Bool) -> [String] {
     var lines = ["Rule definition:"]
     if duplicateUserRules {
@@ -112,7 +114,7 @@ func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, duplicat
     if let desc = rule["description"] as? String { lines.append("  description: \(desc)") }
     if let status = rule["status"] as? String { lines.append("  status: \(status)") }
     if let ls = rule["logsource"] { lines.append("  logsource: \(ls)") }
-    lines.append("  full rule: run `maccrabctl why \(alertID)` on this Mac to see what a match requires.")
+    lines.append("  matching logic: run `maccrabctl why \(alertID)` on this Mac; it prints the rule's predicates and how they combine (long value lists are shortened).")
     return lines
 }
 
