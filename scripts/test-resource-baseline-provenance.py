@@ -19,6 +19,9 @@ P = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(P)
 ARCHIVED = (ROOT / P.ARCHIVE).read_bytes()
 CURRENT = (ROOT / 'scripts/candidate-qualification.py').read_bytes()
+# The live docs policy binds the current four-executor measurement. This helper
+# only ever covers the frozen two-executor v1 policy, kept byte-for-byte here.
+HISTORICAL_POLICY = (ROOT / 'scripts/fixtures/historical-two-executor-resource-policy.json').read_bytes()
 
 
 class ResourceBaselineProvenanceTests(unittest.TestCase):
@@ -93,6 +96,9 @@ class ResourceBaselineProvenanceTests(unittest.TestCase):
         self.reject(self.altered('def percentile_nearest_rank(', 'def renamed_percentile_nearest_rank('))
         self.reject(ARCHIVED.decode() + '\nlen = 3\n')
 
+    def test_historical_policy_fixture_is_the_frozen_v1_policy(self):
+        self.assertEqual(P.digest(HISTORICAL_POLICY), P.BASELINE_SHA)
+
     def test_archive_bytes_are_not_a_general_old_hash_exception(self):
         with self.assertRaisesRegex(P.ProvenanceError, 'archive hash'):
             P.verify_sources(ARCHIVED + b'\n', ARCHIVED)
@@ -100,7 +106,7 @@ class ResourceBaselineProvenanceTests(unittest.TestCase):
     def fixture(self, root):
         payloads = {
             P.ARCHIVE: ARCHIVED,
-            'docs/RELEASE_RESOURCE_BASELINE.json': (ROOT / 'docs/RELEASE_RESOURCE_BASELINE.json').read_bytes(),
+            'docs/RELEASE_RESOURCE_BASELINE.json': HISTORICAL_POLICY,
             'scripts/candidate-qualification.py': ARCHIVED,
             'scripts/runtime-qualification-workload.sh': (ROOT / 'scripts/runtime-qualification-workload.sh').read_bytes(),
             'scripts/test-otlp-curl.sh': (ROOT / 'scripts/test-otlp-curl.sh').read_bytes(),

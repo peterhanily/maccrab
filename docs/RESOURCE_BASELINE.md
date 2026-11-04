@@ -7,13 +7,19 @@ measured summaries and limits, and commitments to the private accepted evidence.
 It contains no machine fingerprint, installed path, process ID, capture time,
 raw sample, workload transcript or operator identity.
 
-The limits remain 9 MiB/s average engine writes, 164 MiB/s maximum sampled write
-window, and 19% background GUI p95 CPU (percent of one core). The engineering
-allowance is 25% above each measured reference statistic, rounded upward to whole
-MiB/s or CPU percentage points. It was selected before the candidate comparison.
-One epoch cannot estimate run-to-run variation or a false-failure probability.
-The complete raw samples, including the workload-bracketing write spike, and the
-written acceptance decision remain private and unchanged.
+The reference was re-measured on 2026-11-04 with the four-executor fixed
+workload: 4,963,155 B/s average engine writes, 126,251,281 B/s maximum sampled
+write window, and 3.9% background GUI p95 CPU (percent of one core). The limits
+remain the September 2026 values that shipped v1.22.5 qualified under: 9 MiB/s,
+164 MiB/s and 19%, each 25% above its September measurement, rounded up. They
+are not re-derived from the new measurement, which ran on fresh factory stores:
+the [runtime quality contract](RUNTIME_QUALITY_CONTRACT.md) qualifies a
+candidate on its retained stores and does not let a wiped-data run rescue
+publication, and on its retained stores shipped v1.22.5 averaged 7,288,004 B/s
+of engine writes. One epoch cannot estimate run-to-run variation or a
+false-failure probability. The complete raw samples, including the
+workload-bracketing write spike, and the written acceptance decision remain
+private and unchanged.
 
 A build preflight can validate the committed public policy without access to
 private host data. Installed recording and final release verification additionally
@@ -48,8 +54,8 @@ heartbeat fields. It captures 31 observations at 30-second offsets across a
 900-second epoch and runs the fixed 3,000-iteration workload at minute five.
 Workload completion is timed independently of sampling. The private receipt
 retains raw samples, running process identities, signing checks, host details,
-complete workload output and both workload executor hashes. It refuses a changed
-process, candidate image, failed workload or changed executor bytes.
+complete workload output and all four workload executor hashes. It refuses a
+changed process, candidate image, failed workload or changed executor bytes.
 
 The result is **measured-awaiting-acceptance**, with no approved limits. Capture
 does not install software, choose budgets or authorize a release.
@@ -97,9 +103,10 @@ The validator binds the public policy to the candidate's exact source commit,
 then applies the complete original capture checks to the private receipt:
 reference identity, endpoint timing, native uptime, workload output, sample
 cadence, raw-statistic recomputation and same-host configuration. The historical
-recorder compatibility proof pins the public policy, private evidence commitment,
-archive and unchanged resource dependency closure. Missing private evidence is
-an incomplete release qualification, never an implicit pass.
+recorder compatibility proof pins the historical two-executor public policy,
+private evidence commitment, archive and unchanged resource dependency closure.
+Missing private evidence is an incomplete release qualification, never an
+implicit pass.
 
 The recorder is resource evidence only. Its successful workload does not prove
 event persistence or detection fidelity. Candidate qualification still requires
