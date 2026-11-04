@@ -509,8 +509,18 @@ struct CompiledRuleFileIndexTests {
         #expect(shown() == "user override")
         #expect(!index.hasUnreadableUserRules(id: "rule.x", in: compiled))
 
-        // A folder the engine trusts that this process cannot list.
+        // A folder the engine trusts that this process cannot list. The first
+        // lookup after the change is explain_alert's rule section, so the note
+        // it adds comes from the build that lookup makes: present for the
+        // single-event id, absent for the sequence id.
         #expect(chmod(user, 0o300) == 0)
+        let alertID = "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2d"
+        func section(_ id: String) -> [String] {
+            explainRuleSectionLines(ruleID: id, alertID: alertID, compiledDir: compiled, index: index)
+        }
+        #expect(Array(section("rule.x").prefix(2)) == ["Rule definition:", Self.unreadableNote(alertID)])
+        #expect(section("seq.s").first == "Rule definition:")
+        #expect(!section("seq.s").contains(Self.unreadableNote(alertID)))
         #expect(shown() == "bundled")
         #expect(index.hasUnreadableUserRules(id: "rule.x", in: compiled))
         #expect(chmod(user, 0o755) == 0)

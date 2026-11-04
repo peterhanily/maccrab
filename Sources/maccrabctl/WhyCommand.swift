@@ -101,18 +101,9 @@ extension MacCrabCtl {
             }
             exit(1)
         }
-        let ruleDir = (rulePath as NSString).deletingLastPathComponent
-        let isUserRule = ruleDir.hasSuffix("/user_rules")
-        // The user rules that could stand in for this rule, read before the
-        // notes about them are printed: those of its support dir, for a user
-        // rule or a bundled single-event rule. A user rule does not replace a
-        // sequence or graph rule.
-        let userRules = isUserRule || ruleDir.hasSuffix("/compiled_rules")
-            ? loadableUserRuleFiles(forRuleID: alert.ruleId,
-                                    inUserRules: (ruleDir as NSString).deletingLastPathComponent + "/user_rules")
-            : (paths: [], unreadable: false)
         // A user rule is read again the way the daemon reads it: without
         // following a link, and within its rule-file size limit.
+        let isUserRule = (rulePath as NSString).deletingLastPathComponent.hasSuffix("/user_rules")
         let ruleData = isUserRule
             ? BoundedRegularFileReader.read(at: rulePath, maximumBytes: RuleEngine.maximumRuleFileBytes)
             : (try? Data(contentsOf: URL(fileURLWithPath: rulePath)))
@@ -124,14 +115,12 @@ extension MacCrabCtl {
 
         // 5. The rule: its file and summary, then a single-event rule's
         //    predicates and condition, a sequence rule's steps, or a graph
-        //    rule's pattern.
+        //    rule's pattern, then any notes on the user rules that could stand
+        //    in for it.
         for line in whyRuleLines(ruleJSON, rulePath: rulePath) {
             print(line)
         }
-        // findRuleFile shows the first of these user rules when there is one,
-        // so a bundled rule is shown only when there is none.
-        for line in whyUserRuleNoteLines(claimCount: isUserRule ? userRules.paths.count : 0,
-                                         unreadable: userRules.unreadable, alertID: alert.id) {
+        for line in whyFoundRuleNoteLines(ruleID: alert.ruleId, rulePath: rulePath, alertID: alert.id) {
             print(line)
         }
 
@@ -263,6 +252,24 @@ extension MacCrabCtl {
             paths.append(path)
         }
         return (paths, unreadable)
+    }
+
+    /// The notes `why` prints after the rule file findRuleFile found at
+    /// `rulePath` for `ruleID`. For a user rule or a bundled single-event
+    /// rule, it first reads which user rules in the same support dir the
+    /// daemon would load for `ruleID`, and whether this user can read all of
+    /// that user_rules. Those claims count only when a user rule is shown:
+    /// findRuleFile shows the first of them when there is one, so a bundled
+    /// rule is shown only when there is none. A user rule does not replace a
+    /// sequence or graph rule, so those get no notes.
+    static func whyFoundRuleNoteLines(ruleID: String, rulePath: String, alertID: String) -> [String] {
+        let ruleDir = (rulePath as NSString).deletingLastPathComponent
+        let isUserRule = ruleDir.hasSuffix("/user_rules")
+        guard isUserRule || ruleDir.hasSuffix("/compiled_rules") else { return [] }
+        let userRules = loadableUserRuleFiles(forRuleID: ruleID,
+                                              inUserRules: (ruleDir as NSString).deletingLastPathComponent + "/user_rules")
+        return whyUserRuleNoteLines(claimCount: isUserRule ? userRules.paths.count : 0,
+                                    unreadable: userRules.unreadable, alertID: alertID)
     }
 
     /// The notes `why` prints after a user rule or a bundled single-event

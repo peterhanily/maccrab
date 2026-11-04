@@ -86,22 +86,34 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
 
         // Sigma rule: show the definition of the rule the engine applies for
         // this id.
-        let compiledDir = dataDir + "/compiled_rules"
-        let ruleJSON = CompiledRuleFileIndex.shared.rule(id: alert.ruleId, in: compiledDir)
         lines.append("")
-        guard let ruleJSON else {
-            lines.append("The compiled rule for \(alert.ruleId) is not readable from this process, so its")
-            lines.append("definition cannot be shown. The alert itself is unaffected.")
-            return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
-        }
-        lines += explainRuleDefinitionLines(
-            ruleJSON, alertID: alert.id,
-            duplicateUserRules: CompiledRuleFileIndex.shared.hasDuplicateUserRules(id: alert.ruleId, in: compiledDir),
-            unreadableUserRules: CompiledRuleFileIndex.shared.hasUnreadableUserRules(id: alert.ruleId, in: compiledDir))
+        lines += explainRuleSectionLines(ruleID: alert.ruleId, alertID: alert.id,
+                                         compiledDir: dataDir + "/compiled_rules", index: .shared)
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
         return toolError("Error reading alerts: \(error.localizedDescription)")
     }
+}
+
+/// The rule part of explain_alert for a Sigma rule's id: the definition of
+/// the rule the engine applies for it, as `index` resolves it in
+/// `compiledDir`, with notes on duplicate and unreadable user rules from the
+/// index's flags, or two lines saying the rule JSON is not readable from this
+/// process.
+func explainRuleSectionLines(ruleID: String, alertID: String, compiledDir: String,
+                             index: CompiledRuleFileIndex) -> [String] {
+    guard let ruleJSON = index.rule(id: ruleID, in: compiledDir) else {
+        return [
+            "The compiled rule for \(ruleID) is not readable from this process, so its",
+            "definition cannot be shown. The alert itself is unaffected.",
+        ]
+    }
+    // rule(id:in:) may rebuild the index, and the flags describe the last
+    // build, so they are read after it.
+    return explainRuleDefinitionLines(
+        ruleJSON, alertID: alertID,
+        duplicateUserRules: index.hasDuplicateUserRules(id: ruleID, in: compiledDir),
+        unreadableUserRules: index.hasUnreadableUserRules(id: ruleID, in: compiledDir))
 }
 
 /// The "Rule definition:" part of explain_alert: the rule's description,

@@ -199,8 +199,10 @@ struct WhyCommandTests {
             return path
         }
         let single = try write(Self.flatRule, rules, "ssh_key_access.json")
+        let sequence = try write(Self.sequenceRule, rules.appendingPathComponent("sequences"), "supply_chain_full_kill_chain.json")
         _ = try write(Self.flatRule, users, "a.json")
         let singleID = "d1a2b3c4-0032-4000-a000-000000000032"
+        let alertID = "00000000-0000-0000-0000-00000000003f"
         let dirs = MacCrabCtl.whySearchDirs(supportDirs: [dir.path])
         func lookup() -> String? { MacCrabCtl.findRuleFile(forRuleID: singleID, in: dirs) }
         func scan() -> (paths: [String], unreadable: Bool) {
@@ -233,6 +235,13 @@ struct WhyCommandTests {
         #expect(lookup() == single)
         #expect(scan().paths.isEmpty)
         #expect(scan().unreadable)
+        // The notes runWhy prints after the bundled rule are the unreadable
+        // note alone. A user rule does not replace a sequence rule, so one
+        // gets no note, though user_rules is just as unreadable.
+        #expect(MacCrabCtl.whyFoundRuleNoteLines(ruleID: singleID, rulePath: single, alertID: alertID)
+            == Self.unreadableNote(alertID))
+        #expect(MacCrabCtl.whyFoundRuleNoteLines(
+            ruleID: "e1f2a3b4-0023-4000-b000-000000000023", rulePath: sequence, alertID: alertID).isEmpty)
         #expect(chmod(users.path, 0o755) == 0)
         #expect(lookup() == override)
         #expect(!scan().unreadable)
@@ -266,7 +275,6 @@ struct WhyCommandTests {
         // no rule file is found, and the note says the daemon may load it.
         let newID = "d1a2b3c4-0032-4000-a000-0000000000ff"
         let newRule = try write(Self.flatRule.replacingOccurrences(of: singleID, with: newID), users, "b.json")
-        let alertID = "00000000-0000-0000-0000-00000000003f"
         func notFound(_ ruleID: String) -> [String] {
             MacCrabCtl.whyNoRuleFileLines(forRuleID: ruleID, in: dirs, hasDescription: false, alertID: alertID)
         }
@@ -305,40 +313,96 @@ struct WhyCommandTests {
         // A bundled rule with nothing unreadable has no note.
         #expect(notes(0).isEmpty)
         // One claim: the daemon applies the rule shown.
-        #expect(notes(1) == [
-            "Note: this is a user rule. It passes the daemon's checks on user rules (folder and",
-            "file ownership, folder permissions, file type and content), so the daemon applies it in",
-            "place of any bundled rule with this id; a change applies at its next rule reload.",
-        ])
+        #expect(notes(1) == Self.definiteNote)
         // Two claims: the daemon applies one of them, which one is not defined.
-        let hedged = [
-            "Note: this is a user rule. It passes the daemon's checks on user rules (folder and",
-            "file ownership, folder permissions, file type and content), so the daemon applies it or",
-            "another user rule with this id (see below) in place of any bundled rule with this id.",
-        ]
-        #expect(notes(2) == hedged + [
-            "Note: 2 user rules have this id. The daemon applies one of them, in an order",
-            "MacCrab does not define; this is the first by file name.",
-        ])
+        #expect(notes(2) == Self.hedgedNote + Self.duplicateNote)
         // Part of user_rules this user cannot read: a daemon running as root
         // may apply a user rule from there, so the rule shown is never stated
         // as the one applied, and the note does not say whether any file is
         // there.
-        let unreadable = [
+        let unreadable = Self.unreadableNote(alertID)
+        #expect(notes(0, unreadable: true) == unreadable)
+        #expect(notes(1, unreadable: true) == Self.hedgedNote + unreadable)
+        // Two readable claims and something unreadable: a file this user
+        // cannot read may hold another claim, and the daemon may apply it.
+        #expect(notes(2, unreadable: true) == Self.hedgedNote + [
+            "Note: at least 2 user rules have this id. The daemon applies one of them or one this",
+            "user cannot read, in an order MacCrab does not define; this is the first by file name of",
+            "those this user can read.",
+        ] + unreadable)
+    }
+
+    @Test("the notes after a found rule come from the user rules of its support dir")
+    func foundRuleNotes() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-why-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let rules = dir.appendingPathComponent("compiled_rules")
+        let users = dir.appendingPathComponent("user_rules")
+        func write(_ json: String, _ folder: URL, _ name: String) throws -> String {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+            let path = folder.appendingPathComponent(name).path
+            try json.write(toFile: path, atomically: true, encoding: .utf8)
+            return path
+        }
+        let singleID = "d1a2b3c4-0032-4000-a000-000000000032"
+        let alertID = "00000000-0000-0000-0000-00000000003d"
+        let single = try write(Self.flatRule, rules, "ssh_key_access.json")
+        let dirs = MacCrabCtl.whySearchDirs(supportDirs: [dir.path])
+        // The rule runWhy shows, and the notes it prints after it.
+        func shown() -> String? { MacCrabCtl.findRuleFile(forRuleID: singleID, in: dirs) }
+        func notes(_ rulePath: String) -> [String] {
+            MacCrabCtl.whyFoundRuleNoteLines(ruleID: singleID, rulePath: rulePath, alertID: alertID)
+        }
+
+        // A readable user_rules with a rule for another id only: the bundled
+        // rule is shown, with no note.
+        _ = try write(Self.flatRule.replacingOccurrences(of: singleID, with: "d1a2b3c4-0032-4000-a000-0000000000fe"),
+                      users, "other.json")
+        #expect(shown() == single)
+        #expect(notes(single).isEmpty)
+        // One loadable override, shown from user_rules: the daemon applies it.
+        let first = try write(Self.flatRule, users, "a.json")
+        #expect(shown() == first)
+        #expect(notes(first) == Self.definiteNote)
+        // Two: the first is shown, and the daemon applies one of them.
+        _ = try write(Self.flatRule, users, "b.json")
+        #expect(shown() == first)
+        #expect(notes(first) == Self.hedgedNote + Self.duplicateNote)
+    }
+
+    // The notes whyUserRuleNoteLines prints, for userRuleNotes and for the
+    // tests of the notes runWhy prints after a found rule.
+
+    /// One user rule the daemon would load for the id, with all of user_rules readable.
+    private static let definiteNote = [
+        "Note: this is a user rule. It passes the daemon's checks on user rules (folder and",
+        "file ownership, folder permissions, file type and content), so the daemon applies it in",
+        "place of any bundled rule with this id; a change applies at its next rule reload.",
+    ]
+
+    /// A user rule shown when the daemon may apply another one instead.
+    private static let hedgedNote = [
+        "Note: this is a user rule. It passes the daemon's checks on user rules (folder and",
+        "file ownership, folder permissions, file type and content), so the daemon applies it or",
+        "another user rule with this id (see below) in place of any bundled rule with this id.",
+    ]
+
+    /// Two user rules the daemon would load for the id, with all of user_rules readable.
+    private static let duplicateNote = [
+        "Note: 2 user rules have this id. The daemon applies one of them, in an order",
+        "MacCrab does not define; this is the first by file name.",
+    ]
+
+    /// Part of user_rules this user cannot read.
+    private static func unreadableNote(_ alertID: String) -> [String] {
+        [
             "Note: this user cannot read all of user_rules (the folder cannot be listed or inspected, or",
             "a file in it cannot be inspected or opened). The daemon runs as root when installed, so it",
             "may apply a user rule from there for this id instead of the rule shown. To check, run",
             "`sudo maccrabctl why \(alertID)`.",
         ]
-        #expect(notes(0, unreadable: true) == unreadable)
-        #expect(notes(1, unreadable: true) == hedged + unreadable)
-        // Two readable claims and something unreadable: a file this user
-        // cannot read may hold another claim, and the daemon may apply it.
-        #expect(notes(2, unreadable: true) == hedged + [
-            "Note: at least 2 user rules have this id. The daemon applies one of them or one this",
-            "user cannot read, in an order MacCrab does not define; this is the first by file name of",
-            "those this user can read.",
-        ] + unreadable)
     }
 
     @Test("a sequence rule shows its window, correlation, ordering, trigger and every step")
