@@ -478,7 +478,8 @@ public struct V2DetectionWorkspace: View {
             ))
             return
         }
-        guard let data = existingUserOverrideData(id: rule.id) ?? bundledCompiledRuleData(id: rule.id),
+        let overrideData = existingUserOverrideData(id: rule.id)
+        guard let data = overrideData ?? bundledCompiledRuleData(id: rule.id),
               var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             state.showToast(V2Toast(
                 kind: .error,
@@ -487,7 +488,9 @@ public struct V2DetectionWorkspace: View {
             ))
             return
         }
-        let wasDisabled = userDisabledRuleIDs.contains(rule.id) || !rule.isEnabled
+        // obj comes from the override file whenever one was read.
+        let wasDisabled = V2RuleOverridePlanner.severityChangeKeepsDisabled(
+            override: overrideData == nil ? nil : obj, displayedEnabled: rule.isEnabled)
         if let severityRaw {
             obj["level"] = severityRaw
         } else {
