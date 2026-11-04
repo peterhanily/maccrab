@@ -45,14 +45,17 @@ func handleListRules(_ args: [String: Any]) -> Any {
 /// the bundled rule. Of that rule it shows the description, status and
 /// logsource, not the matching logic; a closing line points to
 /// `maccrabctl why <alert id>`, which prints the rule's predicates and how they
-/// combine on this Mac (long value lists are shortened). When this process
-/// cannot read all of user_rules, a note says the engine, which runs as root
-/// when installed, may apply a user rule from there instead, unless the rule
-/// is a sequence or graph rule, which user rules do not replace. When the
-/// index maps no rule file to the id, this says so and that built-in
-/// detectors, such as the process-lineage baseline (baseline-anomaly), have
-/// none; a note then says the alert's rule may be a user rule this process
-/// cannot read, when the index's last build could not read all of user_rules.
+/// combine on this Mac (long value lists are shortened). A user rule is
+/// marked `source: user_rules`, and one with "enabled": false gets a line
+/// saying the engine raises no alerts for the id when it applies that rule.
+/// When this process cannot read all of user_rules, a note says the engine,
+/// which runs as root when installed, may apply a user rule from there
+/// instead, unless the rule is a sequence or graph rule, which user rules do
+/// not replace. When the index maps no rule file to the id, this says so and
+/// that built-in detectors, such as the process-lineage baseline
+/// (baseline-anomaly), have none; a note then says the alert's rule may be a
+/// user rule this process cannot read, when the index's last build could not
+/// read all of user_rules.
 func handleExplainAlert(_ args: [String: Any]) async -> Any {
     guard let alertId = args["alert_id"] as? String, !alertId.isEmpty else {
         return toolError("'alert_id' is required (get it from get_alerts).")
@@ -121,17 +124,23 @@ func explainRuleSectionLines(ruleID: String, alertID: String, hasDetail: Bool, c
     // build, so they are read after it.
     return explainRuleDefinitionLines(
         ruleJSON, alertID: alertID,
+        isUserRule: index.mapsToUserRule(id: ruleID, in: compiledDir),
         duplicateUserRules: index.hasDuplicateUserRules(id: ruleID, in: compiledDir),
         unreadableUserRules: index.hasUnreadableUserRules(id: ruleID, in: compiledDir))
 }
 
 /// The "Rule definition:" part of explain_alert: the rule's description,
-/// status and logsource, then where to see its matching logic. That is left
-/// to `maccrabctl why`, which prints the rule's predicates and how they
-/// combine on this Mac (long value lists are shortened); this server's
-/// responses pass through the privacy sanitizer, which rewrites paths, host
-/// names and addresses in rule values.
-func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, duplicateUserRules: Bool, unreadableUserRules: Bool) -> [String] {
+/// status and logsource, then where to see its matching logic. Before them
+/// come the notes on duplicate and unreadable user rules, then, for a user
+/// rule, its source and, when it has "enabled": false, a line saying the
+/// engine raises no alerts for this id while it applies the rule, or if it
+/// applies the rule when a note says it may apply another. The matching
+/// logic is left to `maccrabctl why`, which prints the rule's predicates and
+/// how they combine on this Mac (long value lists are shortened); this
+/// server's responses pass through the privacy sanitizer, which rewrites
+/// paths, host names and addresses in rule values.
+func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, isUserRule: Bool,
+                                duplicateUserRules: Bool, unreadableUserRules: Bool) -> [String] {
     var lines = ["Rule definition:"]
     if duplicateUserRules && !unreadableUserRules {
         lines.append("  note: several user rules have this id. The engine applies one of them, in an order MacCrab does not define; this is the first by file name.")
@@ -140,6 +149,17 @@ func explainRuleDefinitionLines(_ rule: [String: Any], alertID: String, duplicat
     }
     if unreadableUserRules {
         lines.append("  note: this process cannot read all of user_rules (the folder cannot be listed or inspected, or a file in it cannot be inspected or opened). The engine runs as root when installed, so it may apply a user rule from there for this id instead of the rule shown; to check, run `sudo maccrabctl why \(alertID)` on this Mac.")
+    }
+    if isUserRule {
+        lines.append("  source: user_rules")
+        // The engine loads a user rule's "enabled" as written, with no status
+        // profile applied. A bundled rule's flag is not shown: whether the
+        // engine runs a bundled rule also depends on the profile.
+        if (rule["enabled"] as? Bool) == false {
+            lines.append(duplicateUserRules || unreadableUserRules
+                ? "  enabled: false (if the engine applies this rule, it raises no alerts for this id)"
+                : "  enabled: false (the engine raises no alerts for this id while it applies this rule)")
+        }
     }
     if let desc = rule["description"] as? String { lines.append("  description: \(desc)") }
     if let status = rule["status"] as? String { lines.append("  status: \(status)") }
@@ -418,6 +438,14 @@ final class CompiledRuleFileIndex: @unchecked Sendable {
     func lastBuildFoundUnreadableUserRules(in compiledDir: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return directory == compiledDir && unreadableUserRules
+    }
+
+    /// Whether the index maps `id` to a file in user_rules: after
+    /// rule(id:in:) returns a rule for `id`, whether that rule is a user rule.
+    func mapsToUserRule(id: String, in compiledDir: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard directory == compiledDir, let path = paths[id] else { return false }
+        return path.hasPrefix(Self.userRulesDirectory(compiledDir) + "/")
     }
 
     private func cachedPath(id: String, in compiledDir: String) -> String? {

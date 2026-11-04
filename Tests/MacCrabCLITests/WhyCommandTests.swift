@@ -238,10 +238,12 @@ struct WhyCommandTests {
         // The notes runWhy prints after the bundled rule are the unreadable
         // note alone. A user rule does not replace a sequence rule, so one
         // gets no note, though user_rules is just as unreadable.
-        #expect(MacCrabCtl.whyFoundRuleNoteLines(ruleID: singleID, rulePath: single, alertID: alertID)
+        let singleJSON = try #require(JSONSerialization.jsonObject(with: Data(Self.flatRule.utf8)) as? [String: Any])
+        let sequenceJSON = try #require(JSONSerialization.jsonObject(with: Data(Self.sequenceRule.utf8)) as? [String: Any])
+        #expect(MacCrabCtl.whyFoundRuleNoteLines(ruleID: singleID, rulePath: single, rule: singleJSON, alertID: alertID)
             == Self.unreadableNote(alertID))
         #expect(MacCrabCtl.whyFoundRuleNoteLines(
-            ruleID: "e1f2a3b4-0023-4000-b000-000000000023", rulePath: sequence, alertID: alertID).isEmpty)
+            ruleID: "e1f2a3b4-0023-4000-b000-000000000023", rulePath: sequence, rule: sequenceJSON, alertID: alertID).isEmpty)
         #expect(chmod(users.path, 0o755) == 0)
         #expect(lookup() == override)
         #expect(!scan().unreadable)
@@ -307,8 +309,9 @@ struct WhyCommandTests {
     @Test("the user-rule notes say the daemon applies the rule shown only for one claim with nothing unreadable, and count claims only as a lower bound when something is unreadable")
     func userRuleNotes() {
         let alertID = "00000000-0000-0000-0000-00000000003e"
-        func notes(_ claimCount: Int, unreadable: Bool = false) -> [String] {
-            MacCrabCtl.whyUserRuleNoteLines(claimCount: claimCount, unreadable: unreadable, alertID: alertID)
+        func notes(_ claimCount: Int, unreadable: Bool = false, disabled: Bool = false) -> [String] {
+            MacCrabCtl.whyUserRuleNoteLines(claimCount: claimCount, unreadable: unreadable, disabled: disabled,
+                                            alertID: alertID)
         }
         // A bundled rule with nothing unreadable has no note.
         #expect(notes(0).isEmpty)
@@ -330,6 +333,18 @@ struct WhyCommandTests {
             "user cannot read, in an order MacCrab does not define; this is the first by file name of",
             "those this user can read.",
         ] + unreadable)
+
+        // The user rule shown has "enabled": false. With one claim and nothing
+        // unreadable, the daemon applies it and raises no alerts for the id;
+        // otherwise it may apply another rule, so that is a condition.
+        #expect(notes(1, disabled: true) == Self.definiteDisabledNote)
+        #expect(notes(2, disabled: true) == Self.hedgedNote + Self.disabledSentence + Self.duplicateNote)
+        #expect(notes(1, unreadable: true, disabled: true) == Self.hedgedNote + Self.disabledSentence + unreadable)
+        #expect(notes(2, unreadable: true, disabled: true)
+            == Self.hedgedNote + Self.disabledSentence + Array(notes(2, unreadable: true).dropFirst(Self.hedgedNote.count)))
+        // When the bundled rule is shown, no note mentions "enabled".
+        #expect(notes(0, disabled: true).isEmpty)
+        #expect(notes(0, unreadable: true, disabled: true) == unreadable)
     }
 
     @Test("the notes after a found rule come from the user rules of its support dir")
@@ -350,10 +365,13 @@ struct WhyCommandTests {
         let alertID = "00000000-0000-0000-0000-00000000003d"
         let single = try write(Self.flatRule, rules, "ssh_key_access.json")
         let dirs = MacCrabCtl.whySearchDirs(supportDirs: [dir.path])
-        // The rule runWhy shows, and the notes it prints after it.
+        // The rule runWhy shows, and the notes it prints after it, given the
+        // rule as runWhy parses it.
         func shown() -> String? { MacCrabCtl.findRuleFile(forRuleID: singleID, in: dirs) }
-        func notes(_ rulePath: String) -> [String] {
-            MacCrabCtl.whyFoundRuleNoteLines(ruleID: singleID, rulePath: rulePath, alertID: alertID)
+        func notes(_ rulePath: String) throws -> [String] {
+            let rule = try #require(JSONSerialization.jsonObject(
+                with: Data(contentsOf: URL(fileURLWithPath: rulePath))) as? [String: Any])
+            return MacCrabCtl.whyFoundRuleNoteLines(ruleID: singleID, rulePath: rulePath, rule: rule, alertID: alertID)
         }
 
         // A readable user_rules with a rule for another id only: the bundled
@@ -361,15 +379,32 @@ struct WhyCommandTests {
         _ = try write(Self.flatRule.replacingOccurrences(of: singleID, with: "d1a2b3c4-0032-4000-a000-0000000000fe"),
                       users, "other.json")
         #expect(shown() == single)
-        #expect(notes(single).isEmpty)
+        #expect(try notes(single).isEmpty)
         // One loadable override, shown from user_rules: the daemon applies it.
         let first = try write(Self.flatRule, users, "a.json")
         #expect(shown() == first)
-        #expect(notes(first) == Self.definiteNote)
+        #expect(try notes(first) == Self.definiteNote)
         // Two: the first is shown, and the daemon applies one of them.
         _ = try write(Self.flatRule, users, "b.json")
         #expect(shown() == first)
-        #expect(notes(first) == Self.hedgedNote + Self.duplicateNote)
+        #expect(try notes(first) == Self.hedgedNote + Self.duplicateNote)
+
+        // The same two with "enabled": false, as the dashboard's Disable
+        // writes a copy of a rule into user_rules: if the daemon applies the
+        // one shown, it raises no alerts for the id.
+        let disabled = try Self.disabledCopy(of: Self.flatRule)
+        _ = try write(disabled, users, "a.json")
+        _ = try write(disabled, users, "b.json")
+        #expect(shown() == first)
+        #expect(try notes(first) == Self.hedgedNote + Self.disabledSentence + Self.duplicateNote)
+        // One: the daemon applies it, and raises no alerts for the id.
+        try FileManager.default.removeItem(atPath: users.appendingPathComponent("b.json").path)
+        #expect(try notes(first) == Self.definiteDisabledNote)
+        // A bundled rule's "enabled": false is not reported.
+        try FileManager.default.removeItem(atPath: first)
+        _ = try write(disabled, rules, "ssh_key_access.json")
+        #expect(shown() == single)
+        #expect(try notes(single).isEmpty)
     }
 
     // The notes whyUserRuleNoteLines prints, for userRuleNotes and for the
@@ -394,6 +429,29 @@ struct WhyCommandTests {
         "Note: 2 user rules have this id. The daemon applies one of them, in an order",
         "MacCrab does not define; this is the first by file name.",
     ]
+
+    /// One user rule the daemon would load for the id, with "enabled": false
+    /// and all of user_rules readable.
+    private static let definiteDisabledNote = [
+        "Note: this is a user rule with \"enabled\": false. It passes the daemon's checks on user",
+        "rules (folder and file ownership, folder permissions, file type and content), so the daemon",
+        "applies it in place of any bundled rule with this id and raises no alerts for this id while",
+        "it does; a change applies at its next rule reload.",
+    ]
+
+    /// What follows the hedged note when the user rule shown has "enabled": false.
+    private static let disabledSentence = [
+        "The rule shown has \"enabled\": false; if the daemon applies that rule, it raises no",
+        "alerts for this id.",
+    ]
+
+    /// A rule's JSON with "enabled" set to false, as the dashboard's Disable
+    /// writes a copy of a rule into user_rules.
+    private static func disabledCopy(of json: String) throws -> String {
+        var object = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        object["enabled"] = false
+        return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    }
 
     /// Part of user_rules this user cannot read.
     private static func unreadableNote(_ alertID: String) -> [String] {

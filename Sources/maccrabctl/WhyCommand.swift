@@ -120,7 +120,7 @@ extension MacCrabCtl {
         for line in whyRuleLines(ruleJSON, rulePath: rulePath) {
             print(line)
         }
-        for line in whyFoundRuleNoteLines(ruleID: alert.ruleId, rulePath: rulePath, alertID: alert.id) {
+        for line in whyFoundRuleNoteLines(ruleID: alert.ruleId, rulePath: rulePath, rule: ruleJSON, alertID: alert.id) {
             print(line)
         }
 
@@ -261,15 +261,20 @@ extension MacCrabCtl {
     /// that user_rules. Those claims count only when a user rule is shown:
     /// findRuleFile shows the first of them when there is one, so a bundled
     /// rule is shown only when there is none. A user rule does not replace a
-    /// sequence or graph rule, so those get no notes.
-    static func whyFoundRuleNoteLines(ruleID: String, rulePath: String, alertID: String) -> [String] {
+    /// sequence or graph rule, so those get no notes. `rule` is the rule
+    /// shown. Whether it has "enabled": false is passed on only for a user
+    /// rule: the daemon loads a user rule's "enabled" as written, with no
+    /// status profile applied, while whether it runs a bundled rule also
+    /// depends on the profile.
+    static func whyFoundRuleNoteLines(ruleID: String, rulePath: String, rule: [String: Any], alertID: String) -> [String] {
         let ruleDir = (rulePath as NSString).deletingLastPathComponent
         let isUserRule = ruleDir.hasSuffix("/user_rules")
         guard isUserRule || ruleDir.hasSuffix("/compiled_rules") else { return [] }
         let userRules = loadableUserRuleFiles(forRuleID: ruleID,
                                               inUserRules: (ruleDir as NSString).deletingLastPathComponent + "/user_rules")
         return whyUserRuleNoteLines(claimCount: isUserRule ? userRules.paths.count : 0,
-                                    unreadable: userRules.unreadable, alertID: alertID)
+                                    unreadable: userRules.unreadable,
+                                    disabled: isUserRule && (rule["enabled"] as? Bool) == false, alertID: alertID)
     }
 
     /// The notes `why` prints after a user rule or a bundled single-event
@@ -281,10 +286,20 @@ extension MacCrabCtl {
     /// define, and a daemon running as root also reads what this user cannot.
     /// So the notes say the daemon applies the rule shown only for exactly one
     /// claim with nothing unreadable, and with something unreadable give the
-    /// claim count only as a lower bound.
-    static func whyUserRuleNoteLines(claimCount: Int, unreadable: Bool, alertID: String) -> [String] {
+    /// claim count only as a lower bound. `disabled` is whether the user rule
+    /// shown has "enabled": false. The daemon raises no alerts for the id
+    /// while it applies such a rule, and the notes say so, as a condition
+    /// where they do not say the daemon applies the rule shown.
+    static func whyUserRuleNoteLines(claimCount: Int, unreadable: Bool, disabled: Bool, alertID: String) -> [String] {
         var lines: [String] = []
-        if claimCount == 1 && !unreadable {
+        if claimCount == 1 && !unreadable && disabled {
+            lines += [
+                "Note: this is a user rule with \"enabled\": false. It passes the daemon's checks on user",
+                "rules (folder and file ownership, folder permissions, file type and content), so the daemon",
+                "applies it in place of any bundled rule with this id and raises no alerts for this id while",
+                "it does; a change applies at its next rule reload.",
+            ]
+        } else if claimCount == 1 && !unreadable {
             lines += [
                 "Note: this is a user rule. It passes the daemon's checks on user rules (folder and",
                 "file ownership, folder permissions, file type and content), so the daemon applies it in",
@@ -296,6 +311,12 @@ extension MacCrabCtl {
                 "file ownership, folder permissions, file type and content), so the daemon applies it or",
                 "another user rule with this id (see below) in place of any bundled rule with this id.",
             ]
+            if disabled {
+                lines += [
+                    "The rule shown has \"enabled\": false; if the daemon applies that rule, it raises no",
+                    "alerts for this id.",
+                ]
+            }
         }
         if claimCount > 1 && !unreadable {
             lines += [
