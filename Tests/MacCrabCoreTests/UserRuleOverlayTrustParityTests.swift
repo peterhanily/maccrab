@@ -20,7 +20,9 @@ import MacCrabCore
 /// fails here. A test running as a normal user cannot create a folder or file
 /// that root or another user owns, so in such a run a change that affects
 /// only those owners does not fail here. The nested boot gate cannot be
-/// called from a test, so the last test pins its source instead.
+/// called from a test, so the last test pins its source instead, with each
+/// line in DaemonSetup.swift and SignalHandlers.swift that calls
+/// ruleEngine.loadRules or ruleEngine.reloadRules.
 @Suite("User rule overlay trust matches the engine's gates")
 struct UserRuleOverlayTrustParityTests {
     /// A support directory with an empty user_rules folder.
@@ -110,12 +112,16 @@ struct UserRuleOverlayTrustParityTests {
         #expect(loads == ownerOnly)
     }
 
-    @Test("the boot-time user_rules load is gated by the check nested in DaemonSetup.initialize(), which has isOverlayDirSecure's conditions and no other refusal")
+    @Test("the boot-time user_rules load is gated by the check nested in DaemonSetup.initialize(), which has isOverlayDirSecure's conditions and no other refusal, and the lines in DaemonSetup.swift and SignalHandlers.swift that call ruleEngine.loadRules or reloadRules are the expected ones")
     func bootGateSource() throws {
         let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/MacCrabAgentKit/DaemonSetup.swift"), encoding: .utf8)
+        let signalHandlers = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/MacCrabAgentKit/SignalHandlers.swift"), encoding: .utf8)
         let update = "DaemonSetup's boot-time user_rules gate changed: make UserRuleOverlayTrust and these tests match it"
+        let reloadUpdate = "The .reload_tick watcher's or SIGHUP's rule reload changed: make UserRuleOverlayTrust and these tests match it"
         func occurrences(of text: String, in haystack: String) -> Int {
             haystack.components(separatedBy: text).count - 1
         }
@@ -137,18 +143,38 @@ struct UserRuleOverlayTrustParityTests {
                 .joined(separator: "\n")
         }
 
+        // The trimmed lines of `text` that contain `call`, other than
+        // whole-line comments.
+        func lines(calling call: String, in text: String) -> [String] {
+            text.split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { $0.contains(call) && !$0.hasPrefix("//") }
+        }
+
         // The one boot load of user_rules sits inside the block the nested
         // check gates, whose code is exactly what it was when this test was
         // written, so a refusal added in front of the load fails here.
         let gated = block("        if fm.fileExists(atPath: userOverridesDir), isSecureDirectory(userOverridesDir) {\n")
         let gate = try #require(gated, "\(update)")
         #expect(code(gate) == Self.bootGatedBlock, "\(update)")
-        let bootLoads = occurrences(of: "loadRules(from: userOverridesURL", in: source)
-        #expect(bootLoads == 1, "\(update)")
-        // Both overlay loads in this file, the boot load and the .reload_tick
-        // watcher's, pass requireOwnerUID:, so a further load that passes it
-        // changes this count however it names the folder.
-        #expect(occurrences(of: "requireOwnerUID:", in: source) == 2, "\(update)")
+        // The lines in DaemonSetup.swift and SignalHandlers.swift that call
+        // ruleEngine.loadRules or ruleEngine.reloadRules are exactly these:
+        // the two boot loads, and the .reload_tick watcher's and SIGHUP's
+        // reloads, which pass the overlay and the engine's uid. So a further
+        // load, however it names its folder, or a changed argument fails
+        // here. The calls are matched with their receiver because
+        // "reloadRules(" contains "loadRules(".
+        #expect(lines(calling: "ruleEngine.loadRules(", in: source) == [
+            "let count = try await ruleEngine.loadRules(from: rulesURL, enabledStatuses: ruleStatuses)",
+            "let userCount = try await ruleEngine.loadRules(from: userOverridesURL, requireOwnerUID: geteuid())",
+        ], "\(update)")
+        #expect(lines(calling: "ruleEngine.reloadRules(", in: source) == [
+            "let reloaded = try await ruleEngine.reloadRules(from: liveCompiledRulesURL, overlay: overlay, requireOwnerUID: geteuid())",
+        ], "\(reloadUpdate)")
+        #expect(lines(calling: "ruleEngine.loadRules(", in: signalHandlers) == [], "\(reloadUpdate)")
+        #expect(lines(calling: "ruleEngine.reloadRules(", in: signalHandlers) == [
+            "let reloaded = try await state.ruleEngine.reloadRules(from: state.rulesURL, overlay: overlay, requireOwnerUID: geteuid())",
+        ], "\(reloadUpdate)")
 
         // The nested check, declared once, with the code it had when this test
         // was written. Like isOverlayDirSecure, it refuses a symlink, a folder
