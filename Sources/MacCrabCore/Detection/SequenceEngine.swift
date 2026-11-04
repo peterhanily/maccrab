@@ -371,7 +371,10 @@ public actor SequenceEngine {
     /// partial from `step[0]`, so that later step would otherwise be dropped and
     /// 23 of the highest-value kill chains (supply-chain, dropper→C2, ransomware)
     /// would silently never complete. We retain recent later steps here and
-    /// replay them whenever a delayed `step[0]` seeds a partial. A later event is
+    /// replay them whenever a delayed `step[0]` seeds a partial, and, against
+    /// just the partials it advanced, whenever a live event binds a middle step
+    /// without completing (a later step processed before that middle step
+    /// failed its ordering check then). A later event is
     /// history, not a consumable token: the live path fans one event out to every
     /// compatible partial, and replay must do the same for partials that become
     /// known later. Window-pruned and bounded by the shared count and
@@ -459,6 +462,14 @@ public actor SequenceEngine {
     private var pendingIdentityRebuildCount: UInt64 = 0
     private var pendingForcedQueueCompactionCount: UInt64 = 0
     private var pendingCapacityElementVisitCount: UInt64 = 0
+
+    /// Replay on advance (replayPendingStepsAfterAdvance): scans of a rule's
+    /// pending history, and the later-step bindings and completions they made.
+    /// Process-lifetime diagnostics; the replay never changes pending history,
+    /// so none of them is a journal key.
+    private var advanceReplayScansTotal: UInt64 = 0
+    private var advanceReplayBindingsTotal: UInt64 = 0
+    private var advanceReplayCompletionsTotal: UInt64 = 0
 
     private enum PendingStepRemovalDisposition {
         case completed
@@ -1053,6 +1064,11 @@ public actor SequenceEngine {
         public let foldedStepsTotal: UInt64
         public let foldAttemptsTotal: UInt64
         public let lastFold: PendingFoldSnapshot?
+        /// Replay on advance: retained later steps bound, and sequences
+        /// completed, when a middle step bound after them. Pending history is
+        /// read, never changed, so these are not part of the journal.
+        public let advanceReplayBindingsTotal: UInt64
+        public let advanceReplayCompletionsTotal: UInt64
         public let lastPressure: PendingPressureSnapshot?
     }
 
@@ -1075,6 +1091,8 @@ public actor SequenceEngine {
             foldedStepsTotal: pendingFoldedStepsTotal,
             foldAttemptsTotal: pendingFoldAttemptsTotal,
             lastFold: lastPendingFold,
+            advanceReplayBindingsTotal: advanceReplayBindingsTotal,
+            advanceReplayCompletionsTotal: advanceReplayCompletionsTotal,
             lastPressure: lastPendingPressure
         )
     }
@@ -1121,6 +1139,13 @@ public actor SequenceEngine {
             elementVisits: pendingCapacityElementVisitCount,
             foldAttempts: pendingFoldAttemptsTotal
         )
+    }
+
+    /// Replay-on-advance scans of a rule's pending history, so tests can pin
+    /// when the scan runs. Its bindings and completions are published in
+    /// PendingPressureDiagnostics.
+    func advanceReplayScanCount() -> UInt64 {
+        advanceReplayScansTotal
     }
 
     private func pendingPressureSnapshot(
@@ -2703,10 +2728,12 @@ public actor SequenceEngine {
             }
             // Only an ordered step[0] match can seed, and only a seed runs the
             // full replay over pending history (Phase 3), so only such an
-            // event requests pending PIDs. Any replay on advance relies on
-            // each entry's carried evidence. Requesting the history's PIDs for
-            // every later-step event made a flood of buffered writes cost
-            // O(history) lineage lookups per event.
+            // event requests pending PIDs. Replay on advance relies on each
+            // entry's carried evidence (its recorded parent and ancestry), so
+            // lineage learned after an entry was evaluated reaches it only
+            // through a later seed's full replay. Requesting the history's
+            // PIDs for every later-step event made a flood of buffered writes
+            // cost O(history) lineage lookups per event.
             let canSeed = plan.rule.ordered
                 && plan.matchingSteps.contains { $0.id == plan.rule.steps.first?.id }
             let canReplayPending = canSeed && pendingLaterSteps[plan.ruleId]?.isEmpty == false
@@ -2794,6 +2821,9 @@ public actor SequenceEngine {
             // --- Phase 1: Try to advance existing partial matches ---
             var advancedPartials: [(Int, PartialMatch)] = []  // (index, updated partial)
             var completedIndices: Set<Int> = []
+            // Ordered partials this event advanced without completing, with the
+            // index of the step it bound, for the replay on advance (Phase 3).
+            var advancedStepIndexByPartial: [UUID: Int] = [:]
             // Ordered partials already contain their initial step, so a
             // first-step-only event cannot advance any of them. Avoid a full
             // bucket scan whose only outcome would be advancePartial's existing
@@ -2825,6 +2855,9 @@ public actor SequenceEngine {
                     if isTriggerSatisfied(rule.trigger, matchedStepIds: Set(updated.matchedSteps.keys), totalSteps: rule.steps.count) {
                         completedIndices.insert(idx)
                         completedMatches.append(makeMatch(rule: rule, partial: updated))
+                    } else if rule.ordered,
+                              let bound = rule.steps.firstIndex(where: { $0.id == step.id }) {
+                        advancedStepIndexByPartial[updated.id] = bound
                     }
 
                     // Only advance once per step per partial -- break to next partial.
@@ -2858,8 +2891,10 @@ public actor SequenceEngine {
 
             // --- Phase 2: Create new partial matches for initial steps ---
             // #95: track whether this event seeded a fresh partial from the
-            // initial step — only then is it worth replaying any buffered
-            // out-of-order later steps against the rule (Phase 3).
+            // initial step — only then is it worth replaying all buffered
+            // out-of-order later steps against every partial of the rule
+            // (Phase 3). Otherwise Phase 3 replays only the steps after the
+            // one Phase 1 bound, against the partials it advanced.
             var seededInitial = false
             for step in matchingSteps {
                 let isInitialStep: Bool
@@ -2932,11 +2967,24 @@ public actor SequenceEngine {
             // --- Phase 3 (#95): out-of-order backfill for ordered rules ---
             // If this event just seeded an initial partial, replay any later
             // steps that arrived early (via the fast priority consumer while the
-            // file consumer lagged) so the sequence can still complete.
+            // file consumer lagged) so the sequence can still complete. That
+            // replay walks every partial, including any Phase 1 advanced.
+            // Otherwise, if Phase 1 bound a middle step without completing a
+            // partial, replay only the retained steps after that step, against
+            // only those partials: a later step processed before the middle one
+            // failed its ordering check then, and nothing else revisits it.
             if seededInitial, let buffered = pendingLaterSteps[ruleId], !buffered.isEmpty {
                 completedMatches.append(contentsOf: replayPendingSteps(
                     ruleId: ruleId,
                     rule: rule,
+                    now: now,
+                    relationshipSnapshot: relationshipSnapshot
+                ))
+            } else if !advancedStepIndexByPartial.isEmpty {
+                completedMatches.append(contentsOf: replayPendingStepsAfterAdvance(
+                    ruleId: ruleId,
+                    rule: rule,
+                    advancedStepIndexByPartial: advancedStepIndexByPartial,
                     now: now,
                     relationshipSnapshot: relationshipSnapshot
                 ))
@@ -3723,7 +3771,9 @@ public actor SequenceEngine {
     // least as permissive; eligibility keeps later steps independent of which
     // writer binds S1, so an exact event-time tie between two writers can
     // change only which equally timed entry is cited. Live Phase-1 advancement
-    // never reads pending history.
+    // reads no pending history, and the replay on advance it triggers reads
+    // only steps after the newly bound one (index >= 2), so neither reads
+    // folded index-1 history.
     //
     // Residual (owner-accepted 2026-11-03, SEQ Q1). A writer acts only after it
     // exists, so a seed exec'd before the writer was born has t0 <= t(R). The
@@ -3885,7 +3935,8 @@ public actor SequenceEngine {
     /// another initial event that happened earlier but is delivered later can
     /// replay it too; a partial already containing that step or source event
     /// rejects it idempotently. Window-expired entries are pruned. Uses the SAME
-    /// `advancePartial` as the live path.
+    /// `advancePartial` as the live path. A live advance that completes nothing
+    /// runs the narrower replayPendingStepsAfterAdvance instead.
     private func replayPendingSteps(
         ruleId: String,
         rule: SequenceRule,
@@ -3958,6 +4009,128 @@ public actor SequenceEngine {
             }
             markCheckpointStateMutation()
         }
+        return matches
+    }
+
+    /// Replay on advance. Phase 1 just bound step k of each partial in
+    /// `advancedStepIndexByPartial` without completing it. A later step that
+    /// was processed before that bind failed checkOrdering then (step k was
+    /// missing), and replayPendingSteps runs only when a step[0] seeds, so the
+    /// partial would otherwise wait for another live later step or a new seed.
+    /// Replays only retained entries for steps after k, only against those
+    /// partials, earliest event time first (then rule-step order, then bucket
+    /// position), through the shared advancePartial: each step binds its
+    /// earliest passing entry and one entry fans out to every target, as in
+    /// replayPendingSteps. Read-only on pending history: nothing is consumed,
+    /// pruned or rewritten, so the journal and the pending weight do not move;
+    /// an entry past its window is skipped and left for the sweep to retire.
+    /// Synchronous: no await, so the lease keeps read-advance-replace atomic.
+    ///
+    /// Bound. For the partials this event advanced, the completions here are
+    /// exactly those live Phase 1 would produce if each retained later event
+    /// still inside its window were delivered again right after this middle
+    /// event, in event-time order, with the evidence recorded at its own
+    /// evaluation and under the same processing-time windows. Every other
+    /// partial has already been tried against them: live when they arrived,
+    /// by its seed's full replay, or by an earlier replay on advance.
+    /// Those windows run on processing time (partial createdAt, entry
+    /// arrivedAt), so a seed evaluated L seconds late stretches the event-time
+    /// span a chain may cover by L, as it already does for a live completion
+    /// after a lagged seed. Residuals: a later-timed middle event processed
+    /// first binds and is never rebound, so a later step timed between the two
+    /// middles cannot complete; and relations are decided from each entry's
+    /// recorded parent and ancestry (a non-seed requests no pending PIDs), so
+    /// lineage learned after an entry was evaluated is used only by a later
+    /// seed's full replay.
+    ///
+    /// For an ordered rule a second pass binds nothing. An entry that failed
+    /// either found its preceding step unbound, and any entry binding that
+    /// step later in the pass sorts after it at a strictly later time (equal
+    /// times sort the earlier step first), so checkOrdering keeps rejecting
+    /// it; or it failed against a bound prefix, relation evidence and snapshot
+    /// that nothing in this call changes. The loop only confirms that, within
+    /// a bounded number of passes.
+    private func replayPendingStepsAfterAdvance(
+        ruleId: String,
+        rule: SequenceRule,
+        advancedStepIndexByPartial: [UUID: Int],
+        now: Date,
+        relationshipSnapshot: ProcessLineage.RelationshipSnapshot?
+    ) -> [RuleMatch] {
+        // Binding the last step needs no scan: no step follows it.
+        guard rule.ordered,
+              let lowestBound = advancedStepIndexByPartial.values.min(),
+              lowestBound + 1 < rule.steps.count,
+              let pending = pendingLaterSteps[ruleId], !pending.isEmpty else { return [] }
+        Self.incrementSaturating(&advanceReplayScansTotal)
+        let stepOrder = Dictionary(uniqueKeysWithValues: rule.steps.enumerated().map {
+            ($0.element.id, $0.offset)
+        })
+        // The same window test as the full replay and the sweep.
+        let candidates = pending.indices.filter { index in
+            guard let order = stepOrder[pending[index].step.id], order > lowestBound else { return false }
+            return now.timeIntervalSince(pending[index].arrivedAt) <= rule.window
+        }.sorted { lhsIndex, rhsIndex in
+            let lhs = pending[lhsIndex]
+            let rhs = pending[rhsIndex]
+            if lhs.matched.timestamp != rhs.matched.timestamp {
+                return lhs.matched.timestamp < rhs.matched.timestamp
+            }
+            let lhsOrder = stepOrder[lhs.step.id] ?? Int.max
+            let rhsOrder = stepOrder[rhs.step.id] ?? Int.max
+            if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
+            return lhsIndex < rhsIndex
+        }
+        guard !candidates.isEmpty else { return [] }
+        var partials = partialMatches[ruleId] ?? []
+        let targets = partials.indices.filter { advancedStepIndexByPartial[partials[$0].id] != nil }
+        guard !targets.isEmpty else { return [] }
+
+        var completed = Set<Int>()
+        var matches: [RuleMatch] = []
+        var bindings: UInt64 = 0
+        var passes = 0
+        var progressed = true
+        while progressed, passes < rule.steps.count, completed.count < targets.count {
+            progressed = false
+            passes += 1
+            for candidate in candidates {
+                let entry = pending[candidate]
+                guard let order = stepOrder[entry.step.id] else { continue }
+                for target in targets where !completed.contains(target) {
+                    let partial = partials[target]
+                    guard let bound = advancedStepIndexByPartial[partial.id], order > bound,
+                          now.timeIntervalSince(partial.createdAt) <= rule.window,
+                          let updated = advancePartial(
+                              rule: rule,
+                              step: entry.step,
+                              matched: entry.matched,
+                              partial: partial,
+                              relationshipSnapshot: relationshipSnapshot
+                          ) else { continue }
+                    progressed = true
+                    bindings += 1
+                    if isTriggerSatisfied(rule.trigger, matchedStepIds: Set(updated.matchedSteps.keys), totalSteps: rule.steps.count) {
+                        matches.append(makeMatch(rule: rule, partial: updated))
+                        completed.insert(target)
+                    } else {
+                        partials[target] = updated
+                    }
+                }
+            }
+        }
+        guard bindings > 0 else { return [] }
+        if !completed.isEmpty {
+            partials = partials.enumerated().compactMap {
+                completed.contains($0.offset) ? nil : $0.element
+            }
+        }
+        // The only mutation. Completed partials leave stale eviction
+        // references for the amortized compaction, as Phase-1 completions do.
+        setPartialBucket(partials, for: ruleId)
+        markCheckpointStateMutation()
+        Self.addSaturating(bindings, to: &advanceReplayBindingsTotal)
+        Self.addSaturating(UInt64(matches.count), to: &advanceReplayCompletionsTotal)
         return matches
     }
 

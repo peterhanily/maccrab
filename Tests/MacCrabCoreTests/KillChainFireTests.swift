@@ -279,15 +279,15 @@ struct KillChainFireTests {
         #expect(matches.contains { $0.ruleId == npmRat })
     }
 
-    @Test("npm_postinstall_to_rat fires on a later callback after an early callback and a late drop")
+    @Test("npm_postinstall_to_rat fires once across an early callback, a late drop and a later callback")
     func npmPostinstallToRatLaterCallback() async throws {
         let engine = try await stableEngine()
-        var fired = false
+        var fires = 0
         for event in [proc("/bin/sh", parent: "/usr/local/bin/npm", at: 0), net(at: 2),
                       file("/tmp/rat", actor: "/bin/sh", at: 1), net(at: 3)] {
-            if await engine.evaluate(event).contains(where: { $0.ruleId == npmRat }) { fired = true }
+            fires += await engine.evaluate(event).filter { $0.ruleId == npmRat }.count
         }
-        #expect(fired)
+        #expect(fires == 1)
     }
 
     @Test("A Playwright-like install burst folds instead of shedding any rule's history")
