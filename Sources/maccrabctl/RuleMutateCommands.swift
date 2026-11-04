@@ -265,6 +265,13 @@ func ruleSeverityPlan(ruleId: String, level: String, supportDir: String) -> Rule
 /// "all", and only "stable" for any other value.
 private func baseLoadEnablesRule(_ rule: [String: Any], ruleProfile: String) -> Bool {
     if (rule["enabled"] as? Bool) == false { return false }
+    return ruleProfileAllowsStatus(rule, ruleProfile: ruleProfile)
+}
+
+/// Whether the profile lets the engine's base load run a rule with `rule`'s
+/// "status" (absent counts as "experimental"), whatever its "enabled" says:
+/// every status for "all", and only "stable" for any other value.
+func ruleProfileAllowsStatus(_ rule: [String: Any], ruleProfile: String) -> Bool {
     if ruleProfile.lowercased() == "all" { return true }
     return ((rule["status"] as? String) ?? "experimental").lowercased() == "stable"
 }

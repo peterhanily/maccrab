@@ -67,7 +67,9 @@ extension MacCrabCtl {
     /// Throws without editing a file when user_rules/<basename>.json exists
     /// for the id: when the engine loads that file, its rule replaces a
     /// bundled rule with the same id. Also throws when no compiled rule has
-    /// the id.
+    /// the id, and, for an enable, when the rule profile the engine applies
+    /// keeps the rule's status off, because the engine's base load disables
+    /// such a rule whatever its file says.
     static func setCompiledRuleEnabled(ruleId: String, enabled: Bool, directory: String) throws -> [String] {
         if let basename = safeUserRuleBasename(ruleId),
            FileManager.default.fileExists(atPath: directory + "/user_rules/\(basename).json") {
@@ -85,6 +87,14 @@ extension MacCrabCtl {
             let data = try Data(contentsOf: file)
             guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   object["id"] as? String == ruleId else { continue }
+            let ruleProfile = ruleProfileFromConfig(supportDir: directory)
+            if enabled && !ruleProfileAllowsStatus(object, ruleProfile: ruleProfile) {
+                let status = (object["status"] as? String) ?? "experimental"
+                throw RuntimeConfigContractError(
+                    "Rule \(ruleId) has status \(status), and the rule profile \"\(ruleProfile)\" runs only stable rules,"
+                        + " so the engine keeps it off whatever its file says. The bundled rule file was not edited."
+                        + " To run rules of other statuses, set \"rule_profile\": \"all\" in daemon_config.json.")
+            }
             object["enabled"] = enabled
             let output = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
             try output.write(to: file, options: .atomic)

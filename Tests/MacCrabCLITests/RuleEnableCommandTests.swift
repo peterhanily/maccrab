@@ -62,6 +62,9 @@ struct RuleEnableCommandTests {
         defer { dir.remove() }
         let rule = fixtureRule("fixture-rule", status: "experimental", level: "high")
         let bundled = try dir.write(rule, to: "compiled_rules/fixture_rule.json")
+        // The profile that runs every status, so enabling this experimental
+        // rule is an edit the engine applies.
+        try dir.write(["rule_profile": "all"], to: "daemon_config.json")
         let other = try dir.write(fixtureRule("other-rule"), to: "compiled_rules/other_rule.json")
         let otherBefore = try Data(contentsOf: other)
         // A user rule with another id does not stop the edit.
@@ -79,5 +82,34 @@ struct RuleEnableCommandTests {
             _ = try MacCrabCtl.setCompiledRuleEnabled(ruleId: "missing-rule", enabled: false, directory: dir.path)
         }
         #expect(missing?.message == "Rule 'missing-rule' was not found in the compiled corpus")
+    }
+
+    @Test("an enable the rule profile would keep off is refused and the file is not edited")
+    func profileDisabledEnableIsRefused() throws {
+        let dir = try RuleFixtureDirectory()
+        defer { dir.remove() }
+        // No heartbeat and no daemon_config.json: the default stable profile.
+        let experimental = try dir.write(fixtureRule("experimental-rule", status: "experimental", enabled: false),
+                                         to: "compiled_rules/experimental_rule.json")
+        let unlabeled = try dir.write(fixtureRule("unlabeled-rule", status: nil, enabled: false),
+                                      to: "compiled_rules/unlabeled_rule.json")
+        let before = try [experimental, unlabeled].map { try Data(contentsOf: $0) }
+
+        for (id, status) in [("experimental-rule", "experimental"), ("unlabeled-rule", "experimental")] {
+            let error = #expect(throws: RuntimeConfigContractError.self) {
+                _ = try MacCrabCtl.setCompiledRuleEnabled(ruleId: id, enabled: true, directory: dir.path)
+            }
+            #expect(error?.message == "Rule \(id) has status \(status), and the rule profile \"stable\" runs only stable rules,"
+                + " so the engine keeps it off whatever its file says. The bundled rule file was not edited."
+                + " To run rules of other statuses, set \"rule_profile\": \"all\" in daemon_config.json.")
+        }
+        #expect(try [experimental, unlabeled].map { try Data(contentsOf: $0) } == before)
+
+        // A disable is not refused, and the profile the engine publishes
+        // decides before daemon_config.json does.
+        _ = try MacCrabCtl.setCompiledRuleEnabled(ruleId: "experimental-rule", enabled: false, directory: dir.path)
+        try dir.write(["rule_profile": "all"], to: "heartbeat_rich.json")
+        _ = try MacCrabCtl.setCompiledRuleEnabled(ruleId: "experimental-rule", enabled: true, directory: dir.path)
+        #expect(try dir.object(at: experimental)["enabled"] as? Bool == true)
     }
 }

@@ -344,7 +344,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Detection › Rules for one that lasts. When a user_rules file exists for the
   id, they exit 1 without editing any file, because the rule in that file
   replaces the bundled one when the engine loads it. Before, they reported
-  success while that file still decided whether the rule ran.
+  success while that file still decided whether the rule ran. `rule enable`
+  also exits 1 without editing a file for a rule whose status the rule profile
+  keeps off, such as an experimental rule under the default stable profile,
+  because the engine disables such a rule whatever its file says. Before, it
+  reported a saved change that never took effect.
 - **Deleting a rule no longer reports success when nothing can be deleted.**
   MCP `delete_rule` and `maccrabctl rule delete` queued a removal for any id
   and replied that the engine would drop the rule, but the engine removes only
@@ -373,7 +377,9 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - **Installing a rule no longer changes the mode of a folder that user_rules
   links to.** The rule-install handler, which the dashboard, `maccrabctl` and
   MCP use, set user_rules to mode 0755 through a symlink, so the folder it
-  pointed to became 0755, and the install then failed. When user_rules is a
+  pointed to became 0755, and the rule files were written into that folder,
+  where the engine, which refuses a symlinked user_rules, never loaded them.
+  When user_rules is a
   symlink or anything else that is not a folder, the handler now changes
   nothing, logs a warning and records `rejected_unsafe_dir` in
   `dashboard_audit.log`. After a user_rules reload, the engine's log now says

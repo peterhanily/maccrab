@@ -186,6 +186,9 @@ the heartbeat). The bounds:
   say this when they save a change. For a lasting disable, use Disable rule in
   Detection › Rules, which saves an override in `user_rules`. When a rule has a file in
   `user_rules`, the commands change nothing and point to Detection › Rules instead.
+  `maccrabctl rule enable` also changes nothing for a rule whose status the rule profile
+  turns off, such as an experimental rule under the default stable profile, because the
+  engine keeps such a rule off whatever its file says; set `rule_profile: all` to run it.
 - **Re-enabling a rule can keep a severity from before an update.** When you disable a
   bundled rule, its override records the rule's severity at that time. If an update then
   changes that rule's default severity, Enable cannot tell the recorded severity from one

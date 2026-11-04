@@ -1563,8 +1563,17 @@ ATTESTATION_EOF
         # signed RC13; the growth is in the statically linked Swift
         # executables (app, system extension, CLI and MCP tools). CPU, memory,
         # write-rate, detection and free-disk limits are unchanged.
+        # 2026-11-04, v1.22.6 GA: 192512 -> 194560 (188 -> 190 MiB),
+        # explicitly approved for installed disk size only, before the GA
+        # candidate was built. Stripped arm64 release builds of the app, system
+        # extension, CLI and MCP tools are 737 KiB larger than RC14's arm64
+        # slices (about 805 KiB with code signatures), about 1.6 MiB for the
+        # universal binaries, against RC14's 684 KiB of headroom (191828 KiB
+        # installed). The rule: the estimate plus 512 KiB, rounded up to a whole
+        # MiB, at most 2 MiB. CPU, memory, write-rate, detection and free-disk
+        # limits are unchanged.
         # BEGIN INSTALLED_APP_FOOTPRINT_GATE
-        APP_FOOTPRINT_BUDGET_KIB=192512
+        APP_FOOTPRINT_BUDGET_KIB=194560
         APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)
         case "$APP_FOOTPRINT_KIB" in
             ''|*[!0-9]*)

@@ -19,7 +19,7 @@ publication, and on its retained stores shipped v1.22.5 averaged 7,288,004 B/s
 of engine writes. One epoch cannot estimate run-to-run variation or a
 false-failure probability. The complete raw samples, including the
 workload-bracketing write spike, and the written acceptance decision remain
-private and unchanged.
+private.
 
 A build preflight can validate the committed public policy without access to
 private host data. Installed recording and final release verification additionally
