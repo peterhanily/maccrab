@@ -86,6 +86,86 @@ done
     || fail "installer prompts outside the terminal-gated launch offer"
 pass "non-interactive install skips the launch prompt and exits cleanly"
 
+# v1.22.6: an upgrade replaced the bundle under a running menu-bar app, which
+# kept the old code; macOS refused its extension requests, so the new extension
+# never activated.  Quit only users' copies running from /Applications, wait
+# for exactly those, and reopen the app as each user whose copy quit, without
+# SUDO_USER (`sudo env -i` clears it).  Each fixture PID is a file; SIGTERM
+# marks it quitting and it exits during the next wait.
+RESTART_LOG="$TMP_ROOT/app-restart.log"
+RESTART_PIDS="$TMP_ROOT/app-pids"
+restart_fixture() (
+    unset SUDO_USER
+    /usr/bin/pgrep() { /bin/ls "$RESTART_PIDS" | /usr/bin/grep -v quitting; }
+    /bin/ps() {
+        case "$2:$4" in
+            comm=:4343) echo "/Users/fixture/Applications/MacCrab.app/Contents/MacOS/MacCrab" ;;
+            comm=:*) echo "/Applications/MacCrab.app/Contents/MacOS/MacCrab" ;;
+            uid=:4242) echo "  501" ;;
+            uid=:4343) echo "  502" ;;
+            uid=:4444) echo "  503" ;;
+            uid=:4545) echo "    0" ;;
+        esac
+    }
+    kill() {
+        case "$1" in
+            -TERM)
+                echo "kill -TERM $2" >> "$RESTART_LOG"
+                [ "${APP_QUITS:-yes}" = no ] || : > "$RESTART_PIDS/$2.quitting"
+                ;;
+            -0) [ -e "$RESTART_PIDS/$2" ] ;;
+        esac
+    }
+    /bin/sleep() {
+        local quitting
+        for quitting in "$RESTART_PIDS"/*.quitting; do
+            [ ! -e "$quitting" ] || /bin/rm -f "$quitting" "${quitting%.quitting}"
+        done
+    }
+    /bin/launchctl() {
+        echo "launchctl $*" >> "$RESTART_LOG"
+        [ "$2" != "${OPEN_FAILS_FOR:-}" ]
+    }
+    maccrab_restart_running_app "/Applications/MacCrab.app"
+)
+start_copies() {
+    /bin/rm -rf "$RESTART_PIDS"
+    /bin/mkdir "$RESTART_PIDS"
+    : > "$RESTART_PIDS/4242"; : > "$RESTART_PIDS/4343"
+    : > "$RESTART_PIDS/4444"; : > "$RESTART_PIDS/4545"
+    : > "$RESTART_LOG"
+}
+signalled="kill -TERM 4242
+kill -TERM 4444"
+reopened="launchctl asuser 501 /usr/bin/sudo -u #501 /usr/bin/open /Applications/MacCrab.app
+launchctl asuser 503 /usr/bin/sudo -u #503 /usr/bin/open /Applications/MacCrab.app"
+start_copies
+restart_fixture || fail "restarting the running app returned non-zero"
+[ "$(/bin/cat "$RESTART_LOG")" = "$signalled
+$reopened" ] || fail "restart did not quit and reopen exactly the users' copies of this app: $(/bin/cat "$RESTART_LOG")"
+start_copies
+if OPEN_FAILS_FOR=501 restart_fixture; then
+    fail "a failed reopen was reported as a restart"
+fi
+[ "$(/bin/cat "$RESTART_LOG")" = "$signalled
+$reopened" ] || fail "one failed reopen skipped another user's: $(/bin/cat "$RESTART_LOG")"
+start_copies
+if APP_QUITS=no restart_fixture; then
+    fail "copies that did not quit were reported as restarted"
+fi
+[ "$(/bin/cat "$RESTART_LOG")" = "$signalled" ] \
+    || fail "copies that did not quit were reopened anyway"
+/bin/rm -rf "$RESTART_PIDS"; /bin/mkdir "$RESTART_PIDS"; : > "$RESTART_LOG"
+restart_fixture || fail "restart with no running app returned non-zero"
+[ ! -s "$RESTART_LOG" ] || fail "restart signalled or opened an app that was not running"
+install_line=$(/usr/bin/grep -n '^    maccrab_install_app_atomically \\$' "$SCRIPT_DIR/install.sh" | /usr/bin/cut -d: -f1) || true
+restart_line=$(/usr/bin/grep -n '^        maccrab_restart_running_app "/Applications/MacCrab.app" \\$' "$SCRIPT_DIR/install.sh" | /usr/bin/cut -d: -f1) || true
+[ -n "$install_line" ] && [ -n "$restart_line" ] && [ "$install_line" -lt "$restart_line" ] \
+    || fail "installer does not restart a running app after publishing the new one"
+/usr/bin/sed -n "$((restart_line + 1))p" "$SCRIPT_DIR/install.sh" | /usr/bin/grep -q '^            || warn ' \
+    || fail "a failed restart could abort the install instead of warning"
+pass "an upgrade restarts users' copies of this app, reopens every user it can and reports the rest"
+
 MODE_APP="$TMP_ROOT/mode/MacCrab.app"
 /bin/mkdir -p "$MODE_APP/Contents/MacOS" \
     "$MODE_APP/Contents/Frameworks/Sparkle.framework/Versions" \

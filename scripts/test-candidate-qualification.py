@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import contextlib
 import ctypes
@@ -6993,6 +6994,68 @@ class CandidateImageAttachmentTests(unittest.TestCase):
         other.write_bytes(self.dmg.read_bytes())
         with self.hdiutil(self.image(other), self.image(pathlib.Path("/missing/elsewhere.dmg"))):
             qualification.refuse_attached_candidate_image(self.dmg)
+
+    # v1.22.6: macOS 27.2 hdiutil writes this to stderr, which the probe
+    # transcript appends after the stdout plist.
+    MACOS_27_ATTACH_WARNING = (
+        "hdiutil: WARNING: 'hdiutil attach -readonly -nobrowse ...' is deprecated. "
+        "Please use 'diskutil image attach --readOnly --mountOptions nobrowse ...' instead.\n"
+    )
+
+    def attach(self, stdout: str, stderr: str):
+        def run(command, **kwargs):
+            self.commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout, stderr)
+        return mock.patch.object(qualification.subprocess, "run", side_effect=run)
+
+    def test_containment_attach_reads_the_plist_ahead_of_the_deprecation_warning(self) -> None:
+        listing = plistlib.dumps(self.image(self.dmg)).decode("utf-8")
+        with self.attach(listing, self.MACOS_27_ATTACH_WARNING):
+            mountpoint, evidence = qualification.attach_readonly_candidate(self.dmg, "containment mount")
+        self.assertEqual(mountpoint, pathlib.Path("/Volumes/MacCrab"))
+        self.assertEqual(evidence["output"], listing + self.MACOS_27_ATTACH_WARNING)
+
+    def test_containment_attach_refuses_output_without_a_plist(self) -> None:
+        with self.attach("", self.MACOS_27_ATTACH_WARNING):
+            with self.assertRaisesRegex(qualification.QualificationError, "did not return an attach plist"):
+                qualification.attach_readonly_candidate(self.dmg, "containment mount")
+
+    # v1.22.6: record-runtime ignored a failed detach, so containment then
+    # refused the candidate as already attached.
+    BUSY = subprocess.CompletedProcess([], 16, "", "hdiutil: couldn't unmount \"disk9\" - Resource busy\n")
+
+    def test_a_busy_candidate_mount_is_detached_on_retry(self) -> None:
+        detached = subprocess.CompletedProcess([], 0, "\"disk9\" ejected.\n", "")
+        with mock.patch.object(qualification.subprocess, "run", side_effect=[self.BUSY, detached]) as run, \
+                mock.patch.object(qualification.time, "sleep") as sleep, \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            qualification.detach_candidate_mount("/usr/bin/hdiutil", "/Volumes/MacCrab")
+        self.assertEqual(run.call_args_list, [mock.call(
+            ["/usr/bin/hdiutil", "detach", "/Volumes/MacCrab"],
+            capture_output=True, text=True, check=False,
+        )] * 2)
+        sleep.assert_called_once_with(3)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_a_mount_that_stays_attached_is_reported_with_the_detach_command(self) -> None:
+        with mock.patch.object(qualification.subprocess, "run", return_value=self.BUSY) as run, \
+                mock.patch.object(qualification.time, "sleep") as sleep, \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            qualification.detach_candidate_mount("/usr/bin/hdiutil", "/Volumes/MacCrab")
+        self.assertEqual(run.call_count, 10)
+        self.assertEqual(sleep.call_args_list, [mock.call(3)] * 9)
+        self.assertIn("Resource busy", stderr.getvalue())
+        self.assertIn("detach it with: hdiutil detach '/Volumes/MacCrab'", stderr.getvalue())
+
+    def test_every_candidate_detach_goes_through_the_retrying_helper(self) -> None:
+        tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+        owners = [
+            function.name
+            for function in ast.walk(tree) if isinstance(function, ast.FunctionDef)
+            for node in ast.walk(function)
+            if isinstance(node, ast.Constant) and node.value in ("detach", "eject")
+        ]
+        self.assertEqual(owners, ["detach_candidate_mount"])
 
 
 class InvokingUserHandoffTests(unittest.TestCase):

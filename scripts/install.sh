@@ -413,6 +413,59 @@ maccrab_install_app_atomically() {
     /bin/rmdir "$work_root"
 }
 
+# An upgrade replaces the bundle under a running menu-bar app.  That process
+# keeps the old code, and macOS refuses its System Extension requests because
+# its code no longer matches the app on disk, so the new extension does not
+# activate.  `open` would only bring the old copy to the front.
+maccrab_running_app_pids() {
+    local executable="$1/Contents/MacOS/MacCrab"
+    local pid
+    for pid in $(/usr/bin/pgrep -x MacCrab); do
+        if [ "$(/bin/ps -o comm= -p "$pid" 2>/dev/null)" = "$executable" ]; then
+            echo "$pid"
+        fi
+    done
+}
+
+# Quit each running copy, then reopen the app as each user whose copy quit.
+# `launchctl asuser` reaches that user's session even when the installer runs
+# outside it (MDM, automation, or sudo with a cleared environment).  The app is
+# a per-user GUI, so a copy running as root is left alone.
+maccrab_restart_running_app() {
+    local app="$1"
+    local pid uid entry live signalled="" uids="" waits=0 status=0
+    for pid in $(maccrab_running_app_pids "$app"); do
+        uid=$(/bin/ps -o uid= -p "$pid" 2>/dev/null | /usr/bin/tr -d ' ') || true
+        if [ -n "$uid" ] && [ "$uid" != 0 ] && kill -TERM "$pid" 2>/dev/null; then
+            signalled="$signalled$pid:$uid"$'\n'
+        fi
+    done
+    [ -n "$signalled" ] || return 0
+    # Wait for the copies that were signalled, not for any copy of the app.
+    while :; do
+        live=""
+        for entry in $(printf '%s' "$signalled"); do
+            if kill -0 "${entry%%:*}" 2>/dev/null; then
+                live=1
+            fi
+        done
+        [ -n "$live" ] && [ "$waits" -lt 50 ] || break
+        /bin/sleep 0.2
+        waits=$((waits + 1))
+    done
+    for entry in $(printf '%s' "$signalled"); do
+        if kill -0 "${entry%%:*}" 2>/dev/null; then
+            status=1
+        else
+            uids="$uids${entry#*:}"$'\n'
+        fi
+    done
+    for uid in $(printf '%s' "$uids" | /usr/bin/sort -u); do
+        /bin/launchctl asuser "$uid" /usr/bin/sudo -u "#$uid" /usr/bin/open "$app" || status=1
+    done
+    return "$status"
+}
+
 # Unattended installs (`sudo ./install.sh < /dev/null`, MDM, automation) have
 # no one to answer the closing prompt: `read` hit EOF, returned 1, and `set -e`
 # turned a fully successful install into exit 1.  Offer the launch only on a
@@ -541,6 +594,11 @@ if [ -d "$PROJECT_DIR/MacCrab.app" ]; then
     maccrab_install_app_atomically \
         "$PROJECT_DIR/MacCrab.app" "/Applications/MacCrab.app" \
         || error "Staged app copy/signature verification failed; the previous app was retained."
+    if [ -n "$(maccrab_running_app_pids "/Applications/MacCrab.app")" ]; then
+        info "Restarting the running MacCrab app so the new version takes effect..."
+        maccrab_restart_running_app "/Applications/MacCrab.app" \
+            || warn "Could not restart MacCrab.app for every user. Quit any copy still running and open /Applications/MacCrab.app so the new version takes effect."
+    fi
 fi
 
 # ─── Step 4: CLI symlinks ────────────────────────────────────────────

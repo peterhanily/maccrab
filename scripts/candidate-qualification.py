@@ -981,6 +981,28 @@ def refuse_attached_candidate_image(dmg: pathlib.Path) -> None:
         )
 
 
+def detach_candidate_mount(hdiutil: str, mountpoint: str) -> None:
+    """Detach a candidate mount, retrying while the volume is briefly busy.
+
+    A mount left behind makes the next gate refuse the candidate, so a detach
+    that keeps failing is reported with the command that finishes it.
+    """
+    for attempt in range(10):
+        if attempt:
+            time.sleep(3)
+        completed = subprocess.run(
+            [hdiutil, "detach", mountpoint], capture_output=True, text=True, check=False
+        )
+        if completed.returncode == 0:
+            return
+    detail = ((completed.stdout or "") + (completed.stderr or "")).strip()
+    print(
+        f"Candidate DMG is still attached at {mountpoint} ({detail}); "
+        f"detach it with: hdiutil detach '{mountpoint}'",
+        file=sys.stderr,
+    )
+
+
 def inspect_artifact_full(dmg: pathlib.Path) -> Dict[str, Any]:
     codesign = fixed_tool("/usr/bin/codesign")
     xcrun = fixed_tool("/usr/bin/xcrun")
@@ -1154,7 +1176,7 @@ def inspect_artifact_full(dmg: pathlib.Path) -> Dict[str, Any]:
         }
     finally:
         if attached:
-            subprocess.run([hdiutil, "detach", str(mountpoint)], capture_output=True, text=True)
+            detach_candidate_mount(hdiutil, str(mountpoint))
         shutil.rmtree(mount_parent, ignore_errors=True)
 
 
@@ -8294,9 +8316,7 @@ def mounted_tool_probes(dmg: pathlib.Path, version: str, normal_policy: bool) ->
         return probes
     finally:
         if attached:
-            subprocess.run(
-                [hdiutil, "detach", attached], capture_output=True, text=True, check=False
-            )
+            detach_candidate_mount(hdiutil, attached)
 
 
 def attach_readonly_candidate(
@@ -8311,10 +8331,14 @@ def attach_readonly_candidate(
         command, label=label, environment=environment, include_output=True
     )
     evidence["environment"] = dict(environment)
+    # The transcript is stdout then stderr. Since macOS 27, hdiutil warns on
+    # stderr that attach is deprecated, so parse only the stdout plist.
+    output = string_value(evidence.get("output"), f"{label}.output")
+    end = output.find("</plist>")
+    if end < 0:
+        fail(f"{label} did not return an attach plist")
     try:
-        plist = plistlib.loads(
-            string_value(evidence.get("output"), f"{label}.output").encode("utf-8")
-        )
+        plist = plistlib.loads(output[:end + len("</plist>")].encode("utf-8"))
     except plistlib.InvalidFileException as exc:
         fail(f"{label} did not return a readable attach plist: {exc}")
     mountpoints = [
@@ -11318,13 +11342,7 @@ def command_record_containment(args: argparse.Namespace) -> None:
                     except FileNotFoundError:
                         pass
                 if mountpoint is not None:
-                    subprocess.run(
-                        [
-                            fixed_tool("/usr/bin/hdiutil"), "detach",
-                            str(mountpoint),
-                        ],
-                        capture_output=True, text=True, check=False,
-                    )
+                    detach_candidate_mount(fixed_tool("/usr/bin/hdiutil"), str(mountpoint))
     assert_exact_clean_source(
         root,
         source_commit=source_commit,

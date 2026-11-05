@@ -685,6 +685,13 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   - The approval path is now given for both macOS 13–14 and macOS 15 and later.
   - TROUBLESHOOTING now quotes the rule counts `maccrabctl status` actually
     prints.
+- **The DMG's `install.sh` restarts a running MacCrab.** It replaced the app
+  under a running menu-bar app and left that copy running the old code. macOS
+  refused the old copy's System Extension requests because its code no longer
+  matched the app on disk, so the new extension did not activate until the
+  app was restarted. Once the new app is in place, the installer now quits
+  each user's copy running from /Applications and reopens the app as that
+  user, and warns if it cannot.
 
 ### Release tooling
 - **The app no longer ships every localization twice.** SwiftPM also places
