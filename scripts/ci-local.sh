@@ -938,6 +938,7 @@ check "Release supply-chain fixtures" ./scripts/test-release-supply-chain.sh
 check "Site publisher one-commit fixtures" ./scripts/test-site-release-publish.sh
 check "Exact-candidate qualification fixtures" /usr/bin/python3 -I ./scripts/test-candidate-qualification.py
 check "Resource baseline provenance fixtures" /usr/bin/python3 -I ./scripts/test-resource-baseline-provenance.py
+check "Runtime workload helper fixtures" /usr/bin/python3 -I -B ./scripts/test-runtime-workload-helpers.py
 check "Release privacy fixtures" /usr/bin/python3 -I ./scripts/test-release-privacy.py
 check "Staged Sparkle SDK trimming fixtures" /usr/bin/python3 -I -B ./scripts/test-trim-staged-sparkle-sdk.py
 check "Installer/DMG payload fixtures" ./scripts/test-install-payload.sh

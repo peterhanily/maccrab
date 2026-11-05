@@ -262,6 +262,7 @@ PY
     done
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-candidate-qualification.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-resource-baseline-provenance.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-runtime-workload-helpers.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-release-privacy.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-secret-guard.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-ci-phase.py"

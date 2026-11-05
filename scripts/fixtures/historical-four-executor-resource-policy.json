@@ -1,0 +1,59 @@
+{
+  "acceptance_basis": "independent-reference-engineering-review",
+  "limits": {
+    "engine_average_write_bytes_per_second": 9437184,
+    "engine_max_window_write_bytes_per_second": 171966464,
+    "gui_p95_percent": 19
+  },
+  "measurements": {
+    "engine_average_write_bytes_per_second": 4963155.057777777,
+    "engine_max_window_write_bytes_per_second": 126251281.06666666,
+    "gui_p95_percent": 3.9
+  },
+  "private_evidence": {
+    "canonical_sha256": "421c2021d588901d5e68bd15f947122a12d22b3662a751d34a87f97e873aaa55",
+    "sha256": "621ff5b99ab2a1d7ab689ffb7d2b29d0739456378af95e6a43f55b83bc03a805"
+  },
+  "recorder": {
+    "path": "scripts/candidate-qualification.py",
+    "sha256": "dd7277e703e77bd02a358705eac9011c6b19c9d3f9a980328b7f66349807dc16"
+  },
+  "reference": {
+    "dmg_sha256": "9eb6f49389af910e9d1bad14b26d2510aebd2ed2e874bbd2f464f36b664c529b",
+    "engine_sha256": "00df3a78b47f1bdf33d2ff1d78591a94171ec91d72afd9ea2ef02851fdf25458",
+    "gui_sha256": "897d4e426680fe3cbb45bde3ebd0d86d57353e1eb144571074cd9a6447fc66c6",
+    "source_commit": "4f9ab9b35a80aba3f11cc99e7c60d10cc3e6d6eb",
+    "version": "1.21.5"
+  },
+  "schema": "com.maccrab.release-resource-policy.v1",
+  "statistics": {
+    "engine_average_write_bytes_per_second": "cumulative-write-delta/captured-epoch-seconds",
+    "engine_max_window_write_bytes_per_second": "maximum-captured-interval-and-sample-aligned-span-up-to-60s",
+    "gui_p95_percent": "nearest-rank-p95-of-ps-pcpu-snapshots"
+  },
+  "status": "accepted",
+  "workload": {
+    "burst_start_offset_seconds": 300,
+    "executors": [
+      {
+        "path": "scripts/runtime-qualification-workload.sh",
+        "sha256": "be4b0f5561def4a8fda9b60bffc2c87e331c7b1183fd1cd7b31b0db99b793acf"
+      },
+      {
+        "path": "scripts/runtime-workload-directories.py",
+        "sha256": "46af3fa5364bbd951b581c31234319896e81e19a4afed5aad594bee7ca9bd599"
+      },
+      {
+        "path": "scripts/test-otlp-curl.sh",
+        "sha256": "d5a913174c915a2f761fec285d5f623988563f89ab600ae8824680b6af79a2ef"
+      },
+      {
+        "path": "scripts/otlp-smoke.py",
+        "sha256": "f52836f7bbeac1bd3ac5625f7152e57eebfcdf7c9f90f8832649ccda01629672"
+      }
+    ],
+    "iterations": 3000,
+    "sample_interval_seconds": 30,
+    "script_sha256": "be4b0f5561def4a8fda9b60bffc2c87e331c7b1183fd1cd7b31b0db99b793acf"
+  }
+}

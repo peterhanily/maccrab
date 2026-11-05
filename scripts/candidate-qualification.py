@@ -1897,7 +1897,9 @@ def validate_workload_otlp_persistence(row: Mapping[str, Any]) -> None:
         fail("OTLP proof must identify an absolute traces.db path")
     if int_value(database.get("owner_uid"), "OTLP database owner") != 0:
         fail("installed OTLP persistence proof requires a root-owned database")
-    if int_value(database.get("mode"), "OTLP database mode") & 0o077:
+    # TraceStore creates traces.db 0640 root:admin; the app reads it through
+    # the group bit. Group write, execute and any access for others stay refused.
+    if int_value(database.get("mode"), "OTLP database mode") & ~0o640:
         fail("installed OTLP database must remain private")
     int_value(database.get("device"), "OTLP database device", minimum=1)
     int_value(database.get("inode"), "OTLP database inode", minimum=1)

@@ -102,9 +102,12 @@ commitment, a different host or inconsistent public summaries are refused.
 The validator binds the public policy to the candidate's exact source commit,
 then applies the complete original capture checks to the private receipt:
 reference identity, endpoint timing, native uptime, workload output, sample
-cadence, raw-statistic recomputation and same-host configuration. The historical
-recorder compatibility proof pins the historical two-executor public policy,
-private evidence commitment, archive and unchanged resource dependency closure.
+cadence, raw-statistic recomputation and same-host configuration. When the
+recorder has changed since a measurement, the historical recorder compatibility
+proof pins whichever accepted public policy is committed (the two-executor v1
+policy or the four-executor 2026-11-04 remeasurement), with its private evidence
+commitment, archived recorder, workload executors and unchanged resource
+dependency closure.
 Missing private evidence is an incomplete release qualification, never an
 implicit pass.
 

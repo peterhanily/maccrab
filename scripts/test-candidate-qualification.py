@@ -880,7 +880,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "persistence_proven": True, "sanitizer_verified": False,
                 "observed_at": iso(901),
                 "database": {"path": "/Library/Application Support/MacCrab/traces.db",
-                             "owner_uid": 0, "mode": 0o600, "device": 1, "inode": 1,
+                             "owner_uid": 0, "mode": 0o640, "device": 1, "inode": 1,
                              "read_only": True, "no_follow": True},
             },
         },

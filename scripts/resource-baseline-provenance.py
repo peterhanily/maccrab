@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove one historical resource measurement remains compatible; never execute it."""
+"""Prove an accepted historical resource measurement remains compatible; never execute it."""
 import argparse
 import ast
 import hashlib
@@ -14,6 +14,27 @@ RECORDER_SHA = '6871807f08e6477db7525c4f78ae522d3b4296095e2a5560b6a500792ed7f33d
 BASELINE_SHA = 'c3134ac55a0546640fe51db5f547ab819643af83185af5b069bd89deafbfe809'
 PRIVATE_EVIDENCE_SHA256 = 'b435df9a74658e1d04d9b152359c725cb86ce6e7465cc06c94e450a48c352ef3'
 PRIVATE_CANONICAL_SHA256 = 'c3a8eb418db899b41031dacab7a3fd1322070fd0ceeb9e03fa33bb794ab4b9c7'
+# Each accepted measurement, keyed by the exact public policy it produced: the
+# recorder that measured it (archived as data), the private evidence commitments
+# and the workload executors it ran. v1 is the frozen two-executor policy; v2 is
+# the four-executor remeasurement accepted on 2026-11-04.
+MEASUREMENTS = {
+    BASELINE_SHA: {
+        'archive': ARCHIVE,
+        'recorder_sha256': RECORDER_SHA,
+        'private_evidence_sha256': PRIVATE_EVIDENCE_SHA256,
+        'private_canonical_sha256': PRIVATE_CANONICAL_SHA256,
+        'executors': ('scripts/runtime-qualification-workload.sh', 'scripts/test-otlp-curl.sh'),
+    },
+    '5236115e91f0f53b663dc6a8c084f859719e5224945756d662ec04cf249e1d57': {
+        'archive': 'docs/release-provenance/resource-baseline-recorder-v2.py.txt',
+        'recorder_sha256': 'dd7277e703e77bd02a358705eac9011c6b19c9d3f9a980328b7f66349807dc16',
+        'private_evidence_sha256': '621ff5b99ab2a1d7ab689ffb7d2b29d0739456378af95e6a43f55b83bc03a805',
+        'private_canonical_sha256': '421c2021d588901d5e68bd15f947122a12d22b3662a751d34a87f97e873aaa55',
+        'executors': ('scripts/runtime-qualification-workload.sh', 'scripts/runtime-workload-directories.py',
+                      'scripts/test-otlp-curl.sh', 'scripts/otlp-smoke.py'),
+    },
+}
 ROOTS = ('command_record_resource_baseline', 'validate_resource_baseline')
 OLD_GUARD = '        fail("resource baseline recorder bytes differ from the candidate source")'
 NEW_GUARD = '''        run_checked(
@@ -150,8 +171,10 @@ def inert_literal(node, *, names=False):
 
 
 def verify_sources(archived_raw, current_raw):
-    require(digest(archived_raw) == RECORDER_SHA, 'Historical recorder archive hash differs')
-    old = archived_raw.decode('utf-8')
+    require(digest(archived_raw) in {row['recorder_sha256'] for row in MEASUREMENTS.values()},
+            'Historical recorder archive hash differs')
+    # The v2 archive already carries the compatibility call; v1 carries the refusal.
+    old = normalize_guard(archived_raw.decode('utf-8'))
     current = normalize_guard(current_raw.decode('utf-8'))
     old_tree, old_bindings = module(old)
     new_tree, new_bindings = module(current)
@@ -201,7 +224,7 @@ def verify_sources(archived_raw, current_raw):
             defaults = [*node.args.defaults, *(value for value in node.args.kw_defaults if value is not None)]
             require(all(inert_literal(value, names=True) for value in defaults), 'Effectful function default')
     manifest = {name: [digest(source(node, old).encode()) for node in old_bindings[name]] for name in sorted(names)}
-    return {'status': 'EXACT_HISTORICAL_RESOURCE_PROTOCOL_VERIFIED', 'historical_recorder_sha256': RECORDER_SHA,
+    return {'status': 'EXACT_HISTORICAL_RESOURCE_PROTOCOL_VERIFIED', 'historical_recorder_sha256': digest(archived_raw),
             'current_recorder_sha256': digest(current_raw), 'dependency_count': len(names),
             'dependency_manifest_sha256': digest(canonical(manifest))}
 
@@ -209,26 +232,30 @@ def verify_sources(archived_raw, current_raw):
 def verify(source_root, document_sha256, public_policy_document_sha256=None):
     root = Path(source_root).resolve()
     baseline_raw = read_regular(root / 'docs/RELEASE_RESOURCE_BASELINE.json')
-    require(digest(baseline_raw) == BASELINE_SHA, 'Only the exact accepted public resource policy is compatible')
+    measurement = MEASUREMENTS.get(digest(baseline_raw))
+    require(measurement, 'Only the exact accepted public resource policy is compatible')
     baseline = json.loads(baseline_raw)
     if public_policy_document_sha256 is not None:
         require(digest(canonical(baseline)) == public_policy_document_sha256,
                 'Passed public policy document differs from the frozen policy')
-    require(baseline.get('private_evidence') == {'sha256': PRIVATE_EVIDENCE_SHA256,
-            'canonical_sha256': PRIVATE_CANONICAL_SHA256}, 'Private historical evidence commitment differs')
-    require(document_sha256 == PRIVATE_CANONICAL_SHA256,
+    require(baseline.get('private_evidence') == {'sha256': measurement['private_evidence_sha256'],
+            'canonical_sha256': measurement['private_canonical_sha256']},
+            'Private historical evidence commitment differs')
+    require(document_sha256 == measurement['private_canonical_sha256'],
             'Passed baseline document differs from exact private historical evidence')
-    require(baseline.get('recorder') == {'path': 'scripts/candidate-qualification.py', 'sha256': RECORDER_SHA},
-            'Historical baseline recorder identity differs')
-    archived = read_regular(root / ARCHIVE)
+    require(baseline.get('recorder') == {'path': 'scripts/candidate-qualification.py',
+            'sha256': measurement['recorder_sha256']}, 'Historical baseline recorder identity differs')
+    archived = read_regular(root / measurement['archive'])
+    # verify_sources accepts any accepted archive; bind this one to its policy.
+    require(digest(archived) == measurement['recorder_sha256'], 'Historical recorder archive hash differs')
     current = read_regular(root / 'scripts/candidate-qualification.py')
     # Do not quietly carry historical workload executors across a code change.
     for row in baseline['workload']['executors']:
-        require(row['path'] in ('scripts/runtime-qualification-workload.sh', 'scripts/test-otlp-curl.sh')
+        require(row['path'] in measurement['executors']
                 and digest(read_regular(root / row['path'])) == row['sha256'], 'Historical workload executor changed')
     proof = verify_sources(archived, current)
-    proof['baseline_sha256'] = BASELINE_SHA
-    proof['private_evidence_sha256'] = PRIVATE_EVIDENCE_SHA256
+    proof['baseline_sha256'] = digest(baseline_raw)
+    proof['private_evidence_sha256'] = measurement['private_evidence_sha256']
     return proof
 
 

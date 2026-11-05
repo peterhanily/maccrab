@@ -3,9 +3,10 @@
 
 Sources are parsed or hashed as data, never executed. No Git history, network,
 installed-host probe, private receipt or workload execution is required.
-Archived-source compatibility has positive coverage. Full historical integration
-does not: the old workload bytes are intentionally not reintroduced as fixtures.
-Current integration must reject the changed workload, never claim acceptance.
+Archived-source compatibility has positive coverage. Full v1 integration does
+not: the old workload bytes are intentionally not reintroduced as fixtures, so
+it must reject the changed workload, never claim acceptance. The four-executor
+v2 measurement ran the current workload bytes, so its integration is positive.
 """
 import importlib.util
 import json
@@ -19,9 +20,13 @@ P = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(P)
 ARCHIVED = (ROOT / P.ARCHIVE).read_bytes()
 CURRENT = (ROOT / 'scripts/candidate-qualification.py').read_bytes()
-# The live docs policy binds the current four-executor measurement. This helper
-# only ever covers the frozen two-executor v1 policy, kept byte-for-byte here.
-HISTORICAL_POLICY = (ROOT / 'scripts/fixtures/historical-two-executor-resource-policy.json').read_bytes()
+# The helper covers two frozen policies, kept byte-for-byte here: the v1
+# two-executor policy, which today's workload bytes must fail, and the v2
+# four-executor remeasurement that docs/RELEASE_RESOURCE_BASELINE.json holds.
+HISTORICAL_POLICY =(ROOT / 'scripts/fixtures/historical-two-executor-resource-policy.json').read_bytes()
+FOUR_EXECUTOR_POLICY = (ROOT / 'scripts/fixtures/historical-four-executor-resource-policy.json').read_bytes()
+V2 = P.MEASUREMENTS[P.digest(FOUR_EXECUTOR_POLICY)]
+ARCHIVED_V2 = (ROOT / V2['archive']).read_bytes()
 
 
 class ResourceBaselineProvenanceTests(unittest.TestCase):
@@ -161,6 +166,64 @@ class ResourceBaselineProvenanceTests(unittest.TestCase):
             target.rename(moved)
             target.symlink_to(moved.name)
             with self.assertRaisesRegex(P.ProvenanceError, 'Redirected provenance input'):
+                P.verify(root, document_hash)
+
+
+class FourExecutorMeasurementTests(unittest.TestCase):
+    def fixture(self, root, archive=ARCHIVED_V2):
+        payloads = {
+            V2['archive']: archive,
+            'docs/RELEASE_RESOURCE_BASELINE.json': FOUR_EXECUTOR_POLICY,
+            'scripts/candidate-qualification.py': CURRENT,
+            **{relative: (ROOT / relative).read_bytes() for relative in V2['executors']},
+        }
+        for relative, raw in payloads.items():
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+            target.chmod(0o600)  # Inert private fixture data, never executable.
+        return V2['private_canonical_sha256']
+
+    def test_v2_archive_is_the_recorder_the_policy_names(self):
+        self.assertEqual(P.digest(ARCHIVED_V2), V2['recorder_sha256'])
+        self.assertEqual(json.loads(FOUR_EXECUTOR_POLICY)['recorder']['sha256'], V2['recorder_sha256'])
+
+    def test_current_recorder_preserves_the_four_executor_protocol(self):
+        proof = P.verify_sources(ARCHIVED_V2, CURRENT)
+        self.assertEqual(proof['status'], 'EXACT_HISTORICAL_RESOURCE_PROTOCOL_VERIFIED')
+        self.assertEqual(proof['historical_recorder_sha256'], V2['recorder_sha256'])
+
+    def test_measurement_changes_are_rejected_against_the_v2_archive(self):
+        source = ARCHIVED_V2.decode()
+        for before, after in (
+            ('MIN_EPOCH_SECONDS = 900.0', 'MIN_EPOCH_SECONDS = 899.0'),
+            ('rank = max(1, math.ceil(percentile * len(ordered)))', 'rank = 1'),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, source)
+                with self.assertRaises(P.ProvenanceError):
+                    P.verify_sources(ARCHIVED_V2, source.replace(before, after, 1).encode())
+
+    def test_four_executor_policy_verifies_with_its_own_archive_and_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            document_hash = self.fixture(root)
+            public_hash = P.digest(P.canonical(json.loads(FOUR_EXECUTOR_POLICY)))
+            proof = P.verify(root, document_hash, public_hash)
+            self.assertEqual(proof['baseline_sha256'], P.digest(FOUR_EXECUTOR_POLICY))
+            self.assertEqual(proof['private_evidence_sha256'], V2['private_evidence_sha256'])
+            with self.assertRaisesRegex(P.ProvenanceError, 'Passed baseline document'):
+                P.verify(root, P.PRIVATE_CANONICAL_SHA256)
+            executor = root / 'scripts/otlp-smoke.py'
+            executor.write_bytes(executor.read_bytes() + b'\n')
+            with self.assertRaisesRegex(P.ProvenanceError, 'Historical workload executor changed'):
+                P.verify(root, document_hash)
+
+    def test_four_executor_policy_cannot_use_the_v1_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            document_hash = self.fixture(root, archive=ARCHIVED)
+            with self.assertRaisesRegex(P.ProvenanceError, 'archive hash'):
                 P.verify(root, document_hash)
 
 

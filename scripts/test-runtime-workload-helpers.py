@@ -176,11 +176,16 @@ class RecorderOTLPProofTests(unittest.TestCase):
                     'persistence_proven': True, 'sanitizer_verified': False,
                     'observed_at': '2026-10-10T20:20:00Z',
                     'database': {'path': '/Library/Application Support/MacCrab/traces.db',
-                        'owner_uid': 0, 'mode': 0o600, 'device': 1, 'inode': 2,
+                        'owner_uid': 0, 'mode': 0o640, 'device': 1, 'inode': 2,
                         'read_only': True, 'no_follow': True}}}
 
     def test_exact_bound_proof_is_accepted(self):
-        qualification.validate_workload_otlp_persistence(self.fixture())
+        # 0640 is the mode TraceStore gives an installed traces.db.
+        for mode in (0o640, 0o600):
+            row = self.fixture()
+            row['otlp_persistence']['database']['mode'] = mode
+            with self.subTest(mode=oct(mode)):
+                qualification.validate_workload_otlp_persistence(row)
 
     def test_other_span_and_aggregate_count_are_not_proof(self):
         for change in ({'span_id': '3' * 16}, {'matched_rows': 0}, {'matched_rows': True},
@@ -197,7 +202,8 @@ class RecorderOTLPProofTests(unittest.TestCase):
                 qualification.workload_otlp_identity(output)
 
     def test_unsafe_database_or_old_proof_is_rejected(self):
-        for changes in ({'read_only': False}, {'no_follow': False}, {'owner_uid': 501}, {'mode': 0o644}):
+        for changes in ({'read_only': False}, {'no_follow': False}, {'owner_uid': 501}, {'mode': 0o644},
+                        {'mode': 0o660}, {'mode': 0o740}, {'mode': 0o2640}):
             row = self.fixture()
             row['otlp_persistence']['database'].update(changes)
             with self.subTest(changes=changes), self.assertRaises(qualification.QualificationError):
