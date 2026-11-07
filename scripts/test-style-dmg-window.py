@@ -3,13 +3,16 @@
 
 Builds small read-write disk images the way build-release.sh does (attached
 with -nobrowse at a private mount point), runs the styler, converts the image
-and checks the layout survives conversion. Also checks every refusal: a wrong
+and checks the layout survives conversion. Also checks these refusals: a wrong
 volume name, an unexpected payload, an Applications folder that is not the
-/Applications link, an existing layout, an APFS image, and unpinned inputs.
+/Applications link, an extra that is a symbolic link or has a second hard link,
+an existing layout, an APFS image, unpinned inputs, and a link or cached
+bytecode in the vendored libraries.
 """
 import hashlib
 import os
 import plistlib
+import py_compile
 import shutil
 import subprocess
 import sys
@@ -24,6 +27,9 @@ BACKGROUND = ROOT / "scripts/dmg-window/background.tiff"
 ICON = ROOT / "Sources/MacCrabApp/Resources/AppIcon.icns"
 EXTRAS = ("README.md", "install.sh", "LICENSE", "THIRD_PARTY_LICENSES.md", "ThirdPartyNotices")
 VOLUME = "MacCrab v0.0.0-test"
+# check_layout imports the vendored libraries; bytecode written next to them
+# would make the styler refuse the tree.
+sys.dont_write_bytecode = True
 
 
 def hdiutil(*args):
@@ -64,6 +70,15 @@ def run_styler(mount, volume=VOLUME, styler=STYLER, background=BACKGROUND, icon=
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def copy_styler(work):
+    """Copy the styler and its vendored libraries into work/tree."""
+    tree = Path(work, "tree")
+    (tree / "scripts").mkdir(parents=True)
+    shutil.copy2(STYLER, tree / "scripts")
+    shutil.copytree(VENDOR, tree / "vendor/dmg-layout")
+    return tree
 
 
 class Volume:
@@ -138,7 +153,8 @@ class StyleDMGWindowTests(unittest.TestCase):
         result = run_styler(v.mount, **kwargs)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(message, result.stderr)
-        self.assertFalse(os.path.lexists(os.path.join(v.mount, ".DS_Store")), "refusal wrote a layout")
+        for name in (".DS_Store", ".background.tiff", ".VolumeIcon.icns"):
+            self.assertFalse(os.path.lexists(os.path.join(v.mount, name)), "refusal wrote " + name)
 
     def test_refuses_wrong_volume_name(self):
         v = Volume()
@@ -161,6 +177,31 @@ class StyleDMGWindowTests(unittest.TestCase):
         try:
             payload(v.mount, applications_link=False)
             self.assert_refused(v, "link to /Applications")
+        finally:
+            v.close()
+
+    def test_refuses_symlinked_extra(self):
+        v = Volume()
+        try:
+            payload(v.mount)
+            # Hiding a linked extra would hide the link's target on the build host.
+            target = Path(v.dir, "README.md")
+            target.write_text("build host file\n")
+            os.remove(os.path.join(v.mount, "README.md"))
+            os.symlink(target, os.path.join(v.mount, "README.md"))
+            self.assert_refused(v, "README.md must be a regular file")
+            self.assertFalse(os.lstat(target).st_flags & 0x8000, "the link target was hidden")
+        finally:
+            v.close()
+
+    def test_refuses_hard_linked_extra(self):
+        v = Volume()
+        try:
+            payload(v.mount)
+            licence = os.path.join(v.mount, "LICENSE")
+            os.link(licence, os.path.join(v.mount, "MacCrab.app/Contents/LICENSE"))
+            self.assertEqual(os.lstat(licence).st_nlink, 2)
+            self.assert_refused(v, "LICENSE must be a regular file with a single link")
         finally:
             v.close()
 
@@ -192,13 +233,49 @@ class StyleDMGWindowTests(unittest.TestCase):
             other.write_bytes(BACKGROUND.read_bytes() + b"\0")
             self.assert_refused(v, "does not match its pin", background=other)
             # A tampered vendored library is refused before it is imported.
-            tree = Path(work, "tree")
-            (tree / "scripts").mkdir(parents=True)
-            shutil.copy2(STYLER, tree / "scripts")
-            shutil.copytree(VENDOR, tree / "vendor/dmg-layout")
+            tree = copy_styler(work)
             with open(tree / "vendor/dmg-layout/mac_alias/alias.py", "a") as f:
                 f.write("\n# tampered\n")
             self.assert_refused(v, "vendored file does not match its pin", styler=tree / "scripts/style-dmg-window.py")
+        finally:
+            v.close()
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_refuses_link_in_vendored_libraries(self):
+        v = Volume()
+        work = tempfile.mkdtemp(prefix="maccrab-dmg-style-pins.")
+        try:
+            payload(v.mount)
+            # A linked package named after a module the libraries import would
+            # load ahead of the standard library without matching any pin.
+            marker = Path(work, "planted-ran")
+            planted = Path(work, "planted")
+            planted.mkdir()
+            (planted / "__init__.py").write_text("open(%r, 'w').close()\n" % str(marker))
+            tree = copy_styler(work)
+            os.symlink(planted, tree / "vendor/dmg-layout/plistlib")
+            self.assert_refused(v, "link or special file: plistlib", styler=tree / "scripts/style-dmg-window.py")
+            self.assertFalse(marker.exists(), "the linked package ran")
+        finally:
+            v.close()
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_refuses_bytecode_cache_in_vendored_libraries(self):
+        v = Volume()
+        work = tempfile.mkdtemp(prefix="maccrab-dmg-style-pins.")
+        try:
+            payload(v.mount)
+            # Python would run this unchecked bytecode instead of the pinned
+            # ds_store/__init__.py, even with -B.
+            marker = Path(work, "planted-ran")
+            planted = Path(work, "planted.py")
+            planted.write_text("open(%r, 'w').close()\n" % str(marker))
+            tree = copy_styler(work)
+            cache = tree / "vendor/dmg-layout/ds_store/__pycache__"
+            py_compile.compile(str(planted), cfile=str(cache / ("__init__.%s.pyc" % sys.implementation.cache_tag)),
+                               invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+            self.assert_refused(v, "cached bytecode: ds_store/__pycache__", styler=tree / "scripts/style-dmg-window.py")
+            self.assertFalse(marker.exists(), "the cached bytecode ran")
         finally:
             v.close()
             shutil.rmtree(work, ignore_errors=True)

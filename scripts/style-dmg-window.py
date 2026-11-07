@@ -12,8 +12,10 @@ The extras stay on the volume: install.sh keeps its documented path, and the
 licence files also ship inside the app bundle.
 
 Every input is pinned: the background, the volume icon and each file of the
-vendored ds_store and mac_alias libraries (vendor/dmg-layout). A mismatch stops
-the build before anything is written.
+vendored ds_store and mac_alias libraries (vendor/dmg-layout). Apart from its
+SOURCE.txt the vendored tree may hold nothing else (no links, special files or
+cached bytecode), and Python compiles the libraries from their sources. A
+mismatch stops the build before anything is written.
 
 usage: style-dmg-window.py --mount PATH --volume-name NAME --background TIFF --icon ICNS
 """
@@ -23,8 +25,10 @@ import ctypes.util
 import hashlib
 import os
 import shutil
+import stat
 import struct
 import sys
+import tempfile
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENDOR = os.path.join(PROJECT_ROOT, "vendor", "dmg-layout")
@@ -46,7 +50,9 @@ ICON_SHA256 = "70aeb0f11b13d29c427d703f3baef2d52c85527083a0d0a52aa37f2dac49a084"
 
 APP = "MacCrab.app"
 APPLICATIONS = "Applications"
-EXTRAS = ("README.md", "install.sh", "LICENSE", "THIRD_PARTY_LICENSES.md", "ThirdPartyNotices")
+NOTICES = "ThirdPartyNotices"
+EXTRA_FILES = ("README.md", "install.sh", "LICENSE", "THIRD_PARTY_LICENSES.md")
+EXTRAS = EXTRA_FILES + (NOTICES,)
 BACKGROUND, VOLUME_ICON, DS_STORE = ".background.tiff", ".VolumeIcon.icns", ".DS_Store"
 
 # The window's content matches the 660 x 400-point background picture, and the
@@ -72,19 +78,39 @@ def sha256_file(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def verify_inputs(background, icon):
-    present = sorted(os.path.relpath(os.path.join(d, f), VENDOR)
-                     for d, _, files in os.walk(VENDOR) for f in files
-                     if f != "SOURCE.txt" and "__pycache__" not in d)
-    if present != sorted(VENDOR_SHA256):
-        fail("vendored layout libraries changed: %r" % present)
+def verify_vendor():
+    """Allow only SOURCE.txt and the pinned files, in real directories, and no bytecode cache."""
+    if os.path.islink(VENDOR) or not os.path.isdir(VENDOR):
+        fail("vendored layout libraries are not a real directory")
+    present = []
+    for d, dirs, files in os.walk(VENDOR, onerror=lambda e: fail("cannot list %s" % e.filename)):
+        for name in dirs + files:
+            path = os.path.join(d, name)
+            rel = os.path.relpath(path, VENDOR)
+            if name == "__pycache__" or name.endswith(".pyc"):
+                fail("vendored layout libraries contain cached bytecode: %s" % rel)
+            mode = os.lstat(path).st_mode
+            if stat.S_ISREG(mode):
+                if rel != "SOURCE.txt":
+                    present.append(rel)
+            elif not stat.S_ISDIR(mode):
+                fail("vendored layout libraries contain a link or special file: %s" % rel)
+    if sorted(present) != sorted(VENDOR_SHA256):
+        fail("vendored layout libraries changed: %r" % sorted(present))
     for rel, digest in VENDOR_SHA256.items():
-        path = os.path.join(VENDOR, rel)
-        if os.path.islink(path) or sha256_file(path) != digest:
+        if sha256_file(os.path.join(VENDOR, rel)) != digest:
             fail("vendored file does not match its pin: %s" % rel)
-    for path, digest in ((background, BACKGROUND_SHA256), (icon, ICON_SHA256)):
-        if not os.path.isfile(path) or os.path.islink(path) or sha256_file(path) != digest:
-            fail("input does not match its pin: %s" % path)
+
+
+def read_pinned(path, digest):
+    """Read an input once; the bytes checked against the pin are the bytes written."""
+    if os.path.islink(path) or not os.path.isfile(path):
+        fail("input is not a regular file: %s" % path)
+    with open(path, "rb") as f:
+        data = f.read()
+    if hashlib.sha256(data).hexdigest() != digest:
+        fail("input does not match its pin: %s" % path)
+    return data
 
 
 def set_custom_icon_flag(path):
@@ -100,16 +126,23 @@ def set_custom_icon_flag(path):
         fail("cannot set the custom-icon flag: %s" % os.strerror(ctypes.get_errno()))
 
 
-def copy_file(source, target):
-    shutil.copyfile(source, target)
+def write_file(target, data):
+    with open(target, "xb") as f:
+        f.write(data)
     os.chmod(target, 0o644)
 
 
 def style(mount, volume_name, background, icon, app=APP):
-    verify_inputs(background, icon)
-    sys.path.insert(0, VENDOR)
-    from ds_store import DSStore
-    from mac_alias import Alias, osx
+    verify_vendor()
+    background_data = read_pinned(background, BACKGROUND_SHA256)
+    icon_data = read_pinned(icon, ICON_SHA256)
+    # Compile the checked sources: the bytecode cache is a new, empty directory,
+    # so no existing .pyc file can run in their place.
+    with tempfile.TemporaryDirectory(prefix="maccrab-dmg-pycache.") as cache:
+        sys.pycache_prefix = cache
+        sys.path.insert(0, VENDOR)
+        from ds_store import DSStore
+        from mac_alias import Alias, osx
 
     mount = os.path.realpath(mount)
     st = osx.statfs(mount)
@@ -127,16 +160,25 @@ def style(mount, volume_name, background, icon, app=APP):
     applications = os.path.join(mount, APPLICATIONS)
     if not os.path.islink(applications) or os.readlink(applications) != "/Applications":
         fail("Applications must be a link to /Applications")
+    # lstat, so hiding an extra cannot follow a link off the volume or hide
+    # another name for the same file.
+    for name in (app, NOTICES):
+        if not stat.S_ISDIR(os.lstat(os.path.join(mount, name)).st_mode):
+            fail("%s must be a real directory" % name)
+    for name in EXTRA_FILES:
+        info = os.lstat(os.path.join(mount, name))
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            fail("%s must be a regular file with a single link" % name)
     for existing in (BACKGROUND, VOLUME_ICON, DS_STORE):
         if os.path.lexists(os.path.join(mount, existing)):
             fail("%s already exists on the volume" % existing)
 
-    copy_file(background, os.path.join(mount, BACKGROUND))
-    copy_file(icon, os.path.join(mount, VOLUME_ICON))
+    write_file(os.path.join(mount, BACKGROUND), background_data)
+    write_file(os.path.join(mount, VOLUME_ICON), icon_data)
     set_custom_icon_flag(mount)
     for extra in EXTRAS:
         path = os.path.join(mount, extra)
-        os.chflags(path, os.lstat(path).st_flags | UF_HIDDEN)
+        os.chflags(path, os.lstat(path).st_flags | UF_HIDDEN, follow_symlinks=False)
 
     alias = Alias.for_file(os.path.join(mount, BACKGROUND))
     # Record what a normal attach shows (the volume root and its mount point),

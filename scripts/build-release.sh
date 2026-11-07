@@ -1199,9 +1199,13 @@ stage_sign() {
         # Embed the profile at BOTH bundle levels. AMFI walks up from any
         # Mach-O to the nearest enclosing Contents/embedded.provisionprofile;
         # shipping it at both the sysext bundle and the app bundle covers
-        # every discovery path Apple uses.
+        # every discovery path Apple uses. Clear the copies' extended
+        # attributes: a downloaded profile can carry its download URL and a
+        # quarantine record, and even cp -X carries the quarantine over.
         cp "$PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
         cp "$PROVISION_PROFILE" "$SYSEXT_BUNDLE/Contents/embedded.provisionprofile"
+        /usr/bin/xattr -c "$APP/Contents/embedded.provisionprofile" \
+            "$SYSEXT_BUNDLE/Contents/embedded.provisionprofile"
         PROFILE_STAT_AFTER=$(/usr/bin/stat -f 'size=%z;mtime=%m;mode=%Lp;uid=%u;gid=%g' "$PROVISION_PROFILE")
         PROFILE_SHA_AFTER=$($SHASUM_BIN -a 256 "$PROVISION_PROFILE" | /usr/bin/awk '{print $1}')
         if [ "$PROFILE_STAT_BEFORE" != "$PROFILE_STAT_AFTER" ] \
@@ -1752,7 +1756,12 @@ stage_publish() {
     RELEASE_DMG_MOUNT_PATH="$DMG_MNT"
     RELEASE_DMG_ATTACH_ATTEMPTED=1
     /usr/bin/hdiutil attach "$RW_DMG" -nobrowse -mountpoint "$DMG_MNT" >/dev/null
-    /usr/bin/ditto "$STAGING_DIR/" "$DMG_MNT/"
+    # Leave the build host's extended attributes, Finder info, resource forks,
+    # ACLs and quarantine records out of the image (--noextattr needs --norsrc,
+    # and alone still copies quarantine). No code signature in the payload
+    # lives in an extended attribute, and the strict check below verifies the
+    # copy. macOS still adds com.apple.provenance to the files ditto creates.
+    /usr/bin/ditto --norsrc --noextattr --noacl --noqtn "$STAGING_DIR/" "$DMG_MNT/"
     # Lay out the Finder window: the background with the arrow and the steps,
     # icon positions, the crab as the volume icon, and the extras hidden (they
     # stay on the volume). Every input is pinned, and the validation below also
