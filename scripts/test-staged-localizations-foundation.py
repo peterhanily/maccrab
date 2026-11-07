@@ -23,6 +23,12 @@ SPEC = importlib.util.spec_from_file_location('localization_optimizer',
 HELPER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPER)
 COUNTS = (0, 1, 2, 3, 4, 5, 11, 12, 21, 22, 25, 101, 102, 111, 1000, 1000000)
+# The pinned Xcode toolchain's macOS SDK. Without SDKROOT, /usr/bin/clang in the
+# stripped environment below takes the newest Command Line Tools SDK, which a
+# macOS update can make newer than the toolchain's linker can read.
+XCODE_SDK = subprocess.run(['/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-path'],
+                           env={'PATH': '/usr/bin:/bin'}, capture_output=True, text=True,
+                           check=True).stdout.strip()
 FIXTURE_SOURCE = r'''
 #import <Foundation/Foundation.h>
 #include <stdio.h>
@@ -151,7 +157,7 @@ class FoundationLocalizationParity(unittest.TestCase):
             manifest.write_text(json.dumps({'rows': rows, 'counts': COUNTS}))
             objc, executable = root / 'foundation-parity.m', root / 'foundation-parity'
             objc.write_text(FIXTURE_SOURCE)
-            environment = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'TMPDIR': str(root)}
+            environment = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'TMPDIR': str(root), 'SDKROOT': XCODE_SDK}
             compiled = subprocess.run(['/usr/bin/clang', '-fobjc-arc', '-fno-modules', '-framework', 'Foundation',
                                        str(objc), '-o', str(executable)], capture_output=True,
                                       timeout=60, env=environment)

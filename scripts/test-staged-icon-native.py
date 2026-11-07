@@ -26,6 +26,12 @@ ORIGINAL_SHA256 = 'ff369902730ec16f2464160b814cd9807fde38be4612e510457c4d9fa8939
 CANDIDATE_SHA256 = 'bf6efb327d49ddc768c2134b8f93f109b3a957faa06b5abb5fc4d30335b8becf'
 MAX_INPUT = 16 * 1024 * 1024
 MAX_OUTPUT = 64 * 1024
+# The pinned Xcode toolchain's macOS SDK. Without SDKROOT, /usr/bin/clang in the
+# stripped environment below takes the newest Command Line Tools SDK, which a
+# macOS update can make newer than the toolchain's linker can read.
+XCODE_SDK = subprocess.run(['/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-path'],
+                           env={'PATH': '/usr/bin:/bin'}, capture_output=True, text=True,
+                           check=True).stdout.strip()
 NATIVE_SOURCE = r'''
 #import <Foundation/Foundation.h>
 #import <AppKit/NSImage.h>
@@ -209,7 +215,7 @@ def exclusive(path, data):
 
 
 def bounded_process(command, seconds, directory, stem):
-    environment = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'TMPDIR': str(directory)}
+    environment = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'TMPDIR': str(directory), 'SDKROOT': XCODE_SDK}
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                env=environment, start_new_session=True)
     selector = selectors.DefaultSelector()
