@@ -606,7 +606,9 @@ via Sparkle auto-update:
    - Downloads and unpacks the DMG, then verifies the
      `<sparkle:edSignature>` against the public key baked into the running
      app's Info.plist (`SUPublicEDKey`) before installing anything. A
-     swapped DMG fails verification and is not installed.
+     swapped DMG fails verification and is not installed, unless the
+     attacker can also change the appcast and either has the Sparkle
+     signing key or can sign with MacCrab's Developer ID certificate.
    - Replaces `/Applications/MacCrab.app` and relaunches it when the user
      chooses *Install and Relaunch*.
    - On relaunch, `OSSystemExtensionRequest.activationRequest`

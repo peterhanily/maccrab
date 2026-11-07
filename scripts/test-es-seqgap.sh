@@ -5,7 +5,7 @@
 # kernel-drop counters (`es_kernel_dropped_*`) read from the rich heartbeat —
 # NOT DB rows. DB-row presence conflates a kernel ingest-drop with the ~30×
 # retention fast-eviction; `seq_num` continuity at the callback boundary is the
-# correct instrument (see plans/2026-07-13-es-telemetry-blindspot-plan.md, D1).
+# correct instrument.
 #
 # Two experiments:
 #   (i)  quiet control — 500 marker execs → assert the NOTIFY_EXEC kernel-drop

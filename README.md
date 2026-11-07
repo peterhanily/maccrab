@@ -74,8 +74,10 @@ open /Applications/MacCrab.app
 
 # 2. Drag MacCrab.app onto the Applications link in the DMG window, or run the
 #    bundled installer. It installs the app, links maccrabctl and maccrab-mcp
-#    into /usr/local/bin, and removes leftovers of pre-1.3 installs:
-sudo /Volumes/MacCrab\ v*/install.sh
+#    into /usr/local/bin, and removes leftovers of pre-1.3 installs. The disk
+#    image is named after its version, so use the version you downloaded, and
+#    eject any other MacCrab disk image first:
+sudo "/Volumes/MacCrab v1.22.6/install.sh"
 
 # 3. Open the dashboard, then approve the extension as in step 3 of Option A.
 open /Applications/MacCrab.app

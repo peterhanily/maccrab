@@ -164,7 +164,7 @@ boundary — see `RELEASE_PROCESS.md` for the full operator-side
 pipeline.
 
 - Each release DMG is signed with **Developer ID Application: Peter Hanily (`79S425CW99`)**, notarized by Apple, and the notarization ticket is stapled to the DMG before publication.
-- Sparkle auto-updates are gated by an **EdDSA signature** over the DMG bytes. The matching public key (`de+dzPjB…`) is embedded in every shipped `MacCrabApp` Info.plist under `SUPublicEDKey`. Sparkle checks it after the download and before installing, so a swapped DMG fails verification and is not installed.
+- Sparkle auto-updates are gated by an **EdDSA signature** over the DMG bytes. The matching public key (`de+dzPjB…`) is embedded in every shipped `MacCrabApp` Info.plist under `SUPublicEDKey`. Sparkle checks it after the download and before installing, so a swapped DMG fails verification and is not installed, unless the attacker can also change the appcast and either has the Sparkle signing key or can sign with MacCrab's Developer ID certificate.
 - The appcast XML is hosted at `https://maccrab.com/appcast.xml` (Cloudflare Workers, deployed by Workers Builds from source repo `peterhanily/maccrab-site`).
-- End-user verification — `shasum`, `codesign -dvv`, `spctl -a`, `xcrun stapler validate` — is documented step-by-step in `docs/TRUST.md`.
+- End-user verification — `shasum`, `codesign -dvv` and `codesign --verify`, `spctl -a`, `xcrun stapler validate` — is documented step-by-step in `docs/TRUST.md`.
 - Key custody and the operator's release preconditions are documented in `RELEASE_PROCESS.md`, and rollback procedures in `docs/ROLLBACK_RUNBOOK.md`. Reviewers evaluating the supply-chain posture should start with `RELEASE_PROCESS.md`.

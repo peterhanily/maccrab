@@ -208,13 +208,15 @@ events to suppress evidence post-compromise.
 - Each update in Sparkle's appcast carries an EdDSA signature over the
   DMG bytes. The public half of the key is embedded in the signed app
   bundle (`SUPublicEDKey` in `Info.plist`), so a tampered update server
-  can't substitute its own key.
+  can't substitute its own key unless the attacker also has the Sparkle
+  signing key or can sign with MacCrab's Developer ID certificate.
 - The DMG download URL points to GitHub release assets — a separate
   trust path.
 - Sparkle verifies the EdDSA signature after download and **before**
   installing.
 - The release pipeline notarizes + staples the DMG before publishing.
-  An unstapled or unnotarized DMG fails Gatekeeper at install time.
+  An unstapled or unnotarized DMG fails Gatekeeper when a user opens a
+  download; Sparkle's own install step does not enforce notarization.
 
 **Residual risk:**
 - Compromise of Peter Hanily's Apple Developer account would let an

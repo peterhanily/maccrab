@@ -27,11 +27,12 @@ This document describes MacCrab's release and auto-update supply chain, the vuln
 
 **Apple notarization:** The signed DMG is submitted to Apple's notarization service (`xcrun notarytool`) which performs malware scanning. Upon acceptance, a notarization ticket is stapled to the DMG. The ticket is valid for the lifetime of the Developer ID certificate.
 
-**Code signature verification:** End users (and automated tooling) can verify the code signature with:
+**Code signature verification:** End users (and automated tooling) can see who signed the DMG with `codesign -dvv`, and check with `codesign --verify` that it hasn't been modified since signing:
 ```bash
 codesign -dvv ~/Downloads/MacCrab-v<version>.dmg
+codesign --verify --strict --verbose=2 ~/Downloads/MacCrab-v<version>.dmg
 ```
-Expected fragments: `Authority=Developer ID Application: Peter Hanily (79S425CW99)` and `TeamIdentifier=79S425CW99`.
+Expected fragments: `Authority=Developer ID Application: Peter Hanily (79S425CW99)` and `TeamIdentifier=79S425CW99` from `-dvv`, and `valid on disk` and `satisfies its Designated Requirement` from `--verify`.
 
 **Sparkle appcast signature:** Installed MacCrab instances check for updates once per day (`SUScheduledCheckInterval=86400` seconds in Info.plist) by polling `https://maccrab.com/appcast.xml`. Each `<item>` carries an `sparkle:edSignature` attribute — an EdDSA signature over the DMG bytes. Sparkle verifies this signature after downloading and unpacking the update, **before** installing it.
 
@@ -62,7 +63,7 @@ The matching private key lives in the operator's macOS login Keychain, stored by
 | Secret | Blast radius if leaked |
 |---|---|
 | **Developer ID Application certificate + password** | An attacker can sign and notarize any Mach-O under the team ID `79S425CW99`, distributing malicious binaries that appear legitimate. Revocation at appleid.apple.com stops new notarizations but not already-stapled tickets. Combined with Sparkle key compromise, it's game over. |
-| **GitHub PAT (SITE_REPO_TOKEN)** | An attacker can modify `appcast.xml` to advertise a malicious DMG. If the Sparkle key is also compromised, they can forge a valid signature. If NOT compromised, a swapped DMG will fail signature verification and is not installed. |
+| **GitHub PAT (SITE_REPO_TOKEN)** | An attacker can modify `appcast.xml` to advertise a malicious DMG. If the Sparkle key is also compromised, they can forge a valid signature. If NOT compromised, a swapped DMG will fail signature verification and is not installed, unless they can also sign with MacCrab's Developer ID certificate. |
 | **Build machine access** | An attacker with local access to the build Mac can extract all four secrets from the login Keychain, then distribute a malicious release signed with the real cert and real Sparkle key. This is why the build Mac must be kept isolated and un-touched by general browsing / email. |
 
 ### 2.4 No key rotation has been performed
@@ -73,8 +74,8 @@ Both the Developer ID certificate and the Sparkle EdDSA key are at their origina
 
 MacCrab provides `docs/TRUST.md`, which documents the four verification links:
 1. **SHA256 checksum** — published as the GitHub release asset's `sha256` digest, in `release.json` and in `Casks/maccrab.rb` at the release tag.
-2. **Code signature** — verifiable with `codesign -dvv` (identity: Peter Hanily, team `79S425CW99`).
-3. **Notarization ticket** — verifiable with `spctl -a -t open` and `xcrun stapler validate`.
+2. **Code signature** — `codesign -dvv` shows the signing identity (Peter Hanily, team `79S425CW99`); `codesign --verify --strict --verbose=2` checks that the DMG hasn't been modified since signing.
+3. **Notarization ticket** — verifiable with `spctl -a -v -t open --context context:primary-signature` and `xcrun stapler validate`.
 4. **Sparkle EdDSA signature** — verified automatically by Sparkle before update; manually inspectable from `https://maccrab.com/appcast.xml`.
 
 End users who are suspicious can perform all four checks. A compromised release will fail at least one.
@@ -125,7 +126,7 @@ So on key compromise the Sparkle channel is dead, and recovery is manual reinsta
    - If you have lost control of the site repo itself, escalate to GitHub support to freeze it and to Cloudflare to take down the `maccrab-site` Worker deployment.
 
 3. **Issue a public security advisory** via GitHub (`peterhanily/maccrab/security/advisories`) and email `maccrab@peterhanily.com`:
-   - "The Sparkle update-signing key is compromised. Turn off automatic update checks (`defaults write com.maccrab.app SUEnableAutomaticChecks -bool false`, then quit and reopen MacCrab) and do not accept any update offered by the in-app updater. A recovery release with new signing keys is in progress; installing it will require a manual reinstall."
+   - "The Sparkle update-signing key is compromised. Turn off automatic update checks (`defaults write com.maccrab.app SUEnableAutomaticChecks -bool false`; the setting takes effect the next time MacCrab starts) and do not accept any update offered by the in-app updater. If you allowed automatic installs, an update Sparkle has already downloaded still installs when MacCrab quits, and this command does not stop it. A recovery release with new signing keys is in progress; installing it will require a manual reinstall."
    - Naming the compromised public key is fine — it ships in every app bundle and is printed in §2.1 above, and an Ed25519 public key cannot be used to forge signatures. Keep details of *how* the compromise happened vague only while the facts are still unclear — that is comms discipline, not key secrecy.
 
 4. **Notify Homebrew:** If the key is in the wild and someone publishes a malicious Homebrew formula, you want Homebrew awareness early. File an issue on homebrew/homebrew-casks or contact `security@brew.sh` with the advisory.
@@ -158,7 +159,7 @@ So on key compromise the Sparkle channel is dead, and recovery is manual reinsta
    - Homebrew cask bump (`brew reinstall --cask peterhanily/maccrab/maccrab` picks it up).
    - Download link plus advisory banner on maccrab.com.
 
-2. **Update the advisory with manual-reinstall instructions** and the out-of-band verification steps from `docs/TRUST.md` (SHA256, `codesign -dvv`, `spctl`, stapler). Users must verify out-of-band precisely because the in-app trust chain is what broke.
+2. **Update the advisory with manual-reinstall instructions** and the out-of-band verification steps from `docs/TRUST.md` (SHA256, `codesign -dvv` and `codesign --verify`, `spctl`, stapler). Users must verify out-of-band precisely because the in-app trust chain is what broke.
 
 3. **Do not attempt Sparkle delivery.** To repeat the two reasons: existing clients pin the OLD public key in their installed Info.plist and silently reject any NEW-key signature; and signing the recovery entry with the OLD key to get past that pin is exactly the race the attacker — holding the same old key — can win. (Nor can an appcast attribute force the install: `sparkle:minimumAutoupdateVersion` only gates which installed versions treat an update as a *major* upgrade, so `0.0.0` is a no-op, not a mandate.)
 
@@ -331,7 +332,7 @@ If you suspect a MacCrab update is malicious:
    ```
    The URL should be that version's `peterhanily/maccrab` GitHub release asset. To check the file itself, download it from there and follow [`TRUST.md`](TRUST.md#verifying-a-downloaded-dmg). Sparkle checks the EdDSA signature itself before installing; its `sign_update --verify` tool needs the private signing key, so it is not an end-user check. If in doubt, decline the update and report the issue.
 
-2. **Do NOT auto-update.** MacCrab asks before it installs an update unless you ticked "Automatically download and install updates in the future" in an earlier update prompt. The app has no setting to turn automatic checks off. To stop scheduled checks (and automatic installs) while you investigate, run this, then quit and reopen MacCrab:
+2. **Do NOT auto-update.** MacCrab asks before it installs an update unless you ticked "Automatically download and install updates in the future" in an earlier update prompt. The app has no setting to turn automatic checks off. If you allowed automatic installs, an update Sparkle has already downloaded installs when MacCrab quits, and the command below does not stop it. To stop scheduled checks while you investigate, run this, then quit and reopen MacCrab:
    ```bash
    defaults write com.maccrab.app SUEnableAutomaticChecks -bool false
    ```
