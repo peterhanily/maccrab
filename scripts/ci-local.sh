@@ -34,8 +34,8 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/release.sh
     scripts/build-release.sh
     scripts/optimize-staged-localizations.py
-    scripts/compress-staged-icon.py
     scripts/trim-staged-sparkle-sdk.py
+    scripts/style-dmg-window.py
     scripts/prepare-dmg-payload.sh
     scripts/install.sh
     scripts/release-env.sh
@@ -792,7 +792,7 @@ check() {
     local slug phase_script phase_status phase_timeout
     phase_timeout=1800
     case "$name" in
-        "Staged icon compression fixtures"|"Staged icon native parity") phase_timeout=120 ;;
+        "App icon matches its generator"|"Disk image window layout fixtures") phase_timeout=300 ;;
     esac
     slug=$(printf '%s' "$name" | LC_ALL=C tr -cs 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z')
     slug=${slug#-}
@@ -905,8 +905,7 @@ check "Localization checker tests" /usr/bin/python3 -I scripts/test-localization
 check "Staged localization optimization fixtures" /usr/bin/env -u MACCRAB_LOCALIZATION_TEST_RESOURCES \
     /usr/bin/python3 -I -B scripts/test-staged-localizations.py
 check "Staged localization Foundation parity" /usr/bin/python3 -I -B scripts/test-staged-localizations-foundation.py
-check "Staged icon compression fixtures" /usr/bin/python3 -I -B scripts/test-compress-staged-icon.py
-check "Staged icon native parity" /usr/bin/python3 -I -B scripts/test-staged-icon-native.py
+check "App icon matches its generator" /usr/bin/python3 -I -B scripts/test-app-icon.py
 
 echo ""
 echo -e "${BOLD}Rules${NC}"
@@ -942,6 +941,7 @@ check "Runtime workload helper fixtures" /usr/bin/python3 -I -B ./scripts/test-r
 check "Release privacy fixtures" /usr/bin/python3 -I ./scripts/test-release-privacy.py
 check "Staged Sparkle SDK trimming fixtures" /usr/bin/python3 -I -B ./scripts/test-trim-staged-sparkle-sdk.py
 check "Installer/DMG payload fixtures" ./scripts/test-install-payload.sh
+check "Disk image window layout fixtures" /usr/bin/python3 -I -B ./scripts/test-style-dmg-window.py
 check "SQLCipher provenance fixtures" ./scripts/test-sqlcipher-provenance.sh
 
 # Publication gate. Scan every unpublished commit, including changes later

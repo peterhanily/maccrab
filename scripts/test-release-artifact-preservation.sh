@@ -41,8 +41,8 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/release.sh
     scripts/build-release.sh
     scripts/optimize-staged-localizations.py
-    scripts/compress-staged-icon.py
     scripts/trim-staged-sparkle-sdk.py
+    scripts/style-dmg-window.py
     scripts/prepare-dmg-payload.sh
     scripts/install.sh
     scripts/release-env.sh
@@ -277,9 +277,9 @@ PY
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-red-team-preflight.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-localizations.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-localizations-foundation.py"
-    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-compress-staged-icon.py"
-    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-staged-icon-native.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-app-icon.py"
     printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-trim-staged-sparkle-sdk.py"
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-style-dmg-window.py"
     write_executable "$fixture/scripts/pre-release-audit.sh" \
         '#!/bin/bash' \
         'if [ "${MACCRAB_TEST_LATE_DELETE:-0}" = "1" ]; then rm -f .build/MacCrab-v*.dmg; fi' \
