@@ -33,7 +33,7 @@ codesign -dvv ~/Downloads/MacCrab-v<version>.dmg
 ```
 Expected fragments: `Authority=Developer ID Application: Peter Hanily (79S425CW99)` and `TeamIdentifier=79S425CW99`.
 
-**Sparkle appcast signature:** Installed MacCrab instances check for updates once per day (`SUScheduledCheckInterval=86400` seconds in Info.plist) by polling `https://maccrab.com/appcast.xml`. Each `<item>` carries an `sparkle:edSignature` attribute — an EdDSA signature over the DMG bytes. Sparkle verifies this signature **before** downloading or unpacking the update.
+**Sparkle appcast signature:** Installed MacCrab instances check for updates once per day (`SUScheduledCheckInterval=86400` seconds in Info.plist) by polling `https://maccrab.com/appcast.xml`. Each `<item>` carries an `sparkle:edSignature` attribute — an EdDSA signature over the DMG bytes. Sparkle verifies this signature after downloading and unpacking the update, **before** installing it.
 
 The public verification key is embedded in every shipped MacCrab Info.plist as `SUPublicEDKey`:
 ```
@@ -62,7 +62,7 @@ The matching private key lives in the operator's macOS login Keychain, stored by
 | Secret | Blast radius if leaked |
 |---|---|
 | **Developer ID Application certificate + password** | An attacker can sign and notarize any Mach-O under the team ID `79S425CW99`, distributing malicious binaries that appear legitimate. Revocation at appleid.apple.com stops new notarizations but not already-stapled tickets. Combined with Sparkle key compromise, it's game over. |
-| **GitHub PAT (SITE_REPO_TOKEN)** | An attacker can modify `appcast.xml` to advertise a malicious DMG. If the Sparkle key is also compromised, they can forge a valid signature. If NOT compromised, a swapped DMG will fail signature verification before unpacking. |
+| **GitHub PAT (SITE_REPO_TOKEN)** | An attacker can modify `appcast.xml` to advertise a malicious DMG. If the Sparkle key is also compromised, they can forge a valid signature. If NOT compromised, a swapped DMG will fail signature verification and is not installed. |
 | **Build machine access** | An attacker with local access to the build Mac can extract all four secrets from the login Keychain, then distribute a malicious release signed with the real cert and real Sparkle key. This is why the build Mac must be kept isolated and un-touched by general browsing / email. |
 
 ### 2.4 No key rotation has been performed
@@ -72,7 +72,7 @@ Both the Developer ID certificate and the Sparkle EdDSA key are at their origina
 ### 2.5 Verification chain for end users
 
 MacCrab provides `docs/TRUST.md`, which documents the four verification links:
-1. **SHA256 checksum** — published in `Casks/maccrab.rb` and GitHub release notes.
+1. **SHA256 checksum** — published as the GitHub release asset's `sha256` digest, in `release.json` and in `Casks/maccrab.rb` at the release tag.
 2. **Code signature** — verifiable with `codesign -dvv` (identity: Peter Hanily, team `79S425CW99`).
 3. **Notarization ticket** — verifiable with `spctl -a -t open` and `xcrun stapler validate`.
 4. **Sparkle EdDSA signature** — verified automatically by Sparkle before update; manually inspectable from `https://maccrab.com/appcast.xml`.
@@ -120,12 +120,12 @@ So on key compromise the Sparkle channel is dead, and recovery is manual reinsta
 
 1. **Assume the key is compromised.** Do not wait for absolute confirmation.
 
-2. **Tombstone the appcast.** `appcast.xml` lives in the site repo (`peterhanily/maccrab-site`) and is served at `https://maccrab.com/appcast.xml` by Cloudflare Pages, which auto-deploys within ~60 seconds of a commit (see `RELEASE_PROCESS.md` step 6). Replace it with an empty channel — a valid appcast/RSS skeleton with zero `<item>` entries — via the GitHub Web UI or a direct push. Polling clients then see "no update available" instead of whatever the attacker signs.
+2. **Tombstone the appcast.** `appcast.xml` lives in the site repo (`peterhanily/maccrab-site`) and is served at `https://maccrab.com/appcast.xml` by Cloudflare Workers; Workers Builds redeploys the site within ~60 seconds of a commit (see `RELEASE_PROCESS.md` step 6). Replace it with an empty channel — a valid appcast/RSS skeleton with zero `<item>` entries — via the GitHub Web UI or a direct push. Polling clients then see "no update available" instead of whatever the attacker signs.
    - If the key leaked because the build Mac was compromised, assume `SITE_REPO_TOKEN` leaked with it: revoke that PAT first, then tombstone.
-   - If you have lost control of the site repo itself, escalate to GitHub support to freeze it and to Cloudflare to unpublish the Pages deployment.
+   - If you have lost control of the site repo itself, escalate to GitHub support to freeze it and to Cloudflare to take down the `maccrab-site` Worker deployment.
 
 3. **Issue a public security advisory** via GitHub (`peterhanily/maccrab/security/advisories`) and email `maccrab@peterhanily.com`:
-   - "The Sparkle update-signing key is compromised. Disable auto-update and do not accept any update offered by the in-app updater. A recovery release with new signing keys is in progress; installing it will require a manual reinstall."
+   - "The Sparkle update-signing key is compromised. Turn off automatic update checks (`defaults write com.maccrab.app SUEnableAutomaticChecks -bool false`, then quit and reopen MacCrab) and do not accept any update offered by the in-app updater. A recovery release with new signing keys is in progress; installing it will require a manual reinstall."
    - Naming the compromised public key is fine — it ships in every app bundle and is printed in §2.1 above, and an Ed25519 public key cannot be used to forge signatures. Keep details of *how* the compromise happened vague only while the facts are still unclear — that is comms discipline, not key secrecy.
 
 4. **Notify Homebrew:** If the key is in the wild and someone publishes a malicious Homebrew formula, you want Homebrew awareness early. File an issue on homebrew/homebrew-casks or contact `security@brew.sh` with the advisory.
@@ -321,19 +321,21 @@ These require architectural changes and are not urgent for a single-maintainer p
 
 If you suspect a MacCrab update is malicious:
 
-1. **Before installing:** Verify the appcast signature manually:
+1. **Before installing:** Check the appcast entry for the version you were offered (`xmllint` ships with macOS):
    ```bash
-   curl -s https://maccrab.com/appcast.xml | grep -A5 '<sparkle:version>v<version>'
-   # Extract the sparkle:edSignature attribute value (base64)
-   # and the download URL
-   
-   # Download the DMG and verify the signature with the public key
-   # (this requires Sparkle tools; easier to just not update and report the issue)
+   VERSION=1.22.6   # the version you were offered, without the "v"
+   curl -fsS -o appcast.xml https://maccrab.com/appcast.xml
+   xmllint --xpath "//item[*[local-name()='shortVersionString']='$VERSION']/enclosure/@*" appcast.xml
+   # Prints the item's url, length (bytes) and sparkle:edSignature (base64).
+   # "XPath set is empty" means the feed has no item for that version.
    ```
+   The URL should be that version's `peterhanily/maccrab` GitHub release asset. To check the file itself, download it from there and follow [`TRUST.md`](TRUST.md#verifying-a-downloaded-dmg). Sparkle checks the EdDSA signature itself before installing; its `sign_update --verify` tool needs the private signing key, so it is not an end-user check. If in doubt, decline the update and report the issue.
 
-2. **Do NOT auto-update.** Disable auto-update temporarily:
-   - MacCrab UI → Settings → Disable auto-update.
-   - Or edit `~/Library/Preferences/com.maccrab.app.plist` and set `SUEnableAutomaticChecks: false`.
+2. **Do NOT auto-update.** MacCrab asks before it installs an update unless you ticked "Automatically download and install updates in the future" in an earlier update prompt. The app has no setting to turn automatic checks off. To stop scheduled checks (and automatic installs) while you investigate, run this, then quit and reopen MacCrab:
+   ```bash
+   defaults write com.maccrab.app SUEnableAutomaticChecks -bool false
+   ```
+   To restore the default later: `defaults delete com.maccrab.app SUEnableAutomaticChecks`.
 
 3. **Report the suspicious version** to `maccrab@peterhanily.com` with:
    - The version number and appcast signature.
@@ -345,10 +347,10 @@ If you suspect a MacCrab update is malicious:
 Before every release, verify:
 
 ```bash
-# 1. The Sparkle key pairing
-~/Tools/bin/generate_keys -p | tr -d '[:space:]' > /tmp/actual_pub.txt
-grep 'SUPublicEDKey:' Xcode/project.yml | sed -E 's/.*"([^"]+)".*/\1/' > /tmp/expected_pub.txt
-diff /tmp/actual_pub.txt /tmp/expected_pub.txt || exit 1
+# 1. The Sparkle key pairing: step 3 checks it, using only the hash-locked
+#    SwiftPM Sparkle tools (never a copy on PATH, in ~/Tools or under
+#    Homebrew), and refuses when the Keychain key does not pair with the
+#    SUPublicEDKey in Xcode/project.yml
 
 # 2. The Developer ID cert is who you expect
 security find-identity -v -p codesigning | grep "Developer ID Application: Peter Hanily"
@@ -391,7 +393,7 @@ If the sole operator becomes unavailable (incapacitation, departure, loss of bui
 
 ## References
 
-- [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) — full end-to-end release pipeline and secret inventory.
-- [`docs/TRUST.md`](docs/TRUST.md) — end-user verification procedures (SHA256, code signature, notarization, Sparkle signature).
-- [`SECURITY.md`](SECURITY.md) — vulnerability reporting policy and threat model.
+- [`RELEASE_PROCESS.md`](../RELEASE_PROCESS.md) — full end-to-end release pipeline and secret inventory.
+- [`docs/TRUST.md`](TRUST.md) — end-user verification procedures (SHA256, code signature, notarization, Sparkle signature).
+- [`SECURITY.md`](../SECURITY.md) — vulnerability reporting policy and threat model.
 - [`Xcode/project.yml`](../Xcode/project.yml) — canonical source for Developer ID, Sparkle key, and version.

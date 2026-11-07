@@ -43,10 +43,9 @@ residual risk remains.
   etc.). This count describes the full corpus. Since v1.21.4 the daemon
   defaults to the stable rule profile — only rules marked `status: stable`
   are enabled by default: 116 of the 486 (98 single-event, 11 sequence,
-  7 graph). Eight of those cannot fire on a default install: seven until
-  Agent Traces or the deception tier is enabled, and
-  `skill_md_poisoning_install` on no install (see the README's "What runs on
-  a default install"). The majority are disabled unless the operator opts
+  7 graph). Seven of those cannot fire on a default install until Agent
+  Traces or the deception tier is enabled (see the README's "What runs on a
+  default install"). The majority are disabled unless the operator opts
   into a broader profile. See
   [`COVERAGE.md`](COVERAGE.md).
 - Sequence rules correlate multi-step kill chains within bounded
@@ -206,12 +205,14 @@ events to suppress evidence post-compromise.
 **Goal:** ship a malicious "update" to existing installs.
 
 **MacCrab defenses:**
-- Sparkle's appcast is signed with an EdDSA key. The public half is
-  embedded in the signed app bundle (`SUPublicEDKey` in `Info.plist`),
-  so a tampered update server can't substitute its own key.
+- Each update in Sparkle's appcast carries an EdDSA signature over the
+  DMG bytes. The public half of the key is embedded in the signed app
+  bundle (`SUPublicEDKey` in `Info.plist`), so a tampered update server
+  can't substitute its own key.
 - The DMG download URL points to GitHub release assets — a separate
   trust path.
-- Sparkle verifies the EdDSA signature **before** unpacking.
+- Sparkle verifies the EdDSA signature after download and **before**
+  installing.
 - The release pipeline notarizes + staples the DMG before publishing.
   An unstapled or unnotarized DMG fails Gatekeeper at install time.
 

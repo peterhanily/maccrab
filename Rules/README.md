@@ -38,9 +38,9 @@ Rules are organized by [MITRE ATT&CK](https://attack.mitre.org/) tactic:
 |-----------|--------|:-----:|
 | `defense_evasion/` | Defense Evasion (TA0005) | 69 |
 | `supply_chain/` | Supply Chain (macOS-specific) | 53 |
-| `credential_access/` | Credential Access (TA0006) | 39 |
-| `persistence/` | Persistence (TA0003) | 39 |
-| `execution/` | Execution (TA0002) | 33 |
+| `persistence/` | Persistence (TA0003) | 41 |
+| `credential_access/` | Credential Access (TA0006) | 37 |
+| `execution/` | Execution (TA0002) | 34 |
 | `ai_safety/` | AI Agent Safety (macOS-specific) | 32 |
 | `discovery/` | Discovery (TA0007) | 26 |
 | `privilege_escalation/` | Privilege Escalation (TA0004) | 21 |
@@ -53,10 +53,10 @@ Rules are organized by [MITRE ATT&CK](https://attack.mitre.org/) tactic:
 | `container/` | Container Security (macOS-specific) | 12 |
 | `tcc/` | TCC Abuse (macOS-specific) | 8 |
 | `wireless/` | Wireless / RF (macOS-specific) | 8 |
-| **Single-event subtotal** | | **437** |
+| **Single-event subtotal** | | **438** |
 | `sequences/` | Temporal multi-step (SequenceEngine) | 41 |
-| `graph/` | Multi-entity TraceGraph (JSON predicates) | 6 |
-| **Total** | | **484** |
+| `graph/` | Multi-entity TraceGraph (JSON predicates) | 7 |
+| **Total** | | **486** |
 
 Sequence rules in `sequences/` span multiple tactics and use the extended
 `type: sequence` format, processed by the `SequenceEngine` rather than the

@@ -29,9 +29,12 @@ Full diagnostic walkthrough in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ### Can I write my own detection rules?
 
-Yes. MacCrab uses a Sigma-compatible YAML format. Drop a `.yml` file in
-the appropriate `Rules/<tactic>/` directory, run `make compile-rules`, and
-the detection engine picks it up on next SIGHUP or restart.
+Yes. MacCrab uses a Sigma-compatible YAML format. On an installed build,
+**New rule** in **Detection → Rules** opens the rule wizard; Detection shows
+in the sidebar when **Settings → Appearance → Dashboard complexity** is
+Standard or Advanced. In a source checkout, drop a `.yml` file in the
+appropriate `Rules/<tactic>/` directory, run `make compile-rules`, and the
+detection engine picks it up on next SIGHUP or restart.
 
 See [Rules/README.md](Rules/README.md) for the full format reference,
 including the extended sequence-rule syntax (`type: sequence`) for
@@ -48,7 +51,8 @@ console. Events, alerts, and rules stay in local SQLite databases under
 `/Library/Application Support/MacCrab/`. The one request a release build
 makes by default is the daily Sparkle update check to `maccrab.com`, which
 sends app-version information and no detection data. The app has no setting
-to turn automatic update checks off.
+to turn automatic update checks off; [How do I update
+MacCrab?](#how-do-i-update-maccrab) gives the `defaults` command that does.
 
 Optional features that make outbound calls (only when you enable them):
 
@@ -107,18 +111,22 @@ third-party lane off; first-party plugins still run. The technical detail is in
 
 Three options, from least to most surgical:
 
-1. **Suppress a specific alert:** click *Suppress* in the dashboard, or
-   `maccrabctl suppress <alertID>`. Per-alert; fastest.
-2. **Suppress a rule for a specific process:** add to
-   `suppressions.json` (see `docs/suppressions.example.json`) or use
-   `maccrabctl suppress <ruleID> <processPath>`.
-3. **Disable a rule entirely:** delete the YAML file from `Rules/<tactic>/`
-   and re-run `make compile-rules`. (Or use the Rules tab toggle in the
-   dashboard, which sets a per-rule disable flag without deleting the
-   YAML.)
+1. **Suppress a specific alert:** click *Suppress* on the alert in the
+   dashboard. Per-alert; fastest.
+2. **Suppress a rule for a specific process:** run
+   `maccrabctl allow add --rule <ruleID> --path <processPath> --reason "<why>"`
+   (with `sudo` on a release install, where the allowlist is root-owned),
+   then `maccrabctl rules reload`. Add `--ttl 7d` to make the entry expire.
+3. **Disable a rule entirely:** select a single-event or custom rule in
+   **Detection → Rules** and click **Disable rule**, which saves an override
+   in `user_rules` without editing the bundled YAML. For a built-in
+   `maccrab.*` detection the button is **Mute rule**: it hides the alerts,
+   and the detection and any protective action keep running. In a source
+   checkout you can instead delete the YAML file from `Rules/<tactic>/` and
+   re-run `make compile-rules`.
 
-The *Suppress All Like This* button on an alert's detail panel adds a
-`(ruleTitle, processName)` pattern that auto-hides future matches.
+**Alerts → Suppressions** in the dashboard lists the active allowlist
+entries and can remove them; `maccrabctl allow list` shows them too.
 
 ---
 
@@ -147,13 +155,44 @@ you want AI reasoning on an air-gapped box.
 **Homebrew:** `brew upgrade --cask peterhanily/maccrab/maccrab`. Restart `MacCrab.app` after
 the upgrade completes. Within-family upgrades (v1.3.0 → v1.3.5) don't
 require re-approval of the System Extension; major-version upgrades might
-(see [UPGRADE.md](UPGRADE.md)).
+(see [UPGRADE.md](UPGRADE.md)). Homebrew installs also get the in-app update
+prompts described below. Homebrew does not see an in-app update, so a later
+`brew upgrade` can reinstall the release you already have.
 
 **DMG:** download the new DMG from the GitHub Releases page and drag
 `MacCrab.app` over the old one in `/Applications/`. The app handles sysext
 replacement via `OSSystemExtensionRequest(.replace)` on next launch.
 
-**Automatic in-app update** via Sparkle is built in — accept the update prompt and the app replaces itself (and the system extension) on relaunch.
+**Automatic in-app update** via Sparkle is built in. MacCrab checks
+`https://maccrab.com/appcast.xml` once a day and asks before it installs an
+update, unless you ticked *Automatically download and install updates in
+the future* in an earlier update prompt. Accept the update prompt and the
+app replaces itself (and the system extension) on relaunch.
+
+**When an update arrives:** scheduled checks normally get each release in phases.
+Each Mac is placed at random in one of seven groups. The first group becomes
+eligible as soon as a release is published, the next a day later, and so
+on; each Mac is offered the release at its first daily check after its
+group becomes eligible, so every Mac is offered it within about a week. To
+get it now, choose *Check for Updates…* in the menu-bar menu (or click **Check
+for Updates** in Settings → Detection Engine): a manual check offers the
+newest release at once. Installs older than 1.22.0 are offered each release
+as a critical update, without the phase wait, at their next daily check.
+
+**Known issue (v1.22.6 and earlier):** a manual check does nothing until
+the dashboard window has been opened once since MacCrab started. Click the
+menu-bar crab, choose **Show Dashboard**, then choose *Check for Updates…*.
+A prompt from a scheduled check can also open behind other windows; the
+same steps bring it to the front. See [KNOWN_LIMITS.md](KNOWN_LIMITS.md).
+
+**Turning automatic checks off:** the app has no setting for this. Run the
+first command below to turn them off, or the second to restore the default,
+then quit and reopen MacCrab.
+
+```bash
+defaults write com.maccrab.app SUEnableAutomaticChecks -bool false
+defaults delete com.maccrab.app SUEnableAutomaticChecks
+```
 
 ---
 
@@ -201,7 +240,8 @@ reads the database.
 The **CLI** (`maccrabctl`) runs as your regular user. It reads the
 database and asks the engine to make changes: `allow remove` and `unsuppress`
 send removal requests that the engine applies, and `unsuppress` needs `sudo`
-because the allowlist it reads is root-only.
+because the allowlist it reads is root-only. On a release install,
+`allow add` also needs `sudo`, because it writes that allowlist directly.
 
 For local development without the sysext, you can `sudo maccrabd` to run
 the legacy daemon directly — but release builds don't use that path.
@@ -252,6 +292,9 @@ first if required; check `systemextensionsctl list` for the final state.
 Quitting the dashboard alone does not stop the extension. `--zap` removes
 configured data directories as well; it does not replace this deactivation step.
 
+**DMG:** remove the System Extension the same way, then follow the
+[DMG uninstall steps](README.md#dmg) in the README.
+
 **Manual data wipe (if desired):** only after extension removal completes and
 any development daemon, dashboard, and MCP clients have stopped:
 
@@ -275,10 +318,14 @@ server (`maccrab-mcp`) that exposes 67 built-in security tools (including the
 tools like Claude Code. Once wired up, your AI sessions can query alerts, hunt
 threats, and scan untrusted input — without leaving the editor.
 
-**Setup:** on a Homebrew or DMG install, `maccrab-mcp` is already on your
-`PATH`; register it with `claude mcp add maccrab -- "$(which maccrab-mcp)"`.
-From a source checkout, build it with `swift build --target maccrab-mcp` and
-copy `.mcp.json` from the repo root into your project.
+**Setup:** a Homebrew install, or a DMG install set up with the DMG's
+`install.sh`, puts `maccrab-mcp` on your `PATH`; register it with
+`claude mcp add maccrab -- "$(which maccrab-mcp)"`. After dragging the app
+from the DMG without running `install.sh`, use
+`/Applications/MacCrab.app/Contents/Resources/bin/maccrab-mcp` in place of
+`$(which maccrab-mcp)`. From a source checkout, build it with
+`swift build --target maccrab-mcp` and copy `.mcp.json` from the repo root
+into your project.
 
 Key tools: `get_alerts`, `get_campaigns`, `hunt`, `get_security_score`,
 `get_alert_detail`, `suppress_campaign`, `get_ai_alerts`, and `scan_text`.

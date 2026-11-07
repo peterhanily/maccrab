@@ -81,9 +81,17 @@ ls -la ~/Library/Application\ Support/com.apple.TCC/TCC.db
 - **Warm-up window.** Non-critical alerts are suppressed in the first 60
   seconds of daemon start, to avoid floods during replay of backlogged
   events. Critical matches always survive.
-- **Suppression leak.** Check `maccrabctl rules list --suppressed` and
-  `~/Library/Application Support/MacCrab/suppressions.json` — an overly
-  broad suppression pattern silences legitimate alerts too.
+- **Suppression leak.** Check `maccrabctl allow list` (run it with `sudo`
+  if it says the store needs it) or **Alerts → Suppressions** in the
+  dashboard; `maccrabctl suppression list` reads a legacy v1 store. On a
+  release install the allowlist is
+  `/Library/Application Support/MacCrab/suppressions.json`. An overly broad
+  entry silences legitimate alerts too. Since v1.22.6 the engine also
+  applies entries scoped to a file hash or to this host, which earlier
+  versions saved without applying: a host entry that names this Mac
+  silences single-event, sequence and baseline-anomaly alerts, except
+  critical command-execution, command-and-control and credential-theft
+  detections.
 
 ---
 

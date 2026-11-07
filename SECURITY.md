@@ -2,10 +2,17 @@
 
 ## Supported Versions
 
-| Version | Supported |
-|---------|-----------|
-| 1.x     | Yes       |
-| < 1.0   | No        |
+Fixes, security fixes included, ship forward only: each one lands in the next
+release, and older releases do not receive backports.
+
+| Version        | Supported |
+|----------------|-----------|
+| Newest release | Yes       |
+| Older releases | No — update to the newest release |
+
+In-app updates reach installs older than 1.22.0 as critical updates, which
+cannot be skipped. Database upgrades cannot be reversed by reinstalling an
+older app, so update forward rather than downgrading.
 
 ## Reporting a Vulnerability
 
@@ -157,7 +164,7 @@ boundary — see `RELEASE_PROCESS.md` for the full operator-side
 pipeline.
 
 - Each release DMG is signed with **Developer ID Application: Peter Hanily (`79S425CW99`)**, notarized by Apple, and the notarization ticket is stapled to the DMG before publication.
-- Sparkle auto-updates are gated by an **EdDSA signature** over the DMG bytes. The matching public key (`de+dzPjB…`) is embedded in every shipped `MacCrabApp` Info.plist under `SUPublicEDKey`. A swapped DMG fails verification BEFORE unpacking.
-- The appcast XML is hosted at `https://maccrab.com/appcast.xml` (Cloudflare Pages, source repo `peterhanily/maccrab-site`).
+- Sparkle auto-updates are gated by an **EdDSA signature** over the DMG bytes. The matching public key (`de+dzPjB…`) is embedded in every shipped `MacCrabApp` Info.plist under `SUPublicEDKey`. Sparkle checks it after the download and before installing, so a swapped DMG fails verification and is not installed.
+- The appcast XML is hosted at `https://maccrab.com/appcast.xml` (Cloudflare Workers, deployed by Workers Builds from source repo `peterhanily/maccrab-site`).
 - End-user verification — `shasum`, `codesign -dvv`, `spctl -a`, `xcrun stapler validate` — is documented step-by-step in `docs/TRUST.md`.
-- Key custody, rollback procedures, and the operator's release preconditions are documented in `RELEASE_PROCESS.md`. Reviewers evaluating the supply-chain posture should start there.
+- Key custody and the operator's release preconditions are documented in `RELEASE_PROCESS.md`, and rollback procedures in `docs/ROLLBACK_RUNBOOK.md`. Reviewers evaluating the supply-chain posture should start with `RELEASE_PROCESS.md`.

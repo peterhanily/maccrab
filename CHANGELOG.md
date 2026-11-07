@@ -191,6 +191,50 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   being judged, and a held tick with no loss says so.
 
 ### Fixed
+- **Login items registered through SMAppService and programs that launchd
+  starts now reach detection.** MacCrab muted every event from processes
+  under /System/ and from /usr/libexec/xpcproxy. That silenced
+  backgroundtaskmanagementd, which delivers every Background Task Management
+  launch-item addition, so the real-time sensor for SMAppService persistence
+  never fired; only the five-minute snapshot check, which reports only
+  enabled items without a Team ID, could flag them. It also hid the launch of
+  every program that launchd starts, LaunchAgent payloads included, because
+  the mute matched the process performing each exec, which for those
+  programs is xpcproxy. Both mutes now let exec events and launch-item additions through;
+  other events from those processes stay muted. More exec events now reach
+  the engine, mostly XPC service launches.
+- **The critical Full Kill Chain campaign can fire.** Alerts that span four or
+  more tactics, including credential access, persistence and command and
+  control, always contain a high-severity two-tactic pair, and the campaign
+  detector checked those pairs first. It raised a high campaign such as
+  Partial Kill Chain, or nothing while that campaign was recent, and never the
+  critical one. Pairs are now skipped when the full chain is present. They are
+  also checked in a fixed order, so the same alerts always get the same
+  campaign title.
+- **The stable SKILL.md poisoning rule can fire.**
+  `skill_md_poisoning_install` matched only a file creation carrying the
+  file's content, but MacCrab reads content only when a completed write
+  closes the file, so no event matched. It now also matches that close.
+- **Fork events are no longer evaluated as process creations.** A forked
+  child still runs its parent's program with an empty command line, so rules
+  that check only the program matched again on every fork, and the first step
+  of the reverse-shell sequence matched every forked shell. Forks now have
+  their own `process_fork` category, which no rule selects; process lineage,
+  AI tool tracking and the baseline still read them.
+- **TCC permission grants and revocations are reported once.** Every change
+  to a TCC database started its own check, and checks that overlapped
+  compared the database with the same earlier snapshot, so a grant or
+  revocation could be reported twice; a check that finished last could also
+  put back an older snapshot, so the next change reported it again. A change
+  made within half a second of the previous one was not reported until a
+  later change. Checks now run one at a time.
+- **The slow-rule guard turns off only rules that use a regular
+  expression.** It turned off any rule after one evaluation of a second or
+  more, or after a run of slow ones, timed by the wall clock, which also
+  counts time the engine was preempted or paged out. A stalled Mac could
+  therefore turn off whichever rule was running, must-fire rules included,
+  until the next rule reload. Slow evaluations of other rules are still
+  logged.
 - **A signing identity counts only for the code that is running.** An
   identity that grants an exemption (MacCrab's own, Apple's developer tools,
   Google's or Brave's) is accepted only once Security has verified the running
@@ -627,10 +671,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - **The README and FAQ no longer describe more than a default install does.**
   The rules badge reads "486 shipped". A new "What runs on a default install"
   section says the stable profile enables 116 of the 486 rules (98
-  single-event, 11 sequence, 7 graph). It also names the eight of those that
-  cannot fire on a default install: seven wait for Agent Traces or deception,
-  and `skill_md_poisoning_install` cannot fire on any install. The docs now
-  say "enabled" where they used to say "loaded", matching `maccrabctl status`.
+  single-event, 11 sequence, 7 graph). It also names the seven of those that
+  cannot fire on a default install because they wait for Agent Traces or
+  deception. The docs now say "enabled" where they used to say "loaded",
+  matching `maccrabctl status`.
 
   Other corrections:
   - The System Extension runs as root and is not sandboxed.
@@ -701,9 +745,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   twin, which makes the installed app about 2 MB smaller.
 - **Every release is critical for installs older than 1.22.0.** The appcast
   generator writes Sparkle 2's `<sparkle:criticalUpdate sparkle:version="1.22.0">`
-  into each item, so those installs see the update immediately, outside the
-  phased rollout, and cannot skip it, while newer installs are updated
-  normally.
+  into each item, so those installs are offered the update at their next
+  daily check without waiting for a rollout phase, and cannot skip it. Newer
+  installs get it through the phased rollout, which reaches them over about a
+  week.
 
 ## [1.22.5] — 2026-10-04
 
@@ -4685,8 +4730,7 @@ After the first hand-off, every remaining item from the initial
 - **Sidebar visual grouping** — 4 task buckets (Monitor / Investigate
   / Configure / System) with uppercase section labels. Reduces
   visual clutter without restructuring workspaces. The full 9 → 7
-  workspace collapse (`plans/2026-05-07-dashboard-overhaul.md`)
-  stays as a v1.11.x design proposal.
+  workspace collapse stays as a v1.11.x design proposal.
 - **Force-directed TraceGraph canvas** — already shipped in v1.10.0
   as the `.force` layout option in the Investigation workspace's
   toolbar (full Verlet-style simulation with spring + repulsion,
@@ -4704,8 +4748,7 @@ After the first hand-off, every remaining item from the initial
 
 #### Deferred to v1.11.x (intentional)
 
-- **9 → 7 workspace consolidation** — design proposal in
-  `plans/2026-05-07-dashboard-overhaul.md`. v1.11.1 ships the
+- **9 → 7 workspace consolidation** — a design proposal. v1.11.1 ships the
   lighter visual-grouping fix; the structural fold (Events into
   Investigation tabs, Prevention into Detection tabs) ships
   separately after design review.
@@ -4721,9 +4764,6 @@ After the first hand-off, every remaining item from the initial
   changing the `Record` decode contract; defer until a v1.11.x
   store-design pass.
 
-Full audit findings: `plans/2026-05-11-v1.11.0-audit-findings.md`
-(gitignored — local file with file:line cites for every BLOCKER /
-HIGH / MEDIUM / LOW).
 Full notes: `RELEASE_NOTES/v1.11.0.md`.
 
 ### v1.11.0 RC2 ship-blocker fixes (operator-relevant)

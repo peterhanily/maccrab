@@ -32,6 +32,8 @@ It's a tool for reading and operating your own detection logic, not a managed ED
 
 **Releases:** Signed, notarized, auto-updating builds ship via Sparkle through [maccrab.com/appcast.xml](https://maccrab.com/appcast.xml). See [CHANGELOG.md](CHANGELOG.md) for the release history.
 
+**Updates:** Release builds check that feed once a day and ask before installing an update, unless you ticked *Automatically download and install updates in the future* in an earlier update prompt. A release normally reaches those daily checks in stages over about a week (a phased rollout); installs older than v1.22.0 are offered it at their next daily check, as a critical update. **Check for Updates…** in the menu-bar menu offers the newest release at once. Known issue (v1.22.6 and earlier): **Check for Updates…** does nothing until the dashboard has been opened since MacCrab started, so choose **Show Dashboard** first. See [How do I update MacCrab?](FAQ.md#how-do-i-update-maccrab) for details.
+
 ---
 
 ## Quick Start
@@ -60,7 +62,26 @@ open /Applications/MacCrab.app
 > brew install --cask peterhanily/maccrab/maccrab
 > ```
 
+> **Updates:** the cask moves MacCrab.app into `/Applications`, so a Homebrew install gets the same in-app update prompts as a DMG install, and `brew upgrade --cask peterhanily/maccrab/maccrab` also upgrades it. Homebrew does not see an update you accept in the app, so a later `brew upgrade` can reinstall a release you already have.
+
 > **Note:** Full Endpoint Security coverage requires granting Full Disk Access to MacCrab.app in **System Settings > Privacy & Security > Full Disk Access**.
+
+### Without Homebrew: the DMG
+
+```bash
+# 1. Download MacCrab-v<version>.dmg from https://maccrab.com or
+#    https://github.com/peterhanily/maccrab/releases/latest and open it.
+
+# 2. Drag MacCrab.app onto the Applications link in the DMG window, or run the
+#    bundled installer. It installs the app, links maccrabctl and maccrab-mcp
+#    into /usr/local/bin, and removes leftovers of pre-1.3 installs:
+sudo /Volumes/MacCrab\ v*/install.sh
+
+# 3. Open the dashboard, then approve the extension as in step 3 of Option A.
+open /Applications/MacCrab.app
+```
+
+> **Drag-only install:** the command-line tools are not on your `PATH`. Run them from the app bundle, for example `/Applications/MacCrab.app/Contents/Resources/bin/maccrabctl status`, or run `install.sh` as above to link them.
 
 ### Option B: Build from source (developers)
 
@@ -164,7 +185,7 @@ See [KNOWN_LIMITS.md](KNOWN_LIMITS.md) for transition and admission behavior and
 | [PRIVACY.md](PRIVACY.md) | Data inventory — what's collected, what leaves, what's redacted |
 | [SECURITY.md](SECURITY.md) | Threat model, privilege boundaries, vulnerability disclosure |
 | [docs/AUTHORIZATION_MODEL.md](docs/AUTHORIZATION_MODEL.md) | Daemon control-plane authorization — inbox IPC, who can mutate the engine, audit log, self-protection alerts |
-| [docs/SUPPORTED_OS.md](docs/SUPPORTED_OS.md) | Supported macOS matrix — minimum (Ventura 13), tested target (macOS 26), macOS 27 risks |
+| [docs/SUPPORTED_OS.md](docs/SUPPORTED_OS.md) | Supported macOS matrix — minimum (Ventura 13), where v1.22.6 was qualified (macOS 27.2 on Apple Silicon), version-specific caveats |
 | [docs/DATA_SCHEMA_STABILITY.md](docs/DATA_SCHEMA_STABILITY.md) | On-disk SQLite schema stability statement — use the export interfaces, not direct DB reads |
 | [docs/PLUGIN_AUTHORING.md](docs/PLUGIN_AUTHORING.md) | Authoring a sandboxed forensic plugin for the Rave store — manifest, least-privilege read-set, signing |
 | [docs/TRUST.md](docs/TRUST.md) | End-user verification — SHA256, code signature, notarization, Sparkle signature, and the plugin trust chain |
@@ -215,12 +236,16 @@ See [KNOWN_LIMITS.md](KNOWN_LIMITS.md) for transition and admission behavior and
 ```bash
 maccrabctl status                       # Daemon status
 maccrabctl alerts                       # Recent alerts
+maccrabctl why <alert-id>               # Explain why an alert fired
 maccrabctl events tail 20               # Live event stream
 maccrabctl watch                        # Streaming alert tail
 maccrabctl rules list                   # Loaded rules
 maccrabctl hunt "show critical alerts"  # NL threat hunting
 maccrabctl report --hours 48            # Incident report
-maccrabctl suppress <rule-id> <path>    # Suppress false positive
+maccrabctl allow list                   # Allowlist (suppression) entries
+maccrabctl allow add --rule <rule-id> --path <path> --reason "<text>"
+                                        # Allowlist a process for one rule (sudo on a release install)
+maccrabctl suppress <rule-id> <path>    # Legacy v1 store only; use allow add
 maccrabctl cdhash 1234                  # CDHash lookup
 maccrabctl tree-score 20                # Behavioral scoring
 maccrabctl mcp list                     # MCP server inventory (user-scope configs)
@@ -234,20 +259,24 @@ maccrabctl extensions --suspicious      # Browser extension scan
 MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) server (`maccrab-mcp`) that lets AI coding tools query your security data directly from the editor.
 
 **Setup — installed build (Homebrew / DMG).** `maccrab-mcp` ships inside
-`MacCrab.app` and is symlinked onto your `$PATH` by the cask and the installer,
-so there is nothing to build. Register it with Claude Code:
+`MacCrab.app` at `/Applications/MacCrab.app/Contents/Resources/bin/maccrab-mcp`,
+so there is nothing to build. The Homebrew cask links it into Homebrew's `bin`
+(`/opt/homebrew/bin` on Apple Silicon, `/usr/local/bin` on Intel) and the DMG's
+`install.sh` links it into `/usr/local/bin`; after a drag-only DMG install it is
+not on your `$PATH`, so use the bundled path instead of `$(which maccrab-mcp)`.
+Register it with Claude Code:
 
 ```bash
 claude mcp add maccrab -- "$(which maccrab-mcp)"
 ```
 
-For Claude Desktop, add the same command to
-`~/Library/Application Support/Claude/claude_desktop_config.json`:
+For Claude Desktop, add the path that `which maccrab-mcp` prints, or the bundled
+path, to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "maccrab": { "command": "/usr/local/bin/maccrab-mcp" }
+    "maccrab": { "command": "/Applications/MacCrab.app/Contents/Resources/bin/maccrab-mcp" }
   }
 }
 ```
@@ -295,7 +324,7 @@ into your project; it points at the local `.build/debug/maccrab-mcp`.
 | `forensics_*` | Built-in case/plugin meta-tools, always present — e.g. `forensics_run_collector`, `forensics_run_analyzer`, `forensics_enrich`, `forensics_search_artifacts`, `forensics_timeline`, `forensics_explain_case` (underscore-named since v1.19.1; legacy `forensics.*` dotted names still accepted as aliases) |
 | `launchd_*` / `tcc_*` / `safari_*` / `mail_*` / `imessage_*` / `*_analyze_path` | Per-plugin tools registered dynamically from installed forensic plugins — the actual variable-count family; present only when the corresponding plugin is installed |
 
-**Slash commands** (`.claude/commands/`): `/security-check`, `/threat-hunt <query>`, `/alerts`.
+**Slash commands** (`.claude/commands/`): `/security-check`, `/threat-hunt <query>`, `/alerts`, `/maccrab-control`.
 
 ---
 
@@ -313,6 +342,28 @@ requires it. `systemextensionsctl list` should no longer show a MacCrab
 extension entry, including a pending-removal entry. Then run the Homebrew command above. The cask removes the app and CLI
 binaries but does not itself request extension deactivation, since the same
 uninstall steps also run during upgrades.
+
+### DMG
+
+The DMG has no uninstall script. Use **Remove System Extension** in MacCrab's
+Settings (General tab), approve the macOS request, and wait until
+`systemextensionsctl list` no longer shows a MacCrab extension entry; reboot
+first if macOS requires it. Then turn off **Launch MacCrab at login** in the
+same tab, choose **Quit MacCrab** from the menu-bar menu, move
+`/Applications/MacCrab.app` to the Trash, and, if you ran the DMG's
+`install.sh`, remove the command-line links it created:
+
+```bash
+sudo rm -f /usr/local/bin/maccrabctl /usr/local/bin/maccrab-mcp
+# Apple Silicon with Homebrew: install.sh may also have linked them here
+sudo rm -f /opt/homebrew/bin/maccrabctl /opt/homebrew/bin/maccrab-mcp
+```
+
+The engine's data stays in `/Library/Application Support/MacCrab` until you
+delete that folder (with `sudo`); the commands at the end of the Uninstall
+section remove per-user data. With a copy of the source repository,
+`sudo ./scripts/uninstall.sh` (below) performs these steps for a DMG install
+too, and asks before deleting data.
 
 ### Manual / source build
 
@@ -345,7 +396,7 @@ MacCrab evaluates events through a 5-tier detection hierarchy:
 |------|-------------|
 | **1. Rules** | Sigma-compatible YAML rules compiled to JSON. Category-indexed for O(1) dispatch; rules exceeding 50 ms are logged for profiling. |
 | **2. Anomaly** | Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring with weighted indicators and feedback-adjusted weights. |
-| **3. Sequences** | Temporal multi-step rules with process lineage correlation, 10K partial match cap, LRU regex cache. |
+| **3. Sequences** | Temporal multi-step rules with process lineage correlation, 13K partial match cap, LRU regex cache. |
 | **4. Campaigns** | Kill chain, alert storm, AI compromise, coordinated attack, and lateral movement detection with incremental O(1) indexes. |
 | **5. Cross-process** | Correlation across the full process lineage graph with trusted-helper and unresolved-destination sentinels. |
 
@@ -430,7 +481,7 @@ Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, C
 | **Prompt injection scanner** | Native structural scan of files AI tools read — invisible/zero-width unicode, bidi overrides (Trojan Source), and Unicode tag-character smuggling. No external dependency. |
 | **Activity by tool** | Dashboard AI Guard tab shows a live per-tool alert breakdown (credential / injection / boundary / other) sorted by severity |
 
-32 AI-safety rules ship in `Rules/ai_safety/`; 17 are in the default stable profile, and 6 of those cannot fire on a default install: five wait for Agent Traces or deception bait, and one cannot fire at all (see [What runs on a default install](#what-runs-on-a-default-install)). Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
+32 AI-safety rules ship in `Rules/ai_safety/`; 17 are in the default stable profile, and 5 of those cannot fire on a default install because they wait for Agent Traces or deception bait (see [What runs on a default install](#what-runs-on-a-default-install)). Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
 
 </details>
 
@@ -554,7 +605,7 @@ Per-rule process allowlists loaded from `suppressions.json`. Operators can suppr
 }
 ```
 
-The CLI (`maccrabctl suppress`) writes to the same file. The daemon checks suppressions before emitting alerts.
+The engine still loads this v1 shape but rewrites the file in its v2 format, which supports rule-, path-, hash- and host-scoped entries with optional expiry, and it appends every change to an audit log. Add entries with `maccrabctl allow add` (`sudo` on a release install); `maccrabctl suppress` writes only the v1 shape and refuses a v2 file. The daemon checks suppressions before emitting alerts.
 
 </details>
 
@@ -565,12 +616,12 @@ Rules can trigger configurable response actions ranging from passive to active:
 
 | Action | Description |
 |--------|-------------|
-| `log` | Always on -- write to alert store and JSONL |
+| `log` | Always on -- the alert is written to the alert store (`alerts.db`) |
 | `notify` | macOS notification banner |
 | `kill` | Terminate the process that triggered the alert |
 | `quarantine` | Move the triggering file to a quarantine vault |
 | `script` | Run a custom shell script with alert context as environment variables |
-| `blockNetwork` | Writes a temporary destination rule into the dedicated `com.maccrab.response` PF anchor (requires the privileged engine / root). **Not enforcing by default** — PF must be enabled and the active main ruleset must reference that anchor. MacCrab configures neither. Failed or unverified actions report failure; expiry retries independently of new alerts. See [PREVENTION_RESEARCH.md](PREVENTION_RESEARCH.md#maccrab-current-usage), including the legacy shared-anchor migration requirement. |
+| `blockNetwork` | Writes a temporary destination rule into the dedicated `com.maccrab.response` PF anchor (requires the privileged engine / root). **Not enforcing by default** — PF must be enabled and the active main ruleset must reference that anchor. MacCrab configures neither. Failed or unverified actions report failure; expiry retries independently of new alerts. The engine cleans up only that anchor: if an older release's `maccrab_blocks.conf` is still in the support directory, it logs an error and leaves that file and the shared `com.maccrab` anchor for you to check and clean up by hand. |
 | `escalateNotification` | Send a high-priority macOS notification with the alert's action details |
 
 </details>
@@ -620,8 +671,8 @@ stay disabled; out-of-profile sequence and graph rules are skipped.
 `maccrabctl status` reports the single-event and sequence figures for the
 running engine as `active`.
 
-Eight of those 116 cannot fire on a default install. Seven wait for a feature
-that is off by default:
+Seven of those 116 cannot fire on a default install, because each waits for a
+feature that is off by default:
 
 - **Agent Traces** (`agent_traces_enabled`): `agent_traceparent_credential_access`,
   `agent_filesystem_violation_high_conf`, and `agent_filesystem_violation_probable`
@@ -631,10 +682,6 @@ that is off by default:
 - **Deception** (`deception_enabled`, with bait planted by
   `maccrabctl deception deploy`): `honeyfile_accessed`,
   `canary_skill_or_rules_read`, and `honeyprompt_canary_package_install`.
-
-One cannot fire on any install: `skill_md_poisoning_install` requires
-`FileAction: create`, but the engine reads `FileContent` only for close
-events, so no single event carries both.
 
 Graph rules also evaluate only traces that TraceGraph has stored, so they pause
 while TraceGraph storage is refusing writes. `maccrabctl status` shows that
@@ -650,7 +697,7 @@ state on its `TraceGraph:` line.
 | **JSONL file** | One JSON object per line, suitable for log ingestion pipelines |
 | **macOS notifications** | Native `UserNotifications` banners for alerts at or above a configurable severity (critical by default; every alert still appears in the dashboard) |
 | **Webhook** | JSON POST to a configurable URL for integration with Slack, Teams, PagerDuty |
-| **Syslog** | RFC 5424 structured data over UDP/TCP for forwarding to any syslog receiver |
+| **Syslog** | RFC 5424 structured data over UDP for forwarding to any syslog receiver |
 | **Fleet telemetry** | Optional enrollment with a fleet server for centralized multi-host visibility (self-hosted prototype; outbound-only) |
 
 ---
@@ -876,7 +923,7 @@ argument; neither the variable nor the flag verifies host isolation.
 make test-detection MACCRAB_DISPOSABLE_HOST=1            # Detection simulation
 make test-campaign MACCRAB_DISPOSABLE_HOST=1             # 5-wave simulation
 make test-campaign MACCRAB_DISPOSABLE_HOST=1 SUSTAINED=1 # Slow burn (~12 min)
-make test-fp                     # False positive validation (105 system processes)
+make test-fp                     # False positive validation (46 Apple system processes)
 ./scripts/stress-test.sh 120      # Sustained operation monitor (120s)
 ```
 
@@ -1047,13 +1094,9 @@ make test-fp          # Verify no false positives against normal activity
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MACCRAB_RULES_DIR` | `~/Library/Application Support/MacCrab/compiled_rules/` | Compiled JSON rule directory |
-| `MACCRAB_LOG_DIR` | `~/Library/Application Support/MacCrab/logs/` | JSONL alert and event log directory |
 | `MACCRAB_WEBHOOK_URL` | *(none)* | URL for JSON POST webhook delivery |
-| `MACCRAB_SYSLOG_HOST` | *(none)* | Syslog receiver hostname or IP |
+| `MACCRAB_SYSLOG_HOST` | *(none)* | Syslog receiver hostname or IP (alerts are sent over UDP) |
 | `MACCRAB_SYSLOG_PORT` | `514` | Syslog receiver port |
-| `MACCRAB_SYSLOG_PROTO` | `udp` | Syslog transport (`udp` or `tcp`) |
-| `MACCRAB_MIN_SEVERITY` | `low` | Minimum output severity (`informational`, `low`, `medium`, `high`, `critical`) |
 
 </details>
 
@@ -1129,10 +1172,10 @@ On first launch, macOS may block the ad-hoc-signed `maccrabd` binary. Go to **Sy
 <details>
 <summary><strong>Production release builds (click to expand)</strong></summary>
 
-Release DMGs are produced by `scripts/build-release.sh` (gitignored -- contains local paths and identities). The pipeline:
+Release DMGs are produced by `scripts/build-release.sh`. The pipeline:
 
 1. Compile rules to JSON with `Compiler/compile_rules.py`
-2. Build all 8 SPM targets (`MacCrabCore`, `MacCrabForensics`, `MacCrabAgentKit`, `MacCrabAgent`, `maccrabd`, `maccrabctl`, `maccrab-mcp`, `MacCrabApp`) with `swift build -c release`
+2. Build the package for arm64 and x86_64 with `swift build -c release`, then combine the shipped executables (`MacCrabApp`, `MacCrabAgent`, `maccrabctl`, `maccrab-mcp`, the plugin sandbox trampoline and the reference plugin) into universal binaries
 3. Wrap `MacCrabAgent` into a `.systemextension` bundle with `Info.plist` carrying `CFBundlePackageType=SYSX` and `NSSystemExtensionPointIdentifier=com.apple.system_extension.endpoint_security`
 4. Sign the sysext with Developer ID Application + embedded provisioning profile carrying the ES entitlement
 5. Sign `MacCrab.app` with hardened runtime; notarize and staple the DMG
@@ -1147,7 +1190,7 @@ If you have your own approved ES entitlement (Apple Developer Program required),
 ## Project Structure
 
 <details>
-<summary><strong>Full directory layout (click to expand)</strong></summary>
+<summary><strong>Directory layout, selected files (click to expand)</strong></summary>
 
 ```
 maccrab/
@@ -1166,7 +1209,7 @@ maccrab/
 │   │   │   ├── FileInfo.swift
 │   │   │   ├── NetworkInfo.swift
 │   │   │   └── TCCInfo.swift
-│   │   ├── Collectors/                  # 8 event source implementations
+│   │   ├── Collectors/                  # Event sources and monitors
 │   │   │   ├── ESCollector.swift        #   Endpoint Security client
 │   │   │   ├── ESHelpers.swift          #   ES type conversion
 │   │   │   ├── UnifiedLogCollector.swift #  Unified Log stream
@@ -1205,8 +1248,7 @@ maccrab/
 │   │   │   ├── AIToolRegistry.swift     #   Tool identification
 │   │   │   ├── AIProcessTracker.swift   #   Process tree tracking
 │   │   │   ├── CredentialFence.swift    #   Sensitive file access alerts
-│   │   │   ├── ProjectBoundary.swift    #   Directory escape detection
-│   │   │   └── PromptInjectionScanner.swift # Injection pattern scanning
+│   │   │   └── ProjectBoundary.swift    #   Directory escape detection
 │   │   ├── Fleet/                       # Optional fleet telemetry
 │   │   │   ├── FleetClient.swift        #   Fleet server enrollment
 │   │   │   └── FleetTelemetry.swift     #   Telemetry serialization
@@ -1228,24 +1270,18 @@ maccrab/
 │   ├── maccrabd/                        # Legacy standalone daemon (dev-only fallback)
 │   │   └── main.swift
 │   ├── maccrabctl/                      # CLI control tool
-│   │   └── main.swift
+│   │   └── MacCrabCtl.swift
 │   ├── maccrab-mcp/                     # MCP server for AI agent integration
 │   │   └── main.swift
 │   └── MacCrabApp/                      # SwiftUI menubar app + SystemExtension activator
-│       ├── MacCrabApp.swift
+│       ├── MacCrabApp.swift             #   App entry point and menu-bar menu
 │       ├── AppState.swift
+│       ├── V2/                          #   Dashboard shell and its 10 workspaces
 │       ├── Views/
-│       │   ├── MainView.swift           #   Tab navigation
-│       │   ├── AlertDashboard.swift     #   Alert list + detail
 │       │   ├── EventStream.swift        #   Live event stream
-│       │   ├── RuleBrowser.swift        #   Rule list + toggles
 │       │   ├── RuleWizard.swift         #   Rule authoring wizard
-│       │   ├── TCCTimeline.swift        #   Permission timeline
-│       │   ├── AIActivityView.swift     #   AI tool monitoring
 │       │   ├── SettingsView.swift       #   Configuration
 │       │   ├── ResponseActionsView.swift #  Response action config
-│       │   ├── DocsView.swift           #   Built-in docs
-│       │   ├── StatusBarMenu.swift      #   Menu bar interface
 │       │   └── Components.swift         #   Shared UI components
 │       └── ViewModels/
 │           └── ViewModels.swift
@@ -1336,7 +1372,7 @@ Code contributions are licensed under the [Apache License 2.0](LICENSE). We use 
 
 - [**SigmaHQ**](https://github.com/SigmaHQ/sigma) -- for the Sigma detection rule format and the community-driven rule repository that inspired this project's rule structure
 - [**Objective-See Foundation**](https://objective-see.org/) -- for pioneering open-source macOS security research, tools, and reference implementations that informed MacCrab's design
-- [**coreSigma (Nebulock)**](https://github.com/nebulock/coreSigma) -- for the pySigma macOS ESF pipeline work that demonstrated Sigma rule evaluation against Endpoint Security events
+- [**coreSigma (Nebulock)**](https://github.com/Nebulock-Inc/macos-coresigma) -- for the pySigma macOS ESF pipeline work that demonstrated Sigma rule evaluation against Endpoint Security events
 - [**abuse.ch**](https://abuse.ch/) -- for the open threat intelligence feeds (Feodo Tracker, URLhaus, MalwareBazaar) that power MacCrab's threat intel enrichment
 - **AgentSight** ([arXiv:2508.02736](https://arxiv.org/abs/2508.02736)) -- for demonstrating that an AI coding agent's intent (LLM prompts, tool calls, OTel spans) can be correlated against the kernel events its child processes produce. AgentSight implements this on Linux via eBPF; MacCrab v1.9.0's Agent Traces feature brings the same correlation idea to macOS via the Endpoint Security framework plus a loopback OTLP receiver
 - **Apple Endpoint Security framework** -- for providing the kernel-level visibility that makes real-time detection possible on macOS

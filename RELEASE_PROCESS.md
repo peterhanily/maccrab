@@ -125,7 +125,8 @@ publish.
   database downgrade target. Also reconcile any legacy temporary PF rules in
   the shared `com.maccrab` anchor before publication: the new dedicated response anchor
   deliberately cannot erase potentially unrelated legacy rules. See
-  `KNOWN_LIMITS.md` and `PREVENTION_RESEARCH.md` for the boundaries.
+  `KNOWN_LIMITS.md` and the `blockNetwork` row of the README's Response Actions
+  table for the boundaries.
 - `gh` installed, authenticated, and authorized to write this repository before
   the qualified second phase. Publisher credentials are deliberately not read
   and no GitHub/distribution mutation is attempted by the first-phase artifact
@@ -164,6 +165,10 @@ publish.
   exists; Sparkle public key + appcast URL identical across
   project.yml and Info.plist; team ID consistent in Casks; rules
   compile cleanly with 0 skips; `Package.resolved` is committed.
+  Its website checks (JSON-LD `softwareVersion`, the hero version pill and
+  the "What ships in v<version>" heading) run only when `SITE_REPO_PATH`
+  names a `maccrab-site` checkout. With it unset they are skipped, and when
+  they run they warn rather than fail.
 - `scripts/pre-release-audit.sh` — a suite of architectural-invariant
   passes covering AlertSink-bypass regressions, schema-migrator
   call sites, encryption pairings, env-block accessor confinement,
@@ -524,8 +529,9 @@ free-space preflight.
 
 **Critical updates.** Every generated appcast item is critical for installs
 older than 1.22.0 (`CRITICAL_UPDATE_FLOOR` in `scripts/_appcast_xml.py`):
-Sparkle 2 shows it to those users immediately, outside the phased rollout, and
-does not let them skip it, while newer installs see an ordinary update. Set
+Sparkle 2 offers it to those users at their next scheduled check without
+waiting for a phase, and does not let them skip it, while newer installs see an
+ordinary, phased update (item 7 below). Set
 `MACCRAB_CRITICAL_BELOW=MAJOR.MINOR.PATCH` when running `release.sh` to raise
 that floor for one release; a value below it is rejected. The generator writes
 `<sparkle:criticalUpdate sparkle:version="X">`; the validator rejects a marker
@@ -584,16 +590,25 @@ via Sparkle auto-update:
 6. Cloudflare Workers Builds deploys the site commit, typically within
    30-60 seconds.
 
-7. Existing v(N-1) clients with auto-update on poll `appcast.xml`
-   once per day (`SUScheduledCheckInterval=86400`). On finding a
-   newer `<sparkle:version>`, Sparkle:
-   - Downloads the DMG.
-   - Verifies the `<sparkle:edSignature>` against the public key
-     baked into the running app's Info.plist (`SUPublicEDKey`).
-     A swapped DMG fails verification and the update aborts BEFORE
-     unpacking.
-   - Mounts the DMG, replaces `/Applications/MacCrab.app` atomically,
-     prompts the user to relaunch.
+7. Existing v(N-1) clients with automatic checks on poll `appcast.xml`
+   once per day (`SUScheduledCheckInterval=86400`). Unless the item was
+   generated with `--immediate`, it is phased
+   (`sparkle:phasedRolloutInterval`, 86400 seconds by default): Sparkle puts
+   each Mac in one of 7 groups at random, group g becomes eligible g
+   intervals after the item's `pubDate`, and the offer then arrives at that
+   Mac's next daily check, so with the default interval scheduled checks
+   reach every install over about a week. Phasing applies only to scheduled
+   checks; *Check for Updates…* offers the newest release at once. On
+   finding a newer `<sparkle:version>`, Sparkle:
+   - Shows an update alert (`SUAutomaticallyUpdate` is false) and downloads
+     nothing until the user accepts, unless that user earlier ticked
+     "Automatically download and install updates in the future".
+   - Downloads and unpacks the DMG, then verifies the
+     `<sparkle:edSignature>` against the public key baked into the running
+     app's Info.plist (`SUPublicEDKey`) before installing anything. A
+     swapped DMG fails verification and is not installed.
+   - Replaces `/Applications/MacCrab.app` and relaunches it when the user
+     chooses *Install and Relaunch*.
    - On relaunch, `OSSystemExtensionRequest.activationRequest`
      fires from MacCrabApp's startup. Because CFBundleVersion is
      distinct for a later source revision (`<numeric-base-version>.<commit-count>`),
@@ -606,6 +621,25 @@ run. Any failure ends with `RELEASE INCOMPLETE` and a non-zero exit; the full
 `Released!` banner is printed only when every non-skipped surface succeeded.
 The already digest-verified public GitHub release is intentionally not rolled
 back after a downstream outage; its immutable ID and URL are printed for repair.
+
+### Step 7 — after publication
+
+1. **Website.** The pipeline publishes only `appcast.xml` and `release.json`
+   to the site. The homepage rewrites only its `data-release` elements
+   (version text, rule and built-in counts, release-notes and DMG links) from
+   `release.json`; the JSON-LD, the no-JavaScript fallbacks, `sitemap.xml`,
+   the release-evidence panel and the `/release/<version>/` record are
+   static. In a clean, freshly fetched `maccrab-site` checkout, run
+   `bash scripts/bump.sh --write`, fix by hand the prose it reports, and
+   commit and push the result to `main`. Then publish the
+   `/release/<version>/` evidence record and point the homepage panel at it;
+   until that record exists, label the panel as the previous release.
+2. **Update offer.** Confirm the Sparkle offer with a manual check on a Mac
+   running the previous release, not by waiting for a scheduled check:
+   choose *Check for Updates…* from the menu-bar menu. In v1.22.6 and
+   earlier that item does nothing until the dashboard window has been opened
+   once since MacCrab started, so choose *Show Dashboard* first. Scheduled
+   checks reach the other installs over about a week (Step 6, item 7).
 
 ## Continuous integration
 
@@ -651,9 +685,11 @@ Before each release, the operator can manually verify the chain by:
 # 1. Confirm the build Mac has the right cert
 security find-identity -v -p codesigning | grep "Developer ID Application: Peter Hanily"
 
-# 2. Confirm the EdDSA private key is reachable (sign_update prints
-#    the matching public key as a sanity check)
-~/Tools/bin/sign_update --print-keys
+# 2. scripts/generate-appcast-entry.sh checks the EdDSA key pairing itself,
+#    using only the hash-locked SwiftPM copy of the Sparkle tools (never one
+#    on PATH, in ~/Tools or under Homebrew): it confirms the Keychain key
+#    pairs with SUPublicEDKey, verifies the new signature, and refuses on a
+#    mismatch.
 
 # 3. Confirm SITE_REPO_TOKEN works
 curl -s -H "Authorization: Bearer $SITE_REPO_TOKEN" \
@@ -667,24 +703,14 @@ curl -s -H "Authorization: Bearer $SITE_REPO_TOKEN" \
 ## Rollback
 
 If a shipped release turns out to be malicious or catastrophically
-broken:
-
-1. **GitHub release** — delete the release at
-   `https://github.com/peterhanily/maccrab/releases/tag/v<version>`
-   (the tag stays for git history). Existing direct-download links
-   break.
-2. **Cask** — `git revert` the formula bump commit + push. New
-   `brew install` attempts get the previous version's DMG.
-3. **Sparkle appcast** — edit `peterhanily/maccrab-site/appcast.xml`
-   to remove the `<item>` for the bad version. Existing clients on
-   the bad version stay on it until they manually re-install (no
-   downgrade mechanism in Sparkle), but new updates from earlier
-   versions will land on the prior good release.
-4. **Sysext** — clients can manually run
-   `sudo systemextensionsctl uninstall 79S425CW99 com.maccrab.agent`
-   (requires SIP disabled, see Cask uninstall stanza for the
-   automated path). New install of the prior version then
-   activates a clean sysext.
+broken, follow [`docs/ROLLBACK_RUNBOOK.md`](docs/ROLLBACK_RUNBOOK.md). It
+halts the Sparkle rollout and restores `release.json` in one site commit,
+re-syncs the site's static version text, removes the bad build from GitHub's
+latest-release discovery without deleting it, reverts the Homebrew cask only
+after a storage-format check (reverting it downgrades Homebrew installs), and
+forward-fixes. Sparkle cannot downgrade a client that already installed the
+bad build, and database upgrades are not reversible by reinstalling an older
+app.
 
 There is no over-the-air kill switch. If the EdDSA key is
 compromised, the only safe action is to publish a "v<next>.x —

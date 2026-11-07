@@ -4,7 +4,7 @@
 agents — this consolidates policy that previously lived in scattered code
 comments. The source of truth is `Sources/MacCrabApp/Resources/<locale>.lproj/Localizable.strings`
 (14 locales, classic `.strings` — do NOT migrate to `.xcstrings`: plain
-`swift build` ships catalogs inert; see `plans/2026-06-10-v1.18.1-wwdc26-ui.md`).*
+`swift build` ships catalogs inert).*
 
 ## Hard rules
 
@@ -54,15 +54,21 @@ URLs · CLI commands (anything in backticks or starting `maccrabctl`).
 Professional, terse, operator-facing. Match the system language of macOS
 itself (e.g. German Sie-form, Japanese です/ます). Headers and buttons are
 short — prefer the established platform word over a literal translation.
-Plural handling: only `en` has a `.stringsdict`; other locales currently
-use the format-string singular/plural as written — do not invent new
-plural syntax in `.strings` values.
+Plural handling: every locale ships a `Localizable.stringsdict` with the
+same plural keys as `en`, and each of those keys keeps a `.strings` row as
+its fallback. Give each key exactly the plural categories its locale uses
+(`scripts/check-localizations.py` lists them, e.g. only `other` for ja, ko
+and Chinese, `one`/`few`/`many`/`other` for pl and ru) and keep its format
+specifiers. Do not invent plural syntax in `.strings` values.
 
 ## Provenance / review state
 
-`translation-state.json (repo root)` tracks per-key,
+`translation-state.json` (repo root) records a per-key,
 per-locale state: `legacy` (pre-v1.18.1, unaudited), `machine-translated`
 (agent fill, awaiting native review), `reviewed` (human-confirmed),
-`source-english` (intentionally untranslated). Update it when reviewing.
+`source-english` (intentionally untranslated). It has not been updated
+since it was created in v1.18.1, so most current keys are missing from it
+and no entry is `reviewed` yet; treat a key it does not list as unreviewed.
+Record a key as `reviewed` when a native speaker confirms it.
 The prerelease gate (`prerelease-check.sh` section 4) measures real value
 divergence; machine fills must keep it honest, not game it.

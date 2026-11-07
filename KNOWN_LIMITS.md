@@ -207,13 +207,49 @@ the heartbeat). The bounds:
 
 **Owner:** engine · **Target:** v1.22.7.
 
+### Manual update checks do nothing until the dashboard opens
+
+The **Check for Updates…** item in the menu-bar menu and the **Check for Updates** button
+in Settings › Detection Engine do nothing until the dashboard window has been opened once
+since MacCrab started: no update offer, no "up to date" message and no error. This affects
+v1.22.6 and earlier. Scheduled daily checks are not affected.
+
+**Workaround.** Click the menu-bar crab, choose **Show Dashboard**, then choose
+**Check for Updates…**.
+
+**Owner:** app · **Target:** v1.22.7.
+
+### Update prompts can open behind other windows
+
+MacCrab is a menu-bar app. When a scheduled daily check finds an update, its prompt can
+open behind other windows, and no notification or menu-bar badge points to it. A prompt
+from **Check for Updates…** opens in front.
+
+**Workaround.** Click the menu-bar crab, choose **Show Dashboard**, then choose
+**Check for Updates…**; this brings a waiting prompt to the front.
+
+**Owner:** app · **Target:** v1.22.7.
+
+### Homebrew and in-app updates overlap
+
+A Homebrew install gets the same in-app update prompts as a DMG install, but Homebrew does
+not see an update installed that way and still records the version it installed. The next
+plain `brew upgrade` therefore reinstalls MacCrab even when the app is already current;
+after an in-app update, `brew outdated --cask` still lists `maccrab`. Because the cask does
+not declare that MacCrab updates itself, `brew upgrade` installs whatever version the tap
+names whenever it differs from the recorded one. If the tap were ever reverted to an older
+release, `brew upgrade` would install that release over a newer app, and no downgrade is
+supported (see
+[There is no qualified downgrade target](#there-is-no-qualified-downgrade-target-for-this-database-format)).
+
+**Owner:** app and release · **Target:** v1.22.7.
+
 ---
 
 ## v1.22.0
 
-The properties below still require qualification against the final candidate.
-Listing them here does not accept a release limit or replace a completed runtime
-evidence record.
+The properties below were recorded for v1.22.0 and still apply to v1.22.6. The first two
+are scheduled for v1.22.7. The third is permanent: database upgrades are one-way.
 
 ### Disk write volume during heavy activity
 
@@ -225,9 +261,10 @@ admitted, a base-insert commit writes ~24 WAL frames (~98 KB) while carrying onl
 events, because 16 separate database structures are touched per transaction and roughly
 43 KB of that is a fixed per-transaction cost that does not shrink with batch size.
 
-These observations are not a completed qualification record for the current source.
-The final candidate must be measured using the same intervals and percentiles as the
-resource gate, including a comparable run of the previously shipped version.
+**Measured for v1.22.6.** In its installed-host qualification on macOS 27.2 on Apple
+Silicon, a 15-minute recorded run with a fixed workload at minute five, the engine wrote
+4.28 MiB/s on average, under the release limit of 9 MiB/s. That is one run on one Mac, not
+a bound for every workload.
 
 **Why it happens.** Each event has an immutable base record and a later enrichment
 revision. Base admission reserves and queues the record before analysis; it is not a
@@ -237,15 +274,14 @@ writes. Alerts retain their bounded trigger and expose whether journal verificat
 succeeded; an alert alone is not proof that all related journal evidence is durable.
 
 **What it means for you.** Disk activity depends on workload, retained history and
-maintenance. We do not yet have a qualified daily-write estimate, an SSD-endurance
-claim, or a measured non-regression result for this candidate.
+maintenance. We do not yet have a qualified daily-write estimate or an SSD-endurance
+claim.
 
 **Reducing it** requires measured work on transaction batching and storage costs while
 preserving immutable evidence, bounded memory, and alert/evidence status. A major-version
 change is not established as necessary by the current implementation.
 
-**Owner:** engine · **Target:** final v1.22.0 resource qualification; separately measured
-batching improvements afterward.
+**Owner:** engine · **Target:** v1.22.7.
 
 ### Startup validates retained event history
 
@@ -256,30 +292,30 @@ producers start. This recurring work scales with retained history.
 **What it means for you.** The app reports starting or unavailable until the engine
 reports ready. Detection is not active during that phase. Earlier development captures
 showed startup work taking approximately two minutes; that is neither a one-time cost
-nor a qualified bound for every store. Final qualification must include cold starts with
-representative retained history and explicit handling of insufficient storage space.
-Schema work must fit the configured database-family cap and the volume's free-space
-floor. The separate schema budget removes the fixed index-size refusal; it does not
-make an over-cap or low-space legacy store self-recovering. When startup is refused,
-normal post-start retention cannot run. A supported recovery procedure remains part
-of upgrade qualification.
+nor a qualified bound for every store. Schema work must fit the configured
+database-family cap and the volume's free-space floor. The separate schema budget
+removes the fixed index-size refusal; it does not make an over-cap or low-space legacy
+store self-recovering. When startup is refused, normal post-start retention cannot run.
 
-**Owner:** storage · **Target:** final v1.22.0 upgrade and cold-start qualification.
+**Owner:** storage · **Target:** v1.22.7.
 
 ### There is no qualified downgrade target for this database format
 
 v1.22.0 upgrades the on-disk databases and installs a deliberate barrier against
 incompatible event-store writes by older MacCrab versions.
 
-**What it means for you.** Do not open a v1.22.0 database with v1.21.5 or the unshipped
-v1.21.6 hotfix prefix. Those older recovery paths can move the database aside and start
-with empty history instead of refusing the incompatible format cleanly. The prefix is
-not a supported rollback target. Preserve a consistent pre-upgrade backup before any
-upgrade rehearsal; restoring older data requires a documented procedure with the engine
-fully stopped. Reinstalling an older app alone does not restore the older database.
+**What it means for you.** Do not open a database from v1.22.0 or later with v1.21.5 or
+earlier, or with the unshipped v1.21.6 hotfix prefix. Those older recovery paths can move
+the database aside and start with empty history instead of refusing the incompatible
+format cleanly. The prefix is not a supported rollback target. Preserve a consistent
+pre-upgrade backup before any upgrade rehearsal; restoring older data requires a
+documented procedure with the engine fully stopped. Reinstalling an older app alone does
+not restore the older database. A Homebrew tap reverted to an older release would install
+it over a newer app; see
+[Homebrew and in-app updates overlap](#homebrew-and-in-app-updates-overlap).
 
-**Owner:** storage/release · **Target:** a qualified recovery procedure before v1.22.0
-publication. No automatic downgrade is currently promised.
+**Owner:** storage/release · **Target:** none; this is permanent. Fixes ship forward only,
+in the newest 1.22.x release, and no automatic downgrade is promised.
 
 ---
 
