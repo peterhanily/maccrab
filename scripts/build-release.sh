@@ -1784,7 +1784,10 @@ stage_publish() {
     RELEASE_DMG_ATTACH_ATTEMPTED=0
     /bin/rmdir "$DMG_MNT"
     RELEASE_DMG_MOUNT_PATH=""
-    /usr/bin/hdiutil convert "$RW_DMG" -format UDZO -ov -o "$DMG_PATH" >/dev/null
+    # LZMA (ULMO, macOS 10.15 and later) makes the download about a third smaller
+    # than zlib (UDZO). MacCrab needs macOS 13, and Sparkle and Homebrew attach
+    # the image with hdiutil.
+    /usr/bin/hdiutil convert "$RW_DMG" -format ULMO -ov -o "$DMG_PATH" >/dev/null
     /bin/rm -f "$RW_DMG"
     RELEASE_RW_DMG_PATH=""
 

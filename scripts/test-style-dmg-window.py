@@ -128,7 +128,7 @@ class StyleDMGWindowTests(unittest.TestCase):
             self.check_layout(v.mount)
             detach(v.mount)
             final = os.path.join(v.dir, "final.dmg")
-            hdiutil("convert", v.image, "-format", "UDZO", "-ov", "-o", final)
+            hdiutil("convert", v.image, "-format", "ULMO", "-ov", "-o", final)
             attach(final, v.mount, readonly=True)
             self.check_layout(v.mount)
         finally:
