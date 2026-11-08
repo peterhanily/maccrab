@@ -59,6 +59,20 @@ write_fixture_manifest \
     || fail "DMG-root install.sh layout did not resolve to the mount root"
 pass "repo and DMG roots resolve deterministically"
 
+# A glob such as /Volumes/MacCrab\ v*/install.sh that matches two mounted
+# images runs the first image's installer with the other as an argument. The
+# installer takes no arguments, so it must stop before doing anything.
+args_status=0
+args_output=$(/bin/bash "$SCRIPT_DIR/install.sh" "/Volumes/MacCrab v9.9.8/install.sh" 2>&1) \
+    || args_status=$?
+[ "$args_status" = 64 ] \
+    || fail "installer given an argument exited $args_status, not 64: $args_output"
+case "$args_output" in
+    *"takes no arguments"*) ;;
+    *) fail "installer given an argument did not explain the refusal: $args_output" ;;
+esac
+pass "installer refuses arguments, so a multi-volume glob cannot pick a version"
+
 # `sudo ./install.sh < /dev/null` exited 1 after a complete install: the closing
 # prompt's `read` hit EOF under `set -e`.  With no terminal on stdin (EOF, or an
 # automation pipe answering "y"), the ending must neither fail nor launch.

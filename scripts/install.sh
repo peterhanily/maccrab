@@ -496,6 +496,16 @@ fi
 
 set -euo pipefail
 
+# The installer takes no arguments. `sudo /Volumes/MacCrab\ v*/install.sh` with
+# two MacCrab images mounted runs the first image's installer and passes the
+# other path as an argument; refuse rather than install whichever sorts first.
+if [ "$#" -ne 0 ]; then
+    echo "ERROR: install.sh takes no arguments (given: $*)." >&2
+    echo "If more than one MacCrab disk image is mounted, eject the others, then run:" >&2
+    echo "  sudo \"/Volumes/MacCrab v<version>/install.sh\"" >&2
+    exit 64
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if ! PROJECT_DIR="$(maccrab_resolve_payload_root "$SCRIPT_DIR")"; then
     echo "ERROR: install.sh must be run from a MacCrab source tree or release DMG containing MacCrab.app." >&2
