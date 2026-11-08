@@ -1,6 +1,6 @@
 """Render the disk-image window background from its SVG source.
 
-usage: python3 -I render-dmg-background.py <background.svg> <IBM Plex font dir> <out.tiff>
+usage: python3 -I scripts/dmg-window/render-background.py <background.svg> <IBM Plex font dir> <out.tiff>
 
 A maintainer tool, not a release step: the release build copies the committed
 TIFF. It renders the SVG at 1x and 2x with headless Chrome, using IBM Plex Sans
