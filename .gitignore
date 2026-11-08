@@ -81,6 +81,12 @@ id_rsa*
 id_dsa*
 id_ecdsa*
 id_ed25519*
+# Key material with no telling extension.
+dev-keys/
+KIT/
+*.seed
+*.priv
+sparkle_*private*
 
 # Apple notarytool / altool credentials + session state
 notarization-history.json
@@ -250,6 +256,8 @@ dist/
 .maccrab-ci-clean.lock/
 .maccrab-ci-release.*/
 .claude/scheduled_tasks.lock
+# Per-machine agent permissions; may name local paths and tools.
+.claude/settings.local.json
 # AI-assisted agent worktrees (sub-repos created by the harness)
 .claude/worktrees/
 

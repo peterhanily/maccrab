@@ -265,7 +265,8 @@ an FDA/TCC host.
   from the manifest's enforced capabilities (not author labels), so a plugin
   cannot under-declare what it reads or where it sends.
 - **Trust + revocation + kill-switches.** Plugins are Ed25519-signed; the catalog
-  is signed with an offline key and carries a `frozen` install kill-switch; a
+  is signed with a key that never enters CI (it is kept in a keychain on the
+  maintainer's Mac, not offline) and carries a `frozen` install kill-switch; a
   runtime re-verify quarantines plugins a fresh signed revocation list revokes;
   the operator has a local execution kill-switch.
 - **Containment is proved, not asserted.** The candidate-bound adversarial corpus

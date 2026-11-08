@@ -221,7 +221,7 @@ removed.
 | Apple notarisation credentials | trusted Mac keychain | **no** |
 | Sparkle EdDSA private key | trusted Mac keychain | **no** |
 | Rule-channel private key (`rules.key`) | offline keyholder storage | **no** |
-| Rave catalogue Ed25519 private key | air-gapped, local | **no** |
+| Rave catalogue Ed25519 private key | a keychain on the maintainer's Mac (not offline) | **no** |
 | `SITE_REPO_TOKEN` (appcast/catalog publish) | `~/.maccrab-release-env` | **no** |
 | Rule-channel public key (`rules.pub`) | **none trusted or shipped; channel disabled** | n/a — a future owner-approved public anchor may ship only after an offline key ceremony |
 
