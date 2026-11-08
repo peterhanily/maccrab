@@ -51,6 +51,8 @@ detection:
             - '/Applications/'
             - '/Library/Developer/'
             - '/Library/Caches/'
+            # go run / go test build ad-hoc signed binaries under $TMPDIR/go-build*/.
+            - '/go-build'
     filter_known_dev_tools:
         Image|endswith:
             - '/swift-bundler'

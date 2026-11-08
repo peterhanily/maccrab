@@ -98,6 +98,10 @@ struct RulePrivatePathAliasTests {
         let app = process(executable: "/private/var/folders/zz/abc123/T/Update.app/Contents/MacOS/Update",
                           signer: .adHoc, isAdhocSigned: true)
         #expect(await fires(engine, exec(app), "d1a2b3c4-0500-4000-a000-000000000511"))
+        // go run and go test build ad-hoc signed binaries in $TMPDIR/go-build*/.
+        let goTest = process(executable: "/private/var/folders/zz/abc123/T/go-build4182/b001/pkg.test",
+                             signer: .adHoc, isAdhocSigned: true)
+        #expect(!(await fires(engine, exec(goTest), "d1a2b3c4-0500-4000-a000-000000000511")))
     }
 
     @Test("login item added by a program in $TMPDIR fires")
