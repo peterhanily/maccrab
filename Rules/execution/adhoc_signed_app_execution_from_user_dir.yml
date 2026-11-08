@@ -33,6 +33,7 @@ detection:
             - '/tmp/'
             - '/private/tmp/'
             - '/var/folders/'
+            - '/private/var/folders/'
     selection_ad_hoc_signing:
         # RuleEngine resolves IsAdhocSigned via the cs_blobs.h CS_ADHOC
         # flag bit (RuleEngine.swift:868-869) — the prior selection on

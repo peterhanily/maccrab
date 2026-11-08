@@ -29,6 +29,7 @@ steps:
                   - '/tmp/'
                   - '/private/tmp/'
                   - '/var/folders/'
+                  - '/private/var/folders/'
           condition: selection
 
     - id: cleanup
@@ -41,6 +42,7 @@ steps:
                   - '/tmp/'
                   - '/private/tmp/'
                   - '/var/folders/'
+                  - '/private/var/folders/'
           filter_action:
               FileAction: 'delete'
           condition: selection and filter_action

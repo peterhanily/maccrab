@@ -20,6 +20,7 @@ detection:
             - '/tmp/'
             - '/private/tmp/'
             - '/var/folders/'
+            - '/private/var/folders/'
     filter_system:
         ParentImage|startswith:
             - '/System/'

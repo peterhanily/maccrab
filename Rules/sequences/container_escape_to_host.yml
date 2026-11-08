@@ -48,6 +48,7 @@ steps:
                   - '/Library/LaunchAgents/'
                   - '/Library/LaunchDaemons/'
                   - '/etc/'
+                  - '/private/etc/'
                   - '/usr/local/bin/'
               FileAction: 'write'
               SignerType: 'unsigned'

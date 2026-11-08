@@ -16,7 +16,9 @@ logsource:
     product: macos
 detection:
     selection:
-        TargetFilename|startswith: '/var/db/dslocal/nodes/Default/users/'
+        TargetFilename|startswith:
+            - '/var/db/dslocal/nodes/Default/users/'
+            - '/private/var/db/dslocal/nodes/Default/users/'
         TargetFilename|endswith: '.plist'
     filter_opendirectory:
         Image|endswith:

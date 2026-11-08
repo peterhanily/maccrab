@@ -35,6 +35,7 @@ detection:
             - '/tmp/'
             - '/private/tmp/'
             - '/var/folders/'
+            - '/private/var/folders/'
             - '/Users/'
     selection_user_writable_caches:
         Image|contains:

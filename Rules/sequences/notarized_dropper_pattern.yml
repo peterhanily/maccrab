@@ -60,6 +60,7 @@ steps:
                   - '/tmp/'
                   - '/private/tmp/'
                   - '/var/folders/'
+                  - '/private/var/folders/'
                   - '/Users/'
           condition: (selection or selection_temp)
       process: notarized_exec.descendant

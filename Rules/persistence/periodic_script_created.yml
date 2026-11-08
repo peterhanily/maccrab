@@ -16,6 +16,7 @@ detection:
     selection:
         TargetFilename|startswith:
             - '/etc/periodic/'
+            - '/private/etc/periodic/'
             - '/usr/local/etc/periodic/'
     filter_apple:
         SignerType: 'apple'
