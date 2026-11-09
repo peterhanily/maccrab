@@ -1,7 +1,6 @@
 # MacCrabForensics
 
-The Mac Context Plugin Platform — Track 2 of the MacCrab forward plan
-(`plans/2026-05-19-plugin-platform-plan.md`).
+The Mac Context Plugin Platform — Track 2 of the MacCrab forward plan.
 
 This SPM library hosts the plugin runtime, the encrypted ArtifactStore,
 the Case model, and the four kinds of first-party plugins (Collector,

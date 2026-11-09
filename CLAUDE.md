@@ -27,7 +27,7 @@ make lint-rules                # Rule linting
 
 ## Architecture
 
-MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026), the detection engine ships as a native Endpoint Security **System Extension** activated from inside `MacCrab.app`. Eight SPM targets:
+MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026), the detection engine ships as a native Endpoint Security **System Extension** activated from inside `MacCrab.app`. `Package.swift` declares 15 non-test targets. The eight main ones are below; the other seven are `CSQLCipher` (the vendored SQLCipher amalgamation, the only SQLite in the build), `CTierBBroker` (the C fd-passing layer of the Tier-B plugin file broker), `MacCrabPluginKit` (the plugin-author SDK) and four `maccrab-tierb-*` executables (the third-party plugin sandbox trampoline, the reference plugin and two containment-corpus probes):
 
 - **MacCrabCore** (`Sources/MacCrabCore/`) -- Shared library: detection engines, collectors, enrichment, storage, prevention
 - **MacCrabAgentKit** (`Sources/MacCrabAgentKit/`) -- Shared daemon bootstrap wrapping the event loop, monitors, timers, and signal handlers. Linked by both the sysext and the legacy standalone daemon
@@ -75,7 +75,7 @@ Tests/            Swift Testing unit tests (6089 tests in 934 suites)
 
 1. **Rules** -- 438 single-event Sigma-compatible YAML rules compiled to JSON predicates, plus 41 sequence rules across 17 tactic dirs, plus 7 graph rules (Rules/graph/*.json) evaluated against materialized TraceGraph traces. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
 2. **Anomaly** -- Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights).
-3. **Sequences** -- 41 temporal multi-step rules with process lineage correlation, 10K partial match cap.
+3. **Sequences** -- 41 temporal multi-step rules with process lineage correlation, 13,000 partial match cap.
 4. **Campaigns** -- Kill chain, alert storm, AI compromise, coordinated attack, lateral movement detection. Incremental tactic/user indexes for O(1) lookups.
 5. **Cross-process** -- Correlation across process lineage graph.
 
@@ -86,7 +86,7 @@ Tests/            Swift Testing unit tests (6089 tests in 934 suites)
 3. Detection engine loads compiled JSON from `<support-dir>/compiled_rules/`
 4. Send SIGHUP to reload rules without restart:
    - Dev (standalone `maccrabd`): `pkill -HUP maccrabd`
-   - Release (System Extension): `pkill -HUP com.maccrab.agent`
+   - Release (System Extension; it runs as root, so signaling it needs `sudo`): `sudo pkill -HUP com.maccrab.agent`
 
 ### Rule Compiler Validation
 
@@ -197,7 +197,7 @@ All LLM features degrade gracefully when no backend is configured. Cloud APIs ge
 
 MacCrab includes an MCP (Model Context Protocol) server that lets AI agents query security data directly.
 
-**Binary:** `maccrab-mcp` (5th executable target in Package.swift)
+**Binary:** `maccrab-mcp` (4th executable target in Package.swift)
 
 **Tools exposed (67 built-in + 30 per-plugin = 97 on a release install, 98 in a debug build; the per-plugin half varies with installed plugins):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools, the response-action tools (`list_response_actions` / `set_response_action`), and the built-in `forensics_*` meta-tools — `forensics_run_collector` / `forensics_run_analyzer` / `forensics_enrich` / `forensics_search_artifacts` / `forensics_timeline` / `forensics_explain_case` / `forensics_posture_findings` / … . These are statically declared and always present; the plugin-contributed tools are the `launchd_*` / `tcc_*` / `safari_*` / `mail_*` / `imessage_*` / `*_analyze_path` family. Underscore-named since v1.19.1 for strict-MCP-client compatibility; legacy `forensics.*` dotted names still work as aliases.)
 
@@ -211,7 +211,7 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 | `suppress_alert` | Suppress false positive alerts (audit-logged) |
 | `suppress_campaign` | Suppress a campaign + all contributing alerts |
 | `get_ai_alerts` | AI Guard alerts (credential / boundary / injection / MCP) |
-| `scan_text` | Scan text for prompt-injection (Forensicate.ai, 87+ rules) |
+| `scan_text` | Native prompt-injection marker scan (24 literal signatures in 7 categories plus an invisible-Unicode check) |
 | `get_status` | Daemon status, rule count, DB size |
 | `hunt` | Full-text threat hunting across events |
 | `get_security_score` | Security posture (0-100) with factors |
@@ -227,6 +227,7 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 - `/security-check` — Full security posture report via MCP
 - `/threat-hunt <query>` — Natural language threat hunting
 - `/alerts` — Review and triage recent alerts
+- `/maccrab-control` — Customize MacCrab through the MCP agent control plane (within the capability tiers the human has enabled)
 
 ## Dashboard (MacCrabApp)
 
@@ -251,7 +252,7 @@ Key UX features:
 - Dark mode support (system-aware)
 - "What To Do" actionable guidance on alerts and campaigns
 - Campaign dismiss/restore workflow
-- 14 language localizations, but thinner than the tables suggest: en.lproj defines 799 keys, while 552 of the 1096 keys the UI actually references have no table row at all and fall through to the call-site `defaultValue:` in every locale. Real coverage of visible strings is ~50%, not the 94-98% per-locale figure prerelease-check.sh reports. Gated by `LocalizationCoverageTests.missingEnKeyBudget`; see TRANSLATION.md
+- 14 language localizations. Every locale's `Localizable.strings` has the same 1836 keys and a `Localizable.stringsdict` for plurals, and every `String(localized:)` key the UI references has an en.lproj row (`LocalizationCoverageTests.missingEnKeyBudget` is 0). prerelease-check.sh reports 95-98% of each locale's values as differing from English. The source scans cover only some SwiftUI constructs, so they do not prove every visible string is localized; see TRANSLATION.md
 - WCAG AA contrast compliance (documented in code)
 
 ## Daemon Configuration
@@ -305,7 +306,7 @@ Historical note: v1.19.0 raised the envelope 200 → 350; **v1.21.4 raised 350 �
 
 - **System Extension / root daemon:** `/Library/Application Support/MacCrab/` (release builds use this via sysextd-granted privileges; dev `sudo maccrabd` writes here too)
 - **Non-root dev daemon:** `~/Library/Application Support/MacCrab/` (dev `swift run maccrabd` without sudo)
-- Database: `events.db` (SQLite with WAL mode, ~16MB cache, 64MB mmap — per-store; see `StoragePragmas.swift`)
+- Database: `events.db` (SQLite with WAL mode, ~16MB cache, 32MB mmap — per-store; see `StoragePragmas.swift`)
 - Compiled rules: `compiled_rules/*.json` (dir `0o755`, files `0o644` — world-readable: the non-root MacCrab.app reads them for rule display + integrity hashing; this is intentional, not `0o700`)
 - Auto-generated rules: `compiled_rules/auto_generated/`
 

@@ -5,6 +5,47 @@ full, dated log.
 
 ---
 
+## How updates arrive
+
+MacCrab checks `https://maccrab.com/appcast.xml` once a day and asks before
+it installs an update, unless you ticked *Automatically download and install
+updates in the future* in an earlier update prompt. Each update is signed,
+and the app checks the signature after the download and before it installs
+anything.
+
+- **Scheduled checks get a release in phases.** Each Mac is placed at
+  random in one of seven groups. The first group becomes eligible as soon
+  as a release is published, the next a day later, and so on; each Mac is
+  offered the release at its first daily check after its group becomes
+  eligible, so every Mac is offered it within about a week.
+- **A manual check gets it at once.** *Check for Updates…* in the
+  status-bar menu, or **Check for Updates** in Settings › Detection Engine,
+  offers the newest release immediately.
+- **Installs older than 1.22.0** are offered each release as a critical
+  update: there is no phase wait, but it still arrives at the next daily
+  check.
+- **Known issue (v1.22.6 and earlier):** the manual check does nothing
+  until the dashboard window has been opened once since MacCrab started.
+  Click the crab in the menu bar, choose **Show Dashboard**, then choose
+  *Check for Updates…*. A prompt from a scheduled check can also open
+  behind other windows; the same steps bring it to the front. See
+  [KNOWN_LIMITS.md](KNOWN_LIMITS.md).
+- **Homebrew installs** get the same in-app prompts, and
+  `brew upgrade --cask peterhanily/maccrab/maccrab` also upgrades MacCrab.
+  Homebrew does not see an in-app update, so a later `brew upgrade` can
+  reinstall the release you already have.
+
+To turn automatic checks off (the app has no setting for this), run the
+first command below; the second restores the default. Quit and reopen
+MacCrab after either one.
+
+```bash
+defaults write com.maccrab.app SUEnableAutomaticChecks -bool false
+defaults delete com.maccrab.app SUEnableAutomaticChecks
+```
+
+---
+
 ## v1.2.x → v1.3.x
 
 **This is the biggest architectural shift in MacCrab's history.** The
@@ -66,8 +107,9 @@ installing fresh. This is identical to the flow CrowdStrike, SentinelOne,
 Jamf Protect, and Microsoft Defender use.
 
 For fleet deployments with UAMDM, a `.mobileconfig` with a
-`SystemExtensionPolicy` payload can pre-authorize the extension. A signed
-profile is planned for a future release; see the roadmap for status.
+`SystemExtensionPolicy` payload can pre-authorize the extension.
+[`deploy/`](deploy/README.md) has an unsigned profile template and the steps
+to sign and deploy it.
 
 ### Manual DMG upgrade path (v1.3 → newer v1.3.x)
 
@@ -89,9 +131,10 @@ Sparkle), the drag-n-drop path works:
    cleanly hands over.)
 
 **Recommended over manual drag:** use *Check for Updates…* from the
-status-bar menu (Sparkle), or `brew upgrade --cask peterhanily/maccrab/maccrab`. Both
-coordinate quit + replace + relaunch so there's zero visible downtime
-and zero chance of the old sysext lingering alongside the new one.
+status-bar menu (Sparkle; see [How updates arrive](#how-updates-arrive)),
+or `brew upgrade --cask peterhanily/maccrab/maccrab`. Sparkle quits,
+replaces and relaunches the app; after `brew upgrade`, open
+`MacCrab.app` again.
 
 ### What does NOT change
 
@@ -130,10 +173,13 @@ v1.2 had two hard blockers that drove v1.3:
   v1.2.4 depends on `NoiseFilter` extraction that v1.2 lacks in older
   form.
 
-If you really need to downgrade, `brew install
-peterhanily/maccrab/maccrab@1.2.4` followed by a reinstall of the legacy
-provisioning profile is the path. Ask first on GitHub Issues — there's
-usually a better fix.
+If you really need to downgrade, the v1.2.4 DMG is still attached to its
+[GitHub release](https://github.com/peterhanily/maccrab/releases/tag/v1.2.4)
+(there is no versioned Homebrew cask), and v1.2 also needs its legacy
+provisioning profile reinstalled. Do not install it over databases that
+v1.22.0 or later has upgraded (see
+[Upgrading to v1.22.0](#upgrading-to-v1220)). Ask first on GitHub Issues —
+there's usually a better fix.
 
 ---
 
@@ -156,6 +202,7 @@ approval required for a same-team-ID upgrade. Your data, config, and
 suppressions carry forward untouched.
 
 DMG-installed users get the same result without Homebrew: *Check for
-Updates…* in the status-bar menu (Sparkle) fetches the signed appcast,
-downloads and installs the update, and MacCrab.app relaunches into the
-new version — no manual `brew upgrade` step needed.
+Updates…* in the status-bar menu (Sparkle) fetches the appcast, asks before
+it downloads and installs the update, and MacCrab.app relaunches into the
+new version — no manual `brew upgrade` step needed. Homebrew installs get
+the same prompts; see [How updates arrive](#how-updates-arrive).

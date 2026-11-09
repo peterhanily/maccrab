@@ -6,7 +6,7 @@ MacCrab relies on real-world false-positive baselines to be credible as a securi
 
 A detection rule is only useful if its false-positive rate is known and acceptable. A rule that fires thousands of times per day on clean machines is noise, regardless of its true-positive accuracy. MacCrab's detection library includes **486 rules** (116 enabled by default under the stable profile; most of the rest are experimental), but production FP rates are blank:
 
-- **Reference machine FP rate:** We measure this in CI on a clean macOS VM using `scripts/false-positive-test.sh`, validating against a curated list of 100+ Apple system processes. This gives us a *lower bound* under artificial conditions.
+- **Reference machine FP rate:** `scripts/false-positive-test.sh` (`make test-fp`) starts the daemon, lets it settle, and checks that none of a curated list of 46 Apple system processes raised an alert. This gives us a *lower bound* under artificial conditions.
 - **Real-world FP rate:** Unknown. A developer machine with build tools (esbuild, node, Chrome, Xcode) produces different alert volumes than a non-developer endpoint. A machine running AI tools produces different patterns still. We need data from diverse real machines to publish per-rule FP baselines.
 
 Publishing "false-positive rate: unknown" damages adoption. You can't recommend a rule to a SOC if you don't know how often it fires on a clean machine. Our goal: gather enough data to publish **per-rule FP rates** (e.g., "maccrab.persistence.launch-agent: 0.2 alerts/day on reference hardware" or "maccrab.ai-guard.credential-access: 1.8 alerts/day on active developer machine").
@@ -96,7 +96,7 @@ It does **not** stop or restart the daemon, install any special mode, or read ra
 ### Questions?
 
 - See [BENCHMARK.md](../BENCHMARK.md) for detailed harness usage, data interpretation, and troubleshooting
-- Post a [GitHub Discussion](https://github.com/peterhanily/maccrab/discussions) if the harness fails or you have privacy questions
+- Open a [GitHub Issue](https://github.com/peterhanily/maccrab/issues) if the harness fails or you have privacy questions
 
 ---
 
@@ -114,7 +114,7 @@ It does **not** stop or restart the daemon, install any special mode, or read ra
 - **Published data is anonymized.** When we aggregate submissions into public FP baselines, submissions are:
   - Grouped by OS version + architecture + self-reported category (e.g., "Sequoia 15.1 + arm64 + developer")
   - Median-aggregated per rule (to eliminate outliers)
-  - Published as a table in [docs/FP_BASELINES_v1.md](docs/FP_BASELINES_v1.md) (file naming: one per release)
+  - Published as a table in a versioned `docs/FP_BASELINES_<version>.md` file, one per release (none has been published yet)
   - Example row: `maccrab.persistence.launch-agent | 0.1–0.4 alerts/day | Sonoma 14.6 arm64 (N=42 submissions) | stable`
 - **Individual submissions are not published.** Raw submissions are archived privately and are not made public.
 - **You can opt out.** Before submission, you can review the JSON and delete the entire file. Submissions are voluntary.
@@ -124,7 +124,7 @@ It does **not** stop or restart the daemon, install any special mode, or read ra
 
 - **Contributor names are not recorded** — submissions are anonymous by default. If you want your name or organization listed as a contributor, add a comment in the issue saying so.
 - **No reidentification.** We commit to not attempting to reidentify contributors from the OS version + architecture + category tuple.
-- **Data deletion.** Request deletion of your submission by opening an issue marked [data-deletion-request](https://github.com/peterhanily/maccrab/issues?q=label%3Adata-deletion-request) — we will not publish aggregates based on that data going forward.
+- **Data deletion.** Request deletion of your submission by opening a [GitHub Issue](https://github.com/peterhanily/maccrab/issues) that links to it — we will not publish aggregates based on that data going forward.
 
 ---
 
@@ -132,7 +132,7 @@ It does **not** stop or restart the daemon, install any special mode, or read ra
 
 ### Collection Phase
 
-Submissions accumulate in [GitHub Issues](https://github.com/peterhanily/maccrab/issues) with the `fp-data-submission` label.
+Submissions accumulate in [GitHub Issues](https://github.com/peterhanily/maccrab/issues).
 
 ### Aggregation (per release)
 
@@ -142,7 +142,7 @@ After each major release (or once we have N=50+ submissions), the maintainer:
 2. Groups by: `(macos, arch, self-reported category)`
 3. For each group, computes per-rule **median alert count** over the collection window (to reduce outlier noise)
 4. Normalizes to **alerts/day** (e.g., 18 alerts over a 28-day window = 0.64 alerts/day)
-5. Publishes a table in [docs/FP_BASELINES_v1.20.md](docs/FP_BASELINES_v1.20.md) (example; versioned per release)
+5. Publishes a table in a versioned `docs/FP_BASELINES_<version>.md` file (one per release)
 
 ### Published Format
 
@@ -207,8 +207,7 @@ A: No. There is no phone-home mechanism and no backend. The harness is fully off
 
 Thank you for helping make MacCrab safer for everyone.
 
-- **Questions?** Post in [GitHub Discussions](https://github.com/peterhanily/maccrab/discussions/categories/false-positive-data)
-- **Issues?** Open a [GitHub Issue](https://github.com/peterhanily/maccrab/issues) with the `fp-data` label
+- **Questions or issues?** Open a [GitHub Issue](https://github.com/peterhanily/maccrab/issues)
 - **Contact:** maccrab@peterhanily.com
 
 ---
@@ -240,6 +239,6 @@ That is the complete schema — rule IDs, counts, and coarse host metadata only.
 
 ---
 
-**Document version:** 1.1 (MacCrab v1.21.4)  
-**Last updated:** 2026-07-17  
+**Document version:** 1.2 (MacCrab v1.22.6)  
+**Last updated:** 2026-11-07  
 **Maintainer:** github.com/peterhanily

@@ -19,7 +19,8 @@ therefore two things:
 1. **Stop the bleeding** — halt further distribution so no *new* client picks
    up the bad version.
 2. **Forward-fix** — cut the next version with the fix and ship it (use
-   `--immediate` so it reaches 100% at once; see below).
+   `--immediate` so it skips the phased rollout and every install is offered
+   it at its next scheduled check; see below).
 
 **Database upgrades are not reversible by reinstalling an older app.**
 v1.22 changes the event-store format; there is no qualified downgrade target
@@ -35,10 +36,15 @@ evidence before changing distribution. Keep them intact for diagnosis.
 Phased rollout (`sparkle:phasedRolloutInterval`, on by default for non-critical
 releases — see `scripts/generate-appcast-entry.sh`) is what buys you time here:
 a staggered rollout means only a fraction of users have the bad build when you
-catch it, so halting distribution actually limits the blast radius. Installs
+catch it, so halting distribution actually limits the blast radius. Sparkle
+puts each Mac in one of 7 groups at random; with the default 86400-second
+interval, group g becomes eligible g days after the item's `pubDate`, and the
+offer then arrives at that Mac's next daily check. Phasing applies only to
+scheduled checks: *Check for Updates…* offers the newest item at once. Installs
 older than 1.22.0 are the exception: every item the release generator writes
 is critical for them (`CRITICAL_UPDATE_FLOOR` in `scripts/_appcast_xml.py`), so
-Sparkle offers it to them at once, outside the phased rollout.
+Sparkle offers it to them at their next scheduled check without waiting for a
+phase.
 
 ## The three surfaces that advertise a release
 
@@ -49,7 +55,7 @@ channels remain available. Each is served differently:
 | Surface | What it drives | Where it lives |
 | --- | --- | --- |
 | `appcast.xml` | Sparkle in-app auto-update | `maccrab-site` repo → `https://maccrab.com/appcast.xml` |
-| `release.json` | Website version pill + JSON-LD | `maccrab-site` repo → `https://maccrab.com/release.json` |
+| `release.json` | Homepage `data-release` elements: version text, rule and built-in counts, release-notes and DMG links | `maccrab-site` repo → `https://maccrab.com/release.json` |
 | GitHub release + Homebrew cask | Direct download + `brew install` | `peterhanily/maccrab` release assets + `peterhanily/homebrew-maccrab` tap |
 
 Use configured Git/GitHub authentication for checkout edits. Publisher scripts
@@ -91,7 +97,7 @@ git diff -- appcast.xml release.json
 git add -- appcast.xml release.json
 git commit -m "Roll back v<BAD_VERSION>: pull the appcast item and restore release.json"
 git push origin HEAD:main
-# Cloudflare Pages redeploys in ~30–60s.
+# Cloudflare Workers Builds redeploys in ~30–60s.
 ```
 
 If the push rejects because remote `main` advanced, fetch and reapply the one-item
@@ -107,10 +113,12 @@ curl -fsS https://maccrab.com/appcast.xml | grep -Fc '<sparkle:version>GOOD_BUIL
 
 ## Step 2 — Verify release.json (website version)
 
-`release.json` is the site's source of truth for the version pill and JSON-LD.
-Step 1 restored it together with the appcast. Only if it could not be included
-there, publish it separately as below, then re-check **both** live files once
-every deploy has finished, because the separate commit reintroduces the race:
+`release.json` drives only the homepage elements marked `data-release` (version
+text, rule and built-in counts, release-notes and DMG links), which the page
+rewrites from it after loading. Step 1 restored it together with the appcast.
+Only if it could not be included there, publish it separately as below, then
+re-check **both** live files once every deploy has finished, because the
+separate commit reintroduces the race:
 
 ```bash
 # In a clean maccrab (app) checkout — restore the prior release.json:
@@ -132,6 +140,24 @@ curl -s https://maccrab.com/release.json | grep '"version"'
 # expect: the GOOD version
 ```
 
+The homepage's JSON-LD, its no-JavaScript fallback text and links,
+`sitemap.xml`, the release-evidence panel and the `/release/<version>/` records
+are static files that `release.json` does not change. Once every deploy above
+has finished, run `bump.sh` in a clean, freshly fetched `maccrab-site` checkout
+to bring the JSON-LD, the fallbacks and `sitemap.xml` back in line with the
+restored `release.json`, then commit and push the result to `main` as its own
+commit:
+
+```bash
+bash scripts/bump.sh --write   # JSON-LD, fallback text and links, sitemap, manifest
+git diff
+```
+
+`bump.sh` lists the prose it does not edit; fix that by hand. It does not touch
+the release-evidence panel or the records: point the panel back at the previous
+good release's record, and withdraw or relabel any `/release/<BAD_VERSION>/`
+record.
+
 ## Step 3 — Address GitHub discovery and the Homebrew cask
 
 The GitHub release asset and the cask serve `brew install` and direct
@@ -141,11 +167,22 @@ designation; **it does not revoke existing direct download URLs**. Record that
 remaining exposure. Asset removal requires a separate withdrawal decision after
 preserving its exact bytes and evidence.
 
+Reverting the cask downgrades Homebrew installs. The cask has no
+`auto_updates` stanza, and Homebrew treats a cask as outdated whenever the
+installed version differs from the tap's, with no downgrade guard: the next
+routine `brew upgrade` installs v<GOOD_VERSION> over a Homebrew-managed copy of
+v<BAD_VERSION>, and the older app then activates its older engine on the stores
+v<BAD_VERSION> wrote. Before reverting, establish that v<BAD_VERSION> added no
+schema migration (the forward-only `Migration` steps keyed on
+`PRAGMA user_version` in each store) and no other storage-format change. If it
+did, or you cannot establish this, leave the cask on v<BAD_VERSION> and
+forward-fix (Step 4).
+
 ```bash
 # Remove the bad build from latest-release discovery; direct URLs remain live:
 gh release edit "v<BAD_VERSION>" --prerelease --latest=false
 
-# Revert both cask copies to the previous good version and push:
+# Only after the storage check above: revert both cask copies and push:
 git checkout "v<GOOD_VERSION>" -- Casks/maccrab.rb homebrew/maccrab.rb
 git commit -am "Roll back cask to v<GOOD_VERSION>"
 git push
@@ -161,8 +198,7 @@ git push
 
 The `peterhanily/maccrab` tap reads `Casks/maccrab.rb` from the separate
 `peterhanily/homebrew-maccrab` repository. Verify that live tap's version and
-hash; changing the app repository alone is insufficient. Reverting the cask
-does not downgrade an already-installed app or its migrated databases.
+hash; changing the app repository alone is insufficient.
 
 ## Step 4 — Forward-fix (the actual remedy)
 

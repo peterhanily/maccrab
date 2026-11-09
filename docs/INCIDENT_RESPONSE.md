@@ -56,8 +56,11 @@ confirm scope.
 When a finding is a confirmed false positive (not a real threat):
 
 ```bash
-# v2 store — TTL + audit-logged (preferred):
-maccrabctl allow <rule-id> <process-path>    # see: maccrabctl allow --help
+# v2 store — TTL + audit-logged (preferred). On a release install the store
+# is root-owned, so add entries with sudo. --reason is required.
+sudo maccrabctl allow add --rule <rule-id> --path <process-path> \
+    --reason "<why>" [--ttl 7d]        # see: maccrabctl allow --help
+maccrabctl rules reload                # the engine applies saved entries on reload
 maccrabctl allow list
 ```
 

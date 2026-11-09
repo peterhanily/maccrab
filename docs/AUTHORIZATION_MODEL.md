@@ -27,7 +27,6 @@ single-user Mac). That user cannot mutate the engine's state directly:
 
 - A direct write to the root-owned DB fails with `SQLITE_READONLY`.
 - A POSIX signal from a user process to the root sysext returns `EPERM`.
-- `/tmp` is not a shared namespace between the user and the sysext sandbox.
 
 So control actions are issued as **request files dropped into a privileged
 inbox** that the engine drains. This is the only supported user → engine

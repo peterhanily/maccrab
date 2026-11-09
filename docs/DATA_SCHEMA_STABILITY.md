@@ -55,7 +55,8 @@ Schema evolution is handled by `SchemaMigrator`, keyed on SQLite's
   `CREATE TABLE/INDEX … IF NOT EXISTS` — they add columns/tables, they do not
   drop or rewrite existing ones. The migrator treats "duplicate column" /
   "already exists" errors as idempotent re-runs, so applying the full set to an
-  existing DB is safe. (No migration uses `DROP`/destructive `UPDATE`.)
+  existing DB is safe. (The one `DROP` is `events.db` migration 7, which
+  removes two redundant indexes; no migration runs a destructive `UPDATE`.)
 - **Co-resident-store aware.** Because `user_version` is a *single* per-file
   counter but multiple stores can share a file, each store always re-applies its
   own migrations idempotently rather than trusting the shared counter — a fix
@@ -71,12 +72,17 @@ latest known migration version — i.e. an **older** MacCrab opened a DB written
 a **newer** one (a Sparkle/MDM downgrade, a rolled-back update onto an existing
 evidence store, or a mixed-version fleet) — the migrator surfaces the skew
 **loudly** via both an optional callback and `os.Logger.warning`
-(`com.maccrab.agent` / `schema-migrator`), then proceeds additively. Because
-migrations are additive and reads/writes are column-explicit, the old binary
-keeps working, but it may not understand columns/semantics a newer build added.
+(`com.maccrab.agent` / `schema-migrator`), then proceeds additively. Within
+one store format, because migrations are additive and reads/writes are
+column-explicit, the old binary keeps working, but it may not understand
+columns/semantics a newer build added.
 A caller that wants to hard-refuse can check `current > latest` and throw
 `SchemaMigrationError.unknownVersion`. This is the only "downgrade" handling: it
 is a *warning*, not a guarantee that an old binary reads a new schema correctly.
+Reinstalling an older app over an upgraded store is not a supported rollback:
+`events.db` migration 8, which v1.22.0 and later apply, changed the event-store
+format and added a deliberate barrier against event-store writes by older
+builds (see `docs/ROLLBACK_RUNBOOK.md`).
 
 The practical takeaway for integrators: because the binary itself negotiates the
 schema (and only forward), there is no version of the on-disk format you can pin
@@ -97,7 +103,8 @@ the database files.** An acquirer's SOC should integrate exclusively through:
 - **MCP read tools (`maccrab-mcp`).** A programmatic, versioned read surface for
   AI agents and integrations: `get_alerts`, `get_alert_detail`, `get_events`,
   `get_campaigns`, `get_traces` / `get_trace_detail`, `hunt`, `get_status`,
-  `get_security_score`, `get_audit_log`, etc. (~80 tools).
+  `get_security_score`, `get_audit_log`, etc. (67 built-in tools, plus 30 that
+  forensic plugins add on a default release install).
   (`Sources/maccrab-mcp/`.)
 
 - **OCSF / SIEM output sinks.** For streaming/forwarding into a SIEM, MacCrab

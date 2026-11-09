@@ -30,22 +30,27 @@ After downloading `MacCrab-v<version>.dmg` from the GitHub releases page
 
 ### 1. SHA256 checksum
 
-Each release's checksum is published in two places:
-- The `Casks/maccrab.rb` file in the main repo (search for `sha256 "..."`)
-- The GitHub release notes (when published with `--notes-file`; the
-  checksum is included in the release commit that bumps the cask)
+From v1.22.0 on, each release's checksum is published in three places:
+- The GitHub release page, as the `sha256:` digest listed beside the DMG
+  asset
+- `release.json` at the release tag
+  (`https://github.com/peterhanily/maccrab/blob/v<version>/release.json`,
+  field `dmg.sha256`); for the newest release it is also served at
+  `https://maccrab.com/release.json`
+- `Casks/maccrab.rb` at the release tag (search for `sha256 "..."`)
 
 ```bash
 shasum -a 256 ~/Downloads/MacCrab-v<version>.dmg
-# Compare to the value in Casks/maccrab.rb on main
+# Compare to the value at the v<version> tag, not on main
+# (main moves on to the next release):
+curl -fsS https://raw.githubusercontent.com/peterhanily/maccrab/v<version>/Casks/maccrab.rb | grep sha256
 ```
 
 If they don't match, **stop**. Don't open the DMG.
 
 ### 2. Code signature
 
-Apple's `codesign` confirms the DMG was signed by Peter Hanily's
-Developer ID and hasn't been mutated since signing:
+`codesign -dvv` shows the identity that signed the DMG:
 
 ```bash
 codesign -dvv ~/Downloads/MacCrab-v<version>.dmg
@@ -55,13 +60,22 @@ Expected fragments in the output:
 - `Authority=Developer ID Application: Peter Hanily (79S425CW99)`
 - `TeamIdentifier=79S425CW99`
 
+`-dvv` only displays the signature. To check that the DMG hasn't been
+modified since it was signed:
+
+```bash
+codesign --verify --strict --verbose=2 ~/Downloads/MacCrab-v<version>.dmg
+```
+
+Expected: `valid on disk` and `satisfies its Designated Requirement`.
+
 ### 3. Notarization ticket
 
 Apple's notarization confirms the binary passed Apple's malware scan and
 the ticket has been stapled to the DMG:
 
 ```bash
-spctl -a -t open --context context:primary-signature ~/Downloads/MacCrab-v<version>.dmg
+spctl -a -v -t open --context context:primary-signature ~/Downloads/MacCrab-v<version>.dmg
 ```
 
 Expected: `accepted` and `source=Notarized Developer ID`.
@@ -80,6 +94,7 @@ After mounting the DMG, repeat steps 2 + 3 against the `.app` bundle:
 
 ```bash
 codesign -dvv "/Volumes/MacCrab v<version>/MacCrab.app"
+codesign --verify --deep --strict --verbose=2 "/Volumes/MacCrab v<version>/MacCrab.app"
 spctl -a -t exec -vv "/Volumes/MacCrab v<version>/MacCrab.app"
 ```
 
@@ -96,21 +111,30 @@ Existing installs receive updates via Sparkle from the appcast at
 `sparkle:edSignature` attribute computed over the DMG bytes with the
 private half of the EdDSA key listed above.
 
-Sparkle inside MacCrab.app verifies the signature **before** unpacking
-the update. A swapped DMG fails verification and the update aborts. To
-inspect the appcast manually:
+Sparkle inside MacCrab.app verifies the signature after it downloads and
+unpacks the update and **before** it installs anything. A swapped DMG
+fails verification and is not installed, unless the attacker can also
+change the appcast and either has the Sparkle signing key or can sign
+with MacCrab's Developer ID certificate. To inspect a version's appcast
+entry manually (`xmllint` ships with macOS):
 
 ```bash
-curl -sS https://maccrab.com/appcast.xml | head -60
+curl -fsS -o appcast.xml https://maccrab.com/appcast.xml
+xmllint --xpath "//item[*[local-name()='shortVersionString']='<version>']/enclosure/@*" appcast.xml
 ```
 
-Find the `<sparkle:edSignature="...">` and `length="..."` attributes for
-the version you're checking. The download URL in the same `<item>`
-points to the GitHub release asset.
+This prints the `url`, `length` and `sparkle:edSignature` attributes of
+that version's `<enclosure>`; "XPath set is empty" means the feed has no
+item for it. Use the version without the `v` (for example `1.22.6`); the
+item's `<sparkle:version>` is the four-part build number (for example
+`1.22.6.1644`). The URL points to the GitHub release asset, and `length`
+should equal the DMG's size in bytes (`stat -f %z <dmg>`).
 
 The Sparkle EdDSA public key in `MacCrabApp-Info.plist` is set at
 build time and is part of the signed app bundle, so a tampered
-update server can't substitute its own key.
+update server can't substitute its own key unless the attacker also has
+the Sparkle signing key or can sign with MacCrab's Developer ID
+certificate.
 
 ## Endpoint Security entitlement status
 

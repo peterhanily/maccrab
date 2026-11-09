@@ -13,13 +13,13 @@ its sharp edges.
 ## Compatibility targets and candidate evidence
 
 The matrix below describes compatibility targets and historical development
-coverage, not qualification of every new candidate. As of the 2026-09-07
-v1.22.0 source review, ordinary automated tests have run on macOS 26.6.2
-Apple Silicon. The new candidate has no completed installed-host qualification
-on any OS or architecture. Ventura, Sonoma, Sequoia, Tahoe, and Intel install,
-upgrade, activation, relaunch, and recovery results must be recorded against
-the exact candidate before claiming that matrix is qualified. A deployment
-target or universal binary proves neither installation nor sensor behavior.
+coverage, not qualification of every release. v1.22.6 (build 1.22.6.1644)
+passed installed-host runtime qualification and plugin-containment
+qualification on macOS 27.2 (build 26B123) on Apple Silicon. No other macOS
+version and no Intel Mac was installed-host qualified for v1.22.6, so treat
+Ventura, Sonoma, Sequoia, Tahoe, and Intel install, upgrade, activation,
+relaunch, and recovery as untested for this release. A deployment target or
+universal binary proves neither installation nor sensor behavior.
 
 ## Summary matrix
 
@@ -29,15 +29,17 @@ target or universal binary proves neither installation nor sensor behavior.
 | 13 Ventura | macOS 13 | **Minimum supported** | The `.macOS(.v13)` floor in `Package.swift`. APIs gate to 13+ (e.g. dyld shared cache under the Cryptexes paths is a macOS-13+ layout). |
 | 14 Sonoma | macOS 14 | Supported | One `if #available(macOS 14.0, *)` path exists in `MacCrabApp` for a 14+ UI affordance; everything else degrades gracefully on 13. |
 | 15 Sequoia | macOS 15 | Supported | No version-specific gating beyond the 13 floor. |
-| 26 Tahoe | macOS 26 | **Actively tested** | The current development/validation target. Several caveats are already encoded in code comments (below). |
-| 27 (next) | — | **Untested horizon** | See risks below. There is **no runtime upper-version gate** (stated as a known limitation). |
+| 26 Tahoe | macOS 26 | Supported | The earlier development/validation target; not installed-host qualified for v1.22.6. Several caveats are already encoded in code comments (below). |
+| 27 | macOS 27 | **Qualified for v1.22.6 on 27.2 (Apple Silicon)** | Installed-host runtime and plugin-containment qualification ran on macOS 27.2 (build 26B123). Treat other 27.x builds as untested. See risks below. There is **no runtime upper-version gate** (stated as a known limitation). |
 
 - **Minimum supported macOS: Ventura 13.** Enforced structurally by the
   SwiftPM platform declaration `platforms: [.macOS(.v13)]` — the toolchain will
   not build or run the product below this floor.
-- **Active test target: macOS 26 (Tahoe).** The Tier-B sandbox containment
-  corpus and on-device validation are run here; multiple code comments are tagged
-  "Corpus finding, macOS 26."
+- **v1.22.6 qualification target: macOS 27.2 on Apple Silicon.** Installed-host
+  runtime qualification and the Tier-B plugin-containment qualification ran
+  there. The sandbox runtime base was first tuned against the containment corpus
+  on macOS 26 (Tahoe); code comments such as "Corpus finding, macOS 26" record
+  that work.
 
 ---
 
@@ -89,25 +91,28 @@ macOS:
 - **Endpoint Security (ES) framework.** The detection engine is an ES System
   Extension. New macOS major versions periodically change ES event types,
   message semantics, entitlement gating, and System Extension activation flows.
-  A macOS 27 that changes the ES API or its entitlement requirements is the most
-  likely source of a "protection active but no events" regression and would
+  A macOS release that changes the ES API or its entitlement requirements is the
+  most likely source of a "protection active but no events" regression and would
   require re-validation of the sysext activation path.
 
 - **Sandbox surface (`sandbox_init` / SBPL).** The Tier-B plugin sandbox uses
   `sandbox_init` with a hand-built SBPL profile whose required runtime base
-  (Mach services + dyld cache paths) was *empirically tuned against macOS 26*.
+  (Mach services + dyld cache paths) was *empirically tuned against macOS 26*;
+  v1.22.6 passed plugin-containment qualification on macOS 27.2.
   Apple does not treat the SBPL or the set of services a process needs at
   startup as a stable contract, and `sandbox_init` itself is a long-deprecated
-  API kept deliberately in a binary MacCrab owns and signs. A macOS 27 that
+  API kept deliberately in a binary MacCrab owns and signs. A macOS release that
   changes the base set of services/paths a sandboxed process needs would
   manifest as plugin-startup SIGABRTs and require re-tuning the runtime base
-  against the corpus on a 27 device. (The first-party / sideload execution lanes
+  against the corpus on that release. (The first-party / sideload execution lanes
   are independently trust-gated, so this risk is scoped to third-party plugin
   execution, not core detection.)
 
 Because both subsystems are validated empirically per-OS rather than via a stable
-API contract, **macOS 27 should be treated as untested until the corpus and
-sysext activation are re-run on a 27 device.**
+API contract, a macOS release is untested until the corpus and sysext activation
+are re-run on it. For v1.22.6, installed-host runtime qualification and
+plugin-containment qualification ran on macOS 27.2 (build 26B123) on Apple
+Silicon; **other macOS 27 builds should be treated as untested.**
 
 ---
 

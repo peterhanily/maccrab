@@ -52,8 +52,7 @@ struct V2Sidebar: View {
                 // labels only render when the sidebar is expanded;
                 // collapsed mode shows icons only without headers.
                 // This is the lighter version of the v1.11.x sidebar
-                // consolidation proposal (`plans/2026-05-07-dashboard-
-                // overhaul.md`) — that one collapses to 7 workspaces;
+                // consolidation proposal, which collapses to 7 workspaces;
                 // v1.11.1 keeps the surface stable and just adds
                 // grouping. Same surface, less visual noise.
                 VStack(spacing: 2) {
