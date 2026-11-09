@@ -837,15 +837,10 @@ stage_assemble() {
     # installer-time in-place corpus mutation.
     cp -r "$STAGING_DIR/compiled_rules" "$APP/Contents/Resources/compiled_rules"
 
-    ICON_SRC="$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns"
-    if [ -f "$ICON_SRC" ]; then
-        cp "$ICON_SRC" "$APP/Contents/Resources/AppIcon.icns"
-    fi
-    # Container-only recompression of the pinned icon's ic10 PNG stream. All
-    # resolutions, pixels and non-IDAT metadata are preserved; source is never
-    # modified. Run before any app signature and refuse unexpected icon bytes.
-    /usr/bin/python3 -I -B "$PROJECT_DIR/scripts/compress-staged-icon.py" \
-        --staging-dir "$STAGING_DIR" --icon "$APP/Contents/Resources/AppIcon.icns"
+    # The pixel-art icon is drawn by scripts/render-app-icon.py and is small
+    # enough to ship as is. The disk-image step pins its exact bytes, and CI
+    # checks it against the generator.
+    cp "$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
     # v1.12.0 RC2 fix (B9): copy SPM-generated MacCrab_MacCrabCore.bundle
     # into the .app's Resources directory. Without this, Bundle.module
@@ -1758,6 +1753,14 @@ stage_publish() {
     RELEASE_DMG_ATTACH_ATTEMPTED=1
     /usr/bin/hdiutil attach "$RW_DMG" -nobrowse -mountpoint "$DMG_MNT" >/dev/null
     /usr/bin/ditto "$STAGING_DIR/" "$DMG_MNT/"
+    # Lay out the Finder window: the background with the arrow and the steps,
+    # icon positions, the crab as the volume icon, and the extras hidden (they
+    # stay on the volume). Every input is pinned, and the validation below also
+    # covers the files this adds.
+    /usr/bin/python3 -I -B "$PROJECT_DIR/scripts/style-dmg-window.py" \
+        --mount "$DMG_MNT" --volume-name "MacCrab v$VERSION" \
+        --background "$PROJECT_DIR/scripts/dmg-window/background.tiff" \
+        --icon "$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns"
     # Validate/normalize the actual mounted HFS payload too.  This catches a
     # transport-time mode regression rather than assuming staging modes survive
     # ditto.  The helper is idempotent after loose-payload pruning.
@@ -1781,7 +1784,10 @@ stage_publish() {
     RELEASE_DMG_ATTACH_ATTEMPTED=0
     /bin/rmdir "$DMG_MNT"
     RELEASE_DMG_MOUNT_PATH=""
-    /usr/bin/hdiutil convert "$RW_DMG" -format UDZO -ov -o "$DMG_PATH" >/dev/null
+    # LZMA (ULMO, macOS 10.15 and later) makes the download about a third smaller
+    # than zlib (UDZO). MacCrab needs macOS 13, and Sparkle and Homebrew attach
+    # the image with hdiutil.
+    /usr/bin/hdiutil convert "$RW_DMG" -format ULMO -ov -o "$DMG_PATH" >/dev/null
     /bin/rm -f "$RW_DMG"
     RELEASE_RW_DMG_PATH=""
 

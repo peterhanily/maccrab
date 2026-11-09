@@ -3,6 +3,24 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **The disk image opens to a styled install window.** MacCrab and the
+  Applications folder sit on the website's warm black, joined by a crab-orange
+  pixel arrow, above three steps: drag MacCrab to Applications, open it from
+  there, and allow it in System Settings. The crab is the disk's icon. The
+  README, licenses and `install.sh` stay on the disk image, hidden from the
+  window, so `install.sh` keeps its documented path; the licenses also ship
+  inside the app. The release build lays the window out with
+  `scripts/style-dmg-window.py`, which pins its art, the icon and its vendored
+  ds_store and mac_alias libraries.
+- **The app icon is the pixel crab from maccrab.com** on a warm black rounded
+  square. macOS 26 and later showed the previous round icon inside a grey tile.
+  `scripts/render-app-icon.py` draws every size, and CI checks the shipped icon
+  against it. At 62 KB instead of 1 MB, the icon no longer needs the release's
+  recompression step, which is removed with its fixtures.
+
 ## [1.22.6] — 2026-11-04
 
 ### Added

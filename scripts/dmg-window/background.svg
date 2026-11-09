@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <!-- MacCrab disk image window background. Finder draws the two icons (centres 180,142 and 480,142) and their names. -->
+  <rect width="660" height="400" fill="#110E0D"/>
+  <!-- Pixel arrow from MacCrab to Applications, strengthening toward the head -->
+  <g fill="#FF6A3D" shape-rendering="crispEdges">
+    <rect x="266" y="139" width="6" height="6" opacity="0.32"/>
+    <rect x="278" y="139" width="6" height="6" opacity="0.39"/>
+    <rect x="290" y="139" width="6" height="6" opacity="0.45"/>
+    <rect x="302" y="139" width="6" height="6" opacity="0.52"/>
+    <rect x="314" y="139" width="6" height="6" opacity="0.59"/>
+    <rect x="326" y="139" width="6" height="6" opacity="0.65"/>
+    <rect x="338" y="139" width="6" height="6" opacity="0.72"/>
+    <rect x="350" y="139" width="6" height="6" opacity="0.79"/>
+    <rect x="362" y="139" width="6" height="6" opacity="0.85"/>
+    <rect x="374" y="139" width="6" height="6" opacity="0.92"/>
+    <rect x="392" y="139" width="6" height="6"/>
+    <rect x="386" y="133" width="6" height="6"/>
+    <rect x="380" y="127" width="6" height="6"/>
+    <rect x="386" y="145" width="6" height="6"/>
+    <rect x="380" y="151" width="6" height="6"/>
+  </g>
+  <!-- Steps: the first in crab orange, the later two dimmer -->
+  <g fill="none" stroke-width="2" shape-rendering="crispEdges">
+    <rect x="109" y="287" width="22" height="22" stroke="#FF6A3D"/>
+    <rect x="319" y="287" width="22" height="22" stroke="#6E3A28"/>
+    <rect x="529" y="287" width="22" height="22" stroke="#6E3A28"/>
+  </g>
+  <g text-anchor="middle">
+    <g font-family="IBM Plex Mono" font-size="12" font-weight="500">
+      <text x="120" y="302.5" fill="#FF8A63">1</text>
+      <text x="330" y="302.5" fill="#B86549">2</text>
+      <text x="540" y="302.5" fill="#B86549">3</text>
+    </g>
+    <g font-family="IBM Plex Sans" font-size="13.5">
+      <text x="120" y="336" font-weight="500" fill="#FF8A63">Drag MacCrab to Applications</text>
+      <text x="330" y="336" font-weight="400" fill="#B86549">Open it from Applications</text>
+      <text x="540" y="336" font-weight="400" fill="#B86549">Allow it in System Settings</text>
+    </g>
+  </g>
+</svg>

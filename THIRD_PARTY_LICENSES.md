@@ -15,6 +15,8 @@ component notices. Their origins and file digests are recorded in
 | [PyYAML](https://github.com/yaml/pyyaml) | 6.0.3 | [MIT](ThirdPartyNotices/PyYAML-LICENSE) | Pure-Python modules bundled with the in-app rule compiler |
 | [Swift Testing](https://github.com/swiftlang/swift-testing) | Supplied by the qualified Swift toolchain | Apache-2.0 with Runtime Library Exception | Test targets only; not shipped |
 | [SwiftSyntax](https://github.com/swiftlang/swift-syntax) | Supplied within the toolchain macro implementation | Apache-2.0 with Runtime Library Exception | Build tooling; no independent SwiftPM dependency or shipped library |
+| [ds_store](https://github.com/dmgbuild/ds_store) | 1.3.3 | [MIT](vendor/dmg-layout/ds_store/LICENSE) | Build tooling for the disk image's Finder window; not shipped |
+| [mac_alias](https://github.com/dmgbuild/mac_alias) | 2.2.3 | [MIT](vendor/dmg-layout/mac_alias/LICENSE) | Build tooling for the disk image's Finder window; not shipped |
 
 SwiftPM pins are recorded in [Package.resolved](Package.resolved). SQLCipher
 source provenance is recorded in [Sources/CSQLCipher/PROVENANCE](Sources/CSQLCipher/PROVENANCE).
@@ -24,8 +26,8 @@ PyYAML and release-tool hashes are recorded in
 
 Release assembly copies this index, MacCrab's license, and `ThirdPartyNotices/`
 into `MacCrab.app/Contents/Resources/` before code signing, and also includes
-them at the DMG root. Sparkle's full license is retained here even when its
-framework packaging layout changes.
+them at the DMG root, hidden from the Finder window. Sparkle's full license is
+retained here even when its framework packaging layout changes.
 
 ## Swift Testing and SwiftSyntax build tooling
 
@@ -39,6 +41,15 @@ Both upstream projects are copyright the Swift project authors and licensed
 under Apache-2.0 with the Runtime Library Exception. Their full notices are
 available in the [Swift Testing license](https://github.com/swiftlang/swift-testing/blob/main/LICENSE.txt)
 and [SwiftSyntax license](https://github.com/swiftlang/swift-syntax/blob/main/LICENSE.txt).
+
+## Disk image window build tooling
+
+`scripts/style-dmg-window.py` writes the release disk image's Finder window
+settings with ds_store and mac_alias (copyright Alastair Houghton; mac_alias
+also Russell Keith-Magee; MIT). Both are copied unmodified from their PyPI
+source distributions into [vendor/dmg-layout](vendor/dmg-layout/), with their
+licenses and source hashes, and the script pins every file. They run only during
+the release build and are not bundled in MacCrab releases.
 
 ---
 

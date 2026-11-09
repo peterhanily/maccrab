@@ -1,0 +1,16 @@
+Finder window layout libraries for the release disk image.
+
+Used only at build time by scripts/style-dmg-window.py; nothing here ships in
+MacCrab.app. Both packages are copied unmodified from their PyPI source
+distributions (MIT, by Alastair Houghton). scripts/style-dmg-window.py pins the
+SHA-256 of every file below and refuses to run if any differs.
+
+ds_store 1.3.3
+  https://files.pythonhosted.org/packages/source/d/ds_store/ds_store-1.3.3.tar.gz
+  sha256 a7380896ea1e880f7ba07c5cdc24bd1530fb86836cad0be531f3e80e2d721ac5
+  files: src/ds_store/*.py and LICENSE
+
+mac_alias 2.2.3
+  https://files.pythonhosted.org/packages/source/m/mac_alias/mac_alias-2.2.3.tar.gz
+  sha256 1c7fa367687d66979f2ce4d1a8b2716cf1c9fb811741cab3cf3ca356555c2beb
+  files: src/mac_alias/*.py and LICENSE
