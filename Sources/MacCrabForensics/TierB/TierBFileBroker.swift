@@ -22,8 +22,10 @@
 //     the now-signature-bound manifest (see TierBRegistry resolve() manifest-
 //     TOCTOU fix). The relative path under a root is attacker-influenced, so the
 //     per-component O_NOFOLLOW walk is the load-bearing control.
-//   - Symlinks ABOVE an allowed root (inside the operator-declared manifest
-//     prefix) are trusted; the walk hardens the part a plugin can influence.
+//   - Ancestors of the allowed root are walked too: a user-replaceable alias
+//     must not route an otherwise harmless declaration to a live TCC store.
+//     Only the three fixed, root-owned macOS /var, /tmp and /etc aliases are
+//     accepted; their exact destinations are verified before expansion.
 //   - Read-only in this build (no write/exec brokering). A hostile plugin is
 //     bounded on COUNT (maxRequests), SIZE (maxPathBytes), and TIME (per-read
 //     SO_RCVTIMEO + an absolute maxServeSeconds), and cannot SIGPIPE-kill the
@@ -126,8 +128,9 @@ public final class TierBFileBroker: @unchecked Sendable {
 
     // MARK: - Pure resolution (testable without sockets)
 
-    /// A request path is well-formed for the broker: absolute, no NUL, no `..`
-    /// component, within the byte cap.
+    /// A request path is well-formed for the broker: absolute, no NUL, no dot
+    /// components or empty segments, within the byte cap. Guard and open must
+    /// interpret exactly the same spelling; repeated slashes cannot bypass TCC.
     /// Depth ceiling for a brokered request path. Legitimate brokered reads are
     /// shallow; a depth cap is cheaper than walking thousands of components in
     /// safe-open (STAB-2) and bounds the per-component open-dir fd usage.
@@ -135,6 +138,7 @@ public final class TierBFileBroker: @unchecked Sendable {
 
     public static func isValidRequestPath(_ p: String, maxBytes: Int) -> Bool {
         guard !p.isEmpty, p.utf8.count <= maxBytes, p.hasPrefix("/") else { return false }
+        guard !p.contains("//"), p == "/" || !p.hasSuffix("/") else { return false }
         if p.unicodeScalars.contains(where: { $0.value == 0 }) { return false }
         let segs = p.split(separator: "/", omittingEmptySubsequences: true)
         guard segs.count <= maxPathDepth else { return false }   // STAB-2
@@ -182,7 +186,13 @@ public final class TierBFileBroker: @unchecked Sendable {
     /// this guard). No-op when the policy carries no `tccGuardHome` (non-TCC
     /// contexts / pure unit tests).
     private static func guardTCC(_ served: String, root: String, policy: Policy) -> (path: String, root: String)? {
-        if let home = policy.tccGuardHome, TCCProtectedPaths.isProtected(served, home: home) { return nil }
+        if let home = policy.tccGuardHome {
+            let normalizedHome = Policy.normalizeRoot(home)
+            guard isValidRequestPath(normalizedHome, maxBytes: Int(PATH_MAX) - 1) else { return nil }
+            if TCCProtectedPaths.isProtected(systemAliasExpansion(served), home: systemAliasExpansion(normalizedHome)) {
+                return nil
+            }
+        }
         return (served, root)
     }
 
@@ -203,33 +213,61 @@ public final class TierBFileBroker: @unchecked Sendable {
 
     // MARK: - Safe open (the load-bearing control)
 
-    /// Open `path` read-only BENEATH `root` such that no symlink anywhere in the
-    /// relative path can redirect the open outside the root, and only a regular
-    /// file is returned. Returns an owned fd (caller closes) or -1.
-    ///
-    /// Each relative component is openat'd with O_NOFOLLOW, so a symlink (final
-    /// or intermediate) fails with ELOOP. The final fd is fstat-checked for
-    /// S_IFREG (no dir/fifo/device/symlink). `root` itself is the operator-
-    /// declared, signature-bound prefix and is opened as a directory.
+    /// Only these OS aliases have a supported meaning. This lexical projection
+    /// also keeps the pure TCC guard consistent across /var and /private/var.
+    /// The descriptor walk separately verifies any alias actually used.
+    private static func systemAliasExpansion(_ path: String) -> String {
+        for alias in ["var", "tmp", "etc"] {
+            let prefix = "/" + alias
+            if path == prefix || path.hasPrefix(prefix + "/") { return "/private" + path }
+        }
+        return path
+    }
+
+    private static func verifiedSystemAliasExpansion(_ path: String, rootFD: Int32) -> String? {
+        let expanded = systemAliasExpansion(path)
+        guard expanded != path else { return path }
+        let alias = String(path.dropFirst().prefix { $0 != "/" })
+        var parent = stat(), entry = stat()
+        guard fstat(rootFD, &parent) == 0, parent.st_uid == 0,
+              parent.st_mode & 0o022 == 0,
+              fstatat(rootFD, alias, &entry, AT_SYMLINK_NOFOLLOW) == 0,
+              entry.st_uid == 0, entry.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK) else { return nil }
+        var bytes = [UInt8](repeating: 0, count: Int(PATH_MAX))
+        let count = bytes.withUnsafeMutableBytes { readlinkat(rootFD, alias, $0.baseAddress!, $0.count) }
+        guard count > 0, count < bytes.count,
+              let target = String(bytes: bytes.prefix(count), encoding: .utf8),
+              target == "private/" + alias || target == "/private/" + alias else { return nil }
+        // The entry is owned by root beneath non-writable /. Replacing it is
+        // outside the unprivileged plugin threat model; arbitrary aliases never
+        // reach this exception. All expanded components still use O_NOFOLLOW.
+        return expanded
+    }
+
+    /// Open a single-link regular file beneath the declared root. Walk every
+    /// absolute component from /, including ancestors of that root, with
+    /// O_NOFOLLOW. Special files cannot block the broker before fstat rejects
+    /// them. Returns an owned fd (caller closes) or -1.
     public static func safeOpenReadOnly(path: String, root: String) -> Int32 {
-        guard let rel = relativeComponents(of: path, under: root), !rel.isEmpty else { return -1 }
-        // O_NOFOLLOW on the ROOT too: a hostile plugin that can replace the root's
-        // final component with a symlink (e.g. swap its own scratch dir for a
-        // symlink to ~/Library) must NOT escape — every relative O_NOFOLLOW below
-        // anchors to this descriptor, so the root open itself must refuse a
-        // symlinked final component. (A legit symlinked PREFIX — /var → /private/var
-        // — is unaffected: O_NOFOLLOW only guards the final component, and prefix
-        // components are above the plugin's confinement.)
-        let rootFD = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard isValidRequestPath(path, maxBytes: Int(PATH_MAX) - 1),
+              isValidRequestPath(root, maxBytes: Int(PATH_MAX) - 1),
+              path != "/", relativeComponents(of: path, under: root) != nil else { return -1 }
+        // A manifest read root may name one exact regular file. Equality does
+        // not grant its parent: every absolute component is still walked below,
+        // and the final fstat rejects directories (including a declared root).
+        let rootFD = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard rootFD >= 0 else { return -1 }
         var dirFDs: [Int32] = [rootFD]
         defer { for f in dirFDs { close(f) } }   // closes root + intermediates; returned file fd is separate
+        guard let expanded = verifiedSystemAliasExpansion(path, rootFD: rootFD),
+              isValidRequestPath(expanded, maxBytes: Int(PATH_MAX) - 1) else { return -1 }
+        let components = expanded.split(separator: "/").map(String.init)
         var cur = rootFD
-        for (i, comp) in rel.enumerated() {
+        for (i, comp) in components.enumerated() {
             guard !comp.isEmpty, comp != ".", comp != ".." else { return -1 }
-            let isLast = (i == rel.count - 1)
+            let isLast = (i == components.count - 1)
             if isLast {
-                let fd = openat(cur, comp, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                let fd = openat(cur, comp, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
                 guard fd >= 0 else { return -1 }     // ELOOP if the final component is a symlink
                 var st = stat()
                 if fstat(fd, &st) != 0 || (UInt32(st.st_mode) & UInt32(S_IFMT)) != UInt32(S_IFREG) {
@@ -243,7 +281,7 @@ public final class TierBFileBroker: @unchecked Sendable {
                 if st.st_nlink != 1 { close(fd); return -1 }
                 return fd
             } else {
-                let fd = openat(cur, comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                let fd = openat(cur, comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
                 guard fd >= 0 else { return -1 }     // ELOOP / not-a-dir
                 dirFDs.append(fd)
                 cur = fd

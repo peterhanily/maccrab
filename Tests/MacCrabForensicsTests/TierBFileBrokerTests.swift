@@ -95,6 +95,44 @@ struct TierBFileBrokerTests {
         if fd >= 0 { #expect(Self.readAll(fd) == "hello-broker"); close(fd) }
     }
 
+    @Test("an exact-file manifest root serves its selected regular file without granting siblings or directories")
+    func exactFileRoot() throws {
+        let base = try Self.makeTree()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let selected = base + "/sub/data.txt"
+        let policy = TierBFileBroker.Policy(allowedReadRoots: [selected])
+        let resolved = try #require(TierBFileBroker.resolve(selected, policy: policy))
+        #expect(resolved.path == selected && resolved.root == selected)
+        let fd = TierBFileBroker.safeOpenReadOnly(path: resolved.path, root: resolved.root)
+        #expect(fd >= 0)
+        if fd >= 0 { #expect(Self.readAll(fd) == "hello-broker"); close(fd) }
+        #expect(TierBFileBroker.resolve(base + "/sub/sibling.txt", policy: policy) == nil)
+        #expect(TierBFileBroker.resolve(base + "/outside.txt", policy: policy) == nil)
+        #expect(TierBFileBroker.safeOpenReadOnly(path: base + "/sub", root: base + "/sub") == -1)
+        #expect(TierBFileBroker.safeOpenReadOnly(path: selected + "/child", root: selected) == -1)
+        #expect(TierBFileBroker.safeOpenReadOnly(path: "/", root: "/") == -1)
+        // The existing root-directory scope can still serve an explicitly
+        // selected descendant; only the root directory itself is refused.
+        let absolute = TierBFileBroker.safeOpenReadOnly(path: selected, root: "/")
+        #expect(absolute >= 0)
+        if absolute >= 0 { close(absolute) }
+    }
+
+    @Test("exact-file roots retain final and ancestor alias refusals")
+    func exactFileAliases() throws {
+        let base = try Self.makeTree()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let finalAlias = base + "/alias.txt"
+        let ancestorAlias = base + "/alias-dir"
+        try FileManager.default.createSymbolicLink(atPath: finalAlias, withDestinationPath: base + "/sub/data.txt")
+        try FileManager.default.createSymbolicLink(atPath: ancestorAlias, withDestinationPath: base + "/sub")
+        for selected in [finalAlias, ancestorAlias + "/data.txt"] {
+            let policy = TierBFileBroker.Policy(allowedReadRoots: [selected])
+            let resolved = try #require(TierBFileBroker.resolve(selected, policy: policy))
+            #expect(TierBFileBroker.safeOpenReadOnly(path: resolved.path, root: resolved.root) == -1)
+        }
+    }
+
     @Test("safeOpen: a symlink as the FINAL component is refused (ELOOP, no escape)")
     func safeOpenFinalSymlink() throws {
         let root = try Self.makeTree()
@@ -130,6 +168,91 @@ struct TierBFileBrokerTests {
         defer { try? FileManager.default.removeItem(atPath: symRoot) }
         // Without O_NOFOLLOW on the root open this returned a valid fd to SECRET.
         #expect(TierBFileBroker.safeOpenReadOnly(path: symRoot + "/data.txt", root: symRoot) == -1)
+    }
+
+    @Test("broker refuses an ancestor alias to a protected store before delivering bytes")
+    func safeOpenAncestorAliasToProtectedStore() throws {
+        let base = try Self.makeTree()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let home = base + "/dummy-home"
+        let library = home + "/Library"
+        try FileManager.default.createDirectory(atPath: library + "/Messages", withIntermediateDirectories: true)
+        try "DUMMY-PROTECTED-BYTES".write(toFile: library + "/Messages/chat.db", atomically: true, encoding: .utf8)
+        let alias = base + "/external-alias"
+        try FileManager.default.createSymbolicLink(atPath: alias, withDestinationPath: library)
+        let declared = alias + "/Messages"
+        let requested = declared + "/chat.db"
+        let policy = TierBFileBroker.Policy(allowedReadRoots: [declared], tccGuardHome: home)
+        // The lexical declaration alone looks harmless. Opening the root with
+        // only a final-component O_NOFOLLOW used to expose these dummy bytes.
+        let resolved = try #require(TierBFileBroker.resolve(requested, policy: policy))
+        #expect(TierBFileBroker.safeOpenReadOnly(path: resolved.path, root: resolved.root) == -1)
+    }
+
+    @Test("safeOpen rejects a FIFO without waiting for a writer", .timeLimit(.minutes(1)))
+    func safeOpenFIFOIsNonblocking() throws {
+        let root = try Self.makeTree()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let fifo = root + "/fifo"
+        try #require(mkfifo(fifo, 0o600) == 0)
+        let finished = DispatchSemaphore(value: 0)
+        let worker = Thread {
+            let fd = TierBFileBroker.safeOpenReadOnly(path: fifo, root: root)
+            #expect(fd == -1)
+            if fd >= 0 { close(fd) }
+            finished.signal()
+        }
+        worker.start()
+        let result = finished.wait(timeout: .now() + .seconds(1))
+        if result == .timedOut {
+            // Release a regressed blocking implementation so this test does not
+            // strand a worker; the assertion below still records the defect.
+            let writer = open(fifo, O_RDWR | O_NONBLOCK | O_CLOEXEC)
+            defer { if writer >= 0 { close(writer) } }
+            #expect(finished.wait(timeout: .now() + .seconds(1)) == .success)
+        }
+        #expect(result == .success)
+    }
+
+    @Test("safeOpen validates the absolute root and path before its descriptor walk")
+    func safeOpenMalformedRoots() throws {
+        let root = try Self.makeTree()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        #expect(TierBFileBroker.safeOpenReadOnly(path: root + "/sub/../sub/data.txt", root: root) == -1)
+        #expect(TierBFileBroker.safeOpenReadOnly(path: root + "/sub/data.txt", root: ".") == -1)
+        #expect(TierBFileBroker.safeOpenReadOnly(path: root + "/sub/data.txt\0ignored", root: root) == -1)
+    }
+
+    @Test("TCC direct-read guard treats fixed macOS aliases and canonical spellings equally")
+    func systemAliasesCannotBypassTCCGuard() {
+        let policy = TierBFileBroker.Policy(allowedReadRoots: ["/private/var/example-home"], tccGuardHome: "/var/example-home")
+        #expect(TierBFileBroker.resolve("/private/var/example-home/Library/Messages/chat.db", policy: policy) == nil)
+        let reverse = TierBFileBroker.Policy(allowedReadRoots: ["/var/example-home"], tccGuardHome: "/private/var/example-home")
+        #expect(TierBFileBroker.resolve("/var/example-home/Library/Messages/chat.db", policy: reverse) == nil)
+    }
+
+    @Test("repeated slash spellings cannot bypass the protected-path guard")
+    func repeatedSlashesCannotExposeProtectedBytes() throws {
+        let base = try Self.makeTree()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let home = base + "/dummy-home"
+        try FileManager.default.createDirectory(atPath: home + "/Library/Messages", withIntermediateDirectories: true)
+        try "DUMMY-PROTECTED-BYTES".write(toFile: home + "/Library/Messages/chat.db", atomically: true, encoding: .utf8)
+        let policy = TierBFileBroker.Policy(allowedReadRoots: [home], tccGuardHome: home)
+        for path in [home + "/Library/Messages/chat.db", home + "//Library/Messages/chat.db",
+                     home + "/Library//Messages/chat.db", home + "/Library/Messages//chat.db",
+                     base + "//dummy-home/Library/Messages/chat.db"] {
+            let resolved = TierBFileBroker.resolve(path, policy: policy)
+            #expect(resolved == nil)
+            if let resolved {
+                let fd = TierBFileBroker.safeOpenReadOnly(path: resolved.path, root: resolved.root)
+                if fd >= 0 { close(fd) }
+                #expect(fd == -1)
+            }
+        }
+        #expect(TierBFileBroker.safeOpenReadOnly(path: home + "//Library/Messages/chat.db", root: home) == -1)
+        let malformedHome = TierBFileBroker.Policy(allowedReadRoots: [home], tccGuardHome: base + "//dummy-home")
+        #expect(TierBFileBroker.resolve(home + "/Library/Messages/chat.db", policy: malformedHome) == nil)
     }
 
     @Test("safeOpen: a hardlinked file inside the root is refused (st_nlink check)")
