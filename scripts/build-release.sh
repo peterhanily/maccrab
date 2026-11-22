@@ -55,6 +55,14 @@ set -euo pipefail
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
+# Every xcrun shim, /usr/bin/python3 included, exports SDKROOT as xcrun's
+# default SDK when none is set. Once macOS 27.2's Command Line Tools are
+# installed, that default is their MacOSX27.2.sdk, which the pinned Xcode
+# 26.4.1 compiler cannot read: every phase run through run-ci-phase.py then
+# failed at the first manifest compile. Pin the selected Xcode's own macOS SDK
+# before any shim runs, as the native fixtures already do (423aa45e).
+SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)
+export SDKROOT
 SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" && /bin/pwd -P)"
 PROJECT_DIR="$(/usr/bin/dirname "$SCRIPT_DIR")"
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
