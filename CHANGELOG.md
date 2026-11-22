@@ -3,9 +3,50 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.22.7] — 2026-11-22
+
+### Security
+- **The plugin file broker no longer opens protected files through other
+  spellings of their path.** A Tier-B plugin's brokered read spelled with a
+  repeated slash (`~//Library/Messages/…`), or through `/var` instead of
+  `/private/var`, passed the protected-path check and was still opened. A
+  plugin whose declared folder covered the home folder could therefore read a
+  TCC-protected store through MacCrab's Full Disk Access. The check and the
+  open now interpret the same spelling, `/var`, `/tmp` and `/etc` are expanded
+  only through their verified root-owned links, and an exact-file root serves
+  that file alone.
+- **The threat model no longer says the Rave catalog signing key is kept
+  offline.** It is kept in a keychain on the maintainer's Mac.
+
+### Fixed
+- **A store over its size limit at startup no longer stops the engine.** When
+  startup could not bring `events.db` or `alerts.db` under its storage
+  boundary, the engine exited before collecting anything, and launchd relaunched
+  it into the same refusal about every ten seconds. One v1.22.6 install was
+  reported stuck in that loop for 16 days, with no detection and no way to
+  reclaim space; v1.22.6 had fixed the same loop for TraceGraph only. The
+  engine now starts with that store's writes paused: detection and
+  notifications run, runtime size-cap maintenance keeps reclaiming, and the
+  dashboard's storage banner reports the refused writes. Integrity, key and
+  policy failures still stop startup.
+- **Ten rules now match the `/private` paths Endpoint Security reports.**
+  `/tmp`, `/var` and `/etc` are links into `/private`, so a payload in
+  `$TMPDIR` arrives as `/private/var/folders/…`. Eleven path prefixes named
+  only the `/var` or `/etc` form and could never match; `shadow_hash_access`,
+  a high-severity credential rule, could not fire at all.
+- **`go run` and `go test` binaries no longer fire
+  `adhoc_signed_app_execution_from_user_dir`.**
+- **The broker no longer hangs on a FIFO** under a plugin's declared folder.
+- **`install.sh` refuses arguments.** With two MacCrab disk images mounted,
+  `sudo /Volumes/MacCrab\ v*/install.sh` ran the first image's installer and
+  installed whichever version sorted first. It now exits with instructions
+  before doing anything.
 
 ### Changed
+- **The disk image is smaller and carries nothing from the build Mac.** It is
+  compressed with LZMA (57.7 MB instead of 85.3 MB for the v1.22.6 payload),
+  and the provisioning profiles no longer carry their download URL and
+  quarantine record.
 - **The disk image opens to a styled install window.** MacCrab and the
   Applications folder sit on the website's warm black, joined by a crab-orange
   pixel arrow, above three steps: drag MacCrab to Applications, open it from
