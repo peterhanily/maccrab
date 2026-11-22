@@ -213,7 +213,7 @@ struct AlertsSizeCapRecoveryTests {
             "let alertStartupRecovery = await recoverAlertStoreBeforeProducers("
         ))
         let guardReady = try #require(setup.range(of:
-            "guard alertStartupRecovery.writableBeforeProducers else"
+            "if alertStartupRecovery.writableBeforeProducers {"
         ))
         let finalProbe = try #require(setup.range(of:
             "reprobeAlertStoreAtActivationBoundary("
@@ -606,6 +606,129 @@ struct AlertsSizeCapRecoveryTests {
         )
         #expect(result.writableBeforeProducers)
         #expect(result.passes == 1)
+    }
+
+    /// v1.22.7 field report: a v1.22.6 engine whose alerts family startup
+    /// could not bring under its boundary exited before any producer, and
+    /// launchd relaunched it into the same refusal for 16 days. The cap here
+    /// is below the schema-only floor, so no amount of pruning can converge.
+    @Test("an alert family startup cannot converge reaches a degraded start, not an exit")
+    func unconvergeableAlertFamilyStartsWithWritesPaused() async throws {
+        let directory = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
+        let reserve = 8 * mib
+        let databasePath = directory.appendingPathComponent("alerts.db").path
+        let store = try AlertStore(
+            directory: directory.path,
+            storagePolicy: SQLitePersistentStorePolicy(
+                maxFootprintBytes: 64 * mib,
+                freeSpaceFloorBytes: 0,
+                transactionReserveBytes: reserve,
+                storageVolumePath: directory.path
+            )
+        )
+        for index in 0..<50 {
+            try await store.insert(alert: makeAlert(index))
+        }
+
+        // One page above the reserve: the ordinary write boundary is 4 KiB,
+        // which an alerts.db with its schema can never fit.
+        let boundary = AlertsSizeCapBoundary(
+            nominalCapBytes: reserve + 4_096,
+            transactionReserveBytes: reserve
+        )
+        _ = try await store.updateStorageAdmission(SQLitePersistentStorePolicy(
+            maxFootprintBytes: boundary.nominalCapBytes,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: reserve,
+            storageVolumePath: directory.path
+        ))
+
+        let result = await recoverAlertStoreBeforeProducers(
+            alertStore: store,
+            dbPath: databasePath,
+            alertCapBytes: 4_096,
+            evidenceCapBytes: 4_096,
+            boundary: boundary,
+            maximumPasses: 3
+        )
+        // The state the field engine booted into on every relaunch.
+        #expect(!result.writableBeforeProducers)
+
+        // The activation reprobe refuses for space, which now degrades.
+        var activationError: Error?
+        do {
+            _ = try await reprobeAlertStoreAtActivationBoundary(
+                alertStore: store,
+                dbPath: databasePath,
+                boundary: boundary
+            )
+        } catch {
+            activationError = error
+        }
+        let refusal = try #require(activationError,
+            "an over-boundary family must not pass activation admission")
+        #expect(preIngestionStorageFailureAllowsDegradedStart(refusal),
+                "space pressure must degrade, got \(refusal)")
+
+        // Degraded means paused, not bypassed: the over-cap store still
+        // refuses a new alert.
+        await #expect(throws: (any Error).self) {
+            try await store.insert(alert: makeAlert(999))
+        }
+    }
+
+    @Test("only space pressure degrades startup; a policy mismatch or other failure still stops it")
+    func degradedStartIsLimitedToSpacePressure() {
+        #expect(preIngestionStorageFailureAllowsDegradedStart(
+            SQLitePersistentStoreAdmissionError.footprintLimit(
+                footprintBytes: 162_794_280,
+                reserveBytes: 56_912_010,
+                maxFootprintBytes: 209_715_200
+            )
+        ))
+        #expect(preIngestionStorageFailureAllowsDegradedStart(
+            SQLitePersistentStoreAdmissionError.lowFreeSpace(
+                freeBytes: 0, floorBytes: 1, reserveBytes: 1,
+                requiredFreeBytes: 2
+            )
+        ))
+        #expect(!preIngestionStorageFailureAllowsDegradedStart(
+            SQLitePersistentStoreAdmissionError.invalidPolicy(
+                maxBytes: 0, floorBytes: 0, reserveBytes: 0
+            )
+        ))
+        #expect(!preIngestionStorageFailureAllowsDegradedStart(
+            CocoaError(.fileReadNoPermission)
+        ))
+    }
+
+    @Test("startup no longer exits when a primary store cannot converge")
+    func startupDegradesInsteadOfExitingOnUnconvergedStores() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let setup = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/DaemonSetup.swift"
+            ),
+            encoding: .utf8
+        )
+        for component in ["eventStartupRecovery", "alertStartupRecovery"] {
+            let decision = try #require(setup.range(of:
+                "if \(component).writableBeforeProducers {"
+            ))
+            let window = setup[decision.lowerBound...].prefix(1_500)
+            #expect(window.contains("Self.startWithStorageWritesPaused("),
+                    "\(component) must degrade")
+            #expect(!window.contains("failPreIngestionStorage("),
+                    "\(component) must not exit the engine")
+        }
+        #expect(setup.components(separatedBy:
+            "catch where preIngestionStorageFailureAllowsDegradedStart(error)"
+        ).count - 1 == 2, "both activation reprobes degrade on space pressure")
     }
 
     @Test("family in cap-reserve dead zone is reclaimed and no-write reprobe recovers")

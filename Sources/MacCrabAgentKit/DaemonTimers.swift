@@ -960,6 +960,36 @@ private enum PreIngestionStorageRecoveryError: LocalizedError {
     }
 }
 
+/// v1.22.7: whether a primary store's pre-producer storage failure may start
+/// the engine with that store's writes paused instead of stopping startup.
+///
+/// A relaunch does not free space. Through v1.22.6 an events or alerts family
+/// that startup could not bring under its boundary exited the engine before
+/// any producer started, and launchd relaunched it into the same refusal
+/// about every ten seconds: one field install sat in that loop for 16 days
+/// with no detection, no inbox and no runtime maintenance. Space pressure now
+/// degrades the way TraceGraph has since v1.21.6-rc.36. Admission keeps
+/// refusing writes, runtime size-cap maintenance keeps reclaiming, and the
+/// refused inserts raise the dashboard's storage banner. A policy mismatch is
+/// a wiring fault, not space pressure, and still stops startup.
+func preIngestionStorageFailureAllowsDegradedStart(_ error: Error) -> Bool {
+    if let admission = error as? SQLitePersistentStoreAdmissionError {
+        return admission.isOperationalPressure
+    }
+    if let recovery = error as? PreIngestionStorageRecoveryError {
+        switch recovery {
+        case .startupTargetNotReached, .activationBoundaryExceeded:
+            return true
+        case .admissionPolicyMismatch:
+            return false
+        }
+    }
+    if let store = error as? EventStoreError, case .diskFull = store {
+        return true
+    }
+    return false
+}
+
 /// Run a finite number of maintenance passes, stopping immediately when the
 /// helper cannot run, an exact family measurement fails, or a failed normal
 /// reprobe follows a real maintenance pass with no physical progress. A

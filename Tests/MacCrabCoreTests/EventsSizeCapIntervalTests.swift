@@ -713,13 +713,13 @@ struct EventsSizeCapIntervalTests {
             "let eventStartupRecovery = await recoverEventStoreBeforeProducers("
         ))
         let eventGuard = try #require(setup.range(of:
-            "guard eventStartupRecovery.writableBeforeProducers else"
+            "if eventStartupRecovery.writableBeforeProducers {"
         ))
         let alertRecovery = try #require(setup.range(of:
             "let alertStartupRecovery = await recoverAlertStoreBeforeProducers("
         ))
         let alertGuard = try #require(setup.range(of:
-            "guard alertStartupRecovery.writableBeforeProducers else"
+            "if alertStartupRecovery.writableBeforeProducers {"
         ))
         let finalMarker = try #require(setup.range(of:
             "// FINAL_PRE_INGESTION_STORAGE_ACTIVATION_BOUNDARY"

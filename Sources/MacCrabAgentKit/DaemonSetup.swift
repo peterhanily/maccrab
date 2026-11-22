@@ -272,6 +272,16 @@ enum DaemonSetup {
         )
     }
 
+    /// v1.22.7: start a primary store with its writes paused rather than exit.
+    /// See `preIngestionStorageFailureAllowsDegradedStart` for why. Ordinary
+    /// admission already refuses the store's writes; runtime size-cap
+    /// maintenance and its watchdogs keep reclaiming; each refused insert is
+    /// counted in storage_errors.json, which raises the dashboard banner.
+    static func startWithStorageWritesPaused(component: String, detail: String) {
+        logger.fault("\(component, privacy: .public) is over its startup storage boundary: \(detail, privacy: .public). Starting with its writes paused; detection and alerting run, and runtime maintenance keeps reclaiming.")
+        print("WARNING: \(component) is over its startup storage boundary; starting with its writes paused: \(detail)")
+    }
+
     enum DatabaseQuarantineAuthorizationError: Error, LocalizedError {
         case missingSQLiteFailureDetails(database: String)
         case notExplicitCorruption(database: String, details: SQLiteFailureDetails)
@@ -1251,7 +1261,9 @@ enum DaemonSetup {
                 )
             }
         )
-        guard eventStartupRecovery.writableBeforeProducers else {
+        if eventStartupRecovery.writableBeforeProducers {
+            logger.notice("EventStore ordinary priority+file admission proved before collector construction after \(eventStartupRecovery.passes) bounded pass(es); footprint=\(eventStartupRecovery.lastFootprintBytes ?? -1), file_boundary=\(eventStartupBoundary.fileLaneAdmissionBoundaryBytes), target=\(eventStartupBoundary.targetBytes)")
+        } else {
             let detail = [
                 "passes=\(eventStartupRecovery.passes)",
                 "last_footprint=\(eventStartupRecovery.lastFootprintBytes ?? -1)",
@@ -1259,11 +1271,9 @@ enum DaemonSetup {
                 "reason=\(eventStartupRecovery.reason)",
                 "15-minute forensic floor preserved",
             ].joined(separator: ", ")
-            try DaemonBootstrap.failPreIngestionStorage(
-                supportDir: supportDir,
-                startedAt: startedAt,
+            Self.startWithStorageWritesPaused(
                 component: "EventStore",
-                reason: detail
+                detail: detail
             )
         }
         eventRetentionBudgetHealth.recordSweep(
@@ -1271,7 +1281,6 @@ enum DaemonSetup {
                 eventStartupRecovery.lastFootprintBytes,
             boundary: eventStartupBoundary
         )
-        logger.notice("EventStore ordinary priority+file admission proved before collector construction after \(eventStartupRecovery.passes) bounded pass(es); footprint=\(eventStartupRecovery.lastFootprintBytes ?? -1), file_boundary=\(eventStartupBoundary.fileLaneAdmissionBoundaryBytes), target=\(eventStartupBoundary.targetBytes)")
         Self.logBootStep(label: "after_eventstore_recovery", startedAt: startedAt)
 
         let alertStartupBoundary = AlertsSizeCapBoundary(
@@ -1288,21 +1297,20 @@ enum DaemonSetup {
             evidenceCapBytes: legacyEvidenceCapBytes,
             boundary: alertStartupBoundary
         )
-        guard alertStartupRecovery.writableBeforeProducers else {
+        if alertStartupRecovery.writableBeforeProducers {
+            logger.notice("AlertStore ordinary admission proved before collector construction after \(alertStartupRecovery.passes) bounded pass(es); footprint=\(alertStartupRecovery.lastFootprintBytes ?? -1), boundary=\(alertStartupBoundary.hardAdmissionBoundaryBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")
+        } else {
             let detail = [
                 "passes=\(alertStartupRecovery.passes)",
                 "last_footprint=\(alertStartupRecovery.lastFootprintBytes ?? -1)",
                 "probe_error=\(alertStartupRecovery.lastProbeError ?? "none")",
                 "reason=\(alertStartupRecovery.reason)",
             ].joined(separator: ", ")
-            try DaemonBootstrap.failPreIngestionStorage(
-                supportDir: supportDir,
-                startedAt: startedAt,
+            Self.startWithStorageWritesPaused(
                 component: "AlertStore",
-                reason: detail
+                detail: detail
             )
         }
-        logger.notice("AlertStore ordinary admission proved before collector construction after \(alertStartupRecovery.passes) bounded pass(es); footprint=\(alertStartupRecovery.lastFootprintBytes ?? -1), boundary=\(alertStartupBoundary.hardAdmissionBoundaryBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")
         Self.logBootStep(label: "after_alertstore_recovery", startedAt: startedAt)
 
         Self.writeBootPhase(supportDir: supportDir, phase: "stores_ready", startedAt: startedAt)
@@ -1771,15 +1779,20 @@ enum DaemonSetup {
         // edge. EventStore/AlertStore install their fresh ordinary-write probes
         // at this same marker; keep the graph reprobe last so no background
         // submission or collector can race the retained proof.
-        let eventActivationProof: EventStoreActivationProof
         do {
-            eventActivationProof = try await
+            let eventActivationProof = try await
                 reprobeEventStoreAtActivationBoundary(
                     eventStore: eventStore,
                     dbPath: supportDir + "/events.db",
                     boundary: eventStartupBoundary,
                     retentionBudgetHealth: eventRetentionBudgetHealth
                 )
+            logger.notice("EventStore activation-boundary proof refreshed immediately before producers; footprint=\(eventActivationProof.footprintBytes), target=\(eventStartupBoundary.targetBytes)")
+        } catch where preIngestionStorageFailureAllowsDegradedStart(error) {
+            Self.startWithStorageWritesPaused(
+                component: "EventStore",
+                detail: "activation-boundary priority+file reprobe failed: \(error.localizedDescription)"
+            )
         } catch {
             try DaemonBootstrap.failPreIngestionStorage(
                 supportDir: supportDir,
@@ -1789,16 +1802,20 @@ enum DaemonSetup {
                 failure: error
             )
         }
-        logger.notice("EventStore activation-boundary proof refreshed immediately before producers; footprint=\(eventActivationProof.footprintBytes), target=\(eventStartupBoundary.targetBytes)")
 
-        let alertActivationProof: AlertStoreActivationProof
         do {
-            alertActivationProof = try await
+            let alertActivationProof = try await
                 reprobeAlertStoreAtActivationBoundary(
                     alertStore: alertStore,
                     dbPath: supportDir + "/alerts.db",
                     boundary: alertStartupBoundary
                 )
+            logger.notice("AlertStore activation-boundary proof refreshed immediately before producers; footprint=\(alertActivationProof.footprintBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")
+        } catch where preIngestionStorageFailureAllowsDegradedStart(error) {
+            Self.startWithStorageWritesPaused(
+                component: "AlertStore",
+                detail: "activation-boundary ordinary reprobe failed: \(error.localizedDescription)"
+            )
         } catch {
             try DaemonBootstrap.failPreIngestionStorage(
                 supportDir: supportDir,
@@ -1808,7 +1825,6 @@ enum DaemonSetup {
                 failure: error
             )
         }
-        logger.notice("AlertStore activation-boundary proof refreshed immediately before producers; footprint=\(alertActivationProof.footprintBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")
 
         // rc.36: the activation-boundary proof only applies when TraceGraph is
         // actually running. When the store is unavailable this run, materialization
