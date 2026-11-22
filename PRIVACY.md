@@ -240,6 +240,34 @@ By default no plugins from the store are installed. Third-party execution is
 on by default for plugins you install with publisher trust; creating
 `~/Library/Application Support/MacCrab/tierb_third_party_disabled` turns it off.
 
+### AI agents connected over MCP (opt-in)
+
+`maccrab-mcp` makes no network connections itself. But when you register it
+with an AI agent, such as Claude Code, Codex or Cursor, the agent passes the
+tool results to its model provider, under **that provider's** terms, not
+MacCrab's. Nothing is registered by default.
+
+What an agent can read:
+
+- **Reading needs no permission.** The capability tiers (`config`, `authoring`,
+  `response`) gate only changes. With every tier off, an agent can still read
+  alerts, events, process trees, traces and status.
+- **Results include sensitive detail:** process and file paths, the first 200
+  characters of command lines, network endpoints, alert descriptions and
+  evidence.
+- **Redaction is best-effort.** The text of most results goes through the same
+  heuristic scrubber as cloud LLM prompts (user names, home paths, IP
+  addresses, host names, emails, key-shaped tokens). It is not a guarantee, and
+  structured evidence fields are passed through unchanged so that evidence
+  stays intact.
+- **Forensic and plugin results are not scrubbed at all.** `forensics_*` scan
+  and case tools, session bundles, and plugin tools (`imessage_*`, `mail_*`,
+  `safari_*`, …) return evidence as collected, which can include messages,
+  mail and browsing history. Running them needs the `response` tier.
+
+Connect only agents whose provider you would trust with that activity.
+Removing `maccrab-mcp` from the agent's configuration stops all access.
+
 ## Data Retention
 
 Retention is bounded by **both** a time horizon and a size cap under the

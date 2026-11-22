@@ -253,7 +253,7 @@ Key UX features:
 - "What To Do" actionable guidance on alerts and campaigns
 - Campaign dismiss/restore workflow
 - 14 language localizations. Every locale's `Localizable.strings` has the same 1836 keys and a `Localizable.stringsdict` for plurals, and every `String(localized:)` key the UI references has an en.lproj row (`LocalizationCoverageTests.missingEnKeyBudget` is 0). prerelease-check.sh reports 95-98% of each locale's values as differing from English. The source scans cover only some SwiftUI constructs, so they do not prove every visible string is localized; see TRANSLATION.md
-- WCAG AA contrast compliance (documented in code)
+- WCAG AA contrast targets, checked by hand each release (docs/ACCESSIBILITY.md); no automated accessibility audit runs in CI
 
 ## Daemon Configuration
 

@@ -217,9 +217,21 @@ severity **high**, MITRE `T1562.001` Defense Evasion). It fires on:
 - **Granting an MCP agent capability tier** (false→true transition only);
 - **Disabling an Endpoint Security event subscription**
   (`subscribe_file_open_events` / `subscribe_introspection_events` → false),
-  which blinds a class of kernel telemetry; and
+  which blinds a class of kernel telemetry;
+- **Clamping a detection threshold** that a config write tried to weaken past
+  its safe range;
+- **A request to turn network enrichment on**, which this request plane may
+  only turn off (the request is refused);
+- **Disabling a prevention module**;
+- **Deleting alerts** through a `prune-alerts` request;
 - **Enabling a remote (non-loopback) LLM endpoint**, after which engine prompt
-  traffic may leave the host.
+  traffic may leave the host; and
+- **Changing the LLM endpoint or provider**.
+
+It does **not** fire when a built-in rule is disabled or its severity is
+lowered (`builtin-rule-setting`), when an installed user rule replaces a
+built-in rule with the same id, or when the number of loaded rules falls. Those
+changes weaken detection one rule at a time and are only audit-logged.
 
 This alert is:
 
@@ -265,9 +277,10 @@ Code running **as the console user** (e.g. post-compromise malware, or a
 malicious helper the user launched) can issue any inbox verb that the user could
 issue from the dashboard, because the gate authenticates the *UID*, not user
 presence or intent. MacCrab's compensating controls are **detection, not
-prevention**: every action is audit-logged, and detection-weakening actions
-raise a high-severity, noise-filter-bypassing self-protection alert. Operators
-and SOC teams should monitor `dashboard_audit.log` and the
+prevention**: every action is audit-logged, and the detection-weakening actions
+listed above raise a high-severity, noise-filter-bypassing self-protection
+alert. Disabling, downgrading or replacing an individual rule raises no alert,
+so operators and SOC teams should monitor `dashboard_audit.log` as well as the
 `maccrab.self-defense.*` alert class.
 
 The public inbox's freshness and replay checks do not cover one case: another
@@ -297,7 +310,8 @@ This is an intentional non-goal for this release, not an oversight:
   already draw.
 - Accountability, not role separation, is how this release bounds an authorized
   principal: **every** mutation is audit-logged (`dashboard_audit.log`) and
-  detection-weakening changes raise a self-protection alert (see above).
+  the detection-weakening changes listed above raise a self-protection alert;
+  rule-level changes do not.
 
 **RBAC / role separation would only be required if a fleet console ships** — a
 multi-operator, multi-host management plane where distinct humans need distinct,

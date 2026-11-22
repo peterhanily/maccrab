@@ -17,6 +17,14 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   that file alone.
 - **The threat model no longer says the Rave catalog signing key is kept
   offline.** It is kept in a keychain on the maintainer's Mac.
+- **PRIVACY.md now says what an AI agent connected over MCP can read.** Reads
+  need no capability tier; results include paths, command lines and alert
+  evidence, scrubbed only best-effort; forensic and plugin results are not
+  scrubbed; and the agent sends them to its model provider under that
+  provider's terms.
+- **AUTHORIZATION_MODEL.md lists every action that raises the self-protection
+  alert,** and says that disabling, downgrading or replacing an individual rule
+  raises none.
 
 ### Fixed
 - **A store over its size limit at startup no longer stops the engine.** When

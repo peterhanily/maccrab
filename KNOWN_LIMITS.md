@@ -76,7 +76,7 @@ two of four 30-second intervals, or any loss during a spike in file activity, ma
 sensor as degraded in the app's System workspace and in `maccrabctl status` and raises a
 Sensor Degraded alert.
 
-**Owner:** engine · **Target:** v1.22.7.
+**Owner:** engine · **Target:** a release after v1.22.7.
 
 ### Sequence rules at capacity
 
@@ -119,7 +119,7 @@ The bounds:
 - **Exact timestamp ties.** When two processes' entries have exactly the same timestamp,
   an alert may cite either one as evidence. Whether the rule fires does not change.
 
-**Owner:** engine · **Target:** v1.22.7.
+**Owner:** engine · **Target:** a release after v1.22.7.
 
 ### Sequence chains completed on a late middle step
 
@@ -147,7 +147,7 @@ the heartbeat). The bounds:
   response action configured for the rule use the middle step's process and file, not the
   last step's.
 
-**Owner:** engine · **Target:** v1.22.7.
+**Owner:** engine · **Target:** a release after v1.22.7.
 
 ### Detection › Rules and rule overrides
 
@@ -195,7 +195,7 @@ the heartbeat). The bounds:
   you chose, so it re-enables the rule at the recorded severity. Choose Default in the
   rule's severity control to return to the current default.
 
-**Owner:** app and CLI · **Target:** v1.22.7.
+**Owner:** app and CLI · **Target:** a release after v1.22.7.
 
 ### Other detection limits
 
@@ -205,7 +205,7 @@ the heartbeat). The bounds:
   started it, such as a forked subshell or a program the shell runs in a new process,
   does not complete the reverse-shell sequence rule.
 
-**Owner:** engine · **Target:** v1.22.7.
+**Owner:** engine · **Target:** a release after v1.22.7.
 
 ### Manual update checks do nothing until the dashboard opens
 
@@ -217,7 +217,7 @@ v1.22.6 and earlier. Scheduled daily checks are not affected.
 **Workaround.** Click the menu-bar crab, choose **Show Dashboard**, then choose
 **Check for Updates…**.
 
-**Owner:** app · **Target:** v1.22.7.
+**Owner:** app · **Target:** a release after v1.22.7.
 
 ### Update prompts can open behind other windows
 
@@ -228,7 +228,7 @@ from **Check for Updates…** opens in front.
 **Workaround.** Click the menu-bar crab, choose **Show Dashboard**, then choose
 **Check for Updates…**; this brings a waiting prompt to the front.
 
-**Owner:** app · **Target:** v1.22.7.
+**Owner:** app · **Target:** a release after v1.22.7.
 
 ### Homebrew and in-app updates overlap
 
@@ -242,7 +242,7 @@ release, `brew upgrade` would install that release over a newer app, and no down
 supported (see
 [There is no qualified downgrade target](#there-is-no-qualified-downgrade-target-for-this-database-format)).
 
-**Owner:** app and release · **Target:** v1.22.7.
+**Owner:** app and release · **Target:** a release after v1.22.7.
 
 ---
 
@@ -281,7 +281,7 @@ claim.
 preserving immutable evidence, bounded memory, and alert/evidence status. A major-version
 change is not established as necessary by the current implementation.
 
-**Owner:** engine · **Target:** v1.22.7.
+**Owner:** engine · **Target:** a release after v1.22.7.
 
 ### Startup validates retained event history
 
@@ -297,7 +297,7 @@ database-family cap and the volume's free-space floor. The separate schema budge
 removes the fixed index-size refusal; it does not make an over-cap or low-space legacy
 store self-recovering. When startup is refused, normal post-start retention cannot run.
 
-**Owner:** storage · **Target:** v1.22.7.
+**Owner:** storage · **Target:** a release after v1.22.7.
 
 ### There is no qualified downgrade target for this database format
 
