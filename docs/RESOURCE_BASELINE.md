@@ -7,12 +7,17 @@ measured summaries and limits, and commitments to the private accepted evidence.
 It contains no machine fingerprint, installed path, process ID, capture time,
 raw sample, workload transcript or operator identity.
 
-The reference was re-measured on 2026-11-04 with the four-executor fixed
-workload: 4,963,155 B/s average engine writes, 126,251,281 B/s maximum sampled
-write window, and 3.9% background GUI p95 CPU (percent of one core). The limits
-remain the September 2026 values that shipped v1.22.5 qualified under: 9 MiB/s,
-164 MiB/s and 19%, each 25% above its September measurement, rounded up. They
-are not re-derived from the new measurement, which ran on fresh factory stores:
+The reference was re-measured on 2026-11-23, after the qualification Mac moved
+from macOS 27.2 (26B123) to 27.2.1 (26B131): installed qualification requires
+the same Mac, macOS build and power source as the reference, so the 2026-11-04
+measurement could no longer qualify a candidate. With the four-executor fixed
+workload it measured 4,883,529 B/s average engine writes, 108,817,203 B/s
+maximum sampled write window, and 7.4% background GUI p95 CPU (percent of one
+core); on 27.2 the same reference measured 4,963,155 B/s, 126,251,281 B/s and
+3.9%. The limits remain the September 2026 values that shipped v1.22.5 qualified
+under: 9 MiB/s, 164 MiB/s and 19%, each 25% above its September measurement,
+rounded up. They are not re-derived from the new measurement, which ran on fresh
+factory stores:
 the [runtime quality contract](RUNTIME_QUALITY_CONTRACT.md) qualifies a
 candidate on its retained stores and does not let a wiped-data run rescue
 publication, and on its retained stores shipped v1.22.5 averaged 7,288,004 B/s

@@ -6,17 +6,17 @@
     "gui_p95_percent": 19
   },
   "measurements": {
-    "engine_average_write_bytes_per_second": 4963155.057777777,
-    "engine_max_window_write_bytes_per_second": 126251281.06666666,
-    "gui_p95_percent": 3.9
+    "engine_average_write_bytes_per_second": 4883528.817777778,
+    "engine_max_window_write_bytes_per_second": 108817203.2,
+    "gui_p95_percent": 7.4
   },
   "private_evidence": {
-    "canonical_sha256": "421c2021d588901d5e68bd15f947122a12d22b3662a751d34a87f97e873aaa55",
-    "sha256": "621ff5b99ab2a1d7ab689ffb7d2b29d0739456378af95e6a43f55b83bc03a805"
+    "canonical_sha256": "88a0b29b0b996bf7df48acdbdddef72a2248bca505715a225169e4eeb13f8181",
+    "sha256": "1147433abf0ddee10af5588f714dabdc0d9bc4ee91e81c1ab1491ce22a6e2cb9"
   },
   "recorder": {
     "path": "scripts/candidate-qualification.py",
-    "sha256": "dd7277e703e77bd02a358705eac9011c6b19c9d3f9a980328b7f66349807dc16"
+    "sha256": "5247bf04237dee40981fed46fd0486e489b85603e02241247cfe10523e580c72"
   },
   "reference": {
     "dmg_sha256": "9eb6f49389af910e9d1bad14b26d2510aebd2ed2e874bbd2f464f36b664c529b",
