@@ -3,6 +3,30 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.8] — 2026-11-24
+
+### Security
+- **The plugin file broker now refuses a protected file reached through
+  another spelling of its path.** v1.22.7 closed repeated-slash and
+  `/var`-versus-`/private/var` spellings, but a protected store such as
+  `~/Library/Messages/chat.db` is also reachable through the data volume's own
+  mount point (`/System/Volumes/Data/Users/<user>/Library/Messages/chat.db`),
+  and through a home folder that is itself a symbolic link. Those spellings
+  carry no symbolic link for the open walk to refuse and matched no protected
+  prefix, so a plugin whose declared folder covered one received the live file
+  and the consent sheet showed it as ordinary content. The path classifier now
+  folds the data-volume mount point, and the broker re-checks every file it
+  opens by the path the kernel reports for it, so the file's real location
+  decides whether it is served, whatever spelling asked for it.
+- **A request path component that hides a slash inside a Unicode grapheme
+  cluster is now refused.** Such a component kept its slash through the
+  broker's own split while the kernel still split it, so a symbolic link
+  planted in the plugin's own scratch folder could slip a segment past the
+  no-follow open walk and read outside the declared allowlist.
+
+### Notes
+- Detection, storage, install and update behaviour are unchanged from v1.22.7.
+
 ## [1.22.7] — 2026-11-22
 
 ### Security

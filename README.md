@@ -6,7 +6,7 @@
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
 [![Tests](https://img.shields.io/badge/tests-6112%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20shipped%20(stable%20tier%20on%20by%20default)-blueviolet)](#what-runs-on-a-default-install)
-[![Version](https://img.shields.io/badge/version-1.22.7-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.22.8-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -77,7 +77,7 @@ open /Applications/MacCrab.app
 #    into /usr/local/bin, and removes leftovers of pre-1.3 installs. The disk
 #    image is named after its version, so use the version you downloaded, and
 #    eject any other MacCrab disk image first:
-sudo "/Volumes/MacCrab v1.22.7/install.sh"
+sudo "/Volumes/MacCrab v1.22.8/install.sh"
 
 # 3. Open the dashboard, then approve the extension as in step 3 of Option A.
 open /Applications/MacCrab.app
@@ -756,10 +756,15 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-This source tree targets **v1.22.7**. See [CHANGELOG.md](CHANGELOG.md) for the full
+This source tree targets **v1.22.8**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.22.8** — the plugin file broker now refuses a protected file reached
+  through a second spelling of its path (the data volume's own mount point,
+  or a home folder reached through a link) by checking every file it opens
+  against the path the kernel reports, closing spellings the v1.22.7 fix did
+  not cover.
 - **v1.22.7** — a store that startup cannot bring under its size limit no
   longer stops the engine in a relaunch loop; the plugin file broker no longer opens protected
   files through other spellings of their path; ten rules match the `/private`

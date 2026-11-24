@@ -214,7 +214,7 @@ the heartbeat). The bounds:
 The **Check for Updates…** item in the menu-bar menu and the **Check for Updates** button
 in Settings › Detection Engine do nothing until the dashboard window has been opened once
 since MacCrab started: no update offer, no "up to date" message and no error. This affects
-v1.22.6 and earlier. Scheduled daily checks are not affected.
+v1.22.8 and earlier. Scheduled daily checks are not affected.
 
 **Workaround.** Click the menu-bar crab, choose **Show Dashboard**, then choose
 **Check for Updates…**.
