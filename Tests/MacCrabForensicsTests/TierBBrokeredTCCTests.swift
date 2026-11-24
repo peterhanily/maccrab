@@ -55,6 +55,52 @@ struct TierBBrokeredTCCTests {
         #expect(TCCProtectedPaths.isProtected("/Users/x/Library/Mail/foo", home: "/Users/x/"))
     }
 
+    @Test("classifier folds the Data volume's mount point: /System/Volumes/Data/Users/x is /Users/x")
+    func classifierFoldsTheDataVolumeSpelling() {
+        let home = "/Users/x"
+        #expect(TCCProtectedPaths.isProtected("/System/Volumes/Data/Users/x/Library/Messages/chat.db", home: home))
+        #expect(TCCProtectedPaths.isProtected("/System/Volumes/Data/Users/x/.ssh/id_rsa", home: home))
+        #expect(TCCProtectedPaths.isProtected("/System/Volumes/Data/Users/x/Library/SomeFutureStore/x", home: home))
+        #expect(TCCProtectedPaths.isProtected(
+            "/System/Volumes/Data/Library/Application Support/com.apple.TCC/TCC.db", home: home))
+        #expect(TCCProtectedPaths.isProtected("/system/volumes/DATA/Users/x/Library/Messages", home: home))
+        #expect(TCCProtectedPaths.isProtected("/Users/x/Library/Messages/chat.db", home: "/System/Volumes/Data/Users/x"))
+        // Only that mount point is folded: a look-alike component is a different path.
+        #expect(!TCCProtectedPaths.isProtected("/System/Volumes/DataX/Users/x/Library/Messages/chat.db", home: home))
+        #expect(!TCCProtectedPaths.isProtected("/System/Volumes/Data/Users/x/Documents/notes.txt", home: home))
+        #expect(!TCCProtectedPaths.isProtected(
+            "/System/Volumes/Data/Users/x/Library/Preferences/com.example.plist", home: home))
+        // The live-served ~/Library class follows the same fold, so consent sees it.
+        #expect(TCCProtectedPaths.isLiveServedHomeLibrary(
+            "/System/Volumes/Data/Users/x/Library/Preferences/com.example.plist", home: home))
+        #expect(!TCCProtectedPaths.isLiveServedHomeLibrary("/System/Volumes/Data/Users/x/Documents/notes.txt", home: home))
+    }
+
+    @Test("a home equal to the Data volume mount point still classifies stores under it")
+    func homeEqualToDataVolumeMountStillProtects() {
+        for home in ["/System/Volumes/Data", "/System/Volumes/Data/"] {
+            #expect(TCCProtectedPaths.isProtected("/System/Volumes/Data/.ssh/id_rsa", home: home), "\(home)")
+            #expect(TCCProtectedPaths.isProtected("/System/Volumes/Data/Library/Messages/chat.db", home: home), "\(home)")
+            #expect(TCCProtectedPaths.isProtected("/.ssh/id_rsa", home: home), "\(home)")   // same store, firmlink spelling
+            #expect(!TCCProtectedPaths.isProtected("/System/Volumes/Data/Documents/notes.txt", home: home), "\(home)")
+            #expect(TCCProtectedPaths.isLiveServedHomeLibrary("/System/Volumes/Data/Library/Preferences/x.plist", home: home), "\(home)")
+        }
+    }
+
+    @Test("prepare: a store declared through the Data volume's mount point is not a live direct root")
+    func planDeniesDataVolumeSpellingOfAStoreDirectory() throws {
+        let snapDir = URL(fileURLWithPath: NSTemporaryDirectory() + "snap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: snapDir) }
+        // A directory source cannot be snapshotted, and this one does not exist:
+        // either way it is denied, never handed to the broker as a direct root.
+        let store = "/System/Volumes/Data/Users/maccrab-no-such-user/Library/Messages"
+        let plan = BrokeredTCC.prepare(
+            manifestReadPaths: [store], snapshotDir: snapDir, home: "/Users/maccrab-no-such-user")
+        #expect(plan.directReadRoots.isEmpty)
+        #expect(plan.redirects.isEmpty)
+        #expect(plan.denied == [store])
+    }
+
     @Test("classifier is CASE-FOLDED: a lowercase 'library/messages' can't bypass on case-insensitive APFS")
     func classifierCaseInsensitive() {
         let home = "/Users/x"

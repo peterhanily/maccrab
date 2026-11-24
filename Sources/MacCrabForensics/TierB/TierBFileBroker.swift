@@ -142,14 +142,24 @@ public final class TierBFileBroker: @unchecked Sendable {
         if p.unicodeScalars.contains(where: { $0.value == 0 }) { return false }
         let segs = p.split(separator: "/", omittingEmptySubsequences: true)
         guard segs.count <= maxPathDepth else { return false }   // STAB-2
-        for seg in segs where seg == ".." || seg == "." { return false }
+        // String.split breaks on the Character "/", so a slash byte that
+        // Unicode fuses into a grapheme cluster (after a Prepend scalar, before
+        // a combining mark) stays inside a segment. The kernel's openat still
+        // splits it at the byte, following the earlier component without
+        // O_NOFOLLOW. Reject any segment that still carries a slash byte.
+        for seg in segs
+        where seg == ".." || seg == "." || seg.utf8.contains(UInt8(ascii: "/")) {
+            return false
+        }
         return true
     }
 
     /// Resolve a requested path against the policy → (servedPath, root) to open,
     /// or nil if denied. Applies brokered-TCC redirects first, then the read
-    /// allowlist. PURE.
-    public static func resolve(_ requested: String, policy: Policy) -> (path: String, root: String)? {
+    /// allowlist. PURE. `direct` is false for a snapshot redirect and true when
+    /// the broker will open the live path itself; only a direct grant is
+    /// re-classified after the open (`descriptorIsTCCProtected`).
+    public static func resolve(_ requested: String, policy: Policy) -> (path: String, root: String, direct: Bool)? {
         guard isValidRequestPath(requested, maxBytes: policy.maxPathBytes) else { return nil }
         // Brokered-TCC redirect: serve the snapshot instead of the live store.
         for rd in policy.redirects {
@@ -158,12 +168,12 @@ public final class TierBFileBroker: @unchecked Sendable {
             if requested == pfx {
                 // EXACT-file redirect (e.g. chat.db → its <sha>.db snapshot): serve
                 // the mapped file, rooted at its parent dir for the safe-open walk.
-                return (to, parentDirectory(of: to))
+                return (to, parentDirectory(of: to), false)
             }
             if requested.hasPrefix(pfx + "/") {
                 // DIRECTORY redirect: append the suffix beneath the snapshot root.
                 let suffix = String(requested.dropFirst(pfx.count))   // includes leading "/"
-                return (to + suffix, to)
+                return (to + suffix, to, false)
             }
         }
         for root in policy.allowedReadRoots {
@@ -185,7 +195,7 @@ public final class TierBFileBroker: @unchecked Sendable {
     /// `BrokeredTCC.prepare` then snapshots into a redirect (resolved above, before
     /// this guard). No-op when the policy carries no `tccGuardHome` (non-TCC
     /// contexts / pure unit tests).
-    private static func guardTCC(_ served: String, root: String, policy: Policy) -> (path: String, root: String)? {
+    private static func guardTCC(_ served: String, root: String, policy: Policy) -> (path: String, root: String, direct: Bool)? {
         if let home = policy.tccGuardHome {
             let normalizedHome = Policy.normalizeRoot(home)
             guard isValidRequestPath(normalizedHome, maxBytes: Int(PATH_MAX) - 1) else { return nil }
@@ -193,7 +203,35 @@ public final class TierBFileBroker: @unchecked Sendable {
                 return nil
             }
         }
-        return (served, root)
+        return (served, root, true)
+    }
+
+    /// True when the opened descriptor is a TCC-protected file by the path the
+    /// KERNEL reports for it. `guardTCC` classifies the request's spelling, and a
+    /// spelling is not the file: the Data volume is also mounted at
+    /// `/System/Volumes/Data`, and a home folder can itself be reached through a
+    /// link, so a protected store has spellings that match no protected prefix
+    /// and contain no symbolic link for the open walk to refuse. The descriptor's
+    /// own path is the same whichever spelling opened it. `home` is classified
+    /// both as given and as the kernel reports it. Fails closed (protected) when
+    /// the kernel gives no path for the file, or when the home cannot be opened
+    /// or resolved — for a home reached through a link the given spelling alone
+    /// is no prefix of the store's real path, so a lost kernel home could let a
+    /// protected file through.
+    static func descriptorIsTCCProtected(_ fd: Int32, home: String) -> Bool {
+        guard let opened = kernelPath(of: fd) else { return true }
+        let homeFD = open(home, O_RDONLY | O_DIRECTORY | O_NONBLOCK | O_CLOEXEC)
+        guard homeFD >= 0 else { return true }
+        defer { close(homeFD) }
+        guard let reportedHome = kernelPath(of: homeFD) else { return true }
+        let homes = [systemAliasExpansion(Policy.normalizeRoot(home)), reportedHome]
+        return homes.contains { TCCProtectedPaths.isProtected(opened, home: $0) }
+    }
+
+    private static func kernelPath(of fd: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(fd, F_GETPATH, &buffer) == 0 else { return nil }
+        return String(cString: buffer)
     }
 
     static func parentDirectory(of path: String) -> String {
@@ -319,6 +357,13 @@ public final class TierBFileBroker: @unchecked Sendable {
                 continue
             }
             let fd = Self.safeOpenReadOnly(path: resolved.path, root: resolved.root)
+            if fd >= 0, resolved.direct, let home = policy.tccGuardHome,
+               Self.descriptorIsTCCProtected(fd, home: home) {
+                // Another spelling of a protected store: never sent.
+                close(fd)
+                if maccrab_tierb_send_status(hostSocket, Status.denied.rawValue) != 0 { break }
+                continue
+            }
             if fd >= 0 {
                 let sent = maccrab_tierb_send_fd(hostSocket, fd, Status.ok.rawValue)
                 close(fd)                        // close BEFORE any break — never leak a host fd

@@ -30,6 +30,20 @@ struct TierBConsentSummaryTests {
         #expect(s.tccReads == ["/Users/x/Library/Messages/chat.db"])
     }
 
+    @Test("reading chat.db through the Data volume's mount point is disclosed like the normal spelling")
+    func tccReadThroughTheDataVolumeSpelling() {
+        let chat = "/System/Volumes/Data/Users/x/Library/Messages/chat.db"
+        let s = Self.manifest(reads: [chat], declared: "content").consentSummary(home: "/Users/x")
+        #expect(s.derivedHighestPrivacy == "personalComms")
+        #expect(s.readsPersonalComms)
+        #expect(s.tccReads == [chat])
+        #expect(s.privacyUnderdeclared)
+        // The live-served ~/Library class is elevated through that spelling too.
+        let prefs = Self.manifest(reads: ["/System/Volumes/Data/Users/x/Library/Preferences/com.example.plist"])
+            .consentSummary(home: "/Users/x")
+        #expect(prefs.derivedHighestPrivacy == "personalComms")
+    }
+
     @Test("MEDIUM: reading ~/.ssh/id_rsa is consent-gated like chat.db (flagged as a TCC read)")
     func credentialReadConsentGated() {
         // A credential store read must surface in the consent sheet with the same

@@ -107,9 +107,13 @@ public enum TCCProtectedPaths {
     /// `Library` at open time. A case-sensitive classifier would file that as a
     /// direct (live) read and leak the store; folding closes that bypass.
     /// Over-classification is safe (it only forces brokering).
+    ///
+    /// The Data volume's own mount point is folded away too (`folded`): this is
+    /// a classification of spellings, and the broker separately re-classifies
+    /// every direct grant by the path the kernel reports for the opened file.
     public static func isProtected(_ path: String, home: String) -> Bool {
-        let p = path.lowercased()
-        let h = (home.hasSuffix("/") ? String(home.dropLast()) : home).lowercased()
+        let p = folded(path)
+        let h = foldedHome(home)
         for rel in homeRelativePrefixes {
             let pre = (h + "/" + rel).lowercased()
             if p == pre || p.hasPrefix(pre + "/") { return true }
@@ -141,11 +145,35 @@ public enum TCCProtectedPaths {
     /// "content" — the broker opens it with the host's Full Disk Access — so the
     /// consent summary elevates it above plain content.
     public static func isLiveServedHomeLibrary(_ path: String, home: String) -> Bool {
-        let p = path.lowercased()
-        let h = (home.hasSuffix("/") ? String(home.dropLast()) : home).lowercased()
+        let p = folded(path)
+        let h = foldedHome(home)
         let lib = h + "/library"
         guard p == lib || p.hasPrefix(lib + "/") else { return false }
         return isHomeLibrarySafe(p, foldedHome: h)
+    }
+
+    /// Case-fold `path` and drop a leading `/System/Volumes/Data`. The Data
+    /// volume is mounted there as well as behind the firmlinks (`/Users`,
+    /// `/Library`, `/private`, …), so every file on it has a second spelling with
+    /// no symbolic link in it: `/System/Volumes/Data/Users/x/Library/Messages` is
+    /// `/Users/x/Library/Messages`. Unfolded, that spelling of a protected store
+    /// classifies as an ordinary path.
+    private static func folded(_ path: String) -> String {
+        let p = path.lowercased()
+        let dataVolume = "/system/volumes/data"
+        if p == dataVolume { return "/" }
+        if p.hasPrefix(dataVolume + "/") { return String(p.dropFirst(dataVolume.count)) }
+        return p
+    }
+
+    /// Fold the home, THEN drop a trailing slash. Folding first matters when the
+    /// home is the Data volume's own mount point: stripping first would leave
+    /// `/System/Volumes/Data`, which `folded` maps to `/`, and the home-relative
+    /// rules would then build `//.ssh` and match nothing. Folded first it is the
+    /// empty root, the same as a home of `/`.
+    private static func foldedHome(_ home: String) -> String {
+        let f = folded(home)
+        return f.hasSuffix("/") ? String(f.dropLast()) : f
     }
 }
 

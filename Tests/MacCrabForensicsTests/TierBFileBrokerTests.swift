@@ -231,6 +231,174 @@ struct TierBFileBrokerTests {
         #expect(TierBFileBroker.resolve("/var/example-home/Library/Messages/chat.db", policy: reverse) == nil)
     }
 
+    @Test("a request whose slash is fused into a grapheme cluster is refused by the validator and the open")
+    func fusedSlashSegmentIsRejected() throws {
+        // U+0600 (ARABIC NUMBER SIGN) is Prepend: it fuses with the following
+        // slash into one grapheme cluster, so String.split on "/" does not break
+        // there and the segment keeps a slash byte. The kernel would still split
+        // it at the byte, following the earlier component without O_NOFOLLOW.
+        let prepend = "\u{0600}"
+        let combining = "\u{0301}"
+        for request in [
+            "/a/b\(prepend)/c",          // slash fused after a Prepend scalar
+            "/a/\(combining)b/c",        // leading combining mark on a segment
+            "/scratch/link\(prepend)/Messages/chat.db",
+        ] {
+            #expect(!TierBFileBroker.isValidRequestPath(request, maxBytes: 4096), "request \(request.unicodeScalars.map { String($0.value, radix: 16) })")
+            // safeOpenReadOnly gates on isValidRequestPath, so it also refuses.
+            #expect(TierBFileBroker.safeOpenReadOnly(path: request, root: "/scratch") == -1)
+        }
+        // A plain path with the same ASCII letters still validates.
+        #expect(TierBFileBroker.isValidRequestPath("/a/bc/d", maxBytes: 4096))
+    }
+
+    @Test("the descriptor check fails closed when the guard home cannot be resolved")
+    func descriptorCheckFailsClosedOnUnresolvableHome() throws {
+        let root = try Self.makeTree()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let fd = open(root + "/sub/data.txt", O_RDONLY | O_CLOEXEC)
+        try #require(fd >= 0)
+        defer { close(fd) }
+        // A home that does not exist cannot be opened: the file is treated as
+        // protected (denied) rather than waved through on the textual home alone.
+        #expect(TierBFileBroker.descriptorIsTCCProtected(fd, home: root + "/no-such-home"))
+        // A real, non-protected file under a real home is still allowed.
+        #expect(!TierBFileBroker.descriptorIsTCCProtected(fd, home: root))
+        #expect(TierBFileBroker.descriptorIsTCCProtected(-1, home: root), "no kernel path for the file fails closed")
+    }
+
+    @Test("TCC direct-read guard classifies the Data volume's own mount point like the normal spelling")
+    func dataVolumeSpellingCannotBypassTCCGuard() {
+        let home = "/Users/x"
+        let chat = "/System/Volumes/Data/Users/x/Library/Messages/chat.db"
+        for root in ["/System/Volumes/Data/Users/x", "/System/Volumes/Data", "/System"] {
+            let policy = TierBFileBroker.Policy(allowedReadRoots: [root], tccGuardHome: home)
+            #expect(TierBFileBroker.resolve(chat, policy: policy) == nil, "root \(root)")
+        }
+        let wide = TierBFileBroker.Policy(allowedReadRoots: ["/System"], tccGuardHome: home)
+        #expect(TierBFileBroker.resolve(
+            "/System/Volumes/Data/Library/Application Support/com.apple.TCC/TCC.db", policy: wide) == nil)
+        // The fold is case-insensitive, like the rest of the classifier.
+        let lower = TierBFileBroker.Policy(allowedReadRoots: ["/system/volumes/data/users/x"], tccGuardHome: home)
+        #expect(TierBFileBroker.resolve("/system/volumes/data/users/x/library/messages/chat.db", policy: lower) == nil)
+        // A home given in that spelling protects the normal one.
+        let dataHome = TierBFileBroker.Policy(allowedReadRoots: [home], tccGuardHome: "/System/Volumes/Data/Users/x")
+        #expect(TierBFileBroker.resolve("/Users/x/Library/Messages/chat.db", policy: dataHome) == nil)
+
+        // Unprotected files stay reachable through the same spelling.
+        let narrow = TierBFileBroker.Policy(allowedReadRoots: ["/System/Volumes/Data/Users/x"], tccGuardHome: home)
+        let notes = "/System/Volumes/Data/Users/x/Documents/notes.txt"
+        #expect(TierBFileBroker.resolve(notes, policy: narrow)?.path == notes)
+        let prefs = "/System/Volumes/Data/Users/x/Library/Preferences/com.example.plist"
+        #expect(TierBFileBroker.resolve(prefs, policy: narrow)?.path == prefs)
+        let volume = TierBFileBroker.Policy(allowedReadRoots: ["/System/Volumes/Data"], tccGuardHome: home)
+        let store = "/System/Volumes/Data/.fseventsd/0000000000000001"
+        #expect(TierBFileBroker.resolve(store, policy: volume)?.path == store)
+    }
+
+    @Test("resolve marks a live grant direct and a snapshot redirect not direct")
+    func resolveReportsDirectGrants() throws {
+        let policy = TierBFileBroker.Policy(
+            allowedReadRoots: ["/a/b"],
+            redirects: [.init(prefix: "/Users/x/Library/Messages/chat.db", to: "/snap/abc.db")],
+            tccGuardHome: "/Users/x")
+        #expect(try #require(TierBFileBroker.resolve("/a/b/c.txt", policy: policy)).direct)
+        #expect(!(try #require(TierBFileBroker.resolve("/Users/x/Library/Messages/chat.db", policy: policy)).direct))
+    }
+
+    /// A throwaway tree that stands in for a home folder, under the canonical
+    /// (`/private/var/…`) spelling of the temporary directory. Nothing real is read.
+    static func makeStandInHome() throws -> (base: String, home: String) {
+        let resolved = try #require(realpath(NSTemporaryDirectory(), nil))
+        let temporary = String(cString: resolved)
+        free(resolved)
+        let base = temporary + "/broker-home-\(UUID().uuidString)"
+        let home = base + "/real-home"
+        for directory in ["/Library/Messages", "/Library/Preferences", "/Documents"] {
+            try FileManager.default.createDirectory(atPath: home + directory, withIntermediateDirectories: true)
+        }
+        try "DUMMY-PROTECTED-BYTES".write(toFile: home + "/Library/Messages/chat.db", atomically: true, encoding: .utf8)
+        try "dummy-preferences".write(toFile: home + "/Library/Preferences/a.plist", atomically: true, encoding: .utf8)
+        try "dummy-notes".write(toFile: home + "/Documents/notes.txt", atomically: true, encoding: .utf8)
+        return (base, home)
+    }
+
+    @Test("an opened file is classified by the path the kernel reports, not by the spelling that opened it")
+    func descriptorClassificationIgnoresTheSpelling() throws {
+        let (base, home) = try Self.makeStandInHome()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        func protected(_ path: String, home guardHome: String) throws -> Bool {
+            let fd = open(path, O_RDONLY | O_CLOEXEC)
+            try #require(fd >= 0, "cannot open \(path)")
+            defer { close(fd) }
+            return TierBFileBroker.descriptorIsTCCProtected(fd, home: guardHome)
+        }
+        #expect(try protected(home + "/Library/Messages/chat.db", home: home))
+        #expect(try !protected(home + "/Documents/notes.txt", home: home))
+        #expect(try !protected(home + "/Library/Preferences/a.plist", home: home))
+        #expect(TierBFileBroker.descriptorIsTCCProtected(-1, home: home), "no kernel path fails closed")
+
+        // A home that is itself reached through a link: the store's spelling
+        // through the real folder shares no prefix with it.
+        try FileManager.default.createSymbolicLink(atPath: base + "/home", withDestinationPath: home)
+        #expect(try protected(home + "/Library/Messages/chat.db", home: base + "/home"))
+        #expect(try !protected(home + "/Documents/notes.txt", home: base + "/home"))
+
+        // The Data volume's own mount point, where this host has one.
+        let dataVolume = "/System/Volumes/Data"
+        guard FileManager.default.fileExists(atPath: dataVolume + home + "/Documents/notes.txt") else { return }
+        #expect(try protected(dataVolume + home + "/Library/Messages/chat.db", home: home))
+        #expect(try !protected(dataVolume + home + "/Documents/notes.txt", home: home))
+        #expect(try !protected(dataVolume + home + "/Library/Preferences/a.plist", home: home))
+    }
+
+    @Test("serve never sends a protected file whose spelling the pure guard cannot recognise", .timeLimit(.minutes(1)))
+    func serveReclassifiesDirectGrantsByDescriptor() throws {
+        let (base, home) = try Self.makeStandInHome()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        // The guard's home is a link to the real folder. Requests spelled through
+        // the real folder match no protected prefix of that home, and the open
+        // walk meets no symbolic link: before the descriptor check this was sent.
+        try FileManager.default.createSymbolicLink(atPath: base + "/home", withDestinationPath: home)
+        let policy = TierBFileBroker.Policy(allowedReadRoots: [base], tccGuardHome: base + "/home")
+        let chat = home + "/Library/Messages/chat.db"
+        let grant = try #require(TierBFileBroker.resolve(chat, policy: policy))
+        #expect(grant.direct)
+        let opened = TierBFileBroker.safeOpenReadOnly(path: grant.path, root: grant.root)
+        #expect(opened >= 0)
+        if opened >= 0 { close(opened) }
+
+        var fds: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        let hostSock = fds[0], clientSock = fds[1]
+        defer { close(clientSock); close(hostSock) }
+        let broker = TierBFileBroker()
+        Thread { broker.serve(hostSocket: hostSock, policy: policy) }.start()
+        func request(_ path: String) -> (status: Int32, fd: Int32) {
+            let frame = TierBFileBroker.encodeRequest(path)
+            _ = frame.withUnsafeBytes { write(clientSock, $0.baseAddress, frame.count) }
+            var outFd: Int32 = -1
+            let status = maccrab_tierb_recv_fd(clientSock, &outFd)
+            return (status, outFd)
+        }
+
+        let refused = request(chat)
+        #expect(refused.status == 1)
+        #expect(refused.fd == -1)
+        if refused.fd >= 0 { close(refused.fd) }
+
+        // An unprotected file under the same root is still served, and so is the
+        // serve loop's next request after a refusal.
+        let served = request(home + "/Documents/notes.txt")
+        #expect(served.status == 0)
+        #expect(served.fd >= 0)
+        if served.fd >= 0 { #expect(Self.readAll(served.fd) == "dummy-notes"); close(served.fd) }
+
+        // Without a guard home the policy is not a TCC context and nothing changes.
+        let unguarded = TierBFileBroker.Policy(allowedReadRoots: [base])
+        #expect(TierBFileBroker.resolve(chat, policy: unguarded)?.path == chat)
+    }
+
     @Test("repeated slash spellings cannot bypass the protected-path guard")
     func repeatedSlashesCannotExposeProtectedBytes() throws {
         let base = try Self.makeTree()
