@@ -960,18 +960,23 @@ private enum PreIngestionStorageRecoveryError: LocalizedError {
     }
 }
 
-/// v1.22.7: whether a primary store's pre-producer storage failure may start
-/// the engine with that store's writes paused instead of stopping startup.
+/// v1.22.7: whether a primary store's pre-producer storage failure is space
+/// pressure, for which the engine starts anyway instead of stopping startup.
 ///
 /// A relaunch does not free space. Through v1.22.6 an events or alerts family
 /// that startup could not bring under its boundary exited the engine before
 /// any producer started, and launchd relaunched it into the same refusal
-/// about every ten seconds: one field install sat in that loop for 16 days
-/// with no detection, no inbox and no runtime maintenance. Space pressure now
+/// about every ten seconds, with no detection, no inbox and no runtime
+/// maintenance. (A field install was reported relaunching like this for 16
+/// days; which pre-ingestion stop it hit is not known.) Space pressure now
 /// degrades the way TraceGraph has since v1.21.6-rc.36. Admission keeps
-/// refusing writes, runtime size-cap maintenance keeps reclaiming, and the
-/// refused inserts raise the dashboard's storage banner. A policy mismatch is
-/// a wiring fault, not space pressure, and still stops startup.
+/// refusing the writes it cannot fit, runtime size-cap maintenance keeps
+/// running, and the refused inserts raise the dashboard's storage banner.
+/// An events family above its cap does not shed journal history on its own,
+/// because expiry is refused above the cap: unless free-page reclaim alone
+/// brings it back under, it needs its limit raised.
+/// A policy mismatch is not space pressure; see
+/// `activationReprobeFailureAllowsDegradedStart` for where it still stops.
 func preIngestionStorageFailureAllowsDegradedStart(_ error: Error) -> Bool {
     if let admission = error as? SQLitePersistentStoreAdmissionError {
         return admission.isOperationalPressure
@@ -988,6 +993,59 @@ func preIngestionStorageFailureAllowsDegradedStart(_ error: Error) -> Bool {
         return true
     }
     return false
+}
+
+/// v1.22.7: the same decision for the activation-boundary reprobe.
+///
+/// A store whose pre-producer recovery already failed was never proven ready,
+/// so its activation reprobe is expected to fail, and not only for space. A
+/// legacy-upgrade events store is the case that matters: recovery returns
+/// before it restores the configured cap, the store is still on its fixed
+/// transition allowance, and the reprobe reports that as a policy mismatch.
+/// Stopping there relaunched into the same state every time, so the degraded
+/// start never took effect on exactly the hosts that needed it. Such a store
+/// keeps its allowance, runtime maintenance reclaims toward the configured
+/// boundary, and the next launch restores the cap once it converges.
+///
+/// For such a store every reprobe failure is tolerated except explicit
+/// corruption, whatever its cause (a refused write, a busy lock, an I/O
+/// error): a second failed proof adds nothing to the first. Recovery's own
+/// reprobe makes the same cap comparison, so a mismatch that persists fails
+/// recovery first and that store starts unproven too. This decision still
+/// stops startup for a mismatch, or any other non-space failure, on a store
+/// that recovery did prove. Explicit corruption is never a state to run on:
+/// a relaunch quarantines it at store open.
+func activationReprobeFailureAllowsDegradedStart(
+    _ error: Error, storeAlreadyDegraded: Bool
+) -> Bool {
+    if preIngestionStorageFailureAllowsDegradedStart(error) { return true }
+    guard storeAlreadyDegraded else { return false }
+    return SQLiteFailureClassifier.disposition(for: error)
+        != .quarantineExplicitCorruption
+}
+
+/// v1.22.7: the same decision for boot journal expiry, which is maintenance
+/// and runs before the bounded recovery that decides how the store starts.
+///
+/// Storage admission types its refusals, but a family already above its cap
+/// is stopped before the expiry transaction is ever admitted: expiry's
+/// checkpoint boundary refuses it with the store's untyped not-ready error.
+/// Error text is never classification input, so the state is checked
+/// instead: that error, on a family above the cap the store is enforcing, is
+/// space pressure. (The store reports a checkpoint that returned no usable
+/// frame counts the same way; above the cap that continues too.)
+///
+/// The same error on a family within its cap still stops startup, and so
+/// does every other untyped expiry failure, whatever the footprint: a failed
+/// step, an integrity mismatch, contention past its budget.
+func bootJournalExpiryFailureAllowsDegradedStart(
+    _ error: Error, familyFootprintBytes: Int64?, enforcedCapBytes: Int64?
+) -> Bool {
+    if preIngestionStorageFailureAllowsDegradedStart(error) { return true }
+    guard let store = error as? EventStoreError, case .storageNotReady = store,
+          let footprint = familyFootprintBytes, let cap = enforcedCapBytes
+    else { return false }
+    return footprint > cap
 }
 
 /// Run a finite number of maintenance passes, stopping immediately when the

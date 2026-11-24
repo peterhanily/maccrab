@@ -163,4 +163,85 @@ struct BootJournalExpirySweepTests {
         #expect(Policy.afterAbandon(error: busy, continuations: 0, backlogRemains: false) == .deferToNextPass)
         #expect(Policy.afterAbandon(error: .stepFailed("corrupt"), continuations: 0, backlogRemains: true) == .fail)
     }
+
+    /// v1.22.7: boot expiry is maintenance, and storage admission refuses
+    /// maintenance once the family is far enough over its cap. The sweep
+    /// neither retries nor wraps that refusal, so startup sees the admission
+    /// error itself and can class it as space pressure instead of exiting.
+    @Test("a storage-admission refusal leaves the sweep as the admission error and is classed as space pressure")
+    func admissionRefusalLeavesTheSweepAsSpacePressure() async throws {
+        var calls = 0
+        var slept = 0
+        var thrown: Error?
+        do {
+            _ = try await BootJournalExpirySweep.run(
+                expire: {
+                    calls += 1
+                    throw SQLitePersistentStoreAdmissionError.footprintLimit(
+                        footprintBytes: 500 * 1_048_576,
+                        reserveBytes: 32 * 1_048_576,
+                        maxFootprintBytes: 376 * 1_048_576
+                    )
+                },
+                backpressureBudgetSeconds: 2,
+                retryMilliseconds: 250,
+                uptime: { 1_000 },
+                storeRequiresConvergence: { true },
+                backlogRemains: { true },
+                renewPhase: { _ in },
+                onConservedBackpressure: {},
+                sleep: { _ in slept += 1 }
+            )
+        } catch {
+            thrown = error
+        }
+        let refusal = try #require(thrown, "an admission refusal must not be swallowed")
+        #expect(refusal is SQLitePersistentStoreAdmissionError)
+        #expect(calls == 1 && slept == 0, "it is not retried as backpressure")
+        #expect(preIngestionStorageFailureAllowsDegradedStart(refusal))
+        // A failure that is not space pressure still stops startup there.
+        #expect(!preIngestionStorageFailureAllowsDegradedStart(EventStoreError.stepFailed("corrupt")))
+    }
+
+    /// A family already above its cap is stopped before the expiry
+    /// transaction is admitted: expiry's checkpoint boundary refuses it with
+    /// the store's untyped not-ready error. Startup classes that by the
+    /// store's measured family against its enforced cap, never by reading the
+    /// error.
+    @Test("the store's untyped not-ready refusal is space pressure only when the family is above the enforced cap")
+    func untypedExpiryFailureIsClassedByState() {
+        let untyped = EventStoreError.storageNotReady(
+            "event journal recovery family footprint 500 exceeds transition cap 400"
+        )
+        #expect(!preIngestionStorageFailureAllowsDegradedStart(untyped))
+        #expect(bootJournalExpiryFailureAllowsDegradedStart(
+            untyped, familyFootprintBytes: 500, enforcedCapBytes: 400))
+        // The same words on a family that fits are not believed.
+        #expect(!bootJournalExpiryFailureAllowsDegradedStart(
+            untyped, familyFootprintBytes: 400, enforcedCapBytes: 400))
+        #expect(!bootJournalExpiryFailureAllowsDegradedStart(
+            untyped, familyFootprintBytes: nil, enforcedCapBytes: 400))
+        #expect(!bootJournalExpiryFailureAllowsDegradedStart(
+            untyped, familyFootprintBytes: 500, enforcedCapBytes: nil))
+        // Being above the cap excuses no other error type: a failed step, an
+        // integrity mismatch, contention and corruption still stop startup.
+        let others: [EventStoreError] = [
+            .stepFailed("journal expiry projection delete failed"),
+            .decodingFailed("journal expiry projection count disagrees with coverage"),
+            .busy("journal expiry entry"),
+            .sqliteFailure(
+                context: "journal expiry", message: "database disk image is malformed",
+                resultCode: 11, extendedResultCode: 11, systemErrno: 0
+            ),
+        ]
+        for other in others {
+            #expect(!bootJournalExpiryFailureAllowsDegradedStart(
+                other, familyFootprintBytes: 500, enforcedCapBytes: 400), "\(other)")
+        }
+        // A typed admission refusal needs no measurement.
+        #expect(bootJournalExpiryFailureAllowsDegradedStart(
+            SQLitePersistentStoreAdmissionError.lowFreeSpace(
+                freeBytes: 0, floorBytes: 1, reserveBytes: 1, requiredFreeBytes: 2),
+            familyFootprintBytes: nil, enforcedCapBytes: nil))
+    }
 }

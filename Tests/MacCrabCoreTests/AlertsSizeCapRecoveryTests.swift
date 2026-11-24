@@ -608,12 +608,12 @@ struct AlertsSizeCapRecoveryTests {
         #expect(result.passes == 1)
     }
 
-    /// v1.22.7 field report: a v1.22.6 engine whose alerts family startup
-    /// could not bring under its boundary exited before any producer, and
-    /// launchd relaunched it into the same refusal for 16 days. The cap here
-    /// is below the schema-only floor, so no amount of pruning can converge.
+    /// Through v1.22.6 an engine whose alerts family startup could not bring
+    /// under its boundary exited before any producer, and launchd relaunched
+    /// it into the same refusal. The cap here is below the schema-only floor,
+    /// so no amount of pruning can converge.
     @Test("an alert family startup cannot converge reaches a degraded start, not an exit")
-    func unconvergeableAlertFamilyStartsWithWritesPaused() async throws {
+    func unconvergeableAlertFamilyStartsWithoutStorageProof() async throws {
         let directory = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let mib = SQLitePersistentStorePolicy.bytesPerMiB
@@ -721,14 +721,123 @@ struct AlertsSizeCapRecoveryTests {
                 "if \(component).writableBeforeProducers {"
             ))
             let window = setup[decision.lowerBound...].prefix(1_500)
-            #expect(window.contains("Self.startWithStorageWritesPaused("),
+            #expect(window.contains("Self.continueStartupWithoutStorageProof("),
                     "\(component) must degrade")
             #expect(!window.contains("failPreIngestionStorage("),
                     "\(component) must not exit the engine")
         }
         #expect(setup.components(separatedBy:
-            "catch where preIngestionStorageFailureAllowsDegradedStart(error)"
-        ).count - 1 == 2, "both activation reprobes degrade on space pressure")
+            "catch where activationReprobeFailureAllowsDegradedStart("
+        ).count - 1 == 2, "both activation reprobes use the degraded-start decision")
+        // Each store's own flag must reach its own reprobe: the flag is
+        // defined from that store's recovery result and appears in the catch
+        // that follows that store's reprobe call, before the other store's.
+        for (store, recovery, flag) in [
+            ("reprobeEventStoreAtActivationBoundary(", "eventStartupRecovery", "eventStoreStartsDegraded"),
+            ("reprobeAlertStoreAtActivationBoundary(", "alertStartupRecovery", "alertStoreStartsDegraded"),
+        ] {
+            #expect(setup.contains("let \(flag) = !\(recovery).writableBeforeProducers"),
+                    "\(flag) must come from \(recovery)")
+            let call = try #require(setup.range(of: store))
+            let afterCall = setup[call.upperBound...].prefix(900)
+            #expect(afterCall.contains("error, storeAlreadyDegraded: \(flag)"),
+                    "\(flag) must reach its own activation reprobe")
+        }
+        // Boot journal expiry is maintenance: a space failure there must not
+        // exit before the degraded decision is reached. The catch takes the
+        // store's own snapshot after the failure, decides on the caught error
+        // with it, exits only in the guard's else, and after that neither
+        // exits nor throws before the next boot step.
+        let expiryDecision = try #require(setup.range(of:
+            "guard bootJournalExpiryFailureAllowsDegradedStart("
+        ))
+        let beforeDecision = setup[..<expiryDecision.lowerBound].suffix(900)
+        let catchAll = try #require(beforeDecision.range(of: "} catch {\n"),
+                                    "every expiry failure reaches the decision")
+        #expect(beforeDecision[catchAll.upperBound...].contains(
+            "let expiryAdmission = await eventStore.storageAdmissionSnapshot()\n"
+        ), "the footprint and cap compared are the store's own, read after the failure")
+        let nextStep = try #require(setup.range(
+            of: "Self.logBootStep(label: \"after_journal_expiry\"",
+            range: expiryDecision.upperBound..<setup.endIndex
+        ))
+        let expiryBlock = setup[expiryDecision.lowerBound..<nextStep.lowerBound]
+        #expect(expiryBlock.contains("""
+            guard bootJournalExpiryFailureAllowsDegradedStart(
+                            error, familyFootprintBytes: expiryAdmission?.footprintBytes,
+                            enforcedCapBytes: expiryAdmission?.maxFootprintBytes
+                        ) else {
+                            try DaemonBootstrap.failPreIngestionStorage(
+            """), "the decision takes the caught error, and its else is the exit")
+        let deferred = try #require(expiryBlock.range(of: "journalExpiryBacklogDeferred = true"))
+        let exit = try #require(expiryBlock.range(of:
+            "event journal expiry/rollup failed before producers"
+        ))
+        #expect(exit.lowerBound < deferred.lowerBound)
+        let continuing = expiryBlock[deferred.upperBound...]
+        #expect(!continuing.contains("failPreIngestionStorage("))
+        #expect(!continuing.contains("throw"))
+    }
+
+    @Test("a store that already started degraded is not stopped by its activation reprobe, except for explicit corruption")
+    func activationReprobeDoesNotUndoADegradedStart() async throws {
+        let directory = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
+        let store = try AlertStore(
+            directory: directory.path,
+            storagePolicy: SQLitePersistentStorePolicy(
+                maxFootprintBytes: 64 * mib,
+                freeSpaceFloorBytes: 0,
+                transactionReserveBytes: 8 * mib,
+                storageVolumePath: directory.path
+            )
+        )
+        try await store.insert(alert: makeAlert(1))
+        // The store runs one cap, the boundary names another: the shape a
+        // legacy-upgrade events store has while it is still on its transition
+        // allowance. The reprobe reports it as a policy mismatch.
+        var mismatch: Error?
+        do {
+            _ = try await reprobeAlertStoreAtActivationBoundary(
+                alertStore: store,
+                dbPath: directory.appendingPathComponent("alerts.db").path,
+                boundary: AlertsSizeCapBoundary(
+                    nominalCapBytes: 48 * mib,
+                    transactionReserveBytes: 8 * mib
+                )
+            )
+        } catch {
+            mismatch = error
+        }
+        let refusal = try #require(mismatch, "a different cap must not pass the activation reprobe")
+        #expect(!preIngestionStorageFailureAllowsDegradedStart(refusal),
+                "a policy mismatch is not space pressure, got \(refusal)")
+        // A store that passed recovery: a mismatch is a wiring fault and stops startup.
+        #expect(!activationReprobeFailureAllowsDegradedStart(refusal, storeAlreadyDegraded: false))
+        // A store that already started degraded: the reprobe must not exit.
+        #expect(activationReprobeFailureAllowsDegradedStart(refusal, storeAlreadyDegraded: true))
+
+        let pressure = SQLitePersistentStoreAdmissionError.footprintLimit(
+            footprintBytes: 2, reserveBytes: 1, maxFootprintBytes: 2
+        )
+        #expect(activationReprobeFailureAllowsDegradedStart(pressure, storeAlreadyDegraded: false))
+        #expect(activationReprobeFailureAllowsDegradedStart(pressure, storeAlreadyDegraded: true))
+
+        // SQLITE_CORRUPT is 11, in the error type a reopen inside the reprobe
+        // throws. A relaunch quarantines it at store open.
+        let corrupt = AlertStoreError.sqliteFailure(
+            context: "database open", message: "database disk image is malformed",
+            resultCode: 11, extendedResultCode: 11, systemErrno: 0
+        )
+        #expect(!activationReprobeFailureAllowsDegradedStart(corrupt, storeAlreadyDegraded: true))
+        // A store error that is not corruption (a busy writer lock is 5).
+        let busy = AlertStoreError.sqliteFailure(
+            context: "BEGIN IMMEDIATE", message: "database is locked",
+            resultCode: 5, extendedResultCode: 5, systemErrno: 0
+        )
+        #expect(activationReprobeFailureAllowsDegradedStart(busy, storeAlreadyDegraded: true))
+        #expect(!activationReprobeFailureAllowsDegradedStart(busy, storeAlreadyDegraded: false))
     }
 
     @Test("family in cap-reserve dead zone is reclaimed and no-write reprobe recovers")

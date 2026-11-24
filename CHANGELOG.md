@@ -27,16 +27,25 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   raises none.
 
 ### Fixed
-- **A store over its size limit at startup no longer stops the engine.** When
-  startup could not bring `events.db` or `alerts.db` under its storage
-  boundary, the engine exited before collecting anything, and launchd relaunched
-  it into the same refusal about every ten seconds. One v1.22.6 install was
-  reported stuck in that loop for 16 days, with no detection and no way to
-  reclaim space; v1.22.6 had fixed the same loop for TraceGraph only. The
-  engine now starts with that store's writes paused: detection and
-  notifications run, runtime size-cap maintenance keeps reclaiming, and the
-  dashboard's storage banner reports the refused writes. Integrity, key and
-  policy failures still stop startup.
+- **A store that startup cannot bring under its size limit no longer stops
+  the engine.** When startup could not bring `events.db` or `alerts.db` under
+  its storage boundary, the engine exited before collecting anything, and
+  launchd relaunched it into the same refusal about every ten seconds, with no
+  detection and no way to reclaim space; v1.22.6 had fixed that loop for
+  TraceGraph only. The engine now starts anyway: detection and notifications
+  run, the store goes on refusing the writes it cannot fit, runtime size-cap
+  maintenance keeps running, and the dashboard's storage banner reports the
+  refused writes. The same applies when boot-time journal expiry is refused
+  for space or cannot run because `events.db` is already over its limit, and
+  to an events store still on its upgrade allowance from the v1.21.5 format,
+  which finishes that upgrade on a later launch, once startup can bring it
+  down to its startup target (at most 80% of its limit). An `events.db` that is over its limit does not shed stored history by
+  itself, because expiry is refused above the limit: unless maintenance can
+  reclaim enough unused space inside the file, it stores no new events until
+  the limit is raised. A v1.22.6
+  install was reported relaunching at a startup storage stop for 16 days; which
+  stop it hit is not confirmed, and other stops remain: see "Startup can still
+  stop before detection starts" in KNOWN_LIMITS.md.
 - **Ten rules now match the `/private` paths Endpoint Security reports.**
   `/tmp`, `/var` and `/etc` are links into `/private`, so a payload in
   `$TMPDIR` arrives as `/private/var/folders/…`. Eleven path prefixes named

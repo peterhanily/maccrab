@@ -1012,6 +1012,67 @@ struct EventStoreLegacyUpgradeTests {
         #expect(try await finalReopen.count() == originals.count)
     }
 
+    /// v1.22.7: startup recovery restores the configured cap only after the
+    /// family has converged. When it cannot converge it returns first, so the
+    /// store is still on its fixed transition allowance when the activation
+    /// reprobe runs. That reprobe can never pass in this state: with room
+    /// under the allowance it reports the cap as a policy mismatch, without
+    /// room it refuses for space, which is what this fixture produces (the
+    /// mismatch branch is pinned in AlertsSizeCapRecoveryTests). Through the
+    /// first v1.22.7 candidate the mismatch still stopped a start that had
+    /// already degraded.
+    @Test("A legacy-upgrade store still on its transition allowance does not stop a degraded start at the activation reprobe")
+    func transitionAllowanceDoesNotStopADegradedStart() async throws {
+        // Enough inherited data that family + two reserves exceeds the cap,
+        // so the transition ceiling differs from the configured cap.
+        let fixture = try fixture(rows: 1_300, payloadBytes: 48 * 1_024)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let policy = loweredUpgradePolicy(for: fixture, capMiB: 112)
+        let store = try EventStore(
+            path: fixture.path, storagePolicy: policy,
+            allowLegacyUpgradeHeadroom: true
+        )
+        let transitionCap = try #require(
+            await store.storageAdmissionSnapshot()?.maxFootprintBytes
+        )
+        try #require(transitionCap > policy.maxFootprintBytes)
+        let recovered = try await store.recoverJournalBeforeProducers()
+        try #require(recovered.complete && recovered.remainingEvents == 0)
+        // Recovery maintenance is not run here. This is the state the store
+        // is in when recovery returns unconverged: above the startup target,
+        // with the configured cap never restored.
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: 112)
+        let family = try SQLitePersistentStoreAdmission.measureFamily(fixture.path)
+        try #require(boundary.requiresStartupConvergence(footprintBytes: family))
+        #expect((await store.storageAdmissionSnapshot())?.maxFootprintBytes == transitionCap)
+        #expect(transitionCap != boundary.nominalCapBytes)
+        let receiptURL = URL(fileURLWithPath: fixture.path + ".legacy-upgrade.json")
+        let receiptBefore = try Data(contentsOf: receiptURL)
+
+        var activationError: Error?
+        do {
+            _ = try await reprobeEventStoreAtActivationBoundary(
+                eventStore: store,
+                dbPath: fixture.path,
+                boundary: boundary,
+                retentionBudgetHealth: EventRetentionBudgetHealth()
+            )
+        } catch {
+            activationError = error
+        }
+        let refusal = try #require(
+            activationError,
+            "the activation reprobe must not pass on the transition allowance"
+        )
+        // Whichever refusal it is, a store that already started degraded
+        // keeps running, and its allowance and pending receipt are intact
+        // for the next launch to finish the upgrade.
+        #expect(activationReprobeFailureAllowsDegradedStart(refusal, storeAlreadyDegraded: true),
+                "\(refusal)")
+        #expect((await store.storageAdmissionSnapshot())?.maxFootprintBytes == transitionCap)
+        #expect(try Data(contentsOf: receiptURL) == receiptBefore)
+    }
+
     private final class RecoveryProgress: @unchecked Sendable {
         private let lock = NSLock()
         private var reports: [EventStore.EventJournalRecoverySnapshot] = []

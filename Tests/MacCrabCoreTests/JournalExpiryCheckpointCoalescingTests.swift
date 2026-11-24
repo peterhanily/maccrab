@@ -2,6 +2,7 @@ import CSQLCipher
 import Foundation
 import Testing
 @testable import MacCrabCore
+@testable import MacCrabAgentKit
 
 @Suite("Journal expiry checkpoints preserve bounded progress")
 struct JournalExpiryCheckpointCoalescingTests {
@@ -426,5 +427,159 @@ struct JournalExpiryCheckpointCoalescingTests {
         #expect(try await f.store.expireJournalBlocks(retainedThrough: f.cutoff) == 4)
         #expect(try await aggregateSum(f.store) == 6)
         #expect(try await f.store.count() == 0)
+    }
+
+    /// v1.22.7: a family above the cap its store enforces is stopped before
+    /// the expiry transaction is admitted. Expiry's first checkpoint boundary
+    /// refuses it with an untyped store error, so startup classes the failure
+    /// by the store's measured family against its enforced cap. Through the
+    /// first v1.22.7 candidate this failure exited the engine at boot expiry,
+    /// before the degraded-start decision was reached.
+    @Test("An over-cap family is refused at expiry's first checkpoint with an untyped error that startup classes by state")
+    func overCapFamilyIsRefusedBeforeAdmissionAndClassedByState() async throws {
+        let f = try await fixture(blocks: 4)
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let family = try SQLitePersistentStoreAdmission.measureFamily(f.path)
+        // Enforce a cap below what is already on disk, as a lowered limit does.
+        let lowered = SQLitePersistentStorePolicy(
+            maxFootprintBytes: family - 4_096,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: 4_096,
+            storageVolumePath: f.directory.path
+        )
+        _ = try await f.store.updateStorageAdmission(lowered)
+
+        var thrown: Error?
+        do {
+            _ = try await f.store.expireJournalBlocks(retainedThrough: f.cutoff)
+        } catch {
+            thrown = error
+        }
+        let refusal = try #require(thrown, "an over-cap family must not run expiry")
+        guard let storeError = refusal as? EventStoreError,
+              case .storageNotReady = storeError else {
+            Issue.record("expected the untyped checkpoint-boundary refusal, got \(refusal)")
+            return
+        }
+        // Not a typed admission refusal, so the space-only decision exits…
+        #expect(!preIngestionStorageFailureAllowsDegradedStart(refusal))
+        // …and the state decides: the family is above the enforced cap.
+        let enforced = await f.store.storageAdmissionSnapshot()?.maxFootprintBytes
+        let measured = try SQLitePersistentStoreAdmission.measureFamily(f.path)
+        #expect(enforced == lowered.maxFootprintBytes)
+        #expect(bootJournalExpiryFailureAllowsDegradedStart(
+            refusal, familyFootprintBytes: measured, enforcedCapBytes: enforced))
+        // Nothing was expired or left open by the refusal.
+        #expect(try await f.store.count() == 8)
+        #expect(!(try await f.store.storageAdmissionConnectionStateForTesting()).inTransaction)
+    }
+
+    /// v1.22.7: the events-store sequence from open to the activation reprobe
+    /// for a family that is above its cap at launch and cannot be brought
+    /// under it, using the functions startup calls, in startup's order: open,
+    /// journal step, boot expiry, bounded recovery, activation reprobe.
+    /// Through v1.22.6 every one of the last three exited the engine, and
+    /// launchd relaunched it into the same store about every ten seconds.
+    ///
+    /// Not startup itself: the store opens by path with a test memory budget
+    /// and a 32 MiB free-space floor, the decisions are called here rather
+    /// than from DaemonSetup (whose wiring AlertsSizeCapRecoveryTests pins),
+    /// and the steps before the open (the pre-open checkpoint and
+    /// legacy-evidence measurement) are not run.
+    @Test("A restart with the events family above its cap continues from store open to the activation reprobe")
+    func overCapRestartContinuesFromOpenToActivation() async throws {
+        let capMiB = DaemonConfig.StorageConfig.minimumEventsSizeMiB
+        let capBytes = SQLitePersistentStorePolicy.capBytes(maxSizeMiB: capMiB)
+        var seeded: Fixture? = try await fixture(blocks: 4)
+        let directory = try #require(seeded?.directory)
+        let path = try #require(seeded?.path)
+        let cutoff = try #require(seeded?.cutoff)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Space the store cannot reclaim, so the family stays above the cap
+        // whatever maintenance does (retention only knows its own tables).
+        try executeFixtureSQL("CREATE TABLE fixture_pad(b BLOB)", path: path)
+        var padded: Int64 = 0
+        while padded <= capBytes {
+            try executeFixtureSQL(
+                "INSERT INTO fixture_pad VALUES (zeroblob(8388608))", path: path)
+            padded += 8_388_608
+        }
+        #expect(await seeded?.store.walCheckpointTruncate() == true)
+        seeded = nil
+
+        // Launch: the store opens over its cap.
+        let policy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: capBytes,
+            freeSpaceFloorBytes: 32 * 1_048_576,
+            transactionReserveBytes: SQLitePersistentStorePolicy.eventTransactionReserveBytes,
+            storageVolumePath: directory.path
+        )
+        let store = try EventStore(path: path, storagePolicy: policy,
+            allowLegacyUpgradeHeadroom: true,
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting())
+        #expect(try SQLitePersistentStoreAdmission.measureFamily(path) > capBytes)
+        // Startup exits unless the journal step is complete with nothing left.
+        let journal = try await store.recoverJournalBeforeProducers()
+        #expect(journal.complete && journal.remainingEvents == 0, "\(journal)")
+
+        // Boot journal expiry: refused before admission, classed by state.
+        var expiryFailure: Error?
+        do {
+            _ = try await BootJournalExpirySweep.run(
+                expire: {
+                    try await store.expireJournalBlocks(
+                        retainedThrough: cutoff, maximumBlocks: 128)
+                },
+                backpressureBudgetSeconds: 2,
+                retryMilliseconds: 250,
+                uptime: { Foundation.ProcessInfo.processInfo.systemUptime },
+                storeRequiresConvergence: { true },
+                backlogRemains: { true },
+                renewPhase: { _ in },
+                onConservedBackpressure: {},
+                sleep: { try await Task.sleep(for: .milliseconds($0)) }
+            )
+        } catch {
+            expiryFailure = error
+        }
+        let expiryRefusal = try #require(expiryFailure, "an over-cap family must not run expiry")
+        #expect(!preIngestionStorageFailureAllowsDegradedStart(expiryRefusal),
+                "not a typed admission refusal: \(expiryRefusal)")
+        let expiryAdmission = await store.storageAdmissionSnapshot()
+        #expect(bootJournalExpiryFailureAllowsDegradedStart(
+            expiryRefusal, familyFootprintBytes: expiryAdmission?.footprintBytes,
+            enforcedCapBytes: expiryAdmission?.maxFootprintBytes))
+
+        // Bounded recovery cannot converge, so the store starts unproven.
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: capMiB)
+        #expect(boundary.nominalCapBytes == capBytes)
+        let health = EventRetentionBudgetHealth()
+        let recovery = await recoverEventStoreBeforeProducers(
+            eventStore: store, dbPath: path, boundary: boundary,
+            processFloorMinutes: 15, retentionBudgetHealth: health
+        )
+        #expect(!recovery.writableBeforeProducers, "\(recovery)")
+
+        // Activation reprobe: refused again, and not a stop either.
+        var activationFailure: Error?
+        do {
+            _ = try await reprobeEventStoreAtActivationBoundary(
+                eventStore: store, dbPath: path, boundary: boundary,
+                retentionBudgetHealth: health
+            )
+        } catch {
+            activationFailure = error
+        }
+        let activationRefusal = try #require(activationFailure)
+        #expect(activationReprobeFailureAllowsDegradedStart(
+            activationRefusal,
+            storeAlreadyDegraded: !recovery.writableBeforeProducers
+        ), "\(activationRefusal)")
+
+        // What the running engine is left with: retained history still reads,
+        // no transaction is open, and the enforced cap is the configured one.
+        #expect(try await store.count() == 8)
+        #expect(!(try await store.storageAdmissionConnectionStateForTesting()).inTransaction)
+        #expect((await store.storageAdmissionSnapshot())?.maxFootprintBytes == capBytes)
     }
 }

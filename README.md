@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Validation](https://img.shields.io/badge/release%20qualification-see%20evidence-blue)](docs/UPGRADE_QUALIFICATION.md)
-[![Tests](https://img.shields.io/badge/tests-6106%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-6112%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20shipped%20(stable%20tier%20on%20by%20default)-blueviolet)](#what-runs-on-a-default-install)
 [![Version](https://img.shields.io/badge/version-1.22.7-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
@@ -760,8 +760,8 @@ This source tree targets **v1.22.7**. See [CHANGELOG.md](CHANGELOG.md) for the f
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
-- **v1.22.7** — a store over its size limit at startup no longer stops the
-  engine in a relaunch loop; the plugin file broker no longer opens protected
+- **v1.22.7** — a store that startup cannot bring under its size limit no
+  longer stops the engine in a relaunch loop; the plugin file broker no longer opens protected
   files through other spellings of their path; ten rules match the `/private`
   paths Endpoint Security reports, so `shadow_hash_access` can fire; the disk
   image opens to a styled install window, is smaller, and the app has the

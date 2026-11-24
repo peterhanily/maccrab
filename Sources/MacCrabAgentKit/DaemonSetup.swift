@@ -272,14 +272,18 @@ enum DaemonSetup {
         )
     }
 
-    /// v1.22.7: start a primary store with its writes paused rather than exit.
-    /// See `preIngestionStorageFailureAllowsDegradedStart` for why. Ordinary
-    /// admission already refuses the store's writes; runtime size-cap
-    /// maintenance and its watchdogs keep reclaiming; each refused insert is
-    /// counted in storage_errors.json, which raises the dashboard banner.
-    static func startWithStorageWritesPaused(component: String, detail: String) {
-        logger.fault("\(component, privacy: .public) is over its startup storage boundary: \(detail, privacy: .public). Starting with its writes paused; detection and alerting run, and runtime maintenance keeps reclaiming.")
-        print("WARNING: \(component) is over its startup storage boundary; starting with its writes paused: \(detail)")
+    /// v1.22.7: continue startup for a primary store that could not be proven
+    /// ready, rather than exit. See `preIngestionStorageFailureAllowsDegradedStart`
+    /// for why. This only reports the decision; it switches nothing off. The
+    /// store goes on refusing whatever it cannot take (usually every ordinary
+    /// write, sometimes none; for space in most cases, but a store whose
+    /// second proof failed for another reason gets here too), runtime
+    /// size-cap maintenance and its watchdogs keep running, and each refused
+    /// insert is counted in storage_errors.json, which raises the dashboard
+    /// banner.
+    static func continueStartupWithoutStorageProof(component: String, detail: String) {
+        logger.fault("\(component, privacy: .public) was not proven ready at startup: \(detail, privacy: .public). Starting anyway: detection and alerting run, the store refuses and counts the writes it cannot take, and runtime maintenance keeps running.")
+        print("WARNING: \(component) was not proven ready at startup; starting anyway. It refuses and counts the writes it cannot take: \(detail)")
     }
 
     enum DatabaseQuarantineAuthorizationError: Error, LocalizedError {
@@ -1238,13 +1242,32 @@ enum DaemonSetup {
                 logger.notice("Boot journal expiry: a reader held the WAL at a checkpoint boundary after \(outcome.progress.batches) batches; the runtime expiry timer continues the remaining backlog.")
             }
         } catch {
-            try DaemonBootstrap.failPreIngestionStorage(
-                supportDir: supportDir,
-                startedAt: startedAt,
-                component: "EventStore",
-                reason: "event journal expiry/rollup failed before producers: \(error.localizedDescription)",
-                failure: error
-            )
+            // v1.22.7: boot expiry is maintenance. A refused admission, or a
+            // family already above its cap, stops it, and exiting here
+            // relaunched into the same failure before the degraded decision
+            // below was ever reached. For space pressure, continue and let
+            // the bounded recovery below decide how this store starts. Expiry
+            // stays refused at runtime while the family is above its cap, so
+            // the backlog waits until recovery or a higher limit brings it
+            // back under. See `bootJournalExpiryFailureAllowsDegradedStart`
+            // for why the store's own measurement is read rather than the
+            // error.
+            let expiryAdmission = await eventStore.storageAdmissionSnapshot()
+            guard bootJournalExpiryFailureAllowsDegradedStart(
+                error, familyFootprintBytes: expiryAdmission?.footprintBytes,
+                enforcedCapBytes: expiryAdmission?.maxFootprintBytes
+            ) else {
+                try DaemonBootstrap.failPreIngestionStorage(
+                    supportDir: supportDir,
+                    startedAt: startedAt,
+                    component: "EventStore",
+                    reason: "event journal expiry/rollup failed before producers: \(error.localizedDescription)",
+                    failure: error
+                )
+            }
+            journalExpiryBacklogDeferred = true
+            logger.fault("Boot journal expiry stopped for space (family \(expiryAdmission?.footprintBytes ?? -1) bytes, enforced cap \(expiryAdmission?.maxFootprintBytes ?? -1)): \(error.localizedDescription, privacy: .public). Continuing; the expired history that is left waits for space.")
+            print("WARNING: boot journal expiry stopped for space; continuing: \(error.localizedDescription)")
         }
         Self.logBootStep(label: "after_journal_expiry", startedAt: startedAt)
         let eventStartupRecovery = await recoverEventStoreBeforeProducers(
@@ -1271,11 +1294,15 @@ enum DaemonSetup {
                 "reason=\(eventStartupRecovery.reason)",
                 "15-minute forensic floor preserved",
             ].joined(separator: ", ")
-            Self.startWithStorageWritesPaused(
+            Self.continueStartupWithoutStorageProof(
                 component: "EventStore",
                 detail: detail
             )
         }
+        // Recovery that fails leaves the store unproven (and a legacy-upgrade
+        // store on its transition allowance), so the activation reprobe below
+        // must not turn that same state back into an exit.
+        let eventStoreStartsDegraded = !eventStartupRecovery.writableBeforeProducers
         eventRetentionBudgetHealth.recordSweep(
             observedFootprintBytes:
                 eventStartupRecovery.lastFootprintBytes,
@@ -1306,11 +1333,12 @@ enum DaemonSetup {
                 "probe_error=\(alertStartupRecovery.lastProbeError ?? "none")",
                 "reason=\(alertStartupRecovery.reason)",
             ].joined(separator: ", ")
-            Self.startWithStorageWritesPaused(
+            Self.continueStartupWithoutStorageProof(
                 component: "AlertStore",
                 detail: detail
             )
         }
+        let alertStoreStartsDegraded = !alertStartupRecovery.writableBeforeProducers
         Self.logBootStep(label: "after_alertstore_recovery", startedAt: startedAt)
 
         Self.writeBootPhase(supportDir: supportDir, phase: "stores_ready", startedAt: startedAt)
@@ -1788,8 +1816,10 @@ enum DaemonSetup {
                     retentionBudgetHealth: eventRetentionBudgetHealth
                 )
             logger.notice("EventStore activation-boundary proof refreshed immediately before producers; footprint=\(eventActivationProof.footprintBytes), target=\(eventStartupBoundary.targetBytes)")
-        } catch where preIngestionStorageFailureAllowsDegradedStart(error) {
-            Self.startWithStorageWritesPaused(
+        } catch where activationReprobeFailureAllowsDegradedStart(
+            error, storeAlreadyDegraded: eventStoreStartsDegraded
+        ) {
+            Self.continueStartupWithoutStorageProof(
                 component: "EventStore",
                 detail: "activation-boundary priority+file reprobe failed: \(error.localizedDescription)"
             )
@@ -1811,8 +1841,10 @@ enum DaemonSetup {
                     boundary: alertStartupBoundary
                 )
             logger.notice("AlertStore activation-boundary proof refreshed immediately before producers; footprint=\(alertActivationProof.footprintBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")
-        } catch where preIngestionStorageFailureAllowsDegradedStart(error) {
-            Self.startWithStorageWritesPaused(
+        } catch where activationReprobeFailureAllowsDegradedStart(
+            error, storeAlreadyDegraded: alertStoreStartsDegraded
+        ) {
+            Self.continueStartupWithoutStorageProof(
                 component: "AlertStore",
                 detail: "activation-boundary ordinary reprobe failed: \(error.localizedDescription)"
             )

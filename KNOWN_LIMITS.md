@@ -22,9 +22,11 @@ measured number, in the same commit that accepts it.**
 
 ---
 
-## v1.22.6
+## v1.22.6 and v1.22.7
 
-The limits below are accepted for v1.22.6 and scheduled for v1.22.7.
+The limits below were accepted for v1.22.6 and still apply in v1.22.7, which adds
+"Startup can still stop before detection starts". Each names a later release as its
+target.
 
 Most of the items below are functional limits rather than resource costs. Each says what
 it affects, its bound or reach, and how to see it.
@@ -244,6 +246,48 @@ supported (see
 
 **Owner:** app and release · **Target:** a release after v1.22.7.
 
+### Startup can still stop before detection starts
+
+Since v1.22.7 the engine starts even when it cannot bring `events.db` or `alerts.db`
+under its size limit: the store goes on refusing the writes it cannot fit, and the
+dashboard's storage banner says so. The conditions below still stop startup. The engine
+is then relaunched about every ten seconds, with no backoff, until the condition changes:
+
+- **Another process holds the event database open at launch.** Startup checkpoints
+  `events.db` before opening it. If a reader (the dashboard, `maccrabctl`, an MCP client
+  or any other tool with the file open) keeps its read snapshot through the bounded
+  retries, startup stops. Closing the reader lets the next launch through.
+- **The disk holding MacCrab's data has less than about 1 GB free at launch.** That
+  checkpoint needs 1,024 MiB free plus the size of the database's write-ahead files, and
+  a first launch needs about as much. Freeing space lets the next launch through.
+- **The event database cannot be opened, or its format upgrade cannot finish.** This
+  includes an upgrade from v1.21.5 or earlier whose fixed space allowance is exhausted;
+  the reason names the allowance and asks for a higher events storage limit.
+- **Boot-time journal work fails for a reason other than space,** including contention
+  that outlasts its two-second budget. A disk that fills partway through boot expiry can
+  stop startup too, because some of its steps report that failure without a space code.
+- **A store cannot be opened for a reason other than explicit SQLite corruption,** such
+  as permissions or an I/O error. Startup stops rather than move evidence aside. Explicit
+  corruption reported when the store itself opens is quarantined and the store recreated;
+  an event database that SQLite cannot read at all can stop earlier, at the checkpoint
+  before the open, without being quarantined.
+- **The rule corpus cannot be verified.**
+
+**What it means for you.** While startup is stopped there is no detection. The app shows
+the engine as not ready. For the storage stops,
+`/Library/Application Support/MacCrab/last_crash.json` names the database and a reason,
+and the engine log gives the detail: "Pre-ingestion storage readiness failed", or
+"recovery stopped" when a store could not be opened. The rule-corpus stop writes no crash
+report; its log line is "Aborting before rule readers".
+
+A store that started without its storage proof keeps refusing writes until maintenance or
+a higher limit makes room. An event database that is over its limit does not shed stored
+history by itself, because expiry is refused above the limit. Unless maintenance can
+reclaim enough unused space inside the file, it stores no new events until its events
+storage limit is raised.
+
+**Owner:** storage · **Target:** a release after v1.22.7.
+
 ---
 
 ## v1.22.0
@@ -295,7 +339,9 @@ showed startup work taking approximately two minutes; that is neither a one-time
 nor a qualified bound for every store. Schema work must fit the configured
 database-family cap and the volume's free-space floor. The separate schema budget
 removes the fixed index-size refusal; it does not make an over-cap or low-space legacy
-store self-recovering. When startup is refused, normal post-start retention cannot run.
+store self-recovering. Since v1.22.7 a store that startup cannot bring under its limit
+starts anyway, so post-start retention can run; when startup is refused for another
+reason (see "Startup can still stop before detection starts"), it cannot.
 
 **Owner:** storage · **Target:** a release after v1.22.7.
 
